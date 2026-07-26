@@ -25,9 +25,9 @@ import (
 // an engine bug (checkReviewGate behaved correctly throughout):
 //  1. Engine/reviewer identity collision: if the engine process's FABRIK_TOKEN
 //     is shadowed by a different identity in the launching shell (e.g. an
-//     exported FABRIK_TOKEN or GITHUB_TOKEN pointing at the operator's
-//     personal account), PRs come out authored by that identity — the same
-//     identity used for FABRIK_REVIEWER_TOKEN in some test-bed configs.
+//     exported FABRIK_TOKEN pointing at the operator's personal account),
+//     PRs come out authored by that identity — the same identity used for
+//     FABRIK_REVIEWER_TOKEN in some test-bed configs.
 //     GitHub forbids requesting/approving a review from the PR author, so
 //     RequestPRReviewer silently no-ops. Note: per config.Token()'s actual
 //     precedence (FABRIK_TOKEN > GITHUB_TOKEN, godotenv does not override an
@@ -160,6 +160,14 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	// (after CI clears, ~10 min away) — well ahead of that window.
 	if reviewerToken != "" {
 		reviewerLogin := TokenLogin(t, reviewerToken)
+		// Fail fast if FABRIK_REVIEWER_TOKEN resolves to the same identity as
+		// the engine/PR author: GitHub forbids self-review, so RequestPRReviewer
+		// would silently no-op and this misconfiguration would only surface
+		// after the full CI wait (~10 min) when R2/R5 fail downstream.
+		if engineLogin := TokenLogin(t, env.GHToken); reviewerLogin == engineLogin {
+			t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
+				"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
+		}
 		RequestPRReviewer(t, env, env.RepoAlpha, prNumber, reviewerLogin)
 		t.Logf("requested reviewer %q on PR #%d so Validate's review gate engages", reviewerLogin, prNumber)
 	}

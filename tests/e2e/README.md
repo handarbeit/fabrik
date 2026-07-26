@@ -180,7 +180,7 @@ column is absent, so they are safe to merge before the bed is set up.
     `tests/e2e/testdata/train-poison-guard.yml` to `handarbeit/fabrik-test-beta`
     as `.github/workflows/train-poison-guard.yml` and mark the
     `train-poison-guard` check REQUIRED on branch protection (same steps as for
-    Alpha in prerequisite #16, targeting Beta instead). The runaway test skips
+    Alpha in prerequisite #17, targeting Beta instead). The runaway test skips
     cleanly until this is enrolled.
     **`FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=6`** must also be set in the bed's
     `.env` before launching the Fabrik instance for this test. At the default
