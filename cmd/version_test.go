@@ -117,3 +117,67 @@ func TestVersionWithSHA(t *testing.T) {
 		})
 	}
 }
+
+func buildInfoWithModified(modified string) *debug.BuildInfo {
+	return &debug.BuildInfo{
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "abcdef1234567"},
+			{Key: "vcs.modified", Value: modified},
+		},
+	}
+}
+
+func TestAppendDirtyIfModified(t *testing.T) {
+	tests := []struct {
+		name     string
+		v        string
+		info     *debug.BuildInfo
+		ok       bool
+		expected string
+	}{
+		{
+			name:     "release version with dirty build info gets +dirty appended",
+			v:        "v1.2.3",
+			info:     buildInfoWithModified("true"),
+			ok:       true,
+			expected: "v1.2.3+dirty",
+		},
+		{
+			name:     "release version with clean build info is unchanged",
+			v:        "v1.2.3",
+			info:     buildInfoWithModified("false"),
+			ok:       true,
+			expected: "v1.2.3",
+		},
+		{
+			name:     "dev build with dirty build info gets +dirty appended",
+			v:        "dev(abcdef1)",
+			info:     buildInfoWithModified("true"),
+			ok:       true,
+			expected: "dev(abcdef1)+dirty",
+		},
+		{
+			name:     "no build info leaves version unchanged",
+			v:        "v1.2.3",
+			info:     nil,
+			ok:       false,
+			expected: "v1.2.3",
+		},
+		{
+			name:     "missing vcs.modified setting leaves version unchanged",
+			v:        "v1.2.3",
+			info:     buildInfoWithRevision("abcdef1234567"),
+			ok:       true,
+			expected: "v1.2.3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := appendDirtyIfModified(tt.v, tt.info, tt.ok)
+			if got != tt.expected {
+				t.Errorf("appendDirtyIfModified(%q, ...) = %q, want %q", tt.v, got, tt.expected)
+			}
+		})
+	}
+}

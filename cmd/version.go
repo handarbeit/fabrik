@@ -12,6 +12,7 @@ var Version = "dev"
 func init() {
 	info, ok := debug.ReadBuildInfo()
 	Version = versionWithSHA(Version, info, ok)
+	Version = appendDirtyIfModified(Version, info, ok)
 }
 
 // versionWithSHA returns v unchanged if it is not "dev" (i.e. a real release
@@ -51,6 +52,24 @@ func versionWithSHA(v string, info *debug.BuildInfo, ok bool) string {
 	// resolved version in Main.Version.
 	if mv := info.Main.Version; mv != "" && mv != "(devel)" {
 		return mv
+	}
+	return v
+}
+
+// appendDirtyIfModified appends "+dirty" to v when the running binary's own
+// embedded VCS build info reports vcs.modified=true — regardless of whether
+// v is a ldflags-injected release version or a dev build. This surfaces a
+// locally-built or improperly-released binary instead of it masquerading as
+// a clean release (see #1070): the release path (v != "dev") previously
+// returned untouched from versionWithSHA and never inspected vcs.modified.
+func appendDirtyIfModified(v string, info *debug.BuildInfo, ok bool) string {
+	if !ok || info == nil {
+		return v
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.modified" && s.Value == "true" {
+			return v + "+dirty"
+		}
 	}
 	return v
 }
