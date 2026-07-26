@@ -679,6 +679,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateLayout(false)
 		return m, nil
 
+	case CommentBreakerTrippedEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		m.updateLayout(false)
+		return m, nil
+
 	case JobCompletedEvent:
 		// Fan out to both active (remove job) and history (add entry)
 		comp, _ := m.active.Update(msg)

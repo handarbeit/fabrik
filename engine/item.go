@@ -1370,6 +1370,11 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+
+	// Circuit breaker (#1089): a manual unpause is "a human investigated and is
+	// giving this another shot" — the same reset already applied to the other
+	// cycle counters above.
+	e.resetCommentBreaker(item)
 }
 
 // handleRevalidateLabel processes the fabrik:revalidate operator label by removing

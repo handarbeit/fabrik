@@ -188,6 +188,29 @@ func (o *PushUnblockObserver) allBlockersClosed(defaultRepo string, blockedBy []
 	return true
 }
 
+// CommentBreakerObserver resets the comment-processing circuit breaker
+// counter (#1089) whenever a linked PR's state changes — one of the
+// breaker's forward-progress reset triggers (alongside stage:*:complete,
+// new commits, issue-body edits, and manual unpause; see engine/comment_breaker.go).
+// Deliberately broad: LinkedPRChanged fires on any diffed change to the
+// linked-PR fields (merge, close, draft↔ready, but also review-request/check-run
+// churn), erring toward fewer false trips for a last-resort backstop — the
+// same trade-off ADR-070 made explicitly for bot-noise filtering.
+type CommentBreakerObserver struct {
+	Store *itemstate.Store
+}
+
+// OnChange implements itemstate.Observer.
+func (o *CommentBreakerObserver) OnChange(change itemstate.Change, _ itemstate.Snapshot) {
+	if change.Fields&itemstate.LinkedPRChanged == 0 {
+		return
+	}
+	if o.Store == nil {
+		return
+	}
+	o.Store.Apply(itemstate.CommentBreakerReset{Repo: change.Repo, Number: change.Number})
+}
+
 // OnChange implements itemstate.Observer.
 func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.Snapshot) {
 	if o.Store == nil || o.Remove == nil {
