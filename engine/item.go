@@ -506,8 +506,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// actually runs — never refreshed by observation — so it accurately reflects
 	// real invocation recency and prevents hot-looping after an incomplete run.
 	var lastAttempt time.Time
+	var afterCapped bool
 	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 		lastAttempt = snap.LastAttemptAt(stage.Name)
+		// StageCapped reflects the immediately preceding finalized invocation of THIS
+		// stage — stage-scoped so an intervening comment-processing run (or another
+		// stage's own capped record) can't clobber it. Read here, before dispatch, so
+		// the eventual finalize call carries "was my predecessor capped" independently
+		// of whatever this run's own outcome turns out to be.
+		afterCapped = snap.StageCapped(stage.Name)
 	}
 	if !lastAttempt.IsZero() {
 		// If stage completed, the completion label above would have caught it.
@@ -721,6 +728,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		release:         releaseLock,
 		stashed:         stashed,
 		workerStartedAt: workerStartedAt,
+		afterCapped:     afterCapped,
 	})
 
 	return nil
@@ -987,6 +995,11 @@ type stageOutcomeParams struct {
 	release         func()
 	stashed         bool
 	workerStartedAt time.Time
+	// afterCapped is true when the immediately preceding finalized invocation of
+	// this stage was turn-capped (StageState.LastRunCapped[stage.Name] as of
+	// dispatch time) — drives the posted-comment provenance annotation and the
+	// two log-only "suspicious shape" heuristics.
+	afterCapped bool
 }
 
 // finalizeStageOutcome runs everything that happens after a Claude invocation
@@ -1120,6 +1133,27 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		prNumber, _ = e.ensureDraftPR(item, baseBranch)
 	}
 
+	// Log-only "suspicious shape" heuristics (issue #1081): both are corroborating
+	// signals that this run may be reporting inherited work as first-hand, but
+	// neither gates behavior — false negatives are expected and acceptable.
+	if completed && p.afterCapped && stage.MaxTurns > 0 && usage.TurnsUsed < stage.MaxTurns/4 {
+		e.logf(item.Number, "warn", "stage %q completed in %d turns immediately after a turn-capped predecessor (budget %d) — treat verification claims with caution\n",
+			stage.Name, usage.TurnsUsed, stage.MaxTurns)
+	}
+	if p.afterCapped && containsInheritedWorkLanguage(postOutput) {
+		e.logf(item.Number, "warn", "stage %q output names inheriting a prior interrupted session while still reporting the work as first-hand\n", stage.Name)
+	}
+
+	// Provenance annotation (issue #1081): when the immediately preceding invocation
+	// of this stage was turn-capped, prepend a reader-facing callout so a human
+	// reviewing the comment knows this run resumed a truncated session — without
+	// judging the retry's content. Leading placement, not a footer addition, so
+	// it's the first thing a reader sees. Applied after the degenerate-output guard
+	// so a suppressed (empty) postOutput is never annotated.
+	if p.afterCapped && postOutput != "" {
+		postOutput = cappedRunAnnotation + "\n\n" + postOutput
+	}
+
 	// Post Claude's output
 	if postOutput != "" {
 		footer := formatStatsFooter(usage, completed)
@@ -1159,6 +1193,18 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			Number:    item.Number,
 			StageName: stage.Name,
 			At:        time.Now(),
+		})
+		// Record whether THIS invocation itself was turn-capped, independent of err —
+		// the real-world turn-cap kill exits non-zero (see issue #1081), so this
+		// condition deliberately does not require err == nil like the existing
+		// intra-dispatch hitLimit check does. Unconditional overwrite (not set-once)
+		// so a normal completion clears a stale capped flag, and a chain of
+		// consecutive capped runs keeps the flag set for each successor.
+		e.store.Apply(itemstate.StageCappedRunRecorded{
+			Repo:      repoStr,
+			Number:    item.Number,
+			StageName: stage.Name,
+			Capped:    usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns && !completed,
 		})
 	}
 
@@ -1207,13 +1253,14 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
 	e.store.Apply(itemstate.InvocationRecorded{
-		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
-		Number:    item.Number,
-		Completed: completed,
-		Blocked:   blockedOnInput,
-		Errored:   err != nil,
-		Usage:     usage,
-		Duration:  time.Since(p.workerStartedAt),
+		Repo:           itemOwnerRepoString(item, e.defaultRepo()),
+		Number:         item.Number,
+		Completed:      completed,
+		Blocked:        blockedOnInput,
+		Errored:        err != nil,
+		Usage:          usage,
+		Duration:       time.Since(p.workerStartedAt),
+		AfterCappedRun: p.afterCapped,
 	})
 
 	if completed && noWorkNeeded {

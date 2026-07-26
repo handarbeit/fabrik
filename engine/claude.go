@@ -1003,6 +1003,40 @@ func formatStatsFooter(usage TokenUsage, completed bool) string {
 		usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
 }
 
+// cappedRunAnnotation is prepended to a stage's posted comment when the immediately
+// preceding invocation of the same stage was turn-capped (hit max_turns without
+// completing). It deliberately carries no turn numbers — reproducing the
+// predecessor's own usage would require a second stage-scoped field for no
+// functional gain; the annotation's job is to flag discontinuity, not restate
+// stats already visible in the predecessor's own footer (see issue #1081).
+const cappedRunAnnotation = "⚠️ **Provenance notice:** the previous attempt at this stage was stopped after hitting its turn limit. This run resumed that session — treat any claims about freshly-run commands or verification accordingly."
+
+// inheritedWorkPhrases is a conservative, case-insensitive substring list used by
+// containsInheritedWorkLanguage to flag stage output that names the exact failure
+// mode of issue #1081: the successor is aware it inherited a prior interrupted
+// session's work, yet still reports on it as first-hand. Log-only signal — never
+// gates behavior, so false negatives here are expected and acceptable.
+var inheritedWorkPhrases = []string{
+	"prior session",
+	"previous session",
+	"interrupted session",
+	"prior attempt",
+	"resumed from a prior",
+}
+
+// containsInheritedWorkLanguage reports whether output contains language suggesting
+// the model is aware it resumed a prior interrupted session, per the second
+// detection signature in issue #1081.
+func containsInheritedWorkLanguage(output string) bool {
+	lower := strings.ToLower(output)
+	for _, phrase := range inheritedWorkPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.
 // Returns empty string if markers are not found.
 func extractBetweenMarkers(output, beginMarker, endMarker string) string {
