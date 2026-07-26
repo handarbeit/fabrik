@@ -296,6 +296,90 @@ func TestFindNewComments_SkipsRocketReactedComment(t *testing.T) {
 	}
 }
 
+// TestIsBotServiceNotice covers the classifier's decision boundary: bot login
+// AND a known quota/rate-limit pattern must both hold. Regression guard for
+// #1083/#1088 (gemini-code-assist quota-exhaustion runaway loop).
+func TestIsBotServiceNotice(t *testing.T) {
+	tests := []struct {
+		name string
+		c    gh.Comment
+		want bool
+	}{
+		{
+			name: "gemini quota banner",
+			c:    gh.Comment{Author: "gemini-code-assist[bot]", Body: "[!WARNING]\nYou have reached your daily quota limit."},
+			want: true,
+		},
+		{
+			name: "rate limit banner",
+			c:    gh.Comment{Author: "some-bot[bot]", Body: "You have reached your rate limit. Please try again later."},
+			want: true,
+		},
+		{
+			name: "genuine bot review body",
+			c:    gh.Comment{Author: "gemini-code-assist[bot]", Body: "CHANGES_REQUESTED\n\nline 42: this loop never terminates when the slice is empty."},
+			want: false,
+		},
+		{
+			name: "human authored quota-sounding text",
+			c:    gh.Comment{Author: "humanuser", Body: "You have reached your daily quota limit for this API — worth noting in the docs."},
+			want: false,
+		},
+		{
+			name: "existing quota notice fixture body must not collide",
+			c:    gh.Comment{Author: "gemini-code-assist", Body: "quota notice"},
+			want: false,
+		},
+		{
+			name: "bot with unrelated body",
+			c:    gh.Comment{Author: "dependabot[bot]", Body: "Bumps foo from 1.0.0 to 1.0.1."},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBotServiceNotice(tt.c); got != tt.want {
+				t.Errorf("isBotServiceNotice(%+v) = %v, want %v", tt.c, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFindNewComments_SkipsBotServiceNotice verifies the pre-admission filter
+// excludes a quota/rate-limit bot notice while still admitting a genuine bot
+// review comment and a human comment in the same batch.
+func TestFindNewComments_SkipsBotServiceNotice(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 21,
+		Comments: []gh.Comment{
+			{ID: "C_quota", DatabaseID: 501, Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
+			{ID: "C_review", DatabaseID: 502, Author: "gemini-code-assist[bot]", Body: "CHANGES_REQUESTED: this loop never terminates."},
+			{ID: "C_human", DatabaseID: 503, Author: "humanuser", Body: "please address the review feedback"},
+		},
+	}
+
+	newComments := eng.findNewComments(item)
+	var gotIDs []string
+	for _, c := range newComments {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if len(newComments) != 2 {
+		t.Fatalf("expected 2 new comments (quota notice excluded), got %d: %v", len(newComments), gotIDs)
+	}
+	for _, want := range []string{"C_review", "C_human"} {
+		found := false
+		for _, id := range gotIDs {
+			if id == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected %q to be admitted, got %v", want, gotIDs)
+		}
+	}
+}
+
 // TestAddComment_ReactsWithRocket verifies that processComments adds a 🚀 reaction
 // to every comment it posts via AddComment, using the returned database ID.
 func TestAddComment_ReactsWithRocket(t *testing.T) {

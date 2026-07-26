@@ -30,9 +30,53 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 		if c.HasReaction("ROCKET") {
 			continue
 		}
+		// Skip non-actionable bot service-notices (e.g. quota/rate-limit banners) —
+		// admitting these spawns a comment-processing worker and, if replied to,
+		// re-triggers the subscribed bot into an unbounded reply loop (#1083, #1088).
+		// Watermarking these so they don't re-admit on a later poll is handled
+		// separately by settleBotServiceNotices, since a bot-notice-only backlog
+		// never reaches processComments once excluded here.
+		if isBotServiceNotice(c) {
+			continue
+		}
 		newComments = append(newComments, c)
 	}
 	return newComments
+}
+
+// botServiceNoticePatterns are literal, case-insensitive substrings identifying
+// non-actionable bot service/status notices (quota exhaustion, rate limiting)
+// as opposed to genuine bot review content. Deliberately narrow: a bare
+// "quota"/"rate limit" substring would risk matching genuine review prose that
+// discusses rate limiting, and would collide with this repo's own test
+// fixtures (e.g. the literal body "quota notice" used across
+// blocked_on_input_test.go to exercise the human-only resume gate, ADR-069).
+var botServiceNoticePatterns = []string{
+	"daily quota limit",
+	"you have reached your daily quota",
+	"rate limit exceeded",
+	"you have reached your rate limit",
+	"you have exceeded your rate limit",
+	"api rate limit",
+}
+
+// isBotServiceNotice reports whether c is a non-actionable bot service/status
+// notice (e.g. "you have reached your daily quota limit") rather than genuine
+// bot review content. Both the bot-login check and a pattern match are
+// required — a human comment mentioning the same phrasing is not classified
+// as a notice, and a bot comment that doesn't match a known pattern (e.g. a
+// CHANGES_REQUESTED review body) is left for normal processing.
+func isBotServiceNotice(c gh.Comment) bool {
+	if !gh.IsBotLogin(c.Author) {
+		return false
+	}
+	lower := strings.ToLower(c.Body)
+	for _, pattern := range botServiceNoticePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterHuman filters a comment slice down to comments authored by a human —
