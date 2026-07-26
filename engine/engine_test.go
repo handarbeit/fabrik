@@ -30,7 +30,7 @@ func TestItemNeedsWork_SkipsPaused(t *testing.T) {
 	}
 }
 
-func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
+func TestItemNeedsWork_Paused_HumanComment_Dispatches(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
@@ -45,6 +45,50 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 	// A human comment on a paused item triggers work (unpause).
 	if !eng.itemNeedsWork(item) {
 		t.Error("itemNeedsWork should return true for paused item with a new human comment")
+	}
+}
+
+// TestItemNeedsWork_Paused_MixedBatch_Dispatches and
+// TestItemNeedsWork_AwaitingInput_MixedBatch_Dispatches cover the gate half of
+// the gate/action symmetry ADR 069 relies on: TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause
+// and TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock
+// (blocked_on_input_test.go) already assert the action admits a mixed
+// bot+human batch; nothing asserted the gate does the same, which is exactly
+// the case where a filtering slip would strand an item (admitted by one side,
+// silently skipped by the other).
+func TestItemNeedsWork_Paused_MixedBatch_Dispatches(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "B1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "H1", Author: "otheruser", Body: "please continue"},
+		},
+	}
+
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for paused item with a mixed bot+human comment batch")
+	}
+}
+
+func TestItemNeedsWork_AwaitingInput_MixedBatch_Dispatches(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "B1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "H1", Author: "otheruser", Body: "please continue"},
+		},
+	}
+
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for awaiting-input item with a mixed bot+human comment batch")
 	}
 }
 
