@@ -111,6 +111,7 @@ func (o *InvocationObserver) OnChange(change itemstate.Change, snap itemstate.Sn
 		TurnsUsed:      st.LastTokenUsage.TurnsUsed,
 		MaxTurns:       st.LastTokenUsage.MaxTurns,
 		CostUSD:        st.LastTokenUsage.CostUSD,
+		AfterCappedRun: st.LastInvocationAfterCappedRun,
 	})
 }
 

@@ -113,6 +113,7 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			TurnsUsed:      ev.TurnsUsed,
 			MaxTurns:       ev.MaxTurns,
 			CostUSD:        ev.CostUSD,
+			AfterCappedRun: ev.AfterCappedRun,
 		}
 		h.history = append(h.history, entry)
 		SaveHistory(h.history)
@@ -250,6 +251,14 @@ func (h *HistoryPaneComponent) rebuildViewportContent(innerWidth int) {
 			result = dimStyle.Render("  (retry)")
 		} else {
 			status = successStyle.Render("✓")
+		}
+		if he.AfterCappedRun {
+			// The immediately preceding invocation of this stage was turn-capped —
+			// this row's own claims about freshly-run commands or verification may
+			// be reporting on inherited work (issue #1081). Shown alongside — not
+			// instead of — the retry indicator above, since a row can be both a
+			// retry AND itself resuming a capped predecessor (a capped chain).
+			result += dimStyle.Render("  ⚠cap")
 		}
 		ts := dimStyle.Render(he.CompletedAt.Format("2006-01-02 15:04"))
 		dur := fmtDuration(he.Duration)

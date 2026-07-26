@@ -502,3 +502,77 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 		t.Errorf("round-trip total cost = %.2f, want %.2f", loadedTotal, wantTotal)
 	}
 }
+
+// TestAfterCappedRun_RoundTripsAndRenders verifies AfterCappedRun (issue #1081)
+// round-trips through HistoryPaneComponent.Update into HistoryEntry, survives a
+// SaveHistory/LoadHistory cycle, and renders a distinct dim indicator in the
+// viewport alongside — not instead of — the existing retry indicator.
+func TestAfterCappedRun_RoundTripsAndRenders(t *testing.T) {
+	redirectHistory(t)
+
+	h := NewHistoryPaneComponent("")
+
+	comp, _ := h.Update(JobCompletedEvent{
+		IssueNumber:    2200,
+		StageName:      "Implement",
+		Success:        true,
+		Completed:      true,
+		AfterCappedRun: true,
+		CompletedAt:    time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC),
+	})
+	h = comp.(HistoryPaneComponent)
+
+	entries := h.History()
+	if len(entries) != 1 {
+		t.Fatalf("history has %d entries, want 1", len(entries))
+	}
+	if !entries[0].AfterCappedRun {
+		t.Error("AfterCappedRun not carried through Update into HistoryEntry")
+	}
+
+	// SaveHistory/LoadHistory round-trip must preserve the flag.
+	SaveHistory(entries)
+	loaded := LoadHistory()
+	if len(loaded) != 1 || !loaded[0].AfterCappedRun {
+		t.Errorf("AfterCappedRun not preserved across SaveHistory/LoadHistory round-trip: %+v", loaded)
+	}
+
+	// Rendering: the indicator must appear in the viewport.
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width = 80
+	m.height = 24
+	m.history.history = entries
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = next.(Model)
+	view := m.history.View(m.width)
+	if !strings.Contains(view, "⚠cap") {
+		t.Errorf("expected ⚠cap indicator in viewHistory for AfterCappedRun entry, got: %q", view)
+	}
+}
+
+// TestAfterCappedRun_CoexistsWithRetryIndicator verifies a row that is itself both
+// incomplete (retry) AND resuming a capped predecessor shows both indicators —
+// the two facts are independent (a capped chain re-caps on every successor).
+func TestAfterCappedRun_CoexistsWithRetryIndicator(t *testing.T) {
+	redirectHistory(t)
+
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width = 80
+	m.height = 24
+	m.history.history = []HistoryEntry{{
+		IssueNumber:    2201,
+		StageName:      "Implement",
+		Success:        true,
+		Completed:      false,
+		AfterCappedRun: true,
+	}}
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = next.(Model)
+	view := m.history.View(m.width)
+	if !strings.Contains(view, "↻") {
+		t.Errorf("expected retry indicator ↻ for incomplete entry, got: %q", view)
+	}
+	if !strings.Contains(view, "⚠cap") {
+		t.Errorf("expected ⚠cap indicator alongside retry indicator, got: %q", view)
+	}
+}

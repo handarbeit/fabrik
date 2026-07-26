@@ -71,6 +71,12 @@ type JobCompletedEvent struct {
 	MaxTurns       int
 	CostUSD        float64
 	Skipped        bool // synthetic fallback emit (deferred at emission site); InvocationObserver is authoritative (Skipped:false)
+	// AfterCappedRun is true when the immediately preceding invocation of this
+	// stage was turn-capped (hit max_turns without completing) — see issue #1081.
+	// A human reading a comment with this set should treat claims about
+	// freshly-run commands or verification with caution: the model may be
+	// reporting on inherited work from the capped predecessor as first-hand.
+	AfterCappedRun bool
 }
 
 func (JobCompletedEvent) tuiEvent() {}

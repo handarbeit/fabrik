@@ -27,6 +27,9 @@ type HistoryEntry struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
+	// AfterCappedRun mirrors JobCompletedEvent.AfterCappedRun — true when the
+	// immediately preceding invocation of this stage was turn-capped (see issue #1081).
+	AfterCappedRun bool
 }
 
 // activeJob tracks an in-flight worker.

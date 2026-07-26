@@ -304,6 +304,41 @@ func TestInvocationObserver_FiresJobCompletedEventOnInvocationChanged(t *testing
 	}
 }
 
+// TestInvocationObserver_ForwardsAfterCappedRun verifies AfterCappedRun (issue
+// #1081) flows from InvocationRecorded through to the emitted JobCompletedEvent,
+// the plumbing history.json relies on to surface the provenance annotation state.
+func TestInvocationObserver_ForwardsAfterCappedRun(t *testing.T) {
+	var emitted []tui.Event
+	obs := &InvocationObserver{
+		Stages: nil,
+		Emit: func(e tui.Event) {
+			emitted = append(emitted, e)
+		},
+	}
+
+	store := newTestStore()
+	unsub := store.Subscribe(obs)
+	defer unsub()
+
+	store.Apply(itemstate.InvocationRecorded{
+		Repo:           "owner/repo",
+		Number:         6,
+		Completed:      true,
+		AfterCappedRun: true,
+	})
+
+	if len(emitted) == 0 {
+		t.Fatal("expected JobCompletedEvent to be emitted")
+	}
+	ev, ok := emitted[len(emitted)-1].(tui.JobCompletedEvent)
+	if !ok {
+		t.Fatalf("expected JobCompletedEvent, got %T", emitted[len(emitted)-1])
+	}
+	if !ev.AfterCappedRun {
+		t.Error("AfterCappedRun: got false, want true")
+	}
+}
+
 func TestInvocationObserver_SkipsStatusChanged(t *testing.T) {
 	var emitted []tui.Event
 	obs := &InvocationObserver{
