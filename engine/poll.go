@@ -388,10 +388,37 @@ func (e *Engine) Run() error {
 	rateLimitLow := false
 	rateLimitRatio := 1.0
 	lastRemainingCount := 0
+	restRateLimitPaused := false
 
 	// doPollCycle runs poll(), updates idle/backoff state, emits PollCompletedEvent,
 	// and resets the ticker to the effective interval. Returns the error from poll().
 	doPollCycle := func() error {
+		// REST/core rate-limit hard gate. The GraphQL-driven interval backoff below
+		// conserves the GraphQL budget (spent by the poll read) but does nothing for
+		// the REST/core budget, which is spent by per-item mutations (reactions,
+		// labels, comments, merges) and janitor fetches. When REST is exhausted,
+		// skip the ENTIRE work phase — fetch, dispatch, and mutations — until
+		// GitHub's hourly reset, rather than hammering 403s in a retry storm.
+		// restStats are refreshed from the headers of every REST response (including
+		// 403s), so Reset is authoritative even once the budget is at zero.
+		restStats, _ := e.client.RateLimitStats()
+		if shouldPauseForRESTRateLimit(restStats.Remaining, restStats.Limit, restStats.Reset, time.Now()) {
+			if !restRateLimitPaused {
+				e.logf(0, "warn", "REST rate limit exhausted (%d/%d remaining) — pausing all work until reset at %s\n",
+					restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
+				e.emitStructural(tui.RateLimitAlertEvent{Exhausted: true, Reset: restStats.Reset})
+				restRateLimitPaused = true
+			}
+			ticker.Reset(time.Until(restStats.Reset) + rateLimitResetBuffer)
+			return nil
+		}
+		if restRateLimitPaused {
+			e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
+				restStats.Remaining, restStats.Limit)
+			e.emitStructural(tui.RateLimitAlertEvent{Exhausted: false})
+			restRateLimitPaused = false
+		}
+
 		result, err := e.poll(ctx)
 		if err != nil {
 			return err

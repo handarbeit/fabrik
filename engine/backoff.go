@@ -27,6 +27,24 @@ const rateLimitNearZeroPercent = 1
 // regardless of the configured poll interval.
 const maxIdleBackoff = 5 * time.Minute
 
+// rateLimitResetBuffer is added to the wait when pausing for a REST rate-limit
+// reset, so GitHub has actually rolled the hourly window before we resume (the
+// reset timestamp is second-granular and clocks may differ slightly).
+const rateLimitResetBuffer = 5 * time.Second
+
+// shouldPauseForRESTRateLimit reports whether the engine should skip the entire
+// poll work phase because the REST/core budget is exhausted and has not yet
+// reset. Unlike GraphQL — which the poll read consumes and which the interval
+// backoff (computeEffectiveInterval) throttles organically — the REST/core
+// budget is spent by per-item mutations (reactions, labels, comments, merges)
+// and janitor fetches. Stretching the poll interval does not conserve it, so
+// exhaustion requires a hard pause until the hourly reset rather than a retry
+// storm of 403s. Returns false when limit is unknown (limit == 0, e.g. before
+// the first REST call) or when the reset time has already passed.
+func shouldPauseForRESTRateLimit(remaining, limit int, reset, now time.Time) bool {
+	return isRateLimitNearZero(remaining, limit) && reset.After(now)
+}
+
 // idleBackoffMultiplier returns the backoff multiplier for the given idle duration.
 // Schedule: 0–5min → 1x, 5–10min → 2x, 10–20min → 4x, 20+ min → 0 (use maxIdleBackoff).
 func idleBackoffMultiplier(idleDuration time.Duration) int {

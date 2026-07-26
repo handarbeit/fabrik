@@ -236,3 +236,33 @@ func TestIsRateLimitNearZero_ZeroLimit(t *testing.T) {
 		t.Error("expected false: limit=0 must always return false")
 	}
 }
+
+// TestShouldPauseForRESTRateLimit covers the REST/core hard-gate decision: pause
+// only when the budget is near zero AND the reset is still in the future.
+func TestShouldPauseForRESTRateLimit(t *testing.T) {
+	now := time.Date(2026, 7, 26, 20, 20, 0, 0, time.UTC)
+	future := now.Add(10 * time.Minute)
+	past := now.Add(-1 * time.Minute)
+
+	cases := []struct {
+		name             string
+		remaining, limit int
+		reset            time.Time
+		want             bool
+	}{
+		{"exhausted, reset in future -> pause", 0, 5000, future, true},
+		{"near-zero (1%) boundary, future reset -> pause", 50, 5000, future, true},
+		{"just above near-zero, future reset -> no pause", 51, 5000, future, false},
+		{"healthy quota, future reset -> no pause", 4000, 5000, future, false},
+		{"exhausted but reset already passed -> no pause (resume)", 0, 5000, past, false},
+		{"exhausted, reset exactly now -> no pause (After is strict)", 0, 5000, now, false},
+		{"unknown limit (0) -> no pause", 0, 0, future, false},
+		{"zero-value reset (pre-first-call) -> no pause", 0, 5000, time.Time{}, false},
+	}
+	for _, c := range cases {
+		if got := shouldPauseForRESTRateLimit(c.remaining, c.limit, c.reset, now); got != c.want {
+			t.Errorf("%s: shouldPauseForRESTRateLimit(%d,%d,reset,now)=%v, want %v",
+				c.name, c.remaining, c.limit, got, c.want)
+		}
+	}
+}
