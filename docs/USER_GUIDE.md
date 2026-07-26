@@ -1052,6 +1052,20 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > session file is missing, unreadable, or zero-length, so `--resume` is skipped and a fresh
 > session starts against the existing worktree. This is not currently detected or logged
 > (#1117). See *Session Resume* in [`stage-lifecycle.md`](stage-lifecycle.md) for detail.
+
+> **Troubleshooting: repeated near-instant `$0.00`, 0-turn failures on a comment.** If an
+> issue's comment is never processed and the stage logs show the same tiny failure over
+> and over — `subtype: "error_during_execution"`, an `errors[]` entry reading
+> `No conversation found with session ID: ...`, `num_turns: 0`, `total_cost_usd: 0` — the
+> session Claude Code was asked to resume has been reaped from its own history (its
+> `cleanupPeriodDays` retention, default 30 days), typically because the issue's last
+> stage invocation was over a month ago. From this fix onward, Fabrik detects this
+> structurally, deletes the stale session file, and starts a fresh session automatically
+> on the next poll — no operator action needed. On an older build without this fix, the
+> only way to unblock the issue is to manually delete the stale
+> `.fabrik/sessions/[<owner>-<repo>/]issue-<N>/<Stage>.session` file; moving the item out
+> of its board column and back does **not** work as a workaround, since an unresolved
+> comment always routes to comment processing regardless of board state.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue

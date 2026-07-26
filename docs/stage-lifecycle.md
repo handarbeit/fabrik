@@ -126,6 +126,19 @@ None of these are detected or logged. The first two are the only cases where a r
 
 This inline read is also **not** the same as `engine.ReadSessionID` (`engine/claude.go:286-302`), which trims before returning and so treats a whitespace-only file as absent. `cmd/resume.go` uses `ReadSessionID`; the invocation path does not. Tracked in #1117.
 
+#### Dead-session detection and self-heal
+
+A session file can point at a conversation Claude Code itself has since reaped (the CLI's own `cleanupPeriodDays` retention, default 30 days) — distinct from #1117's load failures above: the file is present and well-formed, but the ID no longer resolves to anything. `--resume <dead-id>` then fails structurally, and the CLI **echoes the requested `session_id` back unchanged** in its error response, so a naive unconditional resave would rewrite the exact same dead pointer every retry, making the failure self-renewing rather than merely stale.
+
+`interpretClaudeResult` (`engine/claude.go`) detects this from the parsed response, requiring both signals together:
+
+- `resp.Subtype == "error_during_execution"` (structural)
+- an entry in `resp.Errors` containing `"No conversation found with session ID"` (substring)
+
+On detection, it removes the session file immediately and skips the resave of `resp.SessionID` for that invocation — the one place `saveSessionIDDirect` would otherwise persist the dead ID right back to disk. The next invocation reads no session file, `buildClaudeArgs` omits `--resume`, and a fresh session starts and is saved normally. No retry counter or label is involved: because the specific dead ID is never rewritten, the identical failure cannot recur for that pointer, which bounds the loop without any additional machinery.
+
+This applies uniformly to both the stage-invocation and comment-processing call paths, since both flow through `interpretClaudeResult`.
+
 ### Model Override
 
 Labels matching `model:<name>` on the issue override the stage's configured model.
