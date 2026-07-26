@@ -371,11 +371,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Awaiting-input: paused because Claude needs user input. If the user has
 	// responded with a new comment, unblock and route to comment processing.
+	// humanNewComments only gates the resume decision; once authorized, the
+	// full raw comment set (including any bot chatter that accumulated while
+	// awaiting input) is handed to processComments in this same pass —
+	// mirroring the paused-unpause branch below, so a resume never leaves a
+	// bot-comment backlog to be picked up as a separate invocation next poll.
 	if isAwaitingInput(item) {
-		newComments := e.humanNewComments(item)
-		if len(newComments) > 0 {
+		if len(e.humanNewComments(item)) > 0 {
 			e.unblockAwaitingInput(item, stage)
-			return e.processComments(ctx, board, item, stage, newComments)
+			return e.processComments(ctx, board, item, stage, e.findNewComments(item))
 		}
 		e.logf(item.Number, "skip", "awaiting user input\n")
 		return nil

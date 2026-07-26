@@ -10,7 +10,7 @@ Incident #1083: a bot quota-notice ping-pong drove Fabrik into an unbounded, unp
 
 ## Decision
 
-Restrict the paused/awaiting-input resume trigger to human-authored comments. A new method, `humanNewComments` (`engine/comments.go`, immediately after `findNewComments`), calls `e.findNewComments(item)` and filters out any comment whose `Author` is either a recognized bot login (`github.IsBotLogin`, already covering `gemini-code-assist`, `*[bot]`, `*-bot`, `copilot-*`, `dependabot`) or Fabrik's own identity (`e.cfg.User`). It composes on top of `findNewComments` rather than reimplementing its dedup/rocket-reaction/Fabrik-prefix logic, so there remains a single source of truth for "is this a new comment at all."
+Restrict the paused/awaiting-input resume trigger to human-authored comments. A new method, `humanNewComments` (`engine/comments.go`, immediately after `findNewComments`), calls `e.findNewComments(item)` and filters out any comment whose `Author` is a recognized bot login (`github.IsBotLogin`, already covering `gemini-code-assist`, `*[bot]`, `*-bot`, `copilot-*`, `dependabot`). It composes on top of `findNewComments` rather than reimplementing its dedup/rocket-reaction/Fabrik-prefix logic, so there remains a single source of truth for "is this a new comment at all."
 
 `humanNewComments` replaces `findNewComments` at exactly the four resume-decision sites in `engine/item.go`:
 - `itemNeedsWork`'s awaiting-input check
@@ -19,6 +19,8 @@ Restrict the paused/awaiting-input resume trigger to human-authored comments. A 
 - `processItem`'s paused unpause loop
 
 Both the gate (`itemNeedsWork`) and the action (`processItem`) call the same shared method, so they cannot drift into disagreement — a scenario where the gate would admit an item for dispatch and the action would then silently no-op, leaving a stuck-but-not-obviously-so state.
+
+In `processItem`, `humanNewComments` is used only to decide *whether* to resume. Once a human comment authorizes it, both the awaiting-input and the paused branches hand the full raw comment set (`e.findNewComments(item)`) to `processComments`, in the same invocation — not just the human comment that triggered the resume. This matters because during a pause a bot may have posted several comments that were never consumed (no reaction, no `CommentProcessed` record, since `humanNewComments` filtered them out of the *decision* but `findNewComments` still returns them for *processing*). Passing the raw set once resumed ensures that backlog is processed together with the resuming comment in one pass, rather than being picked up as a second, separate comment-processing invocation on the next poll.
 
 `findNewComments` itself, and its one remaining raw-form caller — the non-paused new-comment dispatch check (`engine/item.go`, `newComments > 0 ⇒ dispatch`) — are unchanged. Bot-authored comments and reviews continue to trigger comment processing on a non-paused issue exactly as before; only the ability of a bot comment to silently resume a *deliberate pause* is removed. The `fabrik:awaiting-review` gate (`engine/reviews.go`) has no dependency on `findNewComments` at all and is unaffected — it is cleared by a formally submitted PR review, independent of the comment-based resume path.
 
@@ -31,6 +33,10 @@ Four call sites independently re-deriving the same "is this comment human" predi
 ### Why filter by author rather than by comment content or a new marker?
 
 The author is already reliably available (`gh.Comment.Author`, populated by the deep fetch) and `github.IsBotLogin` already exists, is exported, and already covers every bot pattern named in the incident. No new GitHub-side primitive (label, reaction, marker) is needed, and no heuristic on comment body text is required or desired — body-text heuristics are fragile and this fix does not need one.
+
+### Why not also exclude `e.cfg.User` (Fabrik's operator identity)?
+
+An earlier revision of `humanNewComments` also excluded any comment whose author matched `e.cfg.User`, reasoning that this was "Fabrik's own identity." That reasoning was wrong and the exclusion was removed during review (caught by an automated PR reviewer). `e.cfg.User` is the **operator's** GitHub login (`--user` / `FABRIK_USER`) — the account `blockOnInput` explicitly @-mentions when posting "awaiting your input … Reply on this issue to resume" (`docs/USER_GUIDE.md` §"Stages Waiting for Input"). It is not a bot or service-account identity, and in the common (currently only supported — `--filter-user`, #671, is future work) single-account deployment, Fabrik itself posts under that same account. Excluding `c.Author == e.cfg.User` would therefore have filtered out the operator's own resume reply in exactly that deployment shape — recreating this issue's own bug (an unpausable pause), just triggered by the human instead of a bot. It also bought nothing: every Fabrik-authored comment already carries the `🏭 **Fabrik` prefix and is unconditionally excluded further upstream, in `findNewComments`, independent of author. `humanNewComments` therefore filters on bot login only.
 
 ### Why not also gate the non-paused dispatch path?
 
@@ -49,7 +55,9 @@ This ADR intentionally addresses only the resume-trigger authorship gap. Sibling
 
 **Negative / Trade-offs:**
 - An operator who *wants* a bot comment to resume a paused issue (e.g., manually re-triggering after reviewing a bot's suggestion) must now leave a human comment instead; this is the intended behavior change, not a regression.
-- Test fixtures across the engine package that used `Author: "testuser"` (matching `cfg.User` in the shared test harness) to represent a "human resumes" comment had to be updated to a distinct author (`"humanuser"`), since those comments would otherwise now be filtered out as Fabrik's own identity.
+- Bot chatter accumulated during a pause/awaiting-input wait is processed together with the resuming human comment in the same `processComments` invocation (see Decision) — not silently dropped, and not deferred to a later poll.
+
+**Fixed during review — test fixtures modeling the operator's own reply:** an intermediate revision of this fix (before the `e.cfg.User` exclusion above was identified and removed) briefly renamed three fixtures' comment author from `"testuser"` to `"humanuser"` in `engine/blocked_on_input_test.go`. Those fixtures were not incidental — `Author: "testuser"` modeled the operator answering the awaiting-input question under the same account `testEngine`'s harness configures as `cfg.User`, matching `buildAwaitingInputComment`'s `@testuser` mention. Renaming them was a workaround that made the suite pass by testing a different (now-unaffected) scenario instead of catching the regression. They have been reverted to `Author: "testuser"`, restoring coverage for the actual deployment shape the `e.cfg.User` exclusion would have broken.
 
 ## Related Work
 

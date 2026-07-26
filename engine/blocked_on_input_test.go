@@ -101,7 +101,10 @@ func TestItemNeedsWork_AwaitingInput_LockedByOther(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input", "fabrik:locked:otheruser"},
 		Comments: []gh.Comment{
-			{ID: "C1", Author: "humanuser", Body: "Here is my answer"},
+			// Author matches cfg.User ("testuser") — the operator replying under
+			// their own account, the realistic single-account deployment shape.
+			// humanNewComments does not exclude cfg.User, only bot logins.
+			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
 		},
 	}
 
@@ -137,7 +140,9 @@ func TestItemNeedsWork_AwaitingInput_WithNewComments(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
 		Comments: []gh.Comment{
-			{ID: "C1", Author: "humanuser", Body: "Here is my answer"},
+			// Author matches cfg.User ("testuser") — the operator replying under
+			// their own account. humanNewComments does not exclude cfg.User.
+			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
 		},
 	}
 
@@ -213,7 +218,9 @@ func TestProcessItem_AwaitingInput_UnblocksOnComment(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
 		Comments: []gh.Comment{
-			{ID: "C1", Author: "humanuser", Body: "Here is my answer"},
+			// Author matches cfg.User ("testuser") — the operator replying under
+			// their own account. humanNewComments does not exclude cfg.User.
+			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
 		},
 	}
 
@@ -309,6 +316,61 @@ func TestProcessItem_AwaitingInput_BotComment_Skips(t *testing.T) {
 	}
 }
 
+// TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock
+// mirrors TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause:
+// once a human comment authorizes the awaiting-input unblock, any bot
+// chatter that accumulated in the same batch must be consumed in this same
+// pass (not deferred to a second comment-processing invocation next poll).
+func TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "B1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "H1", Author: "humanuser", Body: "please continue"},
+		},
+	}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	var removedAwaiting bool
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:awaiting-input" {
+			removedAwaiting = true
+		}
+	}
+	if !removedAwaiting {
+		t.Fatal("expected fabrik:awaiting-input to be removed on human comment")
+	}
+
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected exactly one comment-processing invocation, got %d", len(claude.forCommentsCalls))
+	}
+}
+
 // --- (e2) processItem unpauses fabrik:paused (no awaiting-input) on human comment only ---
 
 func TestProcessItem_Paused_BotComment_Retained(t *testing.T) {
@@ -374,9 +436,9 @@ func TestProcessItem_Paused_HumanComment_Unpauses(t *testing.T) {
 		},
 	}
 
-	// processItem may error later in comment processing (no real Claude binary
-	// in test env) — we only care that unpause happened before that point.
-	_ = eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
 
 	var removedPaused bool
 	for _, call := range client.removeLabelCalls {
@@ -537,5 +599,65 @@ func TestProcessItem_BlockedOnInput_LastAttemptAtSet(t *testing.T) {
 	}
 	if !snap2.LastAttemptAt("Research").IsZero() {
 		t.Error("LastAttemptAt[Research] should be cleared after unblockAwaitingInput")
+	}
+}
+
+// TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause documents
+// the actual (and intentional) behavior when a paused item accumulates both
+// bot chatter and a human resume comment: humanNewComments only gates the
+// *decision* to unpause. Once unpaused, processItem falls through to the
+// same code path a non-paused item uses, which re-reads the raw
+// (unfiltered) new-comment set and hands the whole batch — bot comment
+// included — to comment processing in this same invocation. Bot comments
+// accumulated during a pause are not silently dropped or deferred to a
+// later poll; they are processed alongside the human comment that
+// triggered the resume (#1083).
+func TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "B1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "H1", Author: "humanuser", Body: "please continue"},
+		},
+	}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	var removedPaused bool
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			removedPaused = true
+		}
+	}
+	if !removedPaused {
+		t.Fatal("expected fabrik:paused to be removed on human comment")
+	}
+
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected exactly one comment-processing invocation, got %d", len(claude.forCommentsCalls))
 	}
 }

@@ -36,13 +36,20 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 }
 
 // humanNewComments filters findNewComments to comments authored by a human —
-// excluding bot logins (gh.IsBotLogin) and Fabrik's own identity (e.cfg.User).
-// Used at the paused / awaiting-input resume-decision sites so bot chatter
-// cannot silently defeat an operator-applied pause (#1083).
+// excluding bot logins (gh.IsBotLogin). Used at the paused / awaiting-input
+// resume-decision sites so bot chatter cannot silently defeat an
+// operator-applied pause (#1083).
+//
+// Deliberately does NOT also exclude e.cfg.User: that is the operator's own
+// GitHub login, not Fabrik's bot identity, and in the common (currently only
+// supported — see #671) single-account deployment Fabrik posts under that
+// same account. Excluding it here would filter out the operator's own
+// resume reply. Fabrik's own comments are already fully excluded upstream by
+// findNewComments' 🏭 **Fabrik body-prefix check, independent of author.
 func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
 	var human []gh.Comment
 	for _, c := range e.findNewComments(item) {
-		if gh.IsBotLogin(c.Author) || strings.EqualFold(c.Author, e.cfg.User) {
+		if gh.IsBotLogin(c.Author) {
 			continue
 		}
 		human = append(human, c)

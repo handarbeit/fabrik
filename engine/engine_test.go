@@ -315,8 +315,12 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 }
 
 // TestHumanNewComments verifies humanNewComments filters findNewComments'
-// output to exclude bot logins and Fabrik's own identity, leaving only
-// human-authored comments (#1083).
+// output to exclude bot logins, leaving only human-authored comments (#1083).
+// It deliberately does NOT exclude e.cfg.User: that is the operator's own
+// GitHub login (in the common single-account deployment, the same account
+// Fabrik posts as), so excluding it would filter out the operator's own
+// resume reply. Fabrik's own output is already excluded upstream by
+// findNewComments' body-prefix check, independent of author.
 func TestHumanNewComments(t *testing.T) {
 	e := &Engine{
 		cfg:   Config{User: "fabrikbot"},
@@ -330,17 +334,44 @@ func TestHumanNewComments(t *testing.T) {
 			{ID: "c1", Author: "alice", Body: "please continue"},         // human — kept
 			{ID: "c2", Author: "gemini-code-assist", Body: "quota hit"},  // bot — filtered
 			{ID: "c3", Author: "dependabot[bot]", Body: "bump version"},  // bot — filtered
-			{ID: "c4", Author: "FabrikBot", Body: "not a fabrik prefix"}, // engine's own identity (case-insensitive) — filtered
+			{ID: "c4", Author: "fabrikbot", Body: "reply from operator"}, // matches cfg.User — kept, not a bot login
 			{ID: "c5", Author: "bob", Body: "another human"},             // human — kept
 		},
 	}
 
 	result := e.humanNewComments(item)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 human comments, got %d: %v", len(result), result)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 human comments, got %d: %v", len(result), result)
 	}
-	if result[0].ID != "c1" || result[1].ID != "c5" {
-		t.Errorf("expected comments c1 and c5, got %v", result)
+	if result[0].ID != "c1" || result[1].ID != "c4" || result[2].ID != "c5" {
+		t.Errorf("expected comments c1, c4, and c5, got %v", result)
+	}
+}
+
+// TestHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that when a paused
+// item receives both a human resume comment and bot chatter in the same
+// batch, only the human comment is handed to processComments — the bot
+// comment is not silently promoted into the "resume" content just because
+// it arrived alongside a valid trigger.
+func TestHumanNewComments_MixedBatch_KeepsOnlyHuman(t *testing.T) {
+	e := &Engine{
+		cfg:   Config{User: "operator"},
+		store: itemstate.NewStore(nil),
+	}
+
+	item := gh.ProjectItem{
+		Number: 7,
+		Repo:   "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "b1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "h1", Author: "operator", Body: "please continue"},
+			{ID: "b2", Author: "dependabot[bot]", Body: "bump version"},
+		},
+	}
+
+	result := e.humanNewComments(item)
+	if len(result) != 1 || result[0].ID != "h1" {
+		t.Fatalf("expected only the human comment h1, got %v", result)
 	}
 }
 
