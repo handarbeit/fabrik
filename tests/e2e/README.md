@@ -110,9 +110,14 @@ the canonical setup.
       identity (GitHub forbids self-approval). This exercises the full
       approval-path joint-clear (R5). Combined with a generous
       `FABRIK_REVIEW_WAIT_TIMEOUT` (see next bullet), the test defers
-      requesting this reviewer until `stage:Review:complete` is observed, so
-      Review's own `wait_for_reviews` gate clears first via the incidental
-      `gemini-code-assist` review, and only Validate's gate blocks on the
+      requesting this reviewer until `fabrik:awaiting-ci` is observed (R1) —
+      not until `stage:Review:complete`, which is applied immediately when
+      Review's Claude invocation finishes, simultaneously with
+      `fabrik:awaiting-review` and before Review's own gate has actually
+      cleared. `fabrik:awaiting-ci` only appears once Validate has been
+      dispatched, which only happens after Review's own `wait_for_reviews`
+      gate has genuinely cleared first via the incidental
+      `gemini-code-assist` review — so only Validate's gate blocks on the
       real reviewer.
     - **`FABRIK_REVIEW_WAIT_TIMEOUT` left at a generous value (e.g. the
       15-minute default)** when running the approval path — a short timeout

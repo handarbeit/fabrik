@@ -45,16 +45,24 @@ import (
 //
 // Redesign (this version): AssertPRAuthorIsExpectedIdentity preflights
 // confound 1 within seconds instead of after a 60-100 min run. The held-out
-// reviewer request is deferred until stage:Review:complete is observed,
-// letting Review's own gate clear the way real (non-test) traffic does — via
-// the incidental gemini-code-assist review, since nothing is yet requested —
-// before a genuinely outstanding human request is established ahead of
-// Validate's gate (confound 2). Because checkReviewGate's outstanding count
-// comes from actual requested-reviewer state (not "any review exists"), once
-// a real reviewer is genuinely outstanding no number of bot reviews can
-// satisfy the gate on their own, which neutralizes confound 3 without any
-// bot-tolerant logic. See docs/state-machine.md for the gate's PR-scoped
-// (not stage-scoped) review-state semantics that make this sequencing work.
+// reviewer request is deferred until fabrik:awaiting-ci is observed (R1) —
+// NOT until stage:Review:complete, which handleStageComplete applies
+// immediately when Review's Claude invocation finishes, simultaneously with
+// fabrik:awaiting-review and well before Review's own gate has actually
+// cleared (engine/stages.go: the wait_for_reviews branch returns without
+// advancing right after adding both labels). Requesting the held-out
+// reviewer at that point would make it an outstanding request on Review's
+// own still-open gate, reproducing confound 2. fabrik:awaiting-ci only
+// appears once Validate has been dispatched — which only happens after
+// Review's gate has genuinely cleared via the incidental gemini-code-assist
+// review, since nothing is yet requested — so it is the earliest safe point
+// to establish a genuinely outstanding human request ahead of Validate's own
+// gate. Because checkReviewGate's outstanding count comes from actual
+// requested-reviewer state (not "any review exists"), once a real reviewer
+// is genuinely outstanding no number of bot reviews can satisfy the gate on
+// their own, which neutralizes confound 3 without any bot-tolerant logic.
+// See docs/state-machine.md for the gate's PR-scoped (not stage-scoped)
+// review-state semantics that make this sequencing work.
 //
 // Known limitation: the timeout-fallback path below (no FABRIK_REVIEWER_TOKEN)
 // has no second identity to request, so it remains exposed to confound 3 —
@@ -133,56 +141,28 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNumber)
 	t.Logf("confirmed PR #%d author matches the test bed's engine identity", prNumber)
 
-	// Let Review's own wait_for_reviews gate clear the way real (non-test)
-	// traffic does — via the incidental gemini-code-assist review, since no
-	// reviewer is requested yet (confound 2). Observe fabrik:awaiting-review
-	// transiently appearing and clearing at Review, non-fatally, to document
-	// that the dual gate is engaging and self-clearing as expected.
-	if reviewerToken != "" {
-		awaitingReviewSeenAtReview := false
-		reviewComplete := false
-		reviewDeadline := time.Now().Add(45 * time.Minute)
-		for time.Now().Before(reviewDeadline) {
-			labels, err := tryIssueLabels(env, env.RepoAlpha, num)
-			if err != nil {
-				t.Logf("transient error polling for stage:Review:complete on %s#%d: %v (retrying)", env.RepoAlpha, num, err)
-				time.Sleep(15 * time.Second)
-				continue
-			}
-			for _, l := range labels {
-				if l == "fabrik:awaiting-review" && !awaitingReviewSeenAtReview {
-					awaitingReviewSeenAtReview = true
-					t.Logf("observed fabrik:awaiting-review at Review on %s#%d (self-clearing via gemini-code-assist, confound 2 resolution)", env.RepoAlpha, num)
-				}
-				if l == "stage:Review:complete" {
-					reviewComplete = true
-				}
-			}
-			if reviewComplete {
-				break
-			}
-			time.Sleep(15 * time.Second)
-		}
-		if !reviewComplete {
-			t.Fatalf("timed out waiting for stage:Review:complete on %s#%d", env.RepoAlpha, num)
-		}
-		if !awaitingReviewSeenAtReview {
-			t.Logf("note: fabrik:awaiting-review was not observed during the Review-stage wait on %s#%d (window may have been missed between polls; not a failure)", env.RepoAlpha, num)
-		}
-		t.Logf("stage:Review:complete confirmed on %s#%d", env.RepoAlpha, num)
+	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
+	// This also confirms the item has advanced past Review — Validate is only
+	// dispatched once Review's own wait_for_reviews gate has genuinely
+	// cleared, via the incidental gemini-code-assist review since no reviewer
+	// is requested yet (confound 2). Waiting for this label — rather than
+	// stage:Review:complete, which is applied immediately when Review's
+	// Claude invocation finishes, simultaneously with fabrik:awaiting-review —
+	// is what actually signals it's safe to request the held-out reviewer.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 30*time.Minute)
+	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
+	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding; Review's own review gate has cleared)", env.RepoAlpha, num)
 
-		// Now establish a genuinely outstanding reviewer request so Validate's
-		// gate has something real to hold on. Review's own gate has already
-		// cleared (above), so this request only engages at Validate.
+	// Now establish a genuinely outstanding reviewer request so Validate's
+	// gate has something real to hold on. Review's own gate has already
+	// cleared (the item has advanced to Validate, above), so this request
+	// only engages once Validate's own checkReviewGate call evaluates it
+	// (after CI clears, ~10 min away) — well ahead of that window.
+	if reviewerToken != "" {
 		reviewerLogin := TokenLogin(t, reviewerToken)
 		RequestPRReviewer(t, env, env.RepoAlpha, prNumber, reviewerLogin)
 		t.Logf("requested reviewer %q on PR #%d so Validate's review gate engages", reviewerLogin, prNumber)
 	}
-
-	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 30*time.Minute)
-	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
-	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding)", env.RepoAlpha, num)
 
 	// R1 withheld window (2 min): stage:Validate:complete must NOT appear while
 	// fabrik:awaiting-ci is present — CI has not yet passed (~10 min).
