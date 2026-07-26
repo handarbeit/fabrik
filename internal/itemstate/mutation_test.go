@@ -978,6 +978,87 @@ func TestProbeBoardItemUpdatedNoChangeFlagsWhenSame(t *testing.T) {
 	}
 }
 
+// ---- CommentBreakerInvocationRecorded / CommentBreakerReset (#1089) ----
+
+func TestApplyCommentBreakerInvocationRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	t1 := time.Unix(1000, 0)
+	applyExpect(t, s, CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: t1, Author: "alice"}, CommentBreakerChanged)
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 1 || !st.CommentBreaker.InvocationsAt[0].Equal(t1) {
+		t.Fatalf("InvocationsAt = %v, want [%v]", st.CommentBreaker.InvocationsAt, t1)
+	}
+	if st.CommentBreaker.LastAuthor != "alice" {
+		t.Errorf("LastAuthor = %q, want %q", st.CommentBreaker.LastAuthor, "alice")
+	}
+
+	// A second invocation appends and updates LastAuthor.
+	t2 := time.Unix(2000, 0)
+	applyExpect(t, s, CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: t2, Author: "some-bot"}, CommentBreakerChanged)
+	st = getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 2 {
+		t.Fatalf("InvocationsAt len = %d, want 2", len(st.CommentBreaker.InvocationsAt))
+	}
+	if st.CommentBreaker.LastAuthor != "some-bot" {
+		t.Errorf("LastAuthor = %q, want %q", st.CommentBreaker.LastAuthor, "some-bot")
+	}
+}
+
+func TestApplyCommentBreakerReset(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: time.Unix(1000, 0), Author: "alice"})
+
+	applyExpect(t, s, CommentBreakerReset{Repo: testRepo, Number: 1}, CommentBreakerChanged)
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 0 {
+		t.Errorf("InvocationsAt = %v, want empty after reset", st.CommentBreaker.InvocationsAt)
+	}
+	if st.CommentBreaker.LastAuthor != "" {
+		t.Errorf("LastAuthor = %q, want empty after reset", st.CommentBreaker.LastAuthor)
+	}
+}
+
+// TestApplyCommentBreakerResetNoOpOnEmpty verifies that resetting an
+// already-empty breaker produces no Change (invariant I6: no-op mutations
+// don't notify observers).
+func TestApplyCommentBreakerResetNoOpOnEmpty(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	_, changes, err := s.Apply(CommentBreakerReset{Repo: testRepo, Number: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(CommentBreakerReset) on already-empty breaker: got %d changes, want 0 (no-op)", len(changes))
+	}
+}
+
+func TestCommentBreakerSnapshotAccessors(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Unix(1234, 0)
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: at, Author: "bob"})
+
+	snap, err := s.Get(testRepo, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	invocations := snap.CommentBreakerInvocationsAt()
+	if len(invocations) != 1 || !invocations[0].Equal(at) {
+		t.Errorf("CommentBreakerInvocationsAt() = %v, want [%v]", invocations, at)
+	}
+	if got := snap.CommentBreakerLastAuthor(); got != "bob" {
+		t.Errorf("CommentBreakerLastAuthor() = %q, want %q", got, "bob")
+	}
+
+	// Mutating the returned slice must not affect the Store's internal state.
+	invocations[0] = time.Unix(9999, 0)
+	again := snap.CommentBreakerInvocationsAt()
+	if !again[0].Equal(at) {
+		t.Errorf("CommentBreakerInvocationsAt() leaked mutation: got %v, want %v", again[0], at)
+	}
+}
+
 // ---- Snapshot immutability for LinkedPR fields ----
 
 func TestHeldSnapshotLinkedPRFieldsUnchanged(t *testing.T) {

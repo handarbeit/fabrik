@@ -711,6 +711,32 @@ type LinkageHealAttempted struct {
 func (LinkageHealAttempted) isMutation()       {}
 func (m LinkageHealAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// CommentBreakerInvocationRecorded appends a timestamp (and records the
+// triggering comment's author) to ItemState.CommentBreaker for the
+// runaway-loop circuit breaker (#1089). Applied once per comment-processing
+// invocation that actually reaches Claude.
+type CommentBreakerInvocationRecorded struct {
+	Repo   string
+	Number int
+	At     time.Time
+	Author string
+}
+
+func (CommentBreakerInvocationRecorded) isMutation()       {}
+func (m CommentBreakerInvocationRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// CommentBreakerReset clears ItemState.CommentBreaker.InvocationsAt (and
+// LastAuthor) after forward progress is observed: a stage:*:complete
+// transition, a new commit on the branch, a PR state change, an issue-body
+// update, or a manual human unpause (#1089).
+type CommentBreakerReset struct {
+	Repo   string
+	Number int
+}
+
+func (CommentBreakerReset) isMutation()       {}
+func (m CommentBreakerReset) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
 // Returns "" when repo is empty (indicating an invalid or unroutable mutation).
 func itemKeyFor(repo string, number int) string {

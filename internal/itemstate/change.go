@@ -55,6 +55,10 @@ const (
 	// TerminalFlagSet. Store-internal clears (when status changes) piggyback on
 	// StatusChanged and do not emit TerminalChanged.
 	TerminalChanged
+	// CommentBreakerChanged indicates ItemState.CommentBreaker (invocation
+	// timestamps or last author) changed. Informational only — not in
+	// wakeChFlags/cycleSetFlags, same treatment as InvocationChanged.
+	CommentBreakerChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

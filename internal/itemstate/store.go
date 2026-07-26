@@ -623,6 +623,19 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.ThreadComments = append(item.LinkedPR.ThreadComments, v.Comment)
 		return LinkedPRChanged | CommentsChanged
 
+	case CommentBreakerInvocationRecorded:
+		item.CommentBreaker.InvocationsAt = append(item.CommentBreaker.InvocationsAt, v.At)
+		item.CommentBreaker.LastAuthor = v.Author
+		return CommentBreakerChanged
+
+	case CommentBreakerReset:
+		if len(item.CommentBreaker.InvocationsAt) == 0 && item.CommentBreaker.LastAuthor == "" {
+			return 0 // no-op: already reset
+		}
+		item.CommentBreaker.InvocationsAt = nil
+		item.CommentBreaker.LastAuthor = ""
+		return CommentBreakerChanged
+
 	case ShallowBoardItemUpdated:
 		return applyShallowItem(item, v.Item)
 

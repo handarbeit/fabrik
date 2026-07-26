@@ -119,6 +119,26 @@ type ItemState struct {
 	// BaseBranchWarned tracks which base-branch overrides have already produced a
 	// "branch not found" warning comment. Replaces engine.baseBranchWarnedSet.
 	BaseBranchWarned map[string]bool
+
+	// CommentBreaker tracks comment-processing invocations for the runaway-loop
+	// circuit breaker (#1089). Scoped to the item as a whole, not per-stage — the
+	// breaker must survive a legitimate stage transition mid-window.
+	CommentBreaker CommentBreakerState
+}
+
+// CommentBreakerState tracks comment-processing invocation timestamps used by
+// the engine's circuit breaker to detect a non-advancing comment-processing
+// loop. The engine (not this package) owns the threshold/window business
+// logic and prunes-and-counts InvocationsAt on every read — mirroring the
+// existing mergeTrainTrials runaway-guard precedent (ADR-059 D8).
+type CommentBreakerState struct {
+	// InvocationsAt holds the timestamp of each recorded comment-processing
+	// invocation since the last reset.
+	InvocationsAt []time.Time
+	// LastAuthor is the author of the comment that triggered the most recent
+	// recorded invocation. Surfaced in the trip comment so the operator knows
+	// who/what to look at.
+	LastAuthor string
 }
 
 // LinkedPRState holds the state of the closing pull request for an issue.
