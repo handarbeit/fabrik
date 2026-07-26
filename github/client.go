@@ -36,6 +36,15 @@ type Client struct {
 	mu           sync.Mutex
 	restStats    RateLimitStats
 	graphqlStats RateLimitStats
+
+	mergeStrategy string
+}
+
+// SetMergeStrategy configures the merge method MergePR attempts first
+// ("MERGE", "SQUASH", or "REBASE", case-insensitive). An empty string leaves
+// MergePR defaulting to "merge". Not safe to call concurrently with MergePR.
+func (c *Client) SetMergeStrategy(strategy string) {
+	c.mergeStrategy = strategy
 }
 
 func NewClient(token string) *Client {
