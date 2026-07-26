@@ -1146,12 +1146,45 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		completed = false
 	}
 
+	// Only honor the blocked-on-input and no-work-needed markers if Claude ran without
+	// error. If there was an error, treat the run as a retry/failure rather than
+	// silently pausing the issue.
+	//
+	// Computed here (before the eager pre-post ensureDraftPR call below) rather than
+	// after it, so the empty-coordinator check folded into noWorkNeeded also gates
+	// that eager call — otherwise it fires unconditionally whenever completed &&
+	// stage.CreateDraftPR && stage.PostToPR (true for the real Implement stage
+	// config) and attempts the doomed CreateDraftPR before this function ever
+	// reaches the noWorkNeeded-gated completion branch further down.
+	blockedOnInput := err == nil && CheckBlockedOnInput(output)
+	noWorkNeeded := err == nil && CheckNoWorkNeeded(output)
+
+	// Empty-coordinator completion (issue #921): a fully-delegated parent that spawned
+	// children has no deliverable of its own — its Implement invocation legitimately
+	// produces zero commits. Detect that deterministically (rather than relying on
+	// Claude to notice and emit FABRIK_NO_WORK_NEEDED, which the skill prompt never
+	// taught it to do) and treat it exactly like the no-work-needed path so the
+	// existing Done/cleanup machinery handles it instead of attempting a doomed
+	// CreateDraftPR call. Gated on completed && stage.Name == "Implement" so this never
+	// fires before Claude has had a chance to run — a hybrid parent (children spawned
+	// AND its own pending implementation work) must always get that chance; checking
+	// commit count only after a completed run is what makes this safe for both cases.
+	// commitsAheadOfBase fails safe: any git error leaves noWorkNeeded untouched and
+	// falls through to the normal PR-creation path.
+	if !noWorkNeeded && completed && stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
+		if ahead, aErr := commitsAheadOfBase(workDir, baseBranch); aErr == nil && ahead == 0 {
+			noWorkNeeded = true
+		}
+	}
+
 	// When completing a stage that posts output to a PR and creates a draft PR,
 	// ensure the PR exists before posting so postOutputToPR can find it.
 	// Error is intentionally ignored here — failure is caught and escalated in
 	// the completion block below, which also retries with the full retry/backoff logic.
 	// prNumber may already be set if the FABRIK_PR_CREATE marker path ran above.
-	if prNumber == 0 && completed && stage.CreateDraftPR && stage.PostToPR {
+	// Skipped for the empty-coordinator case (noWorkNeeded true here) — that path
+	// never creates a PR at all.
+	if prNumber == 0 && completed && !noWorkNeeded && stage.CreateDraftPR && stage.PostToPR {
 		prNumber, _ = e.ensureDraftPR(item, baseBranch)
 	}
 
@@ -1232,30 +1265,6 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		// The InvocationObserver fires on InvocationChanged (from InvocationRecorded
 		// below) and adds this item to e.mayNeedWork, ensuring it is re-evaluated in
 		// the next poll cycle. No explicit eviction is needed.
-	}
-
-	// Only honor the blocked-on-input and no-work-needed markers if Claude ran without
-	// error. If there was an error, treat the run as a retry/failure rather than
-	// silently pausing the issue.
-	blockedOnInput := err == nil && CheckBlockedOnInput(output)
-	noWorkNeeded := err == nil && CheckNoWorkNeeded(output)
-
-	// Empty-coordinator completion (issue #921): a fully-delegated parent that spawned
-	// children has no deliverable of its own — its Implement invocation legitimately
-	// produces zero commits. Detect that deterministically (rather than relying on
-	// Claude to notice and emit FABRIK_NO_WORK_NEEDED, which the skill prompt never
-	// taught it to do) and treat it exactly like the no-work-needed path so the
-	// existing Done/cleanup machinery handles it instead of attempting a doomed
-	// CreateDraftPR call. Gated on completed && stage.Name == "Implement" so this never
-	// fires before Claude has had a chance to run — a hybrid parent (children spawned
-	// AND its own pending implementation work) must always get that chance; checking
-	// commit count only after a completed run is what makes this safe for both cases.
-	// commitsAheadOfBase fails safe: any git error leaves noWorkNeeded untouched and
-	// falls through to the normal PR-creation path.
-	if !noWorkNeeded && completed && stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
-		if ahead, aErr := commitsAheadOfBase(workDir, baseBranch); aErr == nil && ahead == 0 {
-			noWorkNeeded = true
-		}
 	}
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.

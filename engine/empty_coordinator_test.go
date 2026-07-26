@@ -59,8 +59,14 @@ func TestCommitsAheadOfBase(t *testing.T) {
 	}
 }
 
-// coordinatorStages returns an Implement stage (CreateDraftPR: true) followed by
-// a cleanup Done stage, for exercising the empty-coordinator completion path.
+// coordinatorStages returns an Implement stage (CreateDraftPR + PostToPR: true,
+// matching the real .fabrik/stages/implement.yaml config) followed by a cleanup
+// Done stage, for exercising the empty-coordinator completion path. PostToPR
+// must be true here: finalizeStageOutcome has a separate eager ensureDraftPR
+// call gated on `completed && stage.CreateDraftPR && stage.PostToPR` (to ensure
+// a PR exists before posting output to it) that fires independently of the
+// noWorkNeeded completion branch further down — omitting PostToPR would let a
+// regression that reintroduces an unguarded call there go undetected.
 func coordinatorStages() []*stages.Stage {
 	return []*stages.Stage{
 		{
@@ -68,6 +74,7 @@ func coordinatorStages() []*stages.Stage {
 			Order:         1,
 			Prompt:        "implement it",
 			CreateDraftPR: true,
+			PostToPR:      true,
 			Completion:    stages.CompletionCriteria{Type: "claude"},
 		},
 		{
