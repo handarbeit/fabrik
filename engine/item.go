@@ -268,15 +268,25 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// Awaiting-input items: new human comment = resume trigger; no human
 	// comment (or bot-only chatter) = skip.
 	if awaitingInput {
-		return len(e.humanNewComments(item)) > 0
+		raw := e.findNewComments(item)
+		human := filterHuman(raw)
+		if len(raw) > 0 && len(human) == 0 {
+			e.logf(item.Number, "skip", "awaiting-input: %d new comment(s), none human-authored — still waiting\n", len(raw))
+		}
+		return len(human) > 0
 	}
 
 	// Paused items: a new human comment is an implicit "resume and handle
 	// this." Without one — including bot-only chatter — respect the pause.
 	isPaused := hasLabel(item.Labels, "fabrik:paused")
 	if isPaused {
-		if len(e.humanNewComments(item)) > 0 {
+		raw := e.findNewComments(item)
+		human := filterHuman(raw)
+		if len(human) > 0 {
 			return true // comment triggers unpause — processItem handles label removal
+		}
+		if len(raw) > 0 {
+			e.logf(item.Number, "skip", "paused: %d new comment(s), none human-authored — pause retained\n", len(raw))
 		}
 		return false
 	}
