@@ -377,9 +377,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// mirroring the paused-unpause branch below, so a resume never leaves a
 	// bot-comment backlog to be picked up as a separate invocation next poll.
 	if isAwaitingInput(item) {
-		if len(e.humanNewComments(item)) > 0 {
+		raw := e.findNewComments(item)
+		if len(filterHuman(raw)) > 0 {
 			e.unblockAwaitingInput(item, stage)
-			return e.processComments(ctx, board, item, stage, e.findNewComments(item))
+			return e.processComments(ctx, board, item, stage, raw)
 		}
 		e.logf(item.Number, "skip", "awaiting user input\n")
 		return nil
@@ -391,8 +392,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// unpause (#1083 — pause must remain an effective operator kill-switch).
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			newComments := e.humanNewComments(item)
-			if len(newComments) > 0 {
+			if len(filterHuman(e.findNewComments(item))) > 0 {
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
 				e.removeLabel(item, "fabrik:paused")
 				// Also clear any failed label so the stage retries cleanly

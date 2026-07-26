@@ -314,6 +314,9 @@ func TestProcessItem_AwaitingInput_BotComment_Skips(t *testing.T) {
 	if len(claude.calls) != 0 {
 		t.Error("should not invoke claude when awaiting-input with only a bot comment")
 	}
+	if len(claude.forCommentsCalls) != 0 {
+		t.Error("should not invoke comment processing when awaiting-input with only a bot comment")
+	}
 }
 
 // TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock
@@ -414,6 +417,9 @@ func TestProcessItem_Paused_BotComment_Retained(t *testing.T) {
 	}
 	if len(claude.calls) != 0 {
 		t.Error("should not invoke claude when paused with only a bot comment")
+	}
+	if len(claude.forCommentsCalls) != 0 {
+		t.Error("should not invoke comment processing when paused with only a bot comment")
 	}
 }
 
