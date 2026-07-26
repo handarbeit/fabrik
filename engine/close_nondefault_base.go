@@ -71,11 +71,11 @@ func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 		return
 	}
 
-	e.logf(item.Number, "pr-terminal", "issue #%d base %q ≠ default %q — closing explicitly\n", item.Number, base, def)
-
 	if item.IsClosed {
 		return
 	}
+
+	e.logf(item.Number, "pr-terminal", "issue #%d base %q ≠ default %q — closing explicitly\n", item.Number, base, def)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.CloseIssue(owner, repo, item.Number); err != nil {
