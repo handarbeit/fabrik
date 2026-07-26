@@ -309,7 +309,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
 | `--convergence-budget` | Wall-clock budget for post-Validate yolo PR convergence (Go duration: `30m`, `1h`; `0` disables the budget entirely; also `FABRIK_CONVERGENCE_BUDGET`) | `30m` |
-| `--auto-merge-strategy` | Merge method for GitHub native auto-merge on yolo PRs: `MERGE`, `SQUASH`, or `REBASE` (also `FABRIK_AUTO_MERGE_STRATEGY`) | `MERGE` |
+| `--auto-merge-strategy` | Merge method Fabrik attempts first, for both GitHub native auto-merge (yolo PRs) and direct merges (e.g. merge-train landings): `MERGE`, `SQUASH`, or `REBASE`; falls back to a repo-allowed method if the configured one is disallowed (also `FABRIK_AUTO_MERGE_STRATEGY`) | `MERGE` |
 | `--auto-upgrade` | Self-upgrade from handarbeit/fabrik GitHub Releases at startup and when idle (after 2 idle polls) | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
