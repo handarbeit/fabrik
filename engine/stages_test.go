@@ -267,6 +267,55 @@ func TestAttemptMergeOnValidate_DirectMergeAlsoFails(t *testing.T) {
 	}
 }
 
+// TestAttemptMergeOnValidate_DirectMergeFailsCINotGreen verifies that when the
+// direct-merge fallback's MergePR call returns gh.ErrNotMergeableCI (issue
+// #1094: MergePR now self-gates on mergeable_state), attemptMergeOnValidate
+// returns (false, err) wrapping ErrNotMergeableCI — distinguishable from
+// ErrNotMergeable — and, critically, does NOT apply fabrik:rebase-needed or
+// fabrik:paused. A CI refusal must retry on the next poll (via full Validate
+// re-dispatch, since handleStageComplete's caller returns without adding
+// stage:Validate:complete on any mergeErr), not route into the rebase cycle.
+func TestAttemptMergeOnValidate_DirectMergeFailsCINotGreen(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return errors.New("GraphQL error: Pull request is in unstable status")
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err == nil {
+		t.Fatal("expected error when MergePR refuses on CI, got nil")
+	}
+	if !errors.Is(err, gh.ErrNotMergeableCI) {
+		t.Errorf("expected errors.Is(err, gh.ErrNotMergeableCI), got: %v", err)
+	}
+	if errors.Is(err, gh.ErrNotMergeable) {
+		t.Error("ErrNotMergeableCI must not also satisfy errors.Is(err, gh.ErrNotMergeable) — the two sentinels must stay distinguishable")
+	}
+	if enabled {
+		t.Fatal("expected autoMergeEnabled=false when direct merge is refused on CI")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled label must NOT be applied when direct merge is refused on CI")
+		}
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("fabrik:rebase-needed must NOT be applied for a CI refusal — that would incorrectly consume a rebase cycle")
+		}
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be applied for a CI refusal — it should retry on the next poll")
+		}
+	}
+}
+
 // TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns verifies Approach A': when
 // wait_for_ci is true, handleStageComplete adds fabrik:awaiting-ci, does NOT add
 // stage:Validate:complete, and does NOT call attemptMergeOnValidate.
