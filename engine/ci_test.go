@@ -1314,3 +1314,115 @@ func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 		t.Error("SC-4: LastHeadSHAUpdate must be non-zero after PRHeadSHAUpdated with a new SHA")
 	}
 }
+
+// ── classifyCIFromRequiredContexts (ADR-071 / #933) ───────────────────────────
+
+// TestCheckCIGate_RequiredContextFailed_BlocksAndAddsLabel covers the #933
+// regression: a confirmed required-context failure (e.g. a classic commit
+// status the checkRuns-only classification never sees) must block and drive
+// the same fabrik:awaiting-ci escalation path as a failed check run — even
+// though settle.CheckRuns itself may be empty or all-skipped/neutral.
+func TestCheckCIGate_RequiredContextFailed_BlocksAndAddsLabel(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status:                 PRMergeBlocked,
+		Reason:                 "required status context(s) failed: [fantasy/local-test]",
+		RequiredContextsStatus: gh.RequiredContextsFailed,
+		RequiredFailed:         []string{"fantasy/local-test"},
+		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-failed"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked || !ciFailure {
+		t.Errorf("expected blocked=true ciFailure=true for a failed required context, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	}
+	if timedOut {
+		t.Error("expected timedOut=false for a freshly-failed required context")
+	}
+	found := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected fabrik:awaiting-ci to be added on a required-context failure")
+	}
+}
+
+// TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut
+// mirrors TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut for the
+// required-context failure path: once fabrik:awaiting-ci has been applied
+// past CIWaitTimeout, checkCIGate must pause (timedOut=true) rather than
+// re-block indefinitely.
+func TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
+	appliedAt := time.Now().Add(-2 * time.Hour)
+	client := &mockGitHubClient{
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return appliedAt, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.CIWaitTimeout = 1 * time.Millisecond
+
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status:                 PRMergeBlocked,
+		Reason:                 "required status context(s) failed: [fantasy/local-test]",
+		RequiredContextsStatus: gh.RequiredContextsFailed,
+		RequiredFailed:         []string{"fantasy/local-test"},
+		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-failed-timeout"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	if blocked || ciFailure {
+		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	}
+	if !timedOut {
+		t.Error("expected timedOut=true when timeout elapses for a required-context failure")
+	}
+}
+
+// TestCheckCIGate_RequiredContextPending_FallsThroughToNormalHandling ensures
+// a merely-pending (missing/skipped/neutral, not confirmed-failed) required
+// context does not take the classifyCIFromRequiredContexts early-return path
+// — it must defer to the normal Unsettled handling below, matching Plan's
+// "nothing has regressed" decision (no CI-fix reinvoke for a context that
+// simply hasn't reported yet).
+func TestCheckCIGate_RequiredContextPending_FallsThroughToNormalHandling(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status:                 PRMergeUnsettled,
+		Reason:                 "required status context(s) not yet confirmed (missing:[fantasy/local-test] pending:[])",
+		RequiredContextsStatus: gh.RequiredContextsPending,
+		RequiredMissing:        []string{"fantasy/local-test"},
+		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-pending"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked {
+		t.Error("expected blocked=true for a pending required context")
+	}
+	if ciFailure {
+		t.Error("expected ciFailure=false for a merely-pending (not failed) required context — nothing has regressed")
+	}
+	if timedOut {
+		t.Error("expected timedOut=false on the first pending observation")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			t.Error("fabrik:awaiting-ci must NOT be added for a merely-pending required context")
+		}
+	}
+}

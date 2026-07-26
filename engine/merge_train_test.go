@@ -286,6 +286,102 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 	}
 }
 
+// TestPollTrainCI_AllSkippedRequiredContext_NotGreen covers the #933
+// regression for the merge-train path: an all-skipped/neutral check-run set
+// on the trial head must NOT read as TrainCIGreen when a required context is
+// configured but hasn't confirmed success — it should keep polling until
+// CIWaitTimeout, landing on TrainCIPending, never TrainCIGreen.
+func TestPollTrainCI_AllSkippedRequiredContext_NotGreen(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return nil, "blocked", nil // not clean/unstable — falls through to check runs
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			// Sleep past CIWaitTimeout (100ms in trainTestEngine) so the
+			// post-classification deadline check trips on the first loop
+			// iteration instead of waiting through the 30s poll interval.
+			time.Sleep(150 * time.Millisecond)
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "skipped"},
+				{Name: "fantasy/local-test", Status: "completed", Conclusion: "neutral"},
+			}, nil
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return nil, nil // no classic commit status posted for this SHA either
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	if result == TrainCIGreen {
+		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen when a required context is only skipped/neutral/absent on the trial head")
+	}
+	if result != TrainCIPending {
+		t.Errorf("expected TrainCIPending (CIWaitTimeout reached while required context stays unconfirmed), got %v", result)
+	}
+}
+
+// TestPollTrainCI_RequiredContextFailedViaCommitStatus_ReturnsRed covers a
+// required context whose only producer is a classic commit status (not a
+// check run) reporting a confirmed failure on the trial head — this must
+// return TrainCIRed, mirroring settlePRMergeState's PRMergeBlocked for the
+// same scenario (Requirement 3: Fabrik must be able to see this at all).
+func TestPollTrainCI_RequiredContextFailedViaCommitStatus_ReturnsRed(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return nil, "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "success"},
+			}, nil
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return []gh.CommitStatus{{Context: "fantasy/local-test", State: "failure"}}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	if result != TrainCIRed {
+		t.Errorf("expected TrainCIRed for a required context confirmed-failed via classic commit status, got %v", result)
+	}
+}
+
+// TestPollTrainCI_Unconfigured_AllSkippedChecks_StillGreen confirms the fix
+// is a no-op for repos without required_status_contexts configured (same
+// vanilla-GHA-common-case protection as TestSettle_Unconfigured_AllSkippedChecks_StillReady).
+func TestPollTrainCI_Unconfigured_AllSkippedChecks_StillGreen(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return nil, "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "skipped"},
+			}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	// No RequiredStatusContexts configured.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	if result != TrainCIGreen {
+		t.Errorf("expected TrainCIGreen for skipped checks on an unconfigured repo (no behavior change), got %v", result)
+	}
+}
+
 func TestPollTrainCI_ContextCancelled_ReturnsPending(t *testing.T) {
 	var callCount int
 	var mu sync.Mutex
