@@ -79,6 +79,14 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false
 	}
 
+	// ADR-071: a confirmed required-context failure takes precedence over
+	// check-run/mergeable_state classification below — it can be driven
+	// solely by a classic commit status with no corresponding check run,
+	// which classifyCIFromCheckRuns' checkRuns-only view can never see.
+	if blocked, ciFailure, timedOut := e.classifyCIFromRequiredContexts(owner, repo, item, settle); ciFailure || timedOut {
+		return blocked, ciFailure, timedOut
+	}
+
 	// PRMergeUnsettled or PRMergeBlocked: detailed classification using settle.CheckRuns
 	// and settle.MergeableState.
 	if len(settle.CheckRuns) > 0 {
@@ -151,6 +159,38 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 		e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
 	}
 
+	return true, true, false
+}
+
+// classifyCIFromRequiredContexts classifies the CI gate when a configured
+// required status context (ADR-071) has a confirmed failure on settle's head
+// SHA. This can be driven solely by a classic commit status with no
+// corresponding check run — a signal classifyCIFromCheckRuns' checkRuns-only
+// view never sees — so it must be checked ahead of (not folded into) that
+// classification. Applies fabrik:awaiting-ci idempotently and the same
+// CIWaitTimeout guard used by classifyCIFromCheckRuns; a required context
+// that is merely missing/pending (not failed) is left to the normal
+// check-run/mergeable_state fallback below, since nothing has regressed.
+func (e *Engine) classifyCIFromRequiredContexts(owner, repo string, item gh.ProjectItem, settle PRSettleResult) (blocked, ciFailure, timedOut bool) {
+	if settle.RequiredContextsStatus != gh.RequiredContextsFailed {
+		return false, false, false
+	}
+
+	if hasLabel(item.Labels, "fabrik:awaiting-ci") {
+		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+		if err != nil {
+			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
+		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
+			e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — required context(s) failed: %s\n", strings.Join(settle.RequiredFailed, ", "))
+			e.removeAwaitingCILabel(owner, repo, item)
+			return false, false, true
+		}
+	}
+
+	e.logf(item.Number, "ci-gate", "required status context(s) failed: %s\n", strings.Join(settle.RequiredFailed, ", "))
+	if !hasLabel(item.Labels, "fabrik:awaiting-ci") {
+		e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
+	}
 	return true, true, false
 }
 
