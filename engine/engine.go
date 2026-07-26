@@ -182,9 +182,11 @@ func New(cfg Config) (*Engine, error) {
 	claudeGHToken = cfg.Token
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
+	ghClient := gh.NewClient(cfg.Token)
+	ghClient.SetMergeStrategy(cfg.AutoMergeStrategy)
 	eng := &Engine{
 		cfg:                      cfg,
-		client:                   gh.NewClient(cfg.Token),
+		client:                   ghClient,
 		claude:                   &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:         make(map[string]*WorktreeManager),
 		fabrikDir:                fabrikDir,

@@ -278,6 +278,52 @@ func TestExecute_MergeTrainInvalidConfigValue(t *testing.T) {
 	}
 }
 
+func TestExecute_AutoMergeStrategyConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("auto_merge_strategy: SQUASH\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := autoMergeStrategy(cfg.AutoMergeStrategy); got != "SQUASH" {
+		t.Errorf("resolved auto merge strategy = %q, want SQUASH (config.yaml should set it)", got)
+	}
+}
+
+func TestExecute_AutoMergeStrategyFlagBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("auto_merge_strategy: SQUASH\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--auto-merge-strategy", "REBASE"}
+
+	cfg := executeWithConfigHook(t)
+	if got := autoMergeStrategy(cfg.AutoMergeStrategy); got != "REBASE" {
+		t.Errorf("resolved auto merge strategy = %q, want REBASE (explicit flag should beat config.yaml)", got)
+	}
+}
+
+func TestExecute_AutoMergeStrategyEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("auto_merge_strategy: SQUASH\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_AUTO_MERGE_STRATEGY", "REBASE")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := autoMergeStrategy(cfg.AutoMergeStrategy); got != "REBASE" {
+		t.Errorf("resolved auto merge strategy = %q, want REBASE (env var should beat config.yaml)", got)
+	}
+}
+
 func TestMergeTrainMode(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", "off"},
