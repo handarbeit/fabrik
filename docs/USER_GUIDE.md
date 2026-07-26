@@ -1222,7 +1222,7 @@ When the parent advances to Implement, the engine's `preImplement` step fires **
 
 If step 2's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
 
-After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude emits `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` and the parent moves directly to Done.
+After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
 
 #### What You Observe
 
@@ -1244,7 +1244,7 @@ There is no depth limit. A child issue's own Plan can emit spawn blocks, creatin
 
 #### Pure-Coordinator Pattern
 
-When the parent issue has no implementation work of its own (it exists only to coordinate children), the parent's Implement runs after children close, finds nothing to do, and emits both `FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED`. The engine then moves the parent directly to Done without creating a PR. No special configuration is needed — this composes naturally with the existing no-work-needed path.
+When the parent issue has no implementation work of its own (it exists only to coordinate children), the parent's Implement runs after children close, finds nothing to do, and completes normally (`FABRIK_STAGE_COMPLETE`) with no new commits. Rather than attempting a draft PR — which would fail, since there is nothing to diff against the base branch — the engine detects that the parent carries `fabrik:children-spawned` and has zero commits ahead of base, and treats this exactly like a `FABRIK_NO_WORK_NEEDED` completion: the parent moves directly to Done without a PR. No special configuration is needed, and Claude does not need to self-detect or emit any marker — this is a deterministic engine-side check, not a prompt-driven one. A parent that *does* have its own implementation work is unaffected: as long as its own commits land, the normal draft-PR path runs.
 
 #### Re-triggering a Fresh Spawn
 
