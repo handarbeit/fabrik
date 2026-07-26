@@ -18,55 +18,57 @@ import (
 )
 
 type Config struct {
-	Owner                    string
-	Repo                     string
-	ProjectNum               int
-	OwnerType                string
-	User                     string
-	Token                    string
-	Version                  string
-	Yolo                     bool
-	AutoUpgrade              bool
-	GitSSH                   bool
-	PollSeconds              int
-	MaxConcurrent            int
-	MaxRetries               int
-	ReviewWaitTimeout        time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
-	ReconcileInterval        time.Duration // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
-	MaxReviewCycles          int           // Max review re-invocation cycles per issue before pausing (default 5)
-	CIWaitTimeout            time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
-	PostPushDwell            time.Duration // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
-	MaxCiFixCycles           int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
-	MaxRebaseCycles          int           // Max rebase re-invocation cycles per issue before pausing (default 3)
-	MaxEnqueueCycles         int           // Max merge-queue re-enqueue cycles per issue before pausing (default 5; ADR-058 D4)
-	ConvergenceBudget        time.Duration // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
-	AutoMergeStrategy        string        // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
-	MergeQueue               string        // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
-	MergeTrain               string        // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
-	MaxMergeTrainEjections   int           // Max merge-train ejections before pausing a member (default 3; ADR-059)
-	MaxBatchSize             int           // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
-	MaxBisectValidations     int           // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
-	MaxTrainRebaseCycles     int           // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
-	MaxTrainTrialsPerWindow  int           // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
-	TrainTrialWindowDuration time.Duration // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
-	KillGraceSigInt          time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
-	KillGraceSigTerm         time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
-	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
-	WorkerStaleTimeout       time.Duration // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
-	DebugOutput              bool
-	SymlinkEnv               bool
-	WorktreeBoundaryAudit    bool
-	PluginDir                string
-	Stages                   []*stages.Stage
-	Webhooks                 bool
-	WebhookPort              int
-	WebhookEvents            []string
-	ProjectStatusPollSeconds int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
-	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
-	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
-	LogMaxBytes              int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
-	ArchiveAfter             time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
-	ArchiveDone              string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
+	Owner                     string
+	Repo                      string
+	ProjectNum                int
+	OwnerType                 string
+	User                      string
+	Token                     string
+	Version                   string
+	Yolo                      bool
+	AutoUpgrade               bool
+	GitSSH                    bool
+	PollSeconds               int
+	MaxConcurrent             int
+	MaxRetries                int
+	ReviewWaitTimeout         time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
+	ReconcileInterval         time.Duration // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
+	MaxReviewCycles           int           // Max review re-invocation cycles per issue before pausing (default 5)
+	CIWaitTimeout             time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
+	PostPushDwell             time.Duration // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
+	MaxCiFixCycles            int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
+	MaxRebaseCycles           int           // Max rebase re-invocation cycles per issue before pausing (default 3)
+	MaxEnqueueCycles          int           // Max merge-queue re-enqueue cycles per issue before pausing (default 5; ADR-058 D4)
+	ConvergenceBudget         time.Duration // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
+	AutoMergeStrategy         string        // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
+	MergeQueue                string        // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
+	MergeTrain                string        // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	MaxMergeTrainEjections    int           // Max merge-train ejections before pausing a member (default 3; ADR-059)
+	MaxBatchSize              int           // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
+	MaxBisectValidations      int           // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
+	MaxTrainRebaseCycles      int           // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
+	MaxTrainTrialsPerWindow   int           // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
+	TrainTrialWindowDuration  time.Duration // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
+	MaxCommentCyclesPerWindow int           // Comment-processing circuit breaker: max non-advancing comment-processing invocations per issue before pausing (0 = default 10; #1089)
+	CommentCycleWindow        time.Duration // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
+	KillGraceSigInt           time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
+	KillGraceSigTerm          time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
+	ClaudeWaitDelay           time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
+	WorkerStaleTimeout        time.Duration // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
+	DebugOutput               bool
+	SymlinkEnv                bool
+	WorktreeBoundaryAudit     bool
+	PluginDir                 string
+	Stages                    []*stages.Stage
+	Webhooks                  bool
+	WebhookPort               int
+	WebhookEvents             []string
+	ProjectStatusPollSeconds  int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
+	JanitorIntervalHours      int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
+	LogRetentionDays          int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
+	LogMaxBytes               int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
+	ArchiveAfter              time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
+	ArchiveDone               string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
