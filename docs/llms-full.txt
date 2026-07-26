@@ -1824,6 +1824,22 @@ After a successful push, `/cut-release` automatically files a GitHub issue:
 
 The `fabrik:yolo` label means Fabrik will pick it up automatically and run it through the pipeline. You don't need to do anything else for documentation updates after cutting a release.
 
+#### Release-artifact verification guard
+
+The GitHub Actions release workflow (`.github/workflows/release.yml`, via `.goreleaser.yaml`) independently verifies every built binary before it is published — a check that runs in CI, separate from and in addition to `cut-release.sh`'s own local build/test gate.
+
+**What it checks**: for each binary in the release matrix (currently darwin/linux × arm64/amd64), `tools/verify-release-artifact` reads the binary's embedded Go build info and asserts:
+- `vcs.modified` is not `true` — the binary was built from a clean tree, not one with uncommitted changes.
+- `vcs.revision` equals the pushed tag's target commit — the binary was built from the tagged commit, not some other one.
+
+**Where it runs**: as a goreleaser per-build hook (`builds[].hooks.post`), immediately after each target's binary is compiled and before it is archived, checksummed, or published. If any one of the four targets fails either check, the entire `goreleaser release` invocation aborts — no GitHub Release, checksums, or Discussions announcement is created for that run.
+
+**What a failure means**: the CI logs name the offending binary's path, its actual `vcs.revision`/`vcs.modified`, and the expected revision. This most likely means something in the CI environment (not your local machine) mutated or failed to clean the working tree before goreleaser's build step, or the build ran against the wrong commit. Investigate the workflow run's logs; do not assume a local `cut-release.sh` re-run will fix it, since that script doesn't build what ships.
+
+**This guard exists because `v0.0.75` shipped with `vcs.modified=true`** — a dirty-tree build that was undetectable except via `go version -m` on the downloaded binary. **A guard trip does not mean re-cutting `v0.0.75`** — `proxy.golang.org` has already cached that version's zip and checksum, and republishing different content under the same tag would break every consumer that already resolved it. If the guard trips on a *future* release, fix the underlying cause and cut a new version; never force through or re-tag. See also: issue #1073, which gitignored goreleaser's own `dist/` output directory, since an untracked `dist/` at build time was independently identified as a plausible (though at the time unconfirmed) cause of the same symptom — this guard is the safety net for if that fix turns out to be incomplete.
+
+The `cut-release.sh` allowlist for uncommitted `release-notes/<version>.md` and `plugin/known_embedded_versions.go` (documented inline at the script's `DIRTY=` check) was reviewed alongside this guard: both files are committed by the script itself *before* the tag is pushed, so neither can reach the CI-built artifact — the allowlist is unrelated to what this guard protects against and was left unchanged.
+
 ### Built-in Skill: `/audit-documentation`
 
 The `/audit-documentation` skill compares recently shipped features against `USER_GUIDE.md`, `README.md`, and `docs/index.md`, then files GitHub issues for gaps and closes existing documentation issues whose gaps are now covered.

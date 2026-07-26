@@ -76,6 +76,14 @@ ok "on main"
 
 # Allow uncommitted release-notes/<version>.md and plugin/known_embedded_versions.go
 # (the latter is updated by this script itself after the build step).
+#
+# Allowlist disposition (reviewed for #1070): both files are committed by
+# this script's own step 4, *before* the tag is created and pushed in step 5.
+# By the time release.yml's CI job checks out the tag, it's a fresh clone —
+# it never sees this local working tree, dirty or not. So this allowlist
+# cannot affect the CI-built artifact and does not need to be tightened; the
+# built-artifact VCS check lives in .goreleaser.yaml/release.yml instead (see
+# adrs/071-release-artifact-vcs-verification.md).
 DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
