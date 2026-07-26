@@ -342,9 +342,10 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 // checkURLRewrite detects whether git has URL rewriting configured that
 // transparently redirects github.com HTTPS URLs to SSH (e.g. via
 // url.git@github.com:.insteadOf = https://github.com/ in ~/.gitconfig).
-// Returns true when such HTTPS→SSH rewriting is active. Prints an
-// informational notice when active — git applies the rewriting transparently,
-// so Fabrik's HTTPS clone URLs will automatically use SSH.
+// Returns true when such HTTPS→SSH rewriting is active. The result is used
+// solely to suppress the checkHTTPSCredentials advisory (no credential helper
+// is needed when HTTPS is rewritten to SSH); this is a normal, expected config
+// state, so detecting it is silent — nothing is printed.
 func (e *Engine) checkURLRewrite() bool {
 	cmd := exec.Command("git", "config", "--get-regexp", `url\..*\.insteadOf`)
 	out, _ := cmd.Output() // exit code 1 = no matches, not an error
@@ -363,7 +364,6 @@ func (e *Engine) checkURLRewrite() bool {
 		key := strings.ToLower(parts[0])     // url.<base>.insteadof
 		value := strings.TrimSpace(parts[1]) // the insteadOf value (URL prefix to match)
 		if strings.Contains(value, "https://github.com") && strings.Contains(key, "git@github.com") {
-			fmt.Printf("[startup] note: git URL rewriting for github.com is active (HTTPS → SSH); Fabrik's HTTPS clone URLs will be transparently redirected to SSH via your git config.\n")
 			return true
 		}
 	}
