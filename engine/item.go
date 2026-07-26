@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,6 +85,24 @@ func hasLabel(labels []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// commitsAheadOfBase returns the number of commits in workDir's HEAD that are
+// not on origin/baseBranch. It fails safe: any git or parse error is returned
+// as a non-nil error rather than assumed to mean zero commits, so callers must
+// treat an error as "unknown" and not short-circuit to a no-commits outcome.
+func commitsAheadOfBase(workDir, baseBranch string) (int, error) {
+	cmd := exec.Command("git", "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("counting commits ahead of origin/%s: %w", baseBranch, err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parsing commit count ahead of origin/%s: %w", baseBranch, err)
+	}
+	return count, nil
 }
 
 // itemMayNeedWork does cheap pre-checks using only shallow board data (no comments).
@@ -601,6 +620,22 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// running Claude redundantly when the worktree already has the necessary commits.
 	if stage.CreateDraftPR {
 		if r5Snap, r5Err := e.store.Get(repoStr, item.Number); r5Err == nil && r5Snap.PRCreationFailed(stage.Name) {
+			// Empty-coordinator self-heal (issue #921): reaching this branch already
+			// proves Claude completed this Implement stage at least once and still
+			// produced zero commits, so — unlike the primary finalizeStageOutcome
+			// guard — there is no hybrid-parent risk in checking unconditionally here.
+			// This lets an issue already stuck mid-retry-cycle (e.g. from before this
+			// fix shipped) recover to Done on its next poll instead of continuing to
+			// hammer ensureDraftPR toward escalation.
+			if stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
+				if ahead, aErr := commitsAheadOfBase(workDir, baseBranch); aErr == nil && ahead == 0 {
+					releaseLock()
+					e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					e.handleNoWorkNeeded(board, item, stage)
+					return nil
+				}
+			}
 			r5PRNum, r5PRErr := e.ensureDraftPR(item, baseBranch)
 			if r5PRErr == nil && r5PRNum > 0 {
 				// PR created successfully — advance without re-running Claude.
@@ -1204,6 +1239,24 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// silently pausing the issue.
 	blockedOnInput := err == nil && CheckBlockedOnInput(output)
 	noWorkNeeded := err == nil && CheckNoWorkNeeded(output)
+
+	// Empty-coordinator completion (issue #921): a fully-delegated parent that spawned
+	// children has no deliverable of its own — its Implement invocation legitimately
+	// produces zero commits. Detect that deterministically (rather than relying on
+	// Claude to notice and emit FABRIK_NO_WORK_NEEDED, which the skill prompt never
+	// taught it to do) and treat it exactly like the no-work-needed path so the
+	// existing Done/cleanup machinery handles it instead of attempting a doomed
+	// CreateDraftPR call. Gated on completed && stage.Name == "Implement" so this never
+	// fires before Claude has had a chance to run — a hybrid parent (children spawned
+	// AND its own pending implementation work) must always get that chance; checking
+	// commit count only after a completed run is what makes this safe for both cases.
+	// commitsAheadOfBase fails safe: any git error leaves noWorkNeeded untouched and
+	// falls through to the normal PR-creation path.
+	if !noWorkNeeded && completed && stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
+		if ahead, aErr := commitsAheadOfBase(workDir, baseBranch); aErr == nil && ahead == 0 {
+			noWorkNeeded = true
+		}
+	}
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
 	e.store.Apply(itemstate.InvocationRecorded{
