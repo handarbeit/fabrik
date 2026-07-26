@@ -3,6 +3,7 @@ package engine
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
@@ -24,35 +28,62 @@ const (
 )
 
 // SemverGreater reports whether version a is greater than version b.
-// Both versions may have a leading "v" which is stripped before comparison.
-// Each version is split on "." and each segment is compared as an integer.
+// Both versions may have a leading "v" and a trailing pre-release/build/
+// pseudo-version suffix (anything from the first "-" or "+" onward), both of
+// which are stripped before comparison — only the numeric MAJOR.MINOR.PATCH
+// core is compared. This tolerates suffixed running versions such as
+// "0.0.73+dirty", "v0.0.74-0.20260716173320-6198e8102f90+dirty" (a go
+// install @main/branch pseudo-version), or "0.0.73-abc1234" (a SHA suffix) —
+// all of which previously made the per-segment strconv.Atoi parse fail and
+// silently return false ("not an upgrade"), see #1074.
+// When the numeric cores are equal, a clean version (no suffix) is treated
+// as greater than a suffixed one — this lets a daemon running a +dirty or
+// pseudo-version build of the same core version upgrade to the clean
+// release once one exists, instead of being stuck comparing "equal".
 // Returns false (not an upgrade) on any parse error.
 func SemverGreater(a, b string) bool {
-	a = strings.TrimPrefix(a, "v")
-	b = strings.TrimPrefix(b, "v")
-	aParts := strings.Split(a, ".")
-	bParts := strings.Split(b, ".")
+	aCore, aSuffixed, aOK := semverCore(a)
+	bCore, bSuffixed, bOK := semverCore(b)
+	if !aOK || !bOK {
+		return false
+	}
 	// Pad shorter slice with zeros.
-	for len(aParts) < len(bParts) {
-		aParts = append(aParts, "0")
+	for len(aCore) < len(bCore) {
+		aCore = append(aCore, 0)
 	}
-	for len(bParts) < len(aParts) {
-		bParts = append(bParts, "0")
+	for len(bCore) < len(aCore) {
+		bCore = append(bCore, 0)
 	}
-	for i := range aParts {
-		av, err := strconv.Atoi(aParts[i])
+	for i := range aCore {
+		if aCore[i] != bCore[i] {
+			return aCore[i] > bCore[i]
+		}
+	}
+	// Equal numeric cores: a clean version outranks a suffixed one.
+	return !aSuffixed && bSuffixed
+}
+
+// semverCore strips a leading "v" and any pre-release/build/pseudo-version
+// suffix (everything from the first "-" or "+" onward), then splits the
+// remaining numeric core on "." and parses each segment as an integer.
+// suffixed reports whether a suffix was stripped. Returns ok=false if any
+// core segment fails to parse.
+func semverCore(v string) (core []int, suffixed bool, ok bool) {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		suffixed = true
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	segs := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
 		if err != nil {
-			return false
+			return nil, false, false
 		}
-		bv, err := strconv.Atoi(bParts[i])
-		if err != nil {
-			return false
-		}
-		if av != bv {
-			return av > bv
-		}
+		segs[i] = n
 	}
-	return false
+	return segs, suffixed, true
 }
 
 // ExtractBinaryFromTarball extracts the "fabrik" binary from a .tar.gz archive
@@ -110,6 +141,42 @@ func ExtractBinaryFromTarball(tarballPath, destDir string) (string, error) {
 	return "", fmt.Errorf("fabrik binary not found in tarball")
 }
 
+// resignDarwinBinary is a no-op on any OS other than darwin. On darwin, it
+// best-effort clears the quarantine extended attribute and applies an ad-hoc
+// code signature to path, mirroring the documented fix in
+// tests/e2e/README.md for "on macOS/Apple Silicon a copied binary may be
+// SIGKILL'd" (an Apple Silicon AMFI trust-cache quirk that can affect a
+// binary materialized via a fresh write rather than built in place — exactly
+// the shape ExtractBinaryFromTarball + os.Rename produces). Re-signing an
+// already-validly-signed binary is idempotent and harmless, so this runs
+// unconditionally on darwin rather than trying to detect whether it's
+// needed. Missing xattr/codesign (e.g. minimal CI images) and any command
+// failure are logged and treated as non-fatal — this is hardening, not a
+// guaranteed fix, and cannot be verified outside real Apple Silicon
+// hardware.
+func resignDarwinBinary(path string, logf func(string, ...any)) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := exec.LookPath("xattr"); err == nil {
+		if out, err := exec.CommandContext(ctx, "xattr", "-cr", path).CombinedOutput(); err != nil {
+			logf("resigning upgraded binary: xattr -cr failed (non-fatal): %v\n%s\n", err, out)
+		}
+	} else {
+		logf("resigning upgraded binary: xattr not found (non-fatal, skipping quarantine clear)\n")
+	}
+	if _, err := exec.LookPath("codesign"); err == nil {
+		if out, err := exec.CommandContext(ctx, "codesign", "--force", "--sign", "-", path).CombinedOutput(); err != nil {
+			logf("resigning upgraded binary: codesign failed (non-fatal): %v\n%s\n", err, out)
+		}
+	} else {
+		logf("resigning upgraded binary: codesign not found (non-fatal, skipping ad-hoc sign)\n")
+	}
+}
+
 // PerformReleaseUpgrade fetches the latest release from GitHub, compares it to
 // the running version, and — if a newer version is available — downloads the
 // platform-matching tarball, atomically replaces the running binary, and
@@ -161,7 +228,7 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	}
 
 	// Determine current executable path.
-	exe, err := os.Executable()
+	exe, err := upgradeExecutableFn()
 	if err != nil {
 		logf("could not determine executable path: %v\n", err)
 		return fmt.Errorf("determining executable path: %w", err)
@@ -237,6 +304,12 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	}
 	renamed = true
 
+	// Best-effort: on macOS, a freshly-materialized binary (written via a fresh
+	// io.Copy + rename, not built in place) can trip the Apple Silicon AMFI
+	// trust-cache and be SIGKILL'd on exec — see tests/e2e/README.md's documented
+	// "copied binary may be SIGKILL'd" fix. Re-signing here mirrors that recipe.
+	resignDarwinBinary(exe, logf)
+
 	logf("upgraded to %s\n", latestTag)
 
 	// Clean up tarball before exec replaces the process (defers won't run).
@@ -248,12 +321,28 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	logf("re-executing\n")
 
 	env := append(os.Environ(), extraEnv...)
-	if err := syscall.Exec(exe, os.Args, env); err != nil {
-		logf("exec failed: %v\n", err)
+	if err := upgradeExecFn(exe, os.Args, env); err != nil {
+		logf("CRITICAL: upgrade succeeded (binary replaced with %s on disk) but re-exec failed: %v — process is still running the OLD binary; restart manually (e.g. kill -HUP %d) or the daemon will remain silently stale\n", latestTag, err, os.Getpid())
 		return fmt.Errorf("re-executing upgraded binary: %w", err)
 	}
 	return nil
 }
+
+// upgradeExecFn is a package-level seam for syscall.Exec so tests can
+// exercise the re-exec-failure path without replacing the test process
+// itself. Production code leaves this as syscall.Exec; tests may swap it in
+// and must restore it afterward (fabrik's engine tests never run in
+// parallel, so a save/restore around this package var is safe — see
+// engine/sighup_unix.go's analogous sighupExecFn for the same pattern).
+var upgradeExecFn = syscall.Exec
+
+// upgradeExecutableFn resolves the path to the currently-running executable.
+// A seam over os.Executable so tests exercising PerformReleaseUpgrade's full
+// download-extract-replace path can point it at a scratch file instead of
+// renaming over the real go test binary. Production code leaves this as
+// os.Executable; symlink resolution still happens separately via
+// filepath.EvalSymlinks after the call.
+var upgradeExecutableFn = os.Executable
 
 // checkAndUpgrade selects the upgrade path based on the running version:
 //   - dev builds (version starts with "dev"): git pull → go build → re-exec
@@ -361,6 +450,59 @@ func (e *Engine) checkAndUpgrade() {
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
 		e.logf(0, "upgrade", "exec failed: %v\n", err)
 	}
+}
+
+// versionSkewExecCommandFn is a seam over exec.CommandContext so tests can
+// stub the on-disk binary's `--version` output without spawning a real
+// process. Production code leaves this as exec.CommandContext.
+var versionSkewExecCommandFn = exec.CommandContext
+
+// checkVersionSkew compares the on-disk binary's reported version (via a
+// throttled `<exe> --version` subprocess) against the running process's
+// version, recording a persistent warnings/ entry on mismatch — see #1074.
+// This is a general safety net for "the binary on disk has moved on but this
+// process hasn't," whatever the cause: a SemverGreater bug, a failed
+// syscall.Exec re-exec, or a manual/external replacement (e.g. a fleet
+// sharing ~/go/bin/fabrik). Non-fatal: any error resolving the path or
+// running the subprocess is logged and the check is skipped for this poll.
+func (e *Engine) checkVersionSkew(ctx context.Context) {
+	exe, err := upgradeExecutableFn()
+	if err != nil {
+		e.logf(0, "upgrade", "version-skew check: could not determine executable path: %v\n", err)
+		return
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		e.logf(0, "upgrade", "version-skew check: could not resolve symlinks for executable: %v\n", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := versionSkewExecCommandFn(ctx, exe, "--version").Output()
+	if err != nil {
+		e.logf(0, "upgrade", "version-skew check: running %s --version: %v\n", exe, err)
+		return
+	}
+
+	diskVersion := strings.TrimSpace(string(out))
+	running := e.cfg.Version
+	key := "version_skew:" + exe
+
+	if diskVersion == running {
+		_ = warnings.Clear(key)
+		return
+	}
+
+	e.logf(0, "upgrade", "WARNING: on-disk binary version (%s) differs from running version (%s) — a pending upgrade may be stuck; restart with 'kill -HUP %d' to pick it up\n", diskVersion, running, os.Getpid())
+	_ = warnings.Record(warnings.Entry{
+		Key:       key,
+		Type:      "version_skew",
+		Title:     "Running version differs from on-disk binary",
+		Detail:    fmt.Sprintf("The daemon is running version %s but the binary on disk at %s reports %s. This can happen when an upgrade replaced the binary but the process failed to re-exec, or when another process replaced the binary externally.\n\nFix: kill -HUP %d (restarts in place, picking up the on-disk binary).", running, exe, diskVersion, os.Getpid()),
+		FixAction: "shell_command",
+		FixParams: map[string]string{"cmd": fmt.Sprintf("kill -HUP %d", os.Getpid())},
+	})
 }
 
 // extractBinarySHA extracts the short SHA from a dev version string like

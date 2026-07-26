@@ -3,6 +3,8 @@ package engine
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // TestSemverGreater covers the basic semver comparison logic including the
@@ -38,6 +41,22 @@ func TestSemverGreater(t *testing.T) {
 		{"0.0.10", "0.0.2", true},
 		// Mismatched segment counts
 		{"1.0", "0.9.9", true},
+		// Suffixed versions (#1074): a non-numeric suffix must not defeat the
+		// comparison — only the numeric MAJOR.MINOR.PATCH core is compared.
+		{"v0.0.75", "0.0.73+dirty", true},                                             // +dirty release stamp on b
+		{"v0.0.75", "0.0.73-abc1234", true},                                           // SHA suffix on b
+		{"v0.0.75", "v0.0.72-0.20260716173320-6198e8102f90+dirty", true},              // go install @main pseudo-version on b
+		{"v0.0.74-0.20260716173320-6198e8102f90+dirty", "v0.0.75", false},             // suffixed a, not greater
+		{"0.0.73+dirty", "0.0.73-abc1234", false},                                     // equal numeric core, both suffixed
+		{"v0.0.73-0.20260716173320-aaa+dirty", "v0.0.73-0.20260716173320-bbb", false}, // equal core, both suffixed, different sha
+		{"garbage", "0.0.1", false},                                                   // non-numeric core, no panic
+		{"0.0.1", "garbage", false},                                                   // non-numeric core on b, no panic
+		// Equal numeric core, one suffixed: a clean version outranks a suffixed
+		// one, so a daemon running +dirty/pseudo-version of the same release
+		// still upgrades once the clean tag exists.
+		{"v0.0.73", "v0.0.73-alpha", true},  // clean release beats a pre-release of the same core
+		{"v0.0.73", "v0.0.73+dirty", true},  // clean release beats a +dirty build of the same core
+		{"v0.0.73-alpha", "v0.0.73", false}, // suffixed a, clean b: a is not greater
 	}
 	for _, tc := range tests {
 		got := SemverGreater(tc.a, tc.b)
@@ -341,6 +360,205 @@ func TestPerformReleaseUpgrade_DownloadAttempted(t *testing.T) {
 	}
 }
 
+// TestPerformReleaseUpgrade_SuffixedVersionUpgrades is the #1074 regression
+// test: a daemon whose running version carries a non-numeric suffix must
+// still upgrade to a newer release. This covers the exact confirmed
+// real-world exposure — a `go install …@main`/branch pseudo-version running
+// string, live since v0.0.72 — where SemverGreater previously choked on the
+// suffixed segment and silently reported "up to date," so the download path
+// was never reached.
+func TestPerformReleaseUpgrade_SuffixedVersionUpgrades(t *testing.T) {
+	downloaded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = true
+		http.Error(w, "test server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	matchingAsset := fmt.Sprintf("fabrik_0.0.75_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v0.0.75",
+				Assets: []gh.ReleaseAsset{
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	// The confirmed real-world exposure: a go install …@main/branch pseudo-version.
+	runningVersion := "v0.0.72-0.20260716173320-6198e8102f90+dirty"
+
+	PerformReleaseUpgrade(client, runningVersion, "", nil, logf)
+
+	if !downloaded {
+		t.Errorf("expected download to be attempted for suffixed running version %q vs newer release v0.0.75, got logs: %v", runningVersion, logs)
+	}
+}
+
+// TestPerformReleaseUpgrade_SuffixedVersionNotEagerlyUpgraded is the
+// companion guard for the above: when the suffixed running version's
+// numeric core is NOT older than the release tag, no download must be
+// attempted. This guards against an over-eager regression where suffix
+// stripping makes SemverGreater too permissive (e.g. always upgrading).
+func TestPerformReleaseUpgrade_SuffixedVersionNotEagerlyUpgraded(t *testing.T) {
+	downloaded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = true
+		http.Error(w, "test server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{TagName: "v0.0.75"}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	// Suffixed but equal-or-newer numeric core than the release tag — must not upgrade.
+	runningVersion := "v0.0.75-0.20260716173320-6198e8102f90+dirty"
+
+	PerformReleaseUpgrade(client, runningVersion, "", nil, logf)
+
+	if downloaded {
+		t.Errorf("expected no download for running version %q whose numeric core is not older than release v0.0.75", runningVersion)
+	}
+}
+
+// buildTestTarball writes a minimal .tar.gz containing a single "fabrik"
+// entry with the given content to a temp file in dir, and returns its path.
+func buildTestTarball(t *testing.T, dir, content string) string {
+	t.Helper()
+	tarball, err := os.CreateTemp(dir, "release-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tarball.Close()
+	gw := gzip.NewWriter(tarball)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{Name: "fabrik", Typeflag: tar.TypeReg, Size: int64(len(content)), Mode: 0755}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return tarball.Name()
+}
+
+// TestPerformReleaseUpgrade_ExecFailureLogsAndReturnsError drives
+// PerformReleaseUpgrade through a full successful download+extract+replace,
+// then overrides upgradeExecFn to simulate a re-exec failure (e.g. the
+// macOS AMFI SIGKILL scenario). Asserts the strengthened CRITICAL log line
+// appears and PerformReleaseUpgrade returns a non-nil error without
+// panicking — i.e. the daemon survives a failed re-exec rather than dying
+// or silently continuing on the old binary with no signal.
+func TestPerformReleaseUpgrade_ExecFailureLogsAndReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	scratchExe := filepath.Join(dir, "fabrik-under-test")
+	if err := os.WriteFile(scratchExe, []byte("old binary content"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return scratchExe, nil }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	origExecFn := upgradeExecFn
+	execErr := errors.New("simulated exec failure (e.g. AMFI SIGKILL)")
+	var execCalled bool
+	upgradeExecFn = func(argv0 string, argv []string, envv []string) error {
+		execCalled = true
+		return execErr
+	}
+	defer func() { upgradeExecFn = origExecFn }()
+
+	matchingAsset := fmt.Sprintf("fabrik_9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tarballPath := buildTestTarball(t, t.TempDir(), "new binary content")
+		data, err := os.ReadFile(tarballPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(data) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	err := PerformReleaseUpgrade(client, "v0.0.1", "", nil, logf)
+
+	if !execCalled {
+		t.Fatal("upgradeExecFn was never called — the test did not reach the exec step")
+	}
+	if err == nil {
+		t.Error("expected a non-nil error when re-exec fails")
+	}
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "CRITICAL") && strings.Contains(l, "still running the OLD binary") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a CRITICAL 'still running the OLD binary' log line, got: %v", logs)
+	}
+
+	// The binary on disk should have been replaced despite the exec failure.
+	got, err := os.ReadFile(scratchExe)
+	if err != nil {
+		t.Fatalf("reading scratch exe after upgrade: %v", err)
+	}
+	if string(got) != "new binary content" {
+		t.Errorf("expected scratch exe to contain the new binary content, got %q", got)
+	}
+}
+
+// TestResignDarwinBinary_NoopOnNonDarwin verifies that resignDarwinBinary is
+// a safe no-op (no logf calls, no error) on any non-darwin GOOS — this is
+// what actually runs in this sandbox and in Linux CI.
+func TestResignDarwinBinary_NoopOnNonDarwin(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("this test verifies non-darwin no-op behavior; skipping on darwin")
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	resignDarwinBinary(filepath.Join(t.TempDir(), "fabrik"), logf)
+	if len(logs) != 0 {
+		t.Errorf("expected no log output on non-darwin GOOS, got: %v", logs)
+	}
+}
+
 // TestPerformReleaseUpgrade_PrefersAPIURL verifies that when both APIURL and
 // BrowserDownloadURL are set, the APIURL is used (required for private repos).
 // Also checks that the Accept: application/octet-stream header is sent.
@@ -517,5 +735,138 @@ func TestStartupUpgradeCheck_SkipsWhenDisabled(t *testing.T) {
 	case <-called:
 		t.Error("upgradeCheckFn was called but AutoUpgrade=false")
 	default:
+	}
+}
+
+// writeFakeVersionBinary writes an executable shell script to dir that prints
+// version to stdout when invoked with any arguments (mimicking `fabrik
+// --version`). Returns the script's path.
+func writeFakeVersionBinary(t *testing.T, dir, version string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fabrik-fake")
+	script := fmt.Sprintf("#!/bin/sh\necho %s\n", version)
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCheckVersionSkew_MatchingVersion_NoWarningAndClearsExisting verifies
+// that when the on-disk binary reports the same version as the running
+// process, no new warning is recorded and any stale entry for this key is
+// cleared.
+func TestCheckVersionSkew_MatchingVersion_NoWarningAndClearsExisting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake version binary is a shell script; not supported on windows")
+	}
+	dir := t.TempDir()
+	scriptPath := writeFakeVersionBinary(t, dir, "v1.2.3")
+	resolvedPath, err := filepath.EvalSymlinks(scriptPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return scriptPath, nil }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	key := "version_skew:" + resolvedPath
+	if err := warnings.Record(warnings.Entry{Key: key, Type: "version_skew", Title: "stale"}); err != nil {
+		t.Fatalf("seeding stale entry: %v", err)
+	}
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "v1.2.3"
+
+	eng.checkVersionSkew(context.Background())
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Key == key {
+			t.Errorf("expected stale entry %q to be cleared, still present: %+v", key, entry)
+		}
+	}
+}
+
+// TestCheckVersionSkew_MismatchedVersion_RecordsWarning verifies that when
+// the on-disk binary reports a different version than the running process,
+// a warnings entry is recorded with the expected key, type, and fix params.
+func TestCheckVersionSkew_MismatchedVersion_RecordsWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake version binary is a shell script; not supported on windows")
+	}
+	dir := t.TempDir()
+	scriptPath := writeFakeVersionBinary(t, dir, "v1.2.4")
+	resolvedPath, err := filepath.EvalSymlinks(scriptPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return scriptPath, nil }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "v1.2.3"
+
+	eng.checkVersionSkew(context.Background())
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	key := "version_skew:" + resolvedPath
+	var found *warnings.Entry
+	for i := range entries {
+		if entries[i].Key == key {
+			found = &entries[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a version_skew warning entry with key %q, got: %+v", key, entries)
+	}
+	if found.Type != "version_skew" {
+		t.Errorf("Type = %q, want %q", found.Type, "version_skew")
+	}
+	if found.FixAction != "shell_command" {
+		t.Errorf("FixAction = %q, want %q", found.FixAction, "shell_command")
+	}
+	wantCmd := fmt.Sprintf("kill -HUP %d", os.Getpid())
+	if found.FixParams["cmd"] != wantCmd {
+		t.Errorf("FixParams[cmd] = %q, want %q", found.FixParams["cmd"], wantCmd)
+	}
+}
+
+// TestCheckVersionSkew_ExecutableFnError_NonFatal verifies that a failure
+// resolving the executable path is logged and does not panic or record a
+// spurious warning.
+func TestCheckVersionSkew_ExecutableFnError_NonFatal(t *testing.T) {
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return "", errors.New("boom") }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "v1.2.3"
+
+	eng.checkVersionSkew(context.Background()) // must not panic
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no warnings entries on executable-path error, got %v", entries)
 	}
 }
