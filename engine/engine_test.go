@@ -30,7 +30,7 @@ func TestItemNeedsWork_SkipsPaused(t *testing.T) {
 	}
 }
 
-func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
+func TestItemNeedsWork_Paused_HumanComment_Dispatches(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
@@ -42,9 +42,91 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 		},
 	}
 
-	// Any comment (regardless of author) on a paused item triggers work.
+	// A human comment on a paused item triggers work (unpause).
 	if !eng.itemNeedsWork(item) {
-		t.Error("itemNeedsWork should return true for paused item with a new comment from any user")
+		t.Error("itemNeedsWork should return true for paused item with a new human comment")
+	}
+}
+
+// TestItemNeedsWork_Paused_MixedBatch_Dispatches and
+// TestItemNeedsWork_AwaitingInput_MixedBatch_Dispatches cover the gate half of
+// the gate/action symmetry ADR 069 relies on: TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause
+// and TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock
+// (blocked_on_input_test.go) already assert the action admits a mixed
+// bot+human batch; nothing asserted the gate does the same, which is exactly
+// the case where a filtering slip would strand an item (admitted by one side,
+// silently skipped by the other).
+func TestItemNeedsWork_Paused_MixedBatch_Dispatches(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "B1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "H1", Author: "otheruser", Body: "please continue"},
+		},
+	}
+
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for paused item with a mixed bot+human comment batch")
+	}
+}
+
+func TestItemNeedsWork_AwaitingInput_MixedBatch_Dispatches(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "B1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "H1", Author: "otheruser", Body: "please continue"},
+		},
+	}
+
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for awaiting-input item with a mixed bot+human comment batch")
+	}
+}
+
+func TestItemNeedsWork_Paused_BotComment_Skips(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "quota notice"},
+		},
+	}
+
+	// A bot comment must not defeat an operator-applied pause (#1083).
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return false for paused item with only a bot comment")
+	}
+}
+
+func TestItemNeedsWork_NonPaused_BotComment_StillDispatches(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "review comment"},
+		},
+	}
+
+	// Regression guard: bot comment dispatch on a non-paused issue is unaffected
+	// by the human-only resume-trigger restriction — only the paused/awaiting-input
+	// resume decision is scoped to humans.
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for non-paused item with a bot comment")
 	}
 }
 
@@ -273,6 +355,96 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 	}
 	if result[0].ID != "c1" || result[1].ID != "c3" {
 		t.Errorf("expected comments c1 and c3, got %v", result)
+	}
+}
+
+// TestHumanNewComments verifies humanNewComments filters findNewComments'
+// output to exclude bot logins, leaving only human-authored comments (#1083).
+// It deliberately does NOT exclude e.cfg.User: that is the operator's own
+// GitHub login (in the common single-account deployment, the same account
+// Fabrik posts as), so excluding it would filter out the operator's own
+// resume reply. Fabrik's own output is already excluded upstream by
+// findNewComments' body-prefix check, independent of author.
+func TestHumanNewComments(t *testing.T) {
+	e := &Engine{
+		cfg:   Config{User: "fabrikbot"},
+		store: itemstate.NewStore(nil),
+	}
+
+	item := gh.ProjectItem{
+		Number: 42,
+		Repo:   "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "c1", Author: "alice", Body: "please continue"},         // human — kept
+			{ID: "c2", Author: "gemini-code-assist", Body: "quota hit"},  // bot — filtered
+			{ID: "c3", Author: "dependabot[bot]", Body: "bump version"},  // bot — filtered
+			{ID: "c4", Author: "fabrikbot", Body: "reply from operator"}, // matches cfg.User — kept, not a bot login
+			{ID: "c5", Author: "bob", Body: "another human"},             // human — kept
+		},
+	}
+
+	result := e.humanNewComments(item)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 human comments, got %d: %v", len(result), result)
+	}
+	if result[0].ID != "c1" || result[1].ID != "c4" || result[2].ID != "c5" {
+		t.Errorf("expected comments c1, c4, and c5, got %v", result)
+	}
+}
+
+// TestHumanNewComments_EmptyAuthor_FailsClosed verifies that a comment with no
+// resolvable author (e.g. a deleted GitHub account, which the deep fetch
+// leaves as an empty Author string) is treated as non-human rather than as an
+// implicit resume trigger. IsBotLogin("") is false, so without this guard an
+// unattributed comment would silently defeat a pause exactly like the bot
+// chatter this fix targets (#1083) — fail closed instead.
+func TestHumanNewComments_EmptyAuthor_FailsClosed(t *testing.T) {
+	e := &Engine{
+		cfg:   Config{User: "operator"},
+		store: itemstate.NewStore(nil),
+	}
+
+	item := gh.ProjectItem{
+		Number: 9,
+		Repo:   "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "e1", Author: "", Body: "comment from a deleted account"},
+			{ID: "h1", Author: "alice", Body: "please continue"},
+		},
+	}
+
+	result := e.humanNewComments(item)
+	if len(result) != 1 || result[0].ID != "h1" {
+		t.Fatalf("expected only the human comment h1, got %v", result)
+	}
+}
+
+// TestHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that humanNewComments
+// isolates the human-authored comment out of a mixed human+bot batch. This
+// filtered result is used only to decide *whether* to resume a paused /
+// awaiting-input item — it is not what gets handed to processComments once
+// resumed (processItem passes the full raw findNewComments batch at that
+// point; see TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause
+// and its awaiting-input counterpart).
+func TestHumanNewComments_MixedBatch_KeepsOnlyHuman(t *testing.T) {
+	e := &Engine{
+		cfg:   Config{User: "operator"},
+		store: itemstate.NewStore(nil),
+	}
+
+	item := gh.ProjectItem{
+		Number: 7,
+		Repo:   "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "b1", Author: "gemini-code-assist", Body: "quota notice"},
+			{ID: "h1", Author: "operator", Body: "please continue"},
+			{ID: "b2", Author: "dependabot[bot]", Body: "bump version"},
+		},
+	}
+
+	result := e.humanNewComments(item)
+	if len(result) != 1 || result[0].ID != "h1" {
+		t.Fatalf("expected only the human comment h1, got %v", result)
 	}
 }
 

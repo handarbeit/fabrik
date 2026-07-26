@@ -37,6 +37,15 @@ type ReviewRequest struct {
 
 // IsBotLogin returns true if the login matches known bot patterns.
 // Used as a fallback when the GraphQL __typename field is absent or not "Bot".
+//
+// Originally a reviewer-classification fallback, where a false positive
+// (misclassifying a human as a bot) is harmless. It is now also load-bearing
+// for the fabrik:paused / fabrik:awaiting-input resume gate
+// (engine/comments.go's filterHuman, ADR 069), where a false positive is not
+// harmless: a human login that coincidentally matches one of these
+// suffix/prefix heuristics (e.g. a genuine "data-bot" account) would be
+// silently unable to resume a pause by commenting. Weigh that cost, not just
+// the original fallback use, when adding new patterns here.
 func IsBotLogin(login string) bool { return isBotLogin(login) }
 
 // isBotLogin is the unexported implementation; call IsBotLogin from outside this package.

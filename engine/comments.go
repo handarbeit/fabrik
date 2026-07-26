@@ -35,6 +35,38 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	return newComments
 }
 
+// filterHuman filters a comment slice down to comments authored by a human —
+// excluding bot logins (gh.IsBotLogin) and comments with no resolvable author
+// (fail closed: an unattributed author, e.g. a deleted GitHub account, is
+// treated as non-human rather than silently defeating a pause).
+//
+// Deliberately does NOT also exclude e.cfg.User: that is the operator's own
+// GitHub login, not Fabrik's bot identity, and in the common (currently only
+// supported — see #671) single-account deployment Fabrik posts under that
+// same account. Excluding it here would filter out the operator's own
+// resume reply. Fabrik's own comments are already fully excluded upstream by
+// findNewComments' 🏭 **Fabrik body-prefix check, independent of author.
+func filterHuman(comments []gh.Comment) []gh.Comment {
+	var human []gh.Comment
+	for _, c := range comments {
+		if c.Author == "" || gh.IsBotLogin(c.Author) {
+			continue
+		}
+		human = append(human, c)
+	}
+	return human
+}
+
+// humanNewComments filters findNewComments to comments authored by a human.
+// Used at the paused / awaiting-input resume-decision sites so bot chatter
+// cannot silently defeat an operator-applied pause (#1083). Callers that also
+// need the unfiltered set (to hand the full backlog to processComments once
+// a resume is authorized) should call findNewComments once and pass it
+// through filterHuman directly instead of calling this a second time.
+func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
+	return filterHuman(e.findNewComments(item))
+}
+
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {

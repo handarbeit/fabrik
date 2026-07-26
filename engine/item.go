@@ -265,23 +265,34 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		// No store entry (first dispatch or restart): admit.
 	}
 
-	// Awaiting-input items: new comment = resume trigger; no comment = skip.
+	// Awaiting-input items: new human comment = resume trigger; no human
+	// comment (or bot-only chatter) = skip.
 	if awaitingInput {
-		return len(e.findNewComments(item)) > 0
+		raw := e.findNewComments(item)
+		human := filterHuman(raw)
+		if len(raw) > 0 && len(human) == 0 {
+			e.logf(item.Number, "skip", "awaiting-input: %d new comment(s), none human-authored — still waiting\n", len(raw))
+		}
+		return len(human) > 0
 	}
 
-	// Paused items: a new user comment is an implicit "resume and handle this."
-	// Without a comment, respect the pause.
+	// Paused items: a new human comment is an implicit "resume and handle
+	// this." Without one — including bot-only chatter — respect the pause.
 	isPaused := hasLabel(item.Labels, "fabrik:paused")
-	newComments := e.findNewComments(item)
 	if isPaused {
-		if len(newComments) > 0 {
+		raw := e.findNewComments(item)
+		human := filterHuman(raw)
+		if len(human) > 0 {
 			return true // comment triggers unpause — processItem handles label removal
+		}
+		if len(raw) > 0 {
+			e.logf(item.Number, "skip", "paused: %d new comment(s), none human-authored — pause retained\n", len(raw))
 		}
 		return false
 	}
 
 	// New comments are always worth processing (even on completed stages)
+	newComments := e.findNewComments(item)
 	if len(newComments) > 0 {
 		return true
 	}
@@ -370,23 +381,28 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Awaiting-input: paused because Claude needs user input. If the user has
 	// responded with a new comment, unblock and route to comment processing.
+	// humanNewComments only gates the resume decision; once authorized, the
+	// full raw comment set (including any bot chatter that accumulated while
+	// awaiting input) is handed to processComments in this same pass —
+	// mirroring the paused-unpause branch below, so a resume never leaves a
+	// bot-comment backlog to be picked up as a separate invocation next poll.
 	if isAwaitingInput(item) {
-		newComments := e.findNewComments(item)
-		if len(newComments) > 0 {
+		raw := e.findNewComments(item)
+		if len(filterHuman(raw)) > 0 {
 			e.unblockAwaitingInput(item, stage)
-			return e.processComments(ctx, board, item, stage, newComments)
+			return e.processComments(ctx, board, item, stage, raw)
 		}
 		e.logf(item.Number, "skip", "awaiting user input\n")
 		return nil
 	}
 
-	// Paused items: if the user commented, unpause and fall through to
-	// comment processing. Otherwise skip. A user comment on a paused issue
-	// is an implicit "resume and handle this."
+	// Paused items: if a human commented, unpause and fall through to
+	// comment processing. Otherwise skip. A human comment on a paused issue
+	// is an implicit "resume and handle this." Bot-only chatter does not
+	// unpause (#1083 — pause must remain an effective operator kill-switch).
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			newComments := e.findNewComments(item)
-			if len(newComments) > 0 {
+			if len(filterHuman(e.findNewComments(item))) > 0 {
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
 				e.removeLabel(item, "fabrik:paused")
 				// Also clear any failed label so the stage retries cleanly
