@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -82,8 +83,11 @@ func coordinatorStages() []*stages.Stage {
 // combining the testEngineWithRepo and testEngineWithStages patterns.
 func testEngineWithRepoAndStages(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker, stgs []*stages.Stage) (*Engine, string) {
 	t.Helper()
-	repoDir := initBareRepo(t)
-	fakeOriginRef(t, repoDir, "main")
+	// Use a real "origin" remote (not just a faked remote-tracking ref) so that
+	// ensureDraftPR's own push — which treats push failure as fatal, unlike
+	// finalizeStageOutcome's own best-effort push — succeeds for the
+	// coordinator-with-own-commits test, which must exercise real PR creation.
+	repoDir := initRepoWithRemote(t)
 	wm := NewWorktreeManager(repoDir)
 	eng := NewWithDeps(
 		Config{
