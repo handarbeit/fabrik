@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -99,5 +101,87 @@ func TestInterpretClaudeResult_WaitDelayOverride_TreatedAsCleanExit(t *testing.T
 	}
 	if !completed {
 		t.Errorf("expected completed=true")
+	}
+}
+
+// TestInterpretClaudeResult_StaleSession_DeletesFileAndDoesNotResave uses the
+// exact production payload shape from #1128: error_during_execution subtype,
+// an errors[] entry naming the dead session ID, that same ID echoed back in
+// session_id, and zero turns/cost. Before the fix, saveSessionIDDirect would
+// unconditionally rewrite the just-deleted file with this echoed dead ID,
+// making the stale pointer self-renewing instead of merely stale.
+func TestInterpretClaudeResult_StaleSession_DeletesFileAndDoesNotResave(t *testing.T) {
+	sessPath := filepath.Join(t.TempDir(), "issue-815", "Specify.session")
+	if err := os.MkdirAll(filepath.Dir(sessPath), 0700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(sessPath, []byte("3fefda47-9ea5-422a-9cdb-33da6e13244d"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	raw := []byte(`{"subtype":"error_during_execution","duration_ms":0,"num_turns":0,"total_cost_usd":0,` +
+		`"session_id":"3fefda47-9ea5-422a-9cdb-33da6e13244d","is_error":true,` +
+		`"errors":["No conversation found with session ID: 3fefda47-9ea5-422a-9cdb-33da6e13244d"]}`)
+
+	text, completed, _, err := interpretClaudeResult(context.Background(), 815, raw, nil, false, sessPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if completed {
+		t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE marker in this error response)")
+	}
+	if text != "" {
+		t.Errorf("text = %q, want empty result text", text)
+	}
+	if _, statErr := os.Stat(sessPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected stale session file to be deleted and NOT recreated, stat err = %v", statErr)
+	}
+}
+
+// TestInterpretClaudeResult_NonStaleError_StillSavesSession guards the
+// narrow-scoping decision: an IsError response that does not match both the
+// error_during_execution subtype and the dead-session errors[] substring
+// must still persist its session ID exactly as before (e.g. transient
+// errors like rate limits, where the session remains valid and resumable).
+func TestInterpretClaudeResult_NonStaleError_StillSavesSession(t *testing.T) {
+	sessPath := filepath.Join(t.TempDir(), "Specify.session")
+
+	raw := []byte(`{"subtype":"error_during_execution","is_error":true,"session_id":"sid-live",` +
+		`"errors":["rate limit exceeded"]}`)
+
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, statErr := os.ReadFile(sessPath)
+	if statErr != nil {
+		t.Fatalf("expected session file to be saved, stat err = %v", statErr)
+	}
+	if string(got) != "sid-live" {
+		t.Errorf("session file content = %q, want %q", got, "sid-live")
+	}
+}
+
+// TestInterpretClaudeResult_HealthyResume_SessionIDSaved confirms the
+// ordinary success path (no IsError) still persists the session ID —
+// the resave guard must not regress normal resume behavior.
+func TestInterpretClaudeResult_HealthyResume_SessionIDSaved(t *testing.T) {
+	sessPath := filepath.Join(t.TempDir(), "Specify.session")
+
+	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sid-healthy","num_turns":3,"total_cost_usd":0.5}`)
+
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !completed {
+		t.Errorf("expected completed=true")
+	}
+	got, statErr := os.ReadFile(sessPath)
+	if statErr != nil {
+		t.Fatalf("expected session file to be saved, stat err = %v", statErr)
+	}
+	if string(got) != "sid-healthy" {
+		t.Errorf("session file content = %q, want %q", got, "sid-healthy")
 	}
 }
