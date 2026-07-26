@@ -1,0 +1,56 @@
+name: Route community issues to triage board
+
+# Automatically place issues opened by non-maintainers onto the public
+# "Fabrik — Triage & Roadmap" board (project #3) at Status = Triage.
+#
+# Issues we (or the Fabrik bot) open are NOT routed here: maintainer/bot issues
+# carry author_association OWNER / MEMBER / COLLABORATOR, which the `if` below
+# excludes. Community issues carry NONE / CONTRIBUTOR / FIRST_TIME_CONTRIBUTOR.
+# Our own work issues continue to be added to the private working board (#1)
+# explicitly, so they never land on the public roadmap.
+#
+# Requires a repo secret ADD_TO_PROJECT_PAT: a PAT with `project` (write) scope
+# for the handarbeit org — the default GITHUB_TOKEN cannot write org-level
+# Projects. Without the secret the job fails loudly (it never silently no-ops).
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    # Community only. OWNER/MEMBER/COLLABORATOR = us or the Fabrik bot → skip.
+    if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add issue to Triage & Roadmap board (project #3)
+        id: add
+        uses: actions/add-to-project@v2.0.0
+        with:
+          project-url: https://github.com/orgs/handarbeit/projects/3
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+
+      - name: Set Status = Triage
+        env:
+          GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
+          ITEM_ID: ${{ steps.add.outputs.itemId }}
+        # Board #3 identifiers (stable):
+        #   project PVT_kwDOENB0Ac4BeRx-  |  Status field PVTSSF_lADOENB0Ac4BeRx-zhYtNVE
+        #   Triage option 8d9b1d82
+        run: |
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $opt: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project,
+                itemId: $item,
+                fieldId: $field,
+                value: { singleSelectOptionId: $opt }
+              }) { projectV2Item { id } }
+            }' \
+            -f project="PVT_kwDOENB0Ac4BeRx-" \
+            -f item="$ITEM_ID" \
+            -f field="PVTSSF_lADOENB0Ac4BeRx-zhYtNVE" \
+            -f opt="8d9b1d82"
