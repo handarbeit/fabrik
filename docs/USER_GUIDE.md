@@ -548,6 +548,21 @@ user: your-github-username
 # to disable size-cap pruning.
 # log_max_bytes: 2147483648
 
+# Required status/check-run context names the ci-gate must see confirmed
+# `success` for, on the PR's exact head SHA, before it will clear (ADR-072).
+# Keyed by "owner/repo" (works in both single-repo and multi-repo mode).
+# Only needed for repos whose required CI signal isn't a normal GitHub Actions
+# check run — e.g. a "local-CI-takeover" repo that posts a classic commit
+# status out-of-band (GitHub Actions disabled) instead. Without this configured,
+# Fabrik cannot tell a required context that never ran apart from a check that
+# was correctly skipped, and — for repos in that situation — could otherwise
+# record a head as CI-green when the real required signal never posted.
+# Leave unconfigured for a normal repo where all required checks are GitHub
+# Actions check runs; behavior is completely unchanged in that case.
+# required_status_contexts:
+#   your-org/your-repo:
+#     - fantasy/local-test
+
 # Fabrik-internal merge train (ADR-059). When "on", yolo Validate completions
 # advance into the Queued column for batched landing with a single combined
 # Validate instead of merging one PR at a time. Off by default — see the
