@@ -1724,7 +1724,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				return TrainCIRed
 			}
 			if status == gh.CheckRunsReady {
-				// ADR-071: don't declare the trial green until any configured
+				// ADR-072: don't declare the trial green until any configured
 				// required context has confirmed success on this exact trial
 				// SHA — mirrors settlePRMergeState's guard in pr_settle.go. A
 				// required context that's merely missing/pending falls through

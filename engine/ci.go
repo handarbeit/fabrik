@@ -79,7 +79,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false
 	}
 
-	// ADR-071: a confirmed required-context failure takes precedence over
+	// ADR-072: a confirmed required-context failure takes precedence over
 	// check-run/mergeable_state classification below — it can be driven
 	// solely by a classic commit status with no corresponding check run,
 	// which classifyCIFromCheckRuns' checkRuns-only view can never see.
@@ -163,7 +163,7 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 }
 
 // classifyCIFromRequiredContexts classifies the CI gate when a configured
-// required status context (ADR-071) has a confirmed failure on settle's head
+// required status context (ADR-072) has a confirmed failure on settle's head
 // SHA. This can be driven solely by a classic commit status with no
 // corresponding check run — a signal classifyCIFromCheckRuns' checkRuns-only
 // view never sees — so it must be checked ahead of (not folded into) that
