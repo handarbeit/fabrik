@@ -244,7 +244,19 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Snapshot extend-turns label before loop (stable across any mid-loop FetchItemDetails re-fetch).
 	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
 
+	// Circuit breaker (#1089): record this invocation now that Claude is actually
+	// about to run — recording here (not up at the JobStartedEvent emission above)
+	// means an early return before this point (e.g. editing-label API failure)
+	// doesn't count as a wasted cycle. Capture the pre-invocation HEAD so a commit
+	// landed during this cycle resets the counter below.
+	preInvokeSHA, _ := gitHeadSHA(workDir)
+	e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
+
 	output, usage, invCompleted, err := e.runCommentExtensionLoop(ctx, stage, &item, comments, workDir, invokeOpts, hadExtendTurnsLabel)
+
+	if postInvokeSHA, shaErr := gitHeadSHA(workDir); shaErr == nil && postInvokeSHA != preInvokeSHA {
+		e.resetCommentBreaker(item)
+	}
 
 	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		if usage.MaxTurns > 0 {
@@ -289,6 +301,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			return nil
 		}
 		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
+		// A non-completing, erroring invocation is exactly the "no forward progress"
+		// case the circuit breaker exists to catch — check it here too, not only
+		// on the successful-completion path below.
+		e.checkCommentBreaker(item)
 		return err
 	}
 	if err != nil {
@@ -299,7 +315,22 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	e.finalizeComments(ctx, board, item, stage, comments, owner, repo, baseBranch, completed, summary)
 
+	// Checked last so any reset applied above (stage-complete inside
+	// finalizeComments, or an issue-body update inside publishCommentOutput)
+	// takes effect before evaluating whether this cycle tripped the breaker.
+	e.checkCommentBreaker(item)
+
 	return nil
+}
+
+// lastCommentAuthor returns the author of the last comment in comments, or ""
+// if comments is empty. Used to attribute a circuit-breaker invocation to the
+// comment that triggered it (#1089).
+func lastCommentAuthor(comments []gh.Comment) string {
+	if len(comments) == 0 {
+		return ""
+	}
+	return comments[len(comments)-1].Author
 }
 
 // acknowledgeComments reacts with 👀 to all new comments. PR review thread
@@ -405,6 +436,11 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
+		// Circuit breaker (#1089): a FABRIK_ISSUE_UPDATE is the only forward-progress
+		// signal pre-PR stages (Specify/Research/Plan) produce — no commit, no PR,
+		// no stage completion until the human is satisfied. Counting it as progress
+		// avoids false-tripping normal spec/plan Q&A iteration.
+		e.resetCommentBreaker(item)
 	}
 
 	// Strip all Fabrik markers from output before posting.
