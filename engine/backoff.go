@@ -40,9 +40,15 @@ const rateLimitResetBuffer = 5 * time.Second
 // and janitor fetches. Stretching the poll interval does not conserve it, so
 // exhaustion requires a hard pause until the hourly reset rather than a retry
 // storm of 403s. Returns false when limit is unknown (limit == 0, e.g. before
-// the first REST call) or when the reset time has already passed.
+// the first REST call) or once reset+rateLimitResetBuffer has passed.
+//
+// The buffer is applied to the predicate itself, not just to the ticker reset in
+// doPollCycle: because doPollCycle can also be invoked directly from the wakeCh
+// branch (which bypasses the ticker), a wake in the (reset, reset+buffer) window
+// must still pause — otherwise work would resume before GitHub has surely rolled
+// the hourly window, risking a fresh burst of 403s.
 func shouldPauseForRESTRateLimit(remaining, limit int, reset, now time.Time) bool {
-	return isRateLimitNearZero(remaining, limit) && reset.After(now)
+	return isRateLimitNearZero(remaining, limit) && reset.Add(rateLimitResetBuffer).After(now)
 }
 
 // idleBackoffMultiplier returns the backoff multiplier for the given idle duration.
