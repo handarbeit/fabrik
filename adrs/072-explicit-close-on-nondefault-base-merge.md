@@ -49,32 +49,20 @@ The helper:
    advance the caller already performed must never be blocked or unwound.
 5. If base equals default, returns without action — GitHub's own auto-close already covers this case,
    and skipping here is the entire double-close guard.
-6. Otherwise logs the decision (`issue #N base %q ≠ default %q — closing explicitly`), pre-checks
-   `item.IsClosed` (skip if already true), calls `CloseIssue`, treats `errors.Is(err, gh.ErrNotFound)`
-   as success, and on any other failure logs it and returns — never propagating an error to the
-   caller.
+6. Otherwise pre-checks `item.IsClosed` (returns without action if already true), then logs the
+   decision (`issue #N base %q ≠ default %q — closing explicitly`), calls `CloseIssue`, treats
+   `errors.Is(err, gh.ErrNotFound)` as success, and on any other failure logs it and returns — never
+   propagating an error to the caller.
 
 ### Merged vs. closed-without-merging
 
-`advanceConvergedPRToDone`'s terminal-first guard in `checkAutoMergeConvergence` fires on
-`settle.Status == PRMergeTerminal || pr.Merged || pr.State == "closed"` — this is true both for a
-genuine merge *and* for a PR closed without merging (the function advances such items to Done either
-way; that is pre-existing behavior, out of scope here). Explicitly closing the *issue* on a
-closed-without-merging PR would be a correctness bug distinct from what this issue asks for — the
-spec is explicit that the close must fire "on a confirmed merge." `advanceConvergedPRToDone` therefore
-takes a `merged bool` parameter, computed by its callers:
-
-- `reEnqueueOrPause` already confirms merge via a fresh `FetchPRMerged` call before its own call site;
-  it passes `true`.
-- `checkAutoMergeConvergence`'s terminal-first branch prefers `settle.PR.Merged` when
-  `settle.Status == PRMergeTerminal` (already authoritatively confirmed by `settlePRMergeState`,
-  which itself calls `FetchPRMerged` before returning `PRMergeTerminal` for a closed PR — see
-  `pr_settle.go`); otherwise it falls back to the freshly-fetched `pr.Merged`, and if that is still
-  inconclusive (`pr.State == "closed"` but not yet confirmed merged — the same REST list-endpoint
-  staleness window `runValidatePRTerminalAdvance` already handles), it confirms via one additional
-  `FetchPRMerged` call.
-
-`advanceConvergedPRToDone` only calls `closeIssueIfNonDefaultBase` when `merged` is true.
+`advanceConvergedPRToDone`'s terminal-first guard also advances a PR closed *without* merging to Done
+(pre-existing behavior, out of scope here). Explicitly closing the *issue* in that case would be a
+correctness bug distinct from what this issue asks for — the spec requires the close to fire "on a
+confirmed merge." `advanceConvergedPRToDone` therefore takes a `merged bool` parameter, computed by its
+callers from the already-authoritative merge-confirmation machinery described in
+`docs/state-machine.md` (§5.5 auto-merge convergence table, row ①; `settlePRMergeState`/
+`PRMergeTerminal`) — `closeIssueIfNonDefaultBase` is only called when `merged` is true.
 
 ## Rationale
 
@@ -148,10 +136,11 @@ Both are cheap; the spec explicitly requires `ErrNotFound`/already-closed to be 
   Done, nothing currently retries it. This is deliberately out of scope here (see Issue B below) —
   the failure is loudly logged, never silently discarded.
 - A `base:`-labeled item reaching either call site while its repo's `WorktreeManager` is unregistered
-  (restart-window edge case) silently skips the explicit close for that one poll pass; since neither
-  call site is retried specifically for this reason, and durability is explicitly out of scope, such
-  an item could remain open on a race that resolves before the next opportunity to observe it. This
-  mirrors the general best-effort/non-durable scoping decision above, not a new, separate risk.
+  (restart-window edge case) logs a warning and skips the explicit close for that one poll pass; since
+  neither call site is retried specifically for this reason, and durability is explicitly out of
+  scope, such an item could remain open on a race that resolves before the next opportunity to observe
+  it. This mirrors the general best-effort/non-durable scoping decision above, not a new, separate
+  risk.
 
 ## Sibling Audit
 
