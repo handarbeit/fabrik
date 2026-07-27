@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
 // GitHubLister is the subset of *github.Client's methods Daemon needs
@@ -18,6 +19,17 @@ import (
 type GitHubLister interface {
 	GitHubReviewer
 	ListOpenPRs(owner, repo string) ([]gh.PRDetails, error)
+}
+
+// RateLimitReporter is an optional interface implemented by *github.Client:
+// type-asserted against Daemon.Client once per poll cycle so the TUI can
+// surface REST API rate-limit state. Deliberately separate from
+// GitHubLister/GitHubReviewer — adding this method there would force every
+// test fake to implement it; fakes that don't simply emit no
+// RateLimitSnapshotEvent, which is correct (there is no rate-limit data to
+// show).
+type RateLimitReporter interface {
+	RateLimitStats() (rest, graphql gh.RateLimitStats)
 }
 
 // Daemon polls Pruefer's configured repos and dispatches eligible PRs to
@@ -34,6 +46,21 @@ type Daemon struct {
 	// FabrikDir is the directory containing .pruefer/pruefer.lock. Defaults
 	// to "." (cwd) when empty.
 	FabrikDir string
+
+	// Emit, when non-nil, receives TUI observability events for poll cycles,
+	// in-flight reviews, and outcomes. nil (the default) is a true no-op —
+	// mirroring engine.Engine's events-channel-nil idiom — so headless
+	// (-notui) operation incurs zero overhead and is never coupled to
+	// ReviewPR's decision logic: every emit call here wraps ReviewPR from
+	// the outside, never alters its inputs, return value, or control flow.
+	Emit func(ptui.Event)
+}
+
+// emit is a nil-checked convenience wrapper around d.Emit.
+func (d *Daemon) emit(ev ptui.Event) {
+	if d.Emit != nil {
+		d.Emit(ev)
+	}
 }
 
 func (d *Daemon) lockPath() string {
@@ -112,11 +139,15 @@ func (d *Daemon) poll(ctx context.Context) {
 			logf(0, "warn", "skipping malformed watched repo %q (want owner/repo)\n", repoSpec)
 			continue
 		}
+		repoName := owner + "/" + repo
+		pollAt := time.Now()
 		prs, err := d.Client.ListOpenPRs(owner, repo)
 		if err != nil {
 			logf(0, "warn", "listing open PRs for %s/%s: %v — skipping this repo this cycle\n", owner, repo, err)
+			d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, Err: err.Error()})
 			continue
 		}
+		d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, PRCount: len(prs)})
 		for _, pr := range prs {
 			pr := pr
 			wg.Add(1)
@@ -129,14 +160,31 @@ func (d *Daemon) poll(ctx context.Context) {
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
+				startedAt := time.Now()
+				d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
 				outcome := ReviewPR(ctx, d.Client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
 				if outcome.Err != nil {
 					logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
 				}
+				errText := ""
+				if outcome.Err != nil {
+					errText = outcome.Err.Error()
+				}
+				d.emit(ptui.ReviewCompletedEvent{
+					Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
+					Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
+					Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
+					Duration: time.Since(startedAt), CompletedAt: time.Now(),
+				})
 			}()
 		}
 	}
 	wg.Wait()
+
+	if reporter, ok := d.Client.(RateLimitReporter); ok {
+		rest, _ := reporter.RateLimitStats()
+		d.emit(ptui.RateLimitSnapshotEvent{Stats: rest})
+	}
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts. Returns ok=false

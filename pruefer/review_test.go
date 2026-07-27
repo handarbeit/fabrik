@@ -97,8 +97,8 @@ func newFakeReviewer() *fakeReviewer {
 
 func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	client := newFakeReviewer()
-	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (string, error) {
-		return "Looks fine, one nit.", nil
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Looks fine, one nit.", NumTurns: 3, CostUSD: 0.05}, nil
 	}}
 	clone, cloneCalls := fakeClone(t, nil)
 
@@ -123,6 +123,9 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	call := client.submitCalls[0]
 	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit." {
 		t.Errorf("submitCall = %+v", call)
+	}
+	if outcome.NumTurns != 3 || outcome.CostUSD != 0.05 {
+		t.Errorf("outcome NumTurns/CostUSD = %d/%v, want 3/0.05", outcome.NumTurns, outcome.CostUSD)
 	}
 }
 
@@ -267,8 +270,8 @@ func TestReviewPR_ExcludedPath_Skipped(t *testing.T) {
 
 func TestReviewPR_ClaudeFailure_PostsNothing(t *testing.T) {
 	client := newFakeReviewer()
-	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (string, error) {
-		return "", fmt.Errorf("claude crashed")
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{}, fmt.Errorf("claude crashed")
 	}}
 	clone, cloneCalls := fakeClone(t, nil)
 

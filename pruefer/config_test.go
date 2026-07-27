@@ -46,6 +46,42 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if len(cfg.WatchedRepos) != 0 {
 		t.Errorf("WatchedRepos = %v, want empty", cfg.WatchedRepos)
 	}
+	if !cfg.TUI {
+		t.Errorf("TUI = false, want true (default on)")
+	}
+}
+
+func TestLoadConfig_TUIPrecedence(t *testing.T) {
+	dir := t.TempDir()
+
+	// YAML can disable it.
+	path := writeYAMLConfig(t, dir, `tui: false`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TUI {
+		t.Errorf("TUI = true, want false (from YAML)")
+	}
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_TUI", "true")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.TUI {
+		t.Errorf("TUI = false, want true (env should override YAML)")
+	}
+
+	// -notui flag overrides env.
+	cfg, err = LoadConfig([]string{"-config", path, "-notui"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TUI {
+		t.Errorf("TUI = true, want false (-notui flag should override env)")
+	}
 }
 
 func TestLoadConfig_YAMLOverridesDefaults(t *testing.T) {

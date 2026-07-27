@@ -34,6 +34,8 @@ type ReviewOutcome struct {
 	Skipped  bool       // true iff the PR was ineligible
 	Reason   SkipReason // set iff Skipped
 	Err      error      // non-nil on a genuine failure (clone, claude invocation, API call)
+	NumTurns int        // set iff Reviewed; turns used by the claude invocation
+	CostUSD  float64    // set iff Reviewed; cost of the claude invocation
 }
 
 // ReviewPR runs the full per-PR pipeline: on-demand-comment detection,
@@ -100,7 +102,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 	defer cleanup()
 
-	reviewText, err := claude.Review(ctx, ReviewRequest{
+	result, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
 		WorkDir: dir, MaxWallTime: cfg.MaxWallTime,
@@ -110,7 +112,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		return ReviewOutcome{Err: fmt.Errorf("claude review invocation: %w", err)}
 	}
 
-	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, reviewText); err != nil {
+	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, result.Text); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
 	}
 
@@ -121,5 +123,5 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
-	return ReviewOutcome{Reviewed: true}
+	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD}
 }
