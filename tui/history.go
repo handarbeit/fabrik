@@ -106,6 +106,7 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			StageModel:     ev.StageModel,
 			IsComment:      ev.IsComment,
 			Success:        ev.Success,
+			TurnLimited:    ev.TurnLimited,
 			Completed:      ev.Completed,
 			BlockedOnInput: ev.BlockedOnInput,
 			Duration:       ev.Duration,
@@ -247,7 +248,11 @@ func (h *HistoryPaneComponent) rebuildViewportContent(innerWidth int) {
 			result = dimStyle.Render("  (input needed)")
 		} else if !he.Completed {
 			status = dimStyle.Render("↻")
-			result = dimStyle.Render("  (retry)")
+			if he.TurnLimited {
+				result = dimStyle.Render("  (turn limit)")
+			} else {
+				result = dimStyle.Render("  (retry)")
+			}
 		} else {
 			status = successStyle.Render("✓")
 		}

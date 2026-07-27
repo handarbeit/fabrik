@@ -60,6 +60,28 @@ func (e *claudeUsageLimitError) Error() string {
 	return fmt.Sprintf("claude usage limit hit: %s", e.Message)
 }
 
+// claudeTurnLimitError signals that a Claude invocation exited because it
+// exhausted its configured turn budget (CLI-reported subtype
+// "error_max_turns"), not because the stage genuinely failed. Unlike
+// claudeUsageLimitError, this does NOT short-circuit finalizeStageOutcome /
+// processComments with an early return: the existing retry/escalation
+// machinery (StageAttempted, commitWIP, StageRetryIncremented, MaxRetries)
+// must still run exactly as it does today for a turn-cap exit — that
+// behavior is pre-existing and deliberate (see #1081/#448), and out of scope
+// for #1178. This sentinel only changes what feeds the InvocationRecorded
+// write, so history/TUI can render the run as incomplete-but-resumable
+// rather than as a genuine fault.
+type claudeTurnLimitError struct {
+	// TerminalReason is the CLI's own terminal_reason field, if present, for logging.
+	TerminalReason string
+	// NumTurns is the CLI-reported turn count at exit, for logging.
+	NumTurns int
+}
+
+func (e *claudeTurnLimitError) Error() string {
+	return fmt.Sprintf("claude exited: turn limit reached (num_turns=%d)", e.NumTurns)
+}
+
 // detectUsageLimitExit scans raw invocation output — the full NDJSON stdout
 // stream, not the parsed claudeResponse.Result or the already-collapsed text
 // variable — for Anthropic's account usage-limit exit message. Raw bytes are
@@ -671,6 +693,10 @@ type claudeResponse struct {
 	IsError   bool     `json:"is_error"`
 	Errors    []string `json:"errors"`
 	Subtype   string   `json:"subtype"`
+	// TerminalReason is the CLI's more explicit structural classification
+	// (e.g. "max_turns"), captured for logging/future use alongside Subtype.
+	// Only Subtype is consulted for the error_max_turns branch condition below.
+	TerminalReason string `json:"terminal_reason"`
 	// ModelUsage contains per-model accumulated token counts for the full session.
 	// These are more accurate than the top-level "usage" field, which reflects only
 	// the last API call rather than the entire multi-turn session.
@@ -928,6 +954,18 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		if stageCompleteRE.MatchString(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
 			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
+		}
+		// Structural turn-cap classification from the CLI's own result object,
+		// not inferred from turn counts (the CLI's own accounting can report a
+		// turn count past the configured cap, e.g. num_turns: 51 against
+		// max_turns: 50, so an inference built on >= would be fragile). This
+		// check runs before detectUsageLimitExit precisely because relying on
+		// output-prose matching there caused this exact condition to
+		// misclassify as a usage-limit exit — see detectUsageLimitExit's doc
+		// comment and #1183.
+		if ok && resp.Subtype == "error_max_turns" {
+			claudeLog(issueNumber, "claude", "turn limit reached (subtype=error_max_turns, terminal_reason=%q, num_turns=%d)\n", resp.TerminalReason, resp.NumTurns)
+			return text, false, usage, &claudeTurnLimitError{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns}
 		}
 		// usage is passed as an exclusion gate only: it can rule a usage-limit
 		// exit *out* (turns consumed and cost incurred means the invocation ran,

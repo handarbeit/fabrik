@@ -19,6 +19,7 @@ type DetailItem struct {
 	Elapsed        time.Duration
 	Duration       time.Duration
 	Success        bool
+	TurnLimited    bool
 	Completed      bool
 	BlockedOnInput bool
 	TurnsUsed      int
@@ -68,7 +69,11 @@ func (d DetailPanelComponent) View(width int) string {
 		} else if item.BlockedOnInput {
 			statusStr = "awaiting input"
 		} else if !item.Completed {
-			statusStr = "incomplete"
+			if item.TurnLimited {
+				statusStr = "incomplete (turn limit)"
+			} else {
+				statusStr = "incomplete"
+			}
 		}
 		lines = append(lines, fmt.Sprintf("Issue:    #%d", item.IssueNumber))
 		if item.Title != "" {

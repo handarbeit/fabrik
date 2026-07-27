@@ -95,6 +95,8 @@ The session ID is captured even when the invocation ends by hitting `max_turns` 
 
 When a stage exceeds `max_turns`, the Claude CLI self-terminates with a non-zero exit, so `completed = false` and `err != nil`. The progress-based extension loop requires `err == nil`, so this falls through to the cooldown/retry path. A later poll re-invokes the same stage with `resume = true` (`engine/item.go:682` — `resume := !lastAttempt.IsZero()`).
 
+As of #1178, the CLI's own result classification (`subtype: "error_max_turns"`) is captured alongside this exit and threaded into `InvocationRecorded.TurnLimited`, so `history.json`/the TUI can render this case as incomplete-and-resumable rather than as a generic failure. This changes only the classification/rendering surfaced from the invocation — the retry/cooldown mechanics described above are unchanged.
+
 **The retry continues the same Claude session.** It is not a fresh agent inheriting a dirty worktree — it retains the killed run's conversation context, including the output of every command that run executed before the cap.
 
 Two consequences follow, and both routinely look like defects to someone reading only the posted comment:

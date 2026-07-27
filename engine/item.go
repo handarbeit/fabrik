@@ -1105,6 +1105,19 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		}
 	}
 
+	// A Claude turn-limit exit (CLI subtype error_max_turns) is not a genuine
+	// fault — it is an incomplete, resumable run that made real progress and
+	// will continue via the existing retry/cooldown path. Unlike the
+	// usage-limit case above, this does NOT short-circuit: StageAttempted,
+	// commitWIP, the branch push, and StageRetryIncremented/MaxRetries
+	// escalation all still run exactly as they do today for any other
+	// incomplete run. turnLimited only changes what feeds the
+	// InvocationRecorded write below, so history/TUI can render this as
+	// incomplete-but-resumable rather than as an error. See claudeTurnLimitError
+	// in claude.go and ADR-1178.
+	var turnLimitErr *claudeTurnLimitError
+	turnLimited := errors.As(err, &turnLimitErr)
+
 	// Any invocation reaching this point actually ran Claude and was not itself
 	// classified as a usage-limit exit (success, blocked-on-input, no-work-needed,
 	// genuine failure/retry, and PR-creation failure alike) — clear the gate label
@@ -1308,13 +1321,14 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
 	e.store.Apply(itemstate.InvocationRecorded{
-		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
-		Number:    item.Number,
-		Completed: completed,
-		Blocked:   blockedOnInput,
-		Errored:   err != nil,
-		Usage:     usage,
-		Duration:  time.Since(p.workerStartedAt),
+		Repo:        itemOwnerRepoString(item, e.defaultRepo()),
+		Number:      item.Number,
+		Completed:   completed,
+		Blocked:     blockedOnInput,
+		Errored:     err != nil && !turnLimited,
+		TurnLimited: turnLimited,
+		Usage:       usage,
+		Duration:    time.Since(p.workerStartedAt),
 	})
 
 	if completed && noWorkNeeded {
