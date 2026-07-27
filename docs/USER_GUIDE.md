@@ -432,7 +432,7 @@ Pruning runs in three phases per cycle:
 2. **Size-cap backstop**: after age-pruning, if the total size of `.fabrik/logs/` still exceeds `log_max_bytes`, delete the oldest files (by mtime) until the tree is under the cap. Default **2 GiB**. `0` disables the size cap.
 3. **Empty-dir cleanup**: remove any now-empty `issue-N/` and `<owner>-<repo>/` directories.
 
-The janitor only ever touches `.fabrik/logs/`. It never modifies `sessions/`, `worktrees/`, `repos/`, or `debug/`.
+The janitor only ever touches `.fabrik/logs/`. It never modifies `worktrees/`, `repos/`, or `debug/`. (`sessions/` has its own janitor — see [Session Janitor](#session-janitor) below.)
 
 At the end of each scan Fabrik logs:
 
@@ -451,6 +451,36 @@ log_max_bytes: 2147483648   # default (2 GiB) — set to 0 to disable size-cap p
 Also controllable via `--log-retention-days` / `--log-max-bytes` flags or `FABRIK_LOG_RETENTION_DAYS` / `FABRIK_LOG_MAX_BYTES` environment variables.
 
 > **Note:** Because the prune runs on every tick (not only at startup), the size-cap backstop only has to absorb at most one tick-interval of log growth. An instance producing more than `log_max_bytes` within a single `janitor_interval_hours` window can transiently exceed the cap until the next tick — the hourly default makes this a non-issue in practice.
+
+### Session Janitor
+
+`.fabrik/sessions/` stores one `.session` file per (issue, stage) pair — a pointer to the Claude Code conversation Fabrik resumes from on the next invocation. Nothing else in Fabrik ever deletes these files, so on a long-running instance the vast majority end up pointing at conversations Claude Code has already reaped on its own `cleanupPeriodDays` schedule (default 30 days) — dead pointers that just accumulate.
+
+The **session janitor** prunes `.fabrik/sessions/` by age. It runs on the **same cadence as the worktree and log janitors** (disabled when `janitor_interval_hours: 0`):
+
+1. **Once at startup**, after the first successful poll.
+2. **Hourly** thereafter (same `janitor_interval_hours` cadence).
+
+Each cycle deletes any `.session` file whose mtime is older than `session_retention_days` × 24 h (default **14 days**; `0` disables age-based pruning), for both directory layouts Fabrik produces (`.fabrik/sessions/issue-N/` for single-repo projects, `.fabrik/sessions/<owner>-<repo>/issue-N/` for multi-repo). Now-empty `issue-N/` and `<owner>-<repo>/` directories left behind are removed as well.
+
+**A session file for a stage currently in flight is never deleted**, regardless of age: if an issue has a live worker registered, every `.session` file under that issue's session directory is skipped for the cycle — not just the file for the worker's current stage. This is deliberately conservative: it avoids a race where the active stage changes mid-cycle between the age check and the delete.
+
+Pruning is **age-based only**, not liveness-checking against Claude Code's own transcript store — see [ADR 1136](../adrs/1136-session-janitor.md) for the tradeoff. One consequence worth knowing: an issue that sits `fabrik:paused` (e.g. awaiting human input) for longer than `session_retention_days` has no in-flight worker, so its session file can be pruned mid-pause even though the underlying Claude Code conversation may still be resumable for up to 30 days. This is by design — the janitor only protects "in flight," not "paused-but-will-resume" — and the consequence is bounded: the next invocation just starts a fresh Claude session instead of resuming, the same graceful fallback used when a session pointer goes dead for any other reason.
+
+At the end of each scan Fabrik logs:
+
+```
+[session-janitor] cycle complete: scanned N session files, removed M, skipped K (in-flight=I, unresolved-repo=U)
+```
+
+**Configuration:**
+
+```yaml
+# .fabrik/config.yaml
+session_retention_days: 14   # default — set to 0 to disable age-based pruning
+```
+
+Also controllable via `--session-retention-days` flag or `FABRIK_SESSION_RETENTION_DAYS` environment variable.
 
 ---
 
@@ -547,6 +577,12 @@ user: your-github-username
 # oldest files are deleted first until total size is under this cap. Set to 0
 # to disable size-cap pruning.
 # log_max_bytes: 2147483648
+
+# Session janitor: delete .fabrik/sessions/ .session files older than this many
+# days (default 14). Runs on the same janitor_interval_hours cadence. Never
+# deletes a session file for a stage currently in flight. Set to 0 to disable
+# age-based pruning.
+# session_retention_days: 14
 
 # Required status/check-run context names the ci-gate must see confirmed
 # `success` for, on the PR's exact head SHA, before it will clear (ADR-933).
@@ -657,6 +693,7 @@ FABRIK_USER=my-personal-username
 | `--janitor-interval` | Hours between janitor runs (closed-issue cleanup, stale-label eviction); 0 disables the janitor; also `FABRIK_JANITOR_INTERVAL` | `1` |
 | `--log-retention-days` | Delete `.fabrik/logs/` files older than this many days; 0 disables age-based pruning; also `FABRIK_LOG_RETENTION_DAYS` | `14` |
 | `--log-max-bytes` | Total size cap for `.fabrik/logs/` in bytes; oldest files deleted first after age prune; 0 disables size-cap pruning; also `FABRIK_LOG_MAX_BYTES` | `2147483648` (2 GiB) |
+| `--session-retention-days` | Delete `.fabrik/sessions/` `.session` files older than this many days; 0 disables age-based pruning; never deletes a session file for a stage currently in flight; also `FABRIK_SESSION_RETENTION_DAYS` | `14` |
 | `--kill-grace-sigint` | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGINT entirely; also `FABRIK_KILL_GRACE_SIGINT`) | `""` (10s) |
 | `--kill-grace-sigterm` | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGTERM entirely; also `FABRIK_KILL_GRACE_SIGTERM`) | `""` (10s) |
 | `--archive-after` | Grace period since an item settled into Done (its `stage:<Done>:complete` label was applied) before it is auto-archived off the project board (Go duration: `168h`, `24h`; `"0s"` archives immediately once eligible; also `FABRIK_ARCHIVE_AFTER`) | `""` (168h = 1 week) |
@@ -707,6 +744,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_JANITOR_INTERVAL` | `janitor_interval_hours` | Hours between janitor runs (non-negative integer; `0` disables the janitor) | `1` |
 | `FABRIK_LOG_RETENTION_DAYS` | `log_retention_days` | Delete log files older than this many days (non-negative integer; `0` disables age-based pruning) | `14` |
 | `FABRIK_LOG_MAX_BYTES` | `log_max_bytes` | Total size cap for `.fabrik/logs/` in bytes; oldest files deleted first after age prune (`0` disables size-cap pruning) | `2147483648` (2 GiB) |
+| `FABRIK_SESSION_RETENTION_DAYS` | `session_retention_days` | Delete `.fabrik/sessions/` `.session` files older than this many days (non-negative integer; `0` disables age-based pruning; never deletes a session file for a stage currently in flight) | `14` |
 | `FABRIK_KILL_GRACE_SIGINT` | *(no config.yaml key)* | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGINT step entirely) | `""` (10s) |
 | `FABRIK_KILL_GRACE_SIGTERM` | *(no config.yaml key)* | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGTERM step, SIGKILL fires immediately after SIGINT) | `""` (10s) |
 | `FABRIK_ARCHIVE_AFTER` | *(no config.yaml key)* | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration string: `"168h"`, `"24h"`; empty or unset = use default of 168h/1 week; `"0s"` archives immediately once eligible; invalid or negative values fall back to the default) | `""` (168h = 1 week) |

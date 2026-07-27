@@ -37,6 +37,7 @@ type ProjectConfig struct {
 	JanitorIntervalHours      *int     `yaml:"janitor_interval_hours"`
 	LogRetentionDays          *int     `yaml:"log_retention_days"`
 	LogMaxBytes               *int64   `yaml:"log_max_bytes"`
+	SessionRetentionDays      *int     `yaml:"session_retention_days"`
 	MergeTrain                string   `yaml:"merge_train"`
 	AutoMergeStrategy         string   `yaml:"auto_merge_strategy"`
 	MaxBatchSize              *int     `yaml:"max_batch_size"`
