@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
 // fakeLister extends fakeReviewer with ListOpenPRs, keyed by "owner/repo".
@@ -203,6 +204,69 @@ func TestDaemonPoll_ContinuesAfterOneRepoListFails(t *testing.T) {
 
 	if client.submitCallCount() != 1 {
 		t.Errorf("expected the good repo's PR to still be reviewed despite the broken repo failing, got %d submissions", client.submitCallCount())
+	}
+}
+
+// buildParityFixture returns a fresh Daemon (with the given Emit hook) plus
+// its client/claude fakes, seeded with a fixed mix of PRs: one eligible for
+// review, one skipped as draft, and one that fails to clone (a genuine
+// error). Used by TestDaemonPoll_TUIOffAndOnProduceIdenticalDecisions to
+// build two independent runs from an identical starting fixture.
+func buildParityFixture(t *testing.T, emit func(ptui.Event)) (*Daemon, *fakeLister, *mockClaudeInvoker) {
+	t.Helper()
+	client := newFakeLister()
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{
+		{Number: 1, Author: "alice", HeadSHA: "sha1"},
+		{Number: 2, Author: "alice", HeadSHA: "sha2", Draft: true},
+	}
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	d := &Daemon{
+		Client:   client,
+		Claude:   claude,
+		Clone:    clone,
+		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 3},
+		BotLogin: "pruefer-bot[bot]",
+		Emit:     emit,
+	}
+	return d, client, claude
+}
+
+// TestDaemonPoll_TUIOffAndOnProduceIdenticalDecisions asserts the issue's
+// core "no behaviour coupling" requirement: running poll() with Daemon.Emit
+// nil (TUI-off/headless) versus set to a recorder (TUI-on) must produce
+// identical review decisions — same submit count, same claude invocation
+// count — for the same inputs. The TUI-on run must also actually observe
+// events, proving the wiring is exercised rather than trivially satisfied by
+// both runs doing nothing.
+func TestDaemonPoll_TUIOffAndOnProduceIdenticalDecisions(t *testing.T) {
+	dOff, clientOff, claudeOff := buildParityFixture(t, nil)
+	dOff.poll(context.Background())
+
+	var mu sync.Mutex
+	var events []ptui.Event
+	dOn, clientOn, claudeOn := buildParityFixture(t, func(ev ptui.Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+	dOn.poll(context.Background())
+
+	if clientOff.submitCallCount() != 1 {
+		t.Fatalf("TUI-off: submitCallCount() = %d, want 1 (only the non-draft PR reviewed)", clientOff.submitCallCount())
+	}
+	if clientOn.submitCallCount() != clientOff.submitCallCount() {
+		t.Errorf("submitCallCount mismatch: TUI-off=%d, TUI-on=%d, want equal", clientOff.submitCallCount(), clientOn.submitCallCount())
+	}
+	if claudeOn.callCount() != claudeOff.callCount() {
+		t.Errorf("claude callCount mismatch: TUI-off=%d, TUI-on=%d, want equal", claudeOff.callCount(), claudeOn.callCount())
+	}
+
+	mu.Lock()
+	n := len(events)
+	mu.Unlock()
+	if n == 0 {
+		t.Error("TUI-on run emitted no events — Emit wiring is not actually exercised by this test")
 	}
 }
 
