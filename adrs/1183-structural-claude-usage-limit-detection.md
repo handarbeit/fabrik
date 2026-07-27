@@ -221,6 +221,16 @@ re-probe mechanism (see Decision §4) was considered and rejected for this issue
 deferred — it would require a new class of issue-independent Claude invocation this codebase does not
 have.
 
+Elevating the diagnostic-only "unmatched `terminal_reason`" log line (Decision §1) to an active TUI
+alert or metrics counter, raised as PR review feedback on the "Unverified exact value" trade-off above —
+deferred, not implemented. The log line fires for *any* non-empty `terminal_reason` other than
+`"blocking_limit"` reached on an error exit (i.e. every generic error exit other than a turn cap):
+`model_error`, `api_error`, `aborted_tools`, `rapid_refill_breaker`, and the rest of the SDK's
+`TerminalReason` enum all pass through it. A blanket alert on that signal would fire on most ordinary
+failures, which have nothing to do with a usage limit — noise, not diagnosis. A narrower version scoped
+to a specific value already named as limit-adjacent (e.g. `rapid_refill_breaker` alone) is plausible
+future work, but is a separate design decision from this ADR's scope and was not made here.
+
 **References:** ADR-1119 (`1119-claude-usage-limit-detection.md`) — the original prose-matching
 detection this ADR replaces; see its superseded-in-part note. ADR-1120
 (`1120-claude-usage-limit-backoff-and-suspension.md`) — the account-wide suspension/backoff machinery
