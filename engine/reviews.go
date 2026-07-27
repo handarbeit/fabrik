@@ -620,6 +620,26 @@ func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
 	return out
 }
 
+// currentHeadReviewThreadComments narrows buildReviewThreadComments to
+// comments whose parent thread GitHub itself has not marked isOutdated — i.e.
+// threads still anchored to the PR's current head SHA. A thread opened
+// against a commit that has since been superseded by a new push must not
+// block the yolo-merge guards at attemptMergeOnValidate and
+// handleReviewGate's auto-merge-disable path (#1207); GitHub computes
+// isOutdated from whether the commented lines still exist unchanged in the
+// current diff, so no separate SHA-comparison logic is needed here.
+func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comment {
+	all := e.buildReviewThreadComments(item)
+	out := make([]gh.Comment, 0, len(all))
+	for _, c := range all {
+		if c.IsOutdated {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // pauseForReviewTimeout pauses the issue when the review wait timeout elapses.
 // It applies fabrik:paused + fabrik:awaiting-input and posts an explanatory comment.
 // If item.Labels contains the fabrik:bot-reprompted label (the pre-cleanup snapshot
