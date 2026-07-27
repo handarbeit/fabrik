@@ -54,20 +54,26 @@ jobs:
           AUTHOR: ${{ github.event.issue.user.login }}
         run: |
           set +e
-          RESPONSE=$(gh api "orgs/${ORG}/memberships/${AUTHOR}" 2>/tmp/membership-err.log)
-          STATUS=$?
+          RAW=$(gh api -i "orgs/${ORG}/memberships/${AUTHOR}" 2>/tmp/membership-err.log)
           set -e
+          # Strip CR so header/body parsing below isn't tripped up by CRLF.
+          RAW=$(printf '%s\n' "$RAW" | tr -d '\r')
+          # Read the numeric status straight from the HTTP status line — not
+          # from gh's human-readable error text, which is message-format text
+          # that can drift between gh CLI versions (#1137 review feedback).
+          HTTP_CODE=$(printf '%s\n' "$RAW" | awk 'NR==1 && /^HTTP\// {print $2; exit}')
+          BODY=$(printf '%s\n' "$RAW" | awk 'f{print} !NF{f=1}')
 
-          if [ "$STATUS" -eq 0 ]; then
-            STATE=$(echo "$RESPONSE" | jq -r '.state // "unknown"')
-            ROLE=$(echo "$RESPONSE" | jq -r '.role // "unknown"')
-            echo "Membership check: ${AUTHOR} IS a member of ${ORG} (state=${STATE}, role=${ROLE}) despite author_association=NONE (private membership). Basis: 200 from /orgs/${ORG}/memberships/${AUTHOR}. Skipping community routing."
+          if [ "$HTTP_CODE" = "200" ]; then
+            STATE=$(echo "$BODY" | jq -r '.state // "unknown"')
+            ROLE=$(echo "$BODY" | jq -r '.role // "unknown"')
+            echo "Membership check: ${AUTHOR} IS a member of ${ORG} (state=${STATE}, role=${ROLE}) despite author_association=NONE (private membership). Basis: HTTP 200 from /orgs/${ORG}/memberships/${AUTHOR}. Skipping community routing."
             echo "route=false" >> "$GITHUB_OUTPUT"
-          elif grep -q "HTTP 404" /tmp/membership-err.log; then
-            echo "Membership check: ${AUTHOR} is NOT a member of ${ORG}. Basis: 404 from /orgs/${ORG}/memberships/${AUTHOR}. Routing as community issue."
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "Membership check: ${AUTHOR} is NOT a member of ${ORG}. Basis: HTTP 404 from /orgs/${ORG}/memberships/${AUTHOR}. Routing as community issue."
             echo "route=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Error: membership check for ${AUTHOR} in ${ORG} returned an ambiguous result (neither a clean 200 nor 404) — failing closed and skipping routing rather than guessing. Raw output:"
+            echo "Error: membership check for ${AUTHOR} in ${ORG} returned an ambiguous result (HTTP status: ${HTTP_CODE:-none}) — failing closed and skipping routing rather than guessing. Raw output:"
             cat /tmp/membership-err.log
             echo "route=false" >> "$GITHUB_OUTPUT"
             exit 1
