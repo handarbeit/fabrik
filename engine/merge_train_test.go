@@ -1361,6 +1361,66 @@ func TestEnsureTrainWorktreeAt(t *testing.T) {
 	}
 }
 
+// TestAssembleAndValidate_LeavesWorktreeForCallerCleanup locks in the redundancy fix
+// (issue #1151, Requirement 4): assembleAndValidate must no longer remove the local
+// trial worktree itself right after opening the draft CI PR — the worktree must still
+// exist when assembleAndValidate returns, and is removed only once the caller's own
+// cleanup (cleanupTrialArtifacts / CleanupTrainWorktree) runs exactly once.
+func TestAssembleAndValidate_LeavesWorktreeForCallerCleanup(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	baseSHA := strings.TrimSpace(gitOutputDir(t, wm.baseDir, "rev-parse", "refs/remotes/origin/main"))
+
+	client := &mockGitHubClient{
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+	}
+	members := []trainMember{{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1}}
+	const trialName = "assemble-persist-trial"
+
+	survivors, result, prNum, err := eng.assembleAndValidate(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleAndValidate: %v", err)
+	}
+	if len(survivors) != 1 {
+		t.Fatalf("expected 1 survivor, got %d", len(survivors))
+	}
+	if result != TrainCIGreen {
+		t.Fatalf("expected TrainCIGreen, got %v", result)
+	}
+	if prNum != 99 {
+		t.Fatalf("expected prNum 99, got %d", prNum)
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+	if _, statErr := os.Stat(wtDir); statErr != nil {
+		t.Fatalf("expected trial worktree %s to still exist after assembleAndValidate returns (caller owns cleanup): %v", wtDir, statErr)
+	}
+
+	if err := wm.CleanupTrainWorktree(trialName, true); err != nil {
+		t.Fatalf("CleanupTrainWorktree: %v", err)
+	}
+	if _, statErr := os.Stat(wtDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected trial worktree %s removed after caller's cleanup, stat err = %v", wtDir, statErr)
+	}
+}
+
 // ── landMergeTrainBatch unit tests ────────────────────────────────────────────
 
 // makeQueuedMember returns a trainMember with Status "Queued".

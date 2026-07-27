@@ -524,9 +524,9 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 
 // assembleAndValidate builds a trial branch for members (off the pinned base SHA), opens a
 // draft CI PR, and polls the combined Validate. It returns the survivors, the CI result, and
-// the draft PR number. The local trial worktree is always removed before returning; the
-// remote branch persists to back the draft CI PR and is cleaned up by the caller (or by
-// landMergeTrainBatch on a green landing).
+// the draft PR number. The local trial worktree and both branches persist after this returns
+// (success or failure) — the caller owns cleanup exactly once, via cleanupTrialArtifacts or an
+// equivalent direct CleanupTrainWorktree call, regardless of outcome.
 //
 // When e.trainValidateFn is set (tests), it short-circuits the whole git/CI path and returns
 // (members, e.trainValidateFn(ctx, members), 0, nil), keying the result on batch membership
@@ -575,11 +575,6 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 		return nil, TrainCIPending, 0, fmt.Errorf("creating draft CI PR: %w", err)
 	}
 	e.logf(0, "merge-train", "opened draft CI PR #%d for %s/%s (%d survivor(s))\n", prNum, p.owner, p.repo, len(survivors))
-
-	// Remove the local worktree — the trial branch now lives on origin.
-	if cleanErr := p.wm.CleanupTrainWorktree(trialName, false); cleanErr != nil {
-		e.logf(0, "merge-train", "warn: could not clean up local trial worktree %s: %v\n", trialName, cleanErr)
-	}
 
 	result := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
 	return survivors, result, prNum, nil

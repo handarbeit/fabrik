@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -463,6 +464,132 @@ func TestDefaultBaseBranch_SymbolicRefHEAD(t *testing.T) {
 	}
 	if branch != "develop" {
 		t.Errorf("DefaultBaseBranch = %q, want develop (via git symbolic-ref HEAD on bare clone)", branch)
+	}
+}
+
+func TestIsAlreadyGoneWorktreeError(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "already gone",
+			out:  "fatal: '/some/path/merge-train-main-1785120046' is not a working tree",
+			want: true,
+		},
+		{
+			name: "genuine failure",
+			out:  "fatal: '/some/path/merge-train-main-1785120046' contains modified or untracked files, use --force to delete it",
+			want: false,
+		},
+		{
+			name: "empty",
+			out:  "",
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAlreadyGoneWorktreeError([]byte(tt.out)); got != tt.want {
+				t.Errorf("isAlreadyGoneWorktreeError(%q) = %v, want %v", tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAlreadyGoneRemoteBranchError(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "already gone",
+			out:  "error: unable to delete 'fabrik/merge-train/merge-train-main-1785120046': remote ref does not exist",
+			want: true,
+		},
+		{
+			name: "genuine failure",
+			out:  "error: unable to delete 'fabrik/merge-train/merge-train-main-1785120046': remote rejected (protected branch)",
+			want: false,
+		},
+		{
+			name: "empty",
+			out:  "",
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAlreadyGoneRemoteBranchError([]byte(tt.out)); got != tt.want {
+				t.Errorf("isAlreadyGoneRemoteBranchError(%q) = %v, want %v", tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQuietGitSSHEnv(t *testing.T) {
+	env := quietGitSSHEnv()
+	var sshCmd string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") {
+			sshCmd = kv
+		}
+	}
+	if sshCmd == "" {
+		t.Fatal("quietGitSSHEnv did not set GIT_SSH_COMMAND")
+	}
+	if !strings.Contains(sshCmd, "-o LogLevel=ERROR") {
+		t.Errorf("GIT_SSH_COMMAND = %q, want -o LogLevel=ERROR to suppress known-hosts chatter", sshCmd)
+	}
+	if !strings.Contains(sshCmd, "-o StrictHostKeyChecking=accept-new") {
+		t.Errorf("GIT_SSH_COMMAND = %q, want StrictHostKeyChecking=accept-new unchanged (host-key verification must not weaken)", sshCmd)
+	}
+}
+
+// TestCleanupTrainWorktree_AlreadyGoneNoWarn locks in the false-positive fix: calling
+// CleanupTrainWorktree a second time against already-removed artifacts (the reported
+// "every successful landing" scenario, where an earlier cleanup already ran) must not
+// emit warn: lines for the worktree or the remote branch.
+func TestCleanupTrainWorktree_AlreadyGoneNoWarn(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	const trialName = "already-gone-trial"
+	if _, err := wm.EnsureTrainWorktree(trialName, "main"); err != nil {
+		t.Fatalf("EnsureTrainWorktree: %v", err)
+	}
+	if err := wm.PushTrainBranch(trialName); err != nil {
+		t.Fatalf("PushTrainBranch: %v", err)
+	}
+
+	var firstLogs, secondLogs []string
+	wm.logfFn = func(n int, tag, format string, args ...any) {
+		firstLogs = append(firstLogs, fmt.Sprintf("[%s] "+format, append([]any{tag}, args...)...))
+	}
+	if err := wm.CleanupTrainWorktree(trialName, true); err != nil {
+		t.Fatalf("first CleanupTrainWorktree: %v", err)
+	}
+	for _, line := range firstLogs {
+		if strings.Contains(line, "warn:") {
+			t.Errorf("first cleanup (artifacts genuinely present) unexpectedly warned: %s", line)
+		}
+	}
+
+	wm.logfFn = func(n int, tag, format string, args ...any) {
+		secondLogs = append(secondLogs, fmt.Sprintf("[%s] "+format, append([]any{tag}, args...)...))
+	}
+	if err := wm.CleanupTrainWorktree(trialName, true); err != nil {
+		t.Fatalf("second CleanupTrainWorktree: %v", err)
+	}
+	for _, line := range secondLogs {
+		if strings.Contains(line, "could not remove train worktree") {
+			t.Errorf("second cleanup against an already-gone worktree warned: %s", line)
+		}
+		if strings.Contains(line, "could not delete remote trial branch") {
+			t.Errorf("second cleanup against an already-gone remote branch warned: %s", line)
+		}
 	}
 }
 
