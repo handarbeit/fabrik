@@ -27,6 +27,57 @@ var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
 var noWorkNeededRE = regexp.MustCompile(`(?m)^FABRIK_NO_WORK_NEEDED\r?$`)
 
+// usageLimitHitRE matches Anthropic's account usage-limit exit message (e.g.
+// "You've hit your session limit" / "...weekly limit"). Kept narrow and
+// literal, mirroring botServiceNoticePatterns' low-false-positive style, and
+// held in one named var so a future wording change is a one-line fix.
+var usageLimitHitRE = regexp.MustCompile(`(?i)hit your \S+ limit`)
+
+// usageLimitResetRE extracts the best-effort human-readable reset-time
+// fragment from a usage-limit message, e.g. "resets 10:20pm (America/Edmonton)".
+// Used only to enrich the explanatory comment; it never gates detection —
+// if the format shifts, detection still succeeds and the comment simply
+// omits the reset time.
+var usageLimitResetRE = regexp.MustCompile(`(?i)resets\s+(\d{1,2}:\d{2}\s*[ap]m\s*\([^)]+\))`)
+
+// claudeUsageLimitError signals that a Claude invocation exited because the
+// account's usage limit (session or weekly) was exhausted, not because the
+// stage genuinely failed. The stage never ran to completion, so this
+// condition must be excluded from max_retries — see handleUsageLimitExit
+// in item.go, which is the sole consumer (via errors.As).
+type claudeUsageLimitError struct {
+	// Message is the raw matched "hit your ... limit" phrase, for logging.
+	Message string
+	// ResetTime is the best-effort parsed reset-time fragment, or "" if the
+	// message didn't match usageLimitResetRE.
+	ResetTime string
+}
+
+func (e *claudeUsageLimitError) Error() string {
+	if e.ResetTime != "" {
+		return fmt.Sprintf("claude usage limit hit: %s (resets %s)", e.Message, e.ResetTime)
+	}
+	return fmt.Sprintf("claude usage limit hit: %s", e.Message)
+}
+
+// detectUsageLimitExit scans raw invocation output — the full NDJSON stdout
+// stream, not the parsed claudeResponse.Result or the already-collapsed text
+// variable — for Anthropic's account usage-limit exit message. Raw bytes are
+// scanned directly because it is unconfirmed whether a real limit exit lands
+// in resp.Result, only in resp.Errors[] (never copied into text today), or in
+// non-JSON plain stdout; scanning raw bytes is correct under all three shapes
+// without needing to know which is real.
+func detectUsageLimitExit(rawOutput []byte) (msg, resetTime string, detected bool) {
+	match := usageLimitHitRE.Find(rawOutput)
+	if match == nil {
+		return "", "", false
+	}
+	if m := usageLimitResetRE.FindSubmatch(rawOutput); m != nil {
+		resetTime = string(m[1])
+	}
+	return string(match), resetTime, true
+}
+
 // defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
 // when a stage does not specify allowed_tools. This ensures headless Claude Code
 // invocations work deterministically regardless of the user's global settings.
@@ -855,6 +906,13 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		if stageCompleteRE.MatchString(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
 			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
+		}
+		// Corroborating shape (~1 turn, $0.00) is logged only for diagnostics —
+		// per the issue spec it must never gate detection, since a genuine
+		// immediate stage failure can share the same shape.
+		if msg, resetTime, detected := detectUsageLimitExit(rawOutput); detected {
+			claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (resetTime=%q, turns=%d, cost=$%.4f): %s\n", resetTime, usage.TurnsUsed, usage.CostUSD, msg)
+			return text, false, usage, &claudeUsageLimitError{Message: msg, ResetTime: resetTime}
 		}
 		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
 	}
