@@ -494,6 +494,7 @@ func TestTuiEventMethods(t *testing.T) {
 	TickEvent{}.tuiEvent()
 	SkillsStaleEvent{}.tuiEvent()
 	RateLimitAlertEvent{}.tuiEvent()
+	ClaudeUsageLimitAlertEvent{}.tuiEvent()
 }
 
 // TestUpdate_RateLimitAlertEvent_Exhausted verifies that after receiving a
@@ -563,6 +564,113 @@ func TestUpdateLayout_AlertBannerHeightBudget(t *testing.T) {
 	got := lipgloss.Height(m.View())
 	if got != termHeight {
 		t.Errorf("with banner visible: View() height = %d, want %d (height budget not accounting for banner)", got, termHeight)
+	}
+}
+
+// TestUpdate_ClaudeUsageLimitAlertEvent_Suspended verifies that after
+// receiving a ClaudeUsageLimitAlertEvent{Suspended: true}, the usage-limit
+// banner becomes active and visible — mirrors
+// TestUpdate_RateLimitAlertEvent_Exhausted, but for the distinct
+// account-wide Claude suspension condition (ADR-1120).
+func TestUpdate_ClaudeUsageLimitAlertEvent_Suspended(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	reset := time.Now().Add(time.Hour)
+
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: true, Reset: reset})
+	m = next.(Model)
+
+	if !m.usageLimit.active {
+		t.Error("expected usageLimit.active=true after ClaudeUsageLimitAlertEvent{Suspended: true}")
+	}
+	if !m.usageLimit.reset.Equal(reset) {
+		t.Errorf("expected usageLimit.reset=%v, got %v", reset, m.usageLimit.reset)
+	}
+	if !m.usageLimit.isVisible() {
+		t.Error("expected usage-limit banner to be visible after Suspended=true event")
+	}
+}
+
+// TestUpdate_ClaudeUsageLimitAlertEvent_Cleared verifies that after receiving
+// a ClaudeUsageLimitAlertEvent{Suspended: false}, the banner's active flag is
+// cleared and it stops being visible — mirrors
+// TestUpdate_RateLimitAlertEvent_Recovered.
+func TestUpdate_ClaudeUsageLimitAlertEvent_Cleared(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.usageLimit.active = true
+	m.usageLimit.reset = time.Now().Add(time.Hour)
+
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: false})
+	m = next.(Model)
+
+	if m.usageLimit.active {
+		t.Error("expected usageLimit.active=false after ClaudeUsageLimitAlertEvent{Suspended: false}")
+	}
+	if m.usageLimit.isVisible() {
+		t.Error("expected usage-limit banner to be hidden after Suspended=false event")
+	}
+}
+
+// TestClaudeUsageLimitBanner_SelfClearsOnTickPastReset verifies that the
+// banner stops rendering once a TickEvent's At time reaches or passes the
+// computed reset, even with no explicit Suspended=false event — the
+// cosmetic self-clear behavior documented on
+// ClaudeUsageLimitBannerComponent.isVisible.
+func TestClaudeUsageLimitBanner_SelfClearsOnTickPastReset(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	reset := time.Now().Add(time.Hour)
+
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: true, Reset: reset})
+	m = next.(Model)
+	if !m.usageLimit.isVisible() {
+		t.Fatal("precondition: banner should be visible right after activation")
+	}
+
+	// Tick to a time before the reset — still visible.
+	next, _ = m.Update(TickEvent{At: reset.Add(-time.Minute)})
+	m = next.(Model)
+	if !m.usageLimit.isVisible() {
+		t.Error("expected banner to remain visible before reset")
+	}
+
+	// Tick past the reset — banner self-clears.
+	next, _ = m.Update(TickEvent{At: reset.Add(time.Minute)})
+	m = next.(Model)
+	if m.usageLimit.isVisible() {
+		t.Error("expected banner to self-clear once now passes reset")
+	}
+	if m.usageLimit.Height() != 0 {
+		t.Errorf("expected usageLimit.Height()=0 after self-clear, got %d", m.usageLimit.Height())
+	}
+}
+
+// TestUpdateLayout_ClaudeUsageLimitBannerHeightBudget verifies that the
+// layout height invariant holds when the usage-limit banner is visible
+// (banner takes 1 row) — mirrors TestUpdateLayout_AlertBannerHeightBudget.
+func TestUpdateLayout_ClaudeUsageLimitBannerHeightBudget(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+	const termHeight = 24
+
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.usageLimit.active = true
+	m.usageLimit.reset = time.Now().Add(time.Hour)
+	m.usageLimit.now = time.Now()
+
+	if !m.usageLimit.isVisible() {
+		t.Fatal("precondition: usage-limit banner should be visible")
+	}
+	if m.usageLimit.Height() != 1 {
+		t.Fatalf("precondition: usageLimit Height() = %d, want 1", m.usageLimit.Height())
+	}
+
+	// Apply window size — triggers updateLayout.
+	next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+	m = next.(Model)
+
+	got := lipgloss.Height(m.View())
+	if got != termHeight {
+		t.Errorf("with usage-limit banner visible: View() height = %d, want %d (height budget not accounting for banner)", got, termHeight)
 	}
 }
 
