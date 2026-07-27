@@ -60,7 +60,7 @@ func (c *Client) MergeStrategy() string {
 // SetToken replaces the client's bearer token. Safe to call concurrently
 // with in-flight requests. Needed by Pruefer's GitHub App installation-token
 // refresh loop, where the token expires roughly hourly and must be swapped
-// in place without reconstructing the client (see ADR-073).
+// in place without reconstructing the client (see ADR-074).
 func (c *Client) SetToken(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

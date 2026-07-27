@@ -29,7 +29,7 @@ func cloneURL(owner, repo, token string) string {
 // fresh temp dir. Fabrik's worktrees persist for days across many stage
 // runs on the same issue; Pruefer's reviews are single-shot, so a cache
 // would add lifecycle-management complexity for comparatively little
-// benefit at V1 scale (see adrs/073-pruefer-v1-architecture.md).
+// benefit at V1 scale (see adrs/074-pruefer-v1-architecture.md).
 func CloneForReview(ctx context.Context, owner, repo, token string, prNumber int) (dir string, cleanup func(), err error) {
 	return cloneRef(ctx, cloneURL(owner, repo, token), token, fmt.Sprintf("refs/pull/%d/head", prNumber), prNumber)
 }

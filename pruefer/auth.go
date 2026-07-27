@@ -32,7 +32,7 @@ type Auth struct {
 	// BotLogin is the App's own identity as it appears as a PR/review
 	// author, e.g. "pruefer-bot[bot]". Always slug + "[bot]" for a GitHub
 	// App — this is what makes the "review identity != PR author" guarantee
-	// structural rather than operator-discipline-dependent (see ADR-073).
+	// structural rather than operator-discipline-dependent (see ADR-074).
 	BotLogin string
 
 	privateKey *rsa.PrivateKey

@@ -50,7 +50,7 @@ type EligibilityInput struct {
 // ForceReview overrides only the already-reviewed-at-this-SHA check — draft,
 // self-authored, and excluded-author/label/path checks always apply, since
 // "/pruefer review" forces a *fresh* review, not a bypass of every safety
-// check (see adrs/073-pruefer-v1-architecture.md).
+// check (see adrs/074-pruefer-v1-architecture.md).
 func Eligible(in EligibilityInput) (bool, SkipReason) {
 	if in.PR.Draft {
 		return false, SkipDraft

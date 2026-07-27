@@ -561,7 +561,7 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 // SubmitPRReview submits a formal pull_request_review comment (event=COMMENT)
 // against the given commit SHA. The event type is hardcoded and never
 // caller-controlled — Pruefer V1 never submits APPROVE or REQUEST_CHANGES
-// verdicts (see ADR-073). Returns the numeric review ID.
+// verdicts (see ADR-074). Returns the numeric review ID.
 func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string) (int, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", c.baseURL, owner, repo, prNumber)
 	reqBody := map[string]interface{}{

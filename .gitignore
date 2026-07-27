@@ -23,6 +23,11 @@
 .env
 /fabrik
 /print-plugin-hash
+/pruefer
+.pruefer/pruefer.lock
+.pruefer/pruefer.log
+.pruefer/logs/
+.pruefer/*.pem
 # goreleaser build output — must be ignored or Go's buildvcs stamps release
 # artifacts +dirty (untracked dist/ makes the tree "modified" at build time).
 /dist/
