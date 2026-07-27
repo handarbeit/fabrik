@@ -251,6 +251,24 @@ type LocalLockReleased struct {
 func (LocalLockReleased) isMutation()       {}
 func (m LocalLockReleased) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// SelfWriteObserved advances an item's probe staleness baseline
+// (LastSeenSourceUpdatedAt) to the current wall-clock time, without performing
+// a deep fetch and without touching any other field. Applied at every call
+// site where Fabrik performs a self-write (label add/remove, comment post,
+// issue body edit, board status move) that is known to bump the item's real
+// GitHub updatedAt but whose cache write-through already reflects the
+// resulting state (#1090). Store.applyToItem enforces monotonicity: the
+// baseline only ever advances, never moves backward relative to a prior
+// deep-fetch or self-write, so a concurrent DeepFetchInvalidated (which
+// zeroes the baseline) can never be "un-done" by a stale SelfWriteObserved.
+type SelfWriteObserved struct {
+	Repo   string
+	Number int
+}
+
+func (SelfWriteObserved) isMutation()       {}
+func (m SelfWriteObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ---- Periodic reconciliation ----
 
 // BoardReconciled is submitted by the periodic poll loop after a full board fetch.

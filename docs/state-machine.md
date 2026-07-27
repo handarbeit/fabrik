@@ -3175,6 +3175,24 @@ The probe loop:
 
 `FetchItemDetails` writes `ItemDeepFetched` to the Store, updating `LastSeenSourceUpdatedAt` to the new `effectiveUpdatedAt`. The candidates loop that runs later in the same poll cycle sees these items as fresh (via `IsItemCacheFresh`) and skips duplicate fetches.
 
+**Self-write staleness baseline (`SelfWriteObserved`)**
+
+The staleness check in step 7 compares `effectiveUpdatedAt` against `LastSeenSourceUpdatedAt`, which is otherwise written only by a full deep-fetch (`ItemDeepFetched`). Without a second writer, every one of Fabrik's own board mutations — which bump the real GitHub `updatedAt` just like an external edit — would make the very next probe cycle see the item as stale and force an immediate `FetchItemDetails`, even though nothing actionable changed (the #1083 incident: a self-posted reply forced its own re-fetch on the next poll, running the ping-pong loop as fast as polling allowed instead of backing off).
+
+`itemstate.SelfWriteObserved{Repo, Number}` closes this gap: applied via `e.store.Apply(...)` directly (bypassing `boardcache.CacheImpl`, so it needs no cache-wired guard and is not gated on `e.webhookMgr`), it advances `LastSeenSourceUpdatedAt` to the local wall-clock time at the moment of the self-write — no deep-fetch, no other field touched. The advance is monotonic (`store.go`'s `applyToItem` only updates when `time.Now()` is after the current baseline), so it can never regress a value a concurrent `ItemDeepFetched` or an earlier `SelfWriteObserved` already recorded, and a `DeepFetchInvalidated` reset (zero value) always "wins" against a stale `SelfWriteObserved` racing behind it.
+
+It is wired into exactly five call sites, mirroring the existing webhook `RegisterEcho`/`RegisterEchoIfSubscribed` success-gating at each:
+
+- Label add (`engine/mutate.go` `syncLabelAdd`) — unconditional; reaching the call site already implies `AddLabelToIssue` succeeded.
+- Label remove (`engine/mutate.go` `syncLabelRemoval`) — gated on `echo`, the same signal that suppresses the webhook echo on a `gh.ErrNotFound` no-op removal.
+- Comment post (`engine/mutate.go` `postComment`) — unconditional; `AddComment` failure returns before this point.
+- Issue body edit (`engine/comments.go` `publishCommentOutput`) — inside `UpdateIssueBody`'s success branch.
+- Project board status move (`engine/stages.go` `advanceToQueued` and `advanceToNextStage`, `engine/no_work_needed_settle.go`, `engine/closed_item_advance_settle.go`) — inside each site's `UpdateProjectItemStatus` success branch.
+
+A failed mutation at any of these sites never advances the baseline, so the next probe still correctly treats the item as stale. And because the mechanism only ever *advances* the baseline to the current wall clock, a genuine external change that lands with a later `effectiveUpdatedAt` (a human/bot comment, label, or status change arriving after our self-write) still compares as stale and triggers a real deep-fetch — the suppression only ever applies to the self-write's own `updatedAt` bump, never to activity after it.
+
+**Known scope boundary**: this covers only the five call sites above. PR-body self-writes (`engine/pr.go`'s `updatePRVerification`/`ensurePRLinksIssue`, `engine/prcreate.go`'s linkage-heal edit) and a second issue-body-edit site (`engine/item.go`'s stage-output publishing path) bump a component of `effectiveUpdatedAt` the same way but are not wired to `SelfWriteObserved` — a deliberate, documented gap (see ADR-044 Addendum 4), not an oversight, left as a candidate follow-up if it proves to matter in practice.
+
 **Terminal-item skip**
 
 An item is **terminal** once Fabrik has confirmed it has nothing left to do: its status is a cleanup stage (e.g. `Done`), its labels include `stage:<StageName>:complete`, and no transient lifecycle label (`fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:awaiting-input`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`, `fabrik:claude-limit`) or lock label (`fabrik:locked:*`) is present.
