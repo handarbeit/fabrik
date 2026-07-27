@@ -1131,19 +1131,25 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > of its board column and back does **not** work as a workaround, since an unresolved
 > comment always routes to comment processing regardless of board state.
 
-> **Troubleshooting: a stage keeps retrying with a `fabrik:claude-limit` label and no
-> progress.** If the issue carries `fabrik:claude-limit` and a comment naming a Claude
-> account usage limit (e.g. `You've hit your session limit · resets 10:20pm
-> (America/Edmonton)`), the underlying Claude account has run out of usage — this is
-> not a stage failure, and it is not GitHub's own rate limiting (a separate, unrelated
-> mechanism). Fabrik detected the CLI's usage-limit exit message, so it does **not**
-> count this attempt against `--max-retries`: no `stage:<name>:failed`, no
-> `fabrik:paused`, no escalation comment. The stage will keep retrying on the normal
-> poll cooldown (`poll_interval x 10`) until an invocation succeeds, at which point
-> `fabrik:claude-limit` clears automatically. No operator action is required beyond
-> waiting for the account's usage limit to reset — backing off until the stated reset
-> time and pausing dispatch account-wide are tracked as a follow-up; until then, expect
-> one wasted invocation per cooldown window for each affected issue during an outage.
+> **Troubleshooting: a stage carries `fabrik:claude-limit` and dispatch looks idle.** If
+> the issue carries `fabrik:claude-limit` and a comment naming a Claude account usage
+> limit (e.g. `You've hit your session limit · resets 10:20pm (America/Edmonton)`), the
+> underlying Claude account has run out of usage — this is not a stage failure, and it
+> is not GitHub's own rate limiting (a separate, unrelated mechanism; see *Rate Limit
+> Monitoring* below). Fabrik detected the CLI's usage-limit exit message, so it does
+> **not** count this attempt against `--max-retries`: no `stage:<name>:failed`, no
+> `fabrik:paused`, no escalation comment. As soon as one worker observes the limit,
+> Fabrik parses the reset time from the CLI's own message and suspends *all* new Claude
+> dispatch account-wide — not just for this issue — until that time, so a usage-limit
+> window costs one detection and one automatic resume rather than every concurrent item
+> independently rediscovering and waiting out the same limit. If the reset time can't be
+> parsed (unexpected wording, missing zone), Fabrik falls back to a fixed one-hour
+> suspension instead of hammering on the normal 5-minute cooldown. The suspension and
+> its expected end are visible in the log (tag `claude-limit`) and, in the TUI, as a
+> dedicated banner distinct from the GitHub rate-limit banner (see *Claude Usage-Limit
+> Suspension* below). It clears automatically — either at the computed reset time or as
+> soon as any invocation succeeds, whichever comes first — at which point
+> `fabrik:claude-limit` also clears on this issue. No operator action is required.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
@@ -2388,6 +2394,30 @@ polling resumes. You do not need to restart Fabrik — it recovers on its own. O
 recovery from near-zero exhaustion, Fabrik fires an immediate probe rather than
 waiting for the next scheduled poll tick, so processing resumes as soon as the
 budget is restored.
+
+### Claude Usage-Limit Suspension
+
+This is a separate mechanism from GitHub rate-limit monitoring above — it tracks the
+Claude account's own usage limit (session or weekly), not GitHub's API budget. Board
+polling, settle scans, and label reconciliation are unaffected; only the *start* of new
+Claude invocations is gated.
+
+When any worker's Claude invocation exits because the account's usage limit was hit,
+Fabrik suspends the start of every new Claude invocation — across all issues, not just
+the one that hit the limit — until the reset time named in the CLI's own error message,
+and displays a banner distinct from the GraphQL one:
+
+```
+⚠ Claude usage limit hit — dispatch suspended. Resumes in 47m (22:20 local time).
+```
+
+If the reset time can't be parsed, Fabrik falls back to a fixed one-hour suspension
+instead of retrying on the normal cooldown. The suspension clears automatically —
+either once the reset time passes or as soon as any invocation succeeds, whichever
+comes first — and dispatch resumes with no operator action required. Already-running
+Claude invocations are never interrupted by this; the suspension only prevents new ones
+from starting. See the `fabrik:claude-limit` troubleshooting note above for the
+per-issue label/comment behavior layered on top of this account-wide gate.
 
 ---
 
@@ -4815,11 +4845,76 @@ failure.
 **Regression guard:** a usage-limit hit followed by a genuine failure leaves the full `MaxRetries`
 budget available for the genuine failure — the limit hit consumes zero attempts.
 
-**Out of scope (follow-up issue):** backing off until the stated reset time, suspending dispatch
-account-wide when one worker observes the limit, and a dedicated escalation/safety-net path for
-persistent misdetection. Without `MaxRetries` counting against it, a misdetected or unusually
-long-lived condition retries indefinitely rather than ever escalating for human review — an accepted,
-explicit limitation until the backoff-to-reset follow-up lands.
+**Account-wide suspension and backoff-to-reset (ADR-1120):** the per-issue handling above is layered
+under an account-wide gate, because the usage limit applies to the account, not the issue — without it,
+every concurrently-dispatched item independently rediscovers the same limit and each waits out its own
+per-issue cooldown. `Engine` carries a single suspension deadline (`claudeSuspendedUntil time.Time`,
+guarded by a dedicated `claudeSuspendMu`, distinct from the general-purpose `e.mu`) that is checked
+lazily — a cheap read — at each of the three places a Claude invocation can actually be attempted:
+the stage-invocation loop (`runInvocationWithExtension`, `engine/item.go`), the comment-review loop
+(`processComments`/`runCommentExtensionLoop`, `engine/comments.go`), and merge-train inline conflict
+resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
+
+- **Parsing the reset time:** `parseUsageLimitResetTime` (`engine/usage_limit_backoff.go`) parses the
+  raw `"3:04pm (Zone/City)"`-shaped fragment carried in `claudeUsageLimitError.ResetTime` via
+  `time.LoadLocation` (zone) and the `"3:04pm"` reference layout (clock), resolves it against the
+  current date in that zone, and rolls to the next day if the resulting wall-clock time is not after
+  now (the fragment carries no date). `computeUsageLimitResetDeadline` wraps this and falls back to a
+  fixed `claudeUsageLimitFallbackBackoff` (1 hour) — a full order of magnitude longer than the
+  ordinary 5-minute dispatch cooldown — whenever `ResetTime` is empty or the fragment doesn't parse
+  (unknown zone, malformed clock, missing parentheses), logging which path was taken.
+- **Activating and extending:** `activateClaudeSuspension(issueNumber, resetTimeRaw, now)` computes the
+  deadline and, under `claudeSuspendMu`, only updates `claudeSuspendedUntil` if no suspension is
+  currently active or the newly computed deadline is later than the one already recorded — so
+  concurrent workers racing to report the same or different reset times converge on the latest deadline
+  seen, never shortening an active window. It logs (tag `"claude-limit"`, naming the reset time and
+  whether it was parsed or a fallback) and emits `tui.ClaudeUsageLimitAlertEvent{Suspended: true, Reset:
+  deadline}` only on an actual change — the same non-spamming idiom as the per-issue label.
+- **Gating:** each of the three call sites checks `claudeSuspendedUntilTime(time.Now())` before
+  attempting an invocation. If suspended, the stage-invocation and merge-train paths short-circuit by
+  returning/propagating a `*claudeUsageLimitError` without calling Claude at all (routed through the
+  same per-issue handling described above); `processComments` returns `nil` immediately, before any
+  reaction, label, or worktree side effect, so the comment remains "new" and is retried on a later poll
+  once dispatch resumes. Already-running invocations are unaffected — the gate only blocks the *start*
+  of a new one.
+- **Detecting at all three sites:** `comments.go` and `merge_train.go` did not unwrap
+  `claudeUsageLimitError` before this issue landed, so a hit there was misattributed as ordinary
+  failure — a comment-review usage-limit hit counted toward the comment circuit breaker, and a
+  merge-train conflict-resolution usage-limit hit was indistinguishable from a genuinely unresolvable
+  conflict and ejected a healthy member. Both paths now detect the sentinel via `errors.As` after their
+  `InvokeForComments` call: `runCommentExtensionLoop` activates/clears the suspension and
+  `processComments` skips `checkCommentBreaker` on a usage-limit outcome; `resolveConflictWithClaude`
+  returns `(bool, error)` instead of a bare `bool`, and `assembleTrialBranch` treats a non-nil error as
+  a fatal assembly failure (cleanup, retry next cycle) rather than running `git merge --abort` +
+  `ejectMember` — an account-wide condition says nothing about whether that member's conflict is
+  resolvable.
+- **Auto-resume:** there is no ticker or wake mechanism for the suspension — `claudeSuspendedUntilTime`
+  simply returns "not suspended" once `now` reaches the deadline, so the very next dispatch attempt
+  (which was going to happen anyway on the normal poll cadence) proceeds normally. Non-Claude engine
+  work (board polling, settle scans, label reconciliation) is never gated by this mechanism.
+- **Early clear:** any of the three call sites that reaches Claude without a usage-limit error calls
+  `clearClaudeSuspension(reason)`, which clears `claudeSuspendedUntil` (logging + emitting
+  `tui.ClaudeUsageLimitAlertEvent{Suspended: false}`) if a suspension was active — the parsed/fallback
+  deadline is a hint, not a contract, so a successful invocation ahead of it lifts the suspension
+  immediately rather than waiting it out.
+- **TUI surfacing:** `ClaudeUsageLimitAlertEvent` (`tui/events.go`) drives a dedicated
+  `ClaudeUsageLimitBannerComponent` (`tui/usage_limit_banner.go`), independent of the GitHub
+  rate-limit `AlertBannerComponent` per the naming distinction above — both can be visible at once. The
+  banner also self-clears on a `TickEvent` whose time has passed the reset, a cosmetic-only convenience
+  that can run slightly ahead of the engine's own lazy check (harmless, since the engine never trusts
+  the banner's state).
+- **Updated comment copy:** the per-issue explanatory comment posted by `handleUsageLimitExit` no
+  longer says "Fabrik will keep retrying on the normal poll cooldown" — it now describes the
+  account-wide suspension and automatic resume at the reset time (or as soon as any invocation
+  succeeds).
+
+**Out of scope (still deferred):** a dedicated escalation/safety-net path for persistent or repeated
+misdetection. Without `MaxRetries` counting against a usage-limit exit, a misdetected or unusually
+long-lived condition still retries indefinitely (now spaced out by the account-wide suspension window
+rather than the 5-minute cooldown) instead of ever escalating for human review — an accepted, explicit
+limitation per ADR-1119 and ADR-1120. Cross-process coordination between multiple Fabrik instances
+sharing one account is also out of scope: the suspension is per-process, so a fleet of instances will
+each discover the limit once.
 
 ### 7.4 Multi-Instance Lock Protocol
 
