@@ -51,7 +51,7 @@ func newConcurrencyTrackingInvoker() *concurrencyTrackingInvoker {
 	return &concurrencyTrackingInvoker{release: make(chan struct{})}
 }
 
-func (c *concurrencyTrackingInvoker) Review(ctx context.Context, req ReviewRequest) (string, error) {
+func (c *concurrencyTrackingInvoker) Review(ctx context.Context, req ReviewRequest) (ReviewResult, error) {
 	c.mu.Lock()
 	c.current++
 	if c.current > c.maxSeen {
@@ -64,7 +64,7 @@ func (c *concurrencyTrackingInvoker) Review(ctx context.Context, req ReviewReque
 	c.mu.Lock()
 	c.current--
 	c.mu.Unlock()
-	return "reviewed", nil
+	return ReviewResult{Text: "reviewed"}, nil
 }
 
 func (c *concurrencyTrackingInvoker) currentCount() int {

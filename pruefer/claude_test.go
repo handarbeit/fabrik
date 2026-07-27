@@ -136,19 +136,25 @@ func writeFakeClaude(t *testing.T, script string) {
 }
 
 func TestRealClaudeInvoker_Review_Success(t *testing.T) {
-	writeFakeClaude(t, `printf '%s\n' '{"type":"result","result":"Found one bug: nil check missing on line 12.","is_error":false}'`+"\n")
+	writeFakeClaude(t, `printf '%s\n' '{"type":"result","result":"Found one bug: nil check missing on line 12.","is_error":false,"num_turns":7,"total_cost_usd":0.1234}'`+"\n")
 
 	r := &RealClaudeInvoker{}
 	workDir := t.TempDir()
-	text, err := r.Review(context.Background(), ReviewRequest{
+	result, err := r.Review(context.Background(), ReviewRequest{
 		Owner: "handarbeit", Repo: "fabrik", PRNumber: 1, Title: "Fix bug",
 		HeadSHA: "abc123", WorkDir: workDir,
 	})
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
-	if text != "Found one bug: nil check missing on line 12." {
-		t.Errorf("text = %q", text)
+	if result.Text != "Found one bug: nil check missing on line 12." {
+		t.Errorf("Text = %q", result.Text)
+	}
+	if result.NumTurns != 7 {
+		t.Errorf("NumTurns = %d, want 7", result.NumTurns)
+	}
+	if result.CostUSD != 0.1234 {
+		t.Errorf("CostUSD = %v, want 0.1234", result.CostUSD)
 	}
 }
 
@@ -236,12 +242,12 @@ func TestRealClaudeInvoker_Review_ContextCancelKillsProcess(t *testing.T) {
 func TestMockClaudeInvoker_RecordsCalls(t *testing.T) {
 	m := &mockClaudeInvoker{}
 	req := ReviewRequest{PRNumber: 7}
-	text, err := m.Review(context.Background(), req)
+	result, err := m.Review(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
-	if text != "mock review" {
-		t.Errorf("text = %q, want default mock review text", text)
+	if result.Text != "mock review" {
+		t.Errorf("Text = %q, want default mock review text", result.Text)
 	}
 	if m.callCount() != 1 {
 		t.Errorf("callCount = %d, want 1", m.callCount())
