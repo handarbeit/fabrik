@@ -44,6 +44,21 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 	}
 }
 
+func TestBuildReviewArgs_UserSettingsOnly(t *testing.T) {
+	args := buildReviewArgs(ReviewRequest{})
+
+	found := false
+	for i, a := range args {
+		if a == "--setting-sources" && i+1 < len(args) && args[i+1] == "user" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --setting-sources user, args = %v", args)
+	}
+}
+
 func TestBuildReviewArgs_NoModelWhenUnset(t *testing.T) {
 	args := buildReviewArgs(ReviewRequest{})
 	if slices.Contains(args, "--model") {
