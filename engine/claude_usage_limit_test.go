@@ -156,6 +156,42 @@ func TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError(t *testing.T)
 	}
 }
 
+// TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit is the
+// full-pipeline regression for #1183. The unit-level table test hand-supplies a
+// TokenUsage, so it cannot catch the field wiring silently breaking: the raw
+// payload here carries both num_turns and a nonzero total_cost_usd, so the
+// exclusion gate only fires if tokenUsageFromResponse/parseClaudeJSON actually
+// populate TurnsUsed and CostUSD from the JSON.
+//
+// The shape reproduces the incident: a turn-capped run whose own output quotes
+// the usage-limit message (routine in this repository, where issues, specs and
+// tests discuss these exact strings). It must NOT return the sentinel.
+func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing.T) {
+	raw := []byte(`{"subtype":"error_max_turns","terminal_reason":"max_turns","is_error":true,` +
+		`"num_turns":51,"total_cost_usd":2.2766,` +
+		`"result":"added a test fixture: You've hit your session limit · resets 10:20pm (America/Edmonton)",` +
+		`"errors":["Reached maximum number of turns (50)"]}`)
+
+	_, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+
+	// Guard the wiring the exclusion depends on: if these are zero, the gate is
+	// inert and the assertion below would pass for the wrong reason.
+	if usage.TurnsUsed == 0 || usage.CostUSD == 0 {
+		t.Fatalf("usage not parsed from raw payload: TurnsUsed=%d CostUSD=%v — exclusion gate would be inert", usage.TurnsUsed, usage.CostUSD)
+	}
+
+	var limitErr *claudeUsageLimitError
+	if errors.As(err, &limitErr) {
+		t.Fatalf("turn-capped run quoting the usage-limit message was classified as a usage-limit exit (ResetTime=%q); #1183 regression", limitErr.ResetTime)
+	}
+	if err == nil {
+		t.Errorf("expected a generic error for a non-zero exit, got nil")
+	}
+	if completed {
+		t.Errorf("expected completed=false for a turn-capped run")
+	}
+}
+
 // TestInterpretClaudeResult_UsageLimitExit_MarkerTakesPrecedence verifies that
 // a genuine stage completion (FABRIK_STAGE_COMPLETE present) is never
 // misclassified as a usage-limit exit, even if the output happens to also
