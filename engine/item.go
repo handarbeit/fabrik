@@ -953,6 +953,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigIntGrace:    sigIntGrace,
 		SigTermGrace:   sigTermGrace,
 		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+		CorrectiveHint: e.consumeStallHint(repoStr, item.Number, stage.Name),
 	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
@@ -1391,6 +1392,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		if claudeRan && e.cfg.MaxRetries > 0 {
+			e.detectAndArmStallHint(item, stage, repoStr, usage)
 			e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 			var count int
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
@@ -1412,6 +1414,64 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			}
 		}
 	}
+}
+
+// detectAndArmStallHint compares this incomplete invocation's turn usage against
+// the previous incomplete attempt's, recording the trend for the next comparison
+// and arming a one-shot corrective hint when a stall is detected (#1146).
+//
+// The signature: a turn-capped attempt (TurnsUsed >= MaxTurns, did not complete)
+// followed by an incomplete attempt using strictly fewer turns. A genuinely
+// progressing retry does not shrink like that — remaining work only running out
+// of turns faster than a fuller attempt is a strong indicator the worker re-derived
+// the same stall (e.g. backgrounded a long command and waited for a notification
+// that never arrives) rather than making less progress toward completion.
+//
+// Self-limiting to a single corrective hint per episode: StageTurnUsageRecorded
+// always overwrites LastTurnsCapped with this attempt's own capped status, and the
+// attempt that triggers detection is by definition not capped — so the precondition
+// for a re-arm is cleared immediately, without needing a separate one-shot guard.
+func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage, repoStr string, usage TokenUsage) {
+	var prevTurns int
+	var prevCapped bool
+	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
+		prevTurns = snap.LastTurnsUsed(stage.Name)
+		prevCapped = snap.LastTurnsCapped(stage.Name)
+	}
+
+	capped := usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns
+	e.store.Apply(itemstate.StageTurnUsageRecorded{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		TurnsUsed: usage.TurnsUsed,
+		Capped:    capped,
+	})
+
+	if !prevCapped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
+		return
+	}
+
+	e.store.Apply(itemstate.StallHintArmed{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.logf(item.Number, "stall", "detected likely stall on stage %q (turns %d capped -> %d, declining) — arming corrective hint for next attempt\n", stage.Name, prevTurns, usage.TurnsUsed)
+	stallComment := fmt.Sprintf(
+		"🏭 **Fabrik — possible stall detected**\n\nStage **%s** hit its turn limit (%d turns) without completing, and the following attempt used only %d turns without completing either. This pattern often indicates the worker backgrounded a long-running command and stalled waiting for a completion notification that never arrives in this headless environment. The next invocation will receive a corrective hint to run any long-running command in the foreground instead.",
+		stage.Name, prevTurns, usage.TurnsUsed,
+	)
+	e.postItemComment(item, stallComment, true)
+}
+
+// consumeStallHint returns the stall corrective hint text if one is armed for this
+// stage (see detectAndArmStallHint), consuming it so it is injected exactly once
+// per detected episode (#1146). Returns "" when no hint is pending or the store
+// read fails.
+func (e *Engine) consumeStallHint(repoStr string, issueNumber int, stageName string) string {
+	snap, err := e.store.Get(repoStr, issueNumber)
+	if err != nil || !snap.StallHintPending(stageName) {
+		return ""
+	}
+	e.store.Apply(itemstate.StallHintConsumed{Repo: repoStr, Number: issueNumber, StageName: stageName})
+	return stallCorrectiveHintText
 }
 
 // escalatePRCreationFailure is called when create_draft_pr: true and ensureDraftPR
