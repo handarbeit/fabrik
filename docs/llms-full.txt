@@ -1944,6 +1944,27 @@ After a successful push, `/cut-release` automatically files a GitHub issue:
 
 The `fabrik:yolo` label means Fabrik will pick it up automatically and run it through the pipeline. You don't need to do anything else for documentation updates after cutting a release.
 
+#### Plugin version auto-bump
+
+Claude Code's `/plugin update` detects a new plugin release by comparing the cached `plugin.json` `version` field against the version at `ref: main` in `marketplace.json` — same version number means no refresh fires, even if the plugin's source changed. To prevent users from getting stuck on stale cached content, `cut-release.sh` may commit a version bump to `plugin/fabrik/.claude-plugin/plugin.json` before it tags the release:
+
+- **When it fires**: after the release-notes commit is pushed and before the tag is created, the script diffs `plugin/fabrik` (excluding the manifest itself) against the previous release tag. If anything changed, it patch-bumps `plugin.json`'s `version` field (e.g. `0.2.0` → `0.2.1`) and commits it as `@arbeithand`, in a separate commit alongside an appended changelog line in that release's `release-notes/<version>.md`, e.g.:
+
+  ```
+  - Auto-bumped fabrik plugin to 0.2.1 (source changed since v0.0.75)
+  ```
+
+- **When it doesn't fire**: if `plugin/fabrik`'s source is unchanged since the previous tag, or there is no previous tag (first-ever release), no extra commit is made and nothing is appended to the release notes.
+- **Scope**: only `plugin/fabrik` (the one plugin listed in `marketplace.json`) is bumped. `plugin/fabrik-workflows` is embedded directly into the Fabrik binary and distributed via `fabrik init`/`fabrik upgrade`; it uses independent content-hash-based change detection and is not affected by the `/plugin update` staleness issue this bump exists to fix.
+- **Bump type**: patch-only. Minor/major version bumps for `plugin/fabrik` remain a manual responsibility.
+- **Escape hatch**: pass `--no-plugin-bump` to skip this step entirely, e.g. for a hotfix release where you don't want the extra commit:
+
+  ```
+  scripts/cut-release.sh v0.0.68 --no-plugin-bump
+  ```
+
+Don't be surprised to see a second `@arbeithand` commit on `main` after a release that touched plugin source — this is expected, not a sign something went wrong.
+
 #### Release-artifact verification guard
 
 The GitHub Actions release workflow (`.github/workflows/release.yml`, via `.goreleaser.yaml`) independently verifies every built binary before it is published — a check that runs in CI, separate from and in addition to `cut-release.sh`'s own local build/test gate.
@@ -1958,7 +1979,7 @@ The GitHub Actions release workflow (`.github/workflows/release.yml`, via `.gore
 
 **This guard exists because `v0.0.75` shipped with `vcs.modified=true`** — a dirty-tree build that was undetectable except via `go version -m` on the downloaded binary. **A guard trip does not mean re-cutting `v0.0.75`** — `proxy.golang.org` has already cached that version's zip and checksum, and republishing different content under the same tag would break every consumer that already resolved it. If the guard trips on a *future* release, fix the underlying cause and cut a new version; never force through or re-tag. See also: issue #1073, which gitignored goreleaser's own `dist/` output directory, since an untracked `dist/` at build time was independently identified as a plausible (though at the time unconfirmed) cause of the same symptom — this guard is the safety net for if that fix turns out to be incomplete.
 
-The `cut-release.sh` allowlist for uncommitted `release-notes/<version>.md` and `plugin/known_embedded_versions.go` (documented inline at the script's `DIRTY=` check) was reviewed alongside this guard: both files are committed by the script itself *before* the tag is pushed, so neither can reach the CI-built artifact — the allowlist is unrelated to what this guard protects against and was left unchanged.
+The `cut-release.sh` allowlist for uncommitted `release-notes/<version>.md`, `plugin/known_embedded_versions.go`, and `plugin/fabrik/.claude-plugin/plugin.json` (documented inline at the script's `DIRTY=` check) was reviewed alongside this guard: all three files are committed by the script itself *before* the tag is pushed, so none can reach the CI-built artifact — the allowlist is unrelated to what this guard protects against and was left unchanged.
 
 ### Built-in Skill: `/audit-documentation`
 
