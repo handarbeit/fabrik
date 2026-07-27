@@ -47,7 +47,7 @@ func (d *Daemon) lockPath() string {
 // Run acquires an exclusive file lock (preventing two Pruefer instances from
 // double-polling the same watched repos, mirroring engine/poll.go's
 // Engine.Run) and polls on Config.PollInterval until ctx is cancelled.
-func (d *Daemon) Run(ctx context.Context) error {
+func (d *Daemon) Run(ctx context.Context) (err error) {
 	lockPath := d.lockPath()
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
 		return fmt.Errorf("creating lock dir: %w", err)
@@ -56,7 +56,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening lock file %s: %w", lockPath, err)
 	}
-	defer lockFile.Close()
+	// A failed Close on a writable handle can mean a lost write (though the
+	// lock file's own contents are never written to — this guards against
+	// the general case). Surface it as the function's error when nothing
+	// else already failed; otherwise log it so it isn't silently dropped.
+	defer func() {
+		if cerr := lockFile.Close(); cerr != nil {
+			if err == nil {
+				err = fmt.Errorf("closing lock file %s: %w", lockPath, cerr)
+			} else {
+				logf(0, "poll", "closing lock file %s after prior error: %v\n", lockPath, cerr)
+			}
+		}
+	}()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
 	}
