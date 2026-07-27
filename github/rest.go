@@ -44,14 +44,23 @@ func authErrorHint(statusCode int) string {
 	return ""
 }
 
-// do is the shared REST request core. It marshals body (when non-nil), sets
-// auth/content-type/accept headers, executes the request, records rate-limit
-// stats, and maps 404/405/422 responses to their sentinel errors uniformly
-// across every REST verb. body may be nil for GET/DELETE-without-body calls;
-// Content-Type is only set when body is non-nil, matching what each verb sent
-// before this helper existed. The full response body is always read and
-// returned so typed callers can decode it themselves.
+// do is the shared REST request core, using GitHub's standard JSON media
+// type. See doWithAccept for the full behavior description.
 func (c *Client) do(method, url string, body interface{}) (*http.Response, []byte, error) {
+	return c.doWithAccept(method, url, "application/vnd.github+json", body)
+}
+
+// doWithAccept is the shared REST request core. It marshals body (when
+// non-nil), sets auth/content-type/accept headers, executes the request,
+// records rate-limit stats, and maps 404/405/422 responses to their sentinel
+// errors uniformly across every REST verb. body may be nil for
+// GET/DELETE-without-body calls; Content-Type is only set when body is
+// non-nil, matching what each verb sent before this helper existed. The full
+// response body is always read and returned so typed callers can decode it
+// themselves. accept lets callers request a non-default media type (e.g.
+// GitHub's diff format) while sharing the rest of the request/error-handling
+// pipeline.
+func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*http.Response, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -65,11 +74,11 @@ func (c *Client) do(method, url string, body interface{}) (*http.Response, []byt
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.Token())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", accept)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

@@ -57,6 +57,24 @@ func (c *Client) MergeStrategy() string {
 	return c.mergeStrategy
 }
 
+// SetToken replaces the client's bearer token. Safe to call concurrently
+// with in-flight requests. Needed by Pruefer's GitHub App installation-token
+// refresh loop, where the token expires roughly hourly and must be swapped
+// in place without reconstructing the client (see ADR-1113).
+func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
+}
+
+// Token returns the client's current bearer token, safe for concurrent use
+// alongside SetToken.
+func (c *Client) Token() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.token
+}
+
 func NewClient(token string) *Client {
 	return &Client{
 		token:   token,
@@ -120,7 +138,7 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.Token())
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)

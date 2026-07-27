@@ -32,3 +32,4 @@ contributors and future maintainers.
 | [067](067-merge-train-centralized-inflight-cleanup.md) | Centralized Merge-Train In-Flight Marker Cleanup | Accepted |
 | [073](073-outbound-bot-mention-neutralization.md) | Outbound Bot-Mention Neutralization | Accepted |
 | [1089](1089-comment-processing-circuit-breaker.md) | Comment-Processing Circuit Breaker | Accepted |
+| [1113](1113-pruefer-v1-architecture.md) | Pruefer V1 architecture (GitHub App identity, review-state, defaults) | Accepted |
