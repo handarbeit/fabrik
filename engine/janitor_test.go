@@ -558,3 +558,324 @@ func TestLogJanitorPeriodicPath(t *testing.T) {
 		t.Errorf("periodic path: recent file should be kept: %v", err)
 	}
 }
+
+// ── Session janitor tests ───────────────────────────────────────────────────
+
+// seedSessionFile writes a fake session-ID file to dir/name and sets its mtime.
+// Returns the full path.
+func seedSessionFile(t *testing.T, dir, name string, mtime time.Time) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("seedSessionFile mkdir %s: %v", dir, err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("test-session-id"), 0644); err != nil {
+		t.Fatalf("seedSessionFile WriteFile %s: %v", path, err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("seedSessionFile Chtimes %s: %v", path, err)
+	}
+	return path
+}
+
+// TestPruneSessionsAgePrune_SingleRepoLayout verifies age-based pruning on the
+// single-repo layout: root/issue-N/<Stage>.session.
+func TestPruneSessionsAgePrune_SingleRepoLayout(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	old := now.Add(-15 * 24 * time.Hour)   // older than 14-day default
+	recent := now.Add(-1 * 24 * time.Hour) // within retention window
+
+	issueDir := filepath.Join(root, "issue-1")
+	oldFile := seedSessionFile(t, issueDir, "Implement.session", old)
+	newFile := seedSessionFile(t, issueDir, "Review.session", recent)
+
+	noResolve := func(string) (string, bool) { return "", false }
+	notInFlight := func(string, int) bool { return false }
+
+	scanned, removed, skippedInFlight, skippedUnresolved, err := pruneSessions(root, 14, now, "owner/repo", noResolve, notInFlight)
+	if err != nil {
+		t.Fatalf("pruneSessions: %v", err)
+	}
+	if scanned != 2 {
+		t.Errorf("scanned=%d, want 2", scanned)
+	}
+	if removed != 1 {
+		t.Errorf("removed=%d, want 1", removed)
+	}
+	if skippedInFlight != 0 || skippedUnresolved != 0 {
+		t.Errorf("skippedInFlight=%d skippedUnresolved=%d, want 0 0", skippedInFlight, skippedUnresolved)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Errorf("old session file should be deleted")
+	}
+	if _, err := os.Stat(newFile); err != nil {
+		t.Errorf("new session file should be kept: %v", err)
+	}
+}
+
+// TestPruneSessionsAgePrune_MultiRepoLayout verifies age-based pruning on the
+// multi-repo layout: root/<owner>-<repo>/issue-N/<Stage>.session.
+func TestPruneSessionsAgePrune_MultiRepoLayout(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	old := now.Add(-15 * 24 * time.Hour)
+	recent := now.Add(-1 * 24 * time.Hour)
+
+	issueDir := filepath.Join(root, "owner-repo", "issue-1")
+	oldFile := seedSessionFile(t, issueDir, "Implement.session", old)
+	newFile := seedSessionFile(t, issueDir, "Review.session", recent)
+
+	resolve := func(dirName string) (string, bool) {
+		if dirName == "owner-repo" {
+			return "owner/repo", true
+		}
+		return "", false
+	}
+	notInFlight := func(string, int) bool { return false }
+
+	scanned, removed, skippedInFlight, skippedUnresolved, err := pruneSessions(root, 14, now, "", resolve, notInFlight)
+	if err != nil {
+		t.Fatalf("pruneSessions: %v", err)
+	}
+	if scanned != 2 || removed != 1 {
+		t.Errorf("scanned=%d removed=%d, want 2 1", scanned, removed)
+	}
+	if skippedInFlight != 0 || skippedUnresolved != 0 {
+		t.Errorf("skippedInFlight=%d skippedUnresolved=%d, want 0 0", skippedInFlight, skippedUnresolved)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Errorf("old session file should be deleted")
+	}
+	if _, err := os.Stat(newFile); err != nil {
+		t.Errorf("new session file should be kept: %v", err)
+	}
+}
+
+// TestPruneSessionsInFlightGuard_SkipsWholeDirectory verifies that once an
+// issue has a live in-flight worker, every ".session" file under that issue's
+// directory is retained regardless of age — not just the file matching the
+// worker's current stage.
+func TestPruneSessionsInFlightGuard_SkipsWholeDirectory(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	old := now.Add(-30 * 24 * time.Hour)
+
+	// Issue 5 is in flight; both its (unrelated-stage) files must survive.
+	inFlightIssueDir := filepath.Join(root, "issue-5")
+	oldImplementFile := seedSessionFile(t, inFlightIssueDir, "Implement.session", old)
+	oldReviewFile := seedSessionFile(t, inFlightIssueDir, "Review.session", old)
+
+	// Issue 6 is not in flight; its stale file must be removed.
+	notInFlightIssueDir := filepath.Join(root, "issue-6")
+	oldFile6 := seedSessionFile(t, notInFlightIssueDir, "Implement.session", old)
+
+	isInFlight := func(ownerRepo string, issueNumber int) bool {
+		return issueNumber == 5
+	}
+	noResolve := func(string) (string, bool) { return "", false }
+
+	scanned, removed, skippedInFlight, skippedUnresolved, err := pruneSessions(root, 14, now, "owner/repo", noResolve, isInFlight)
+	if err != nil {
+		t.Fatalf("pruneSessions: %v", err)
+	}
+	if scanned != 3 {
+		t.Errorf("scanned=%d, want 3", scanned)
+	}
+	if removed != 1 {
+		t.Errorf("removed=%d, want 1 (only issue-6's file)", removed)
+	}
+	if skippedInFlight != 2 {
+		t.Errorf("skippedInFlight=%d, want 2 (both issue-5 files)", skippedInFlight)
+	}
+	if skippedUnresolved != 0 {
+		t.Errorf("skippedUnresolved=%d, want 0", skippedUnresolved)
+	}
+	for _, f := range []string{oldImplementFile, oldReviewFile} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("in-flight issue's session file %s should be retained: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(oldFile6); !os.IsNotExist(err) {
+		t.Errorf("issue-6's stale file should be deleted")
+	}
+}
+
+// TestPruneSessionsUnresolvedMultiRepoDir_SkippedEntirely verifies that a
+// multi-repo directory whose name cannot be resolved to an owner/repo is
+// skipped in its entirety — nothing under it is deleted, regardless of age.
+func TestPruneSessionsUnresolvedMultiRepoDir_SkippedEntirely(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	old := now.Add(-30 * 24 * time.Hour)
+
+	issueDir := filepath.Join(root, "unknown-owner-unknown-repo", "issue-1")
+	oldFile := seedSessionFile(t, issueDir, "Implement.session", old)
+
+	noResolve := func(string) (string, bool) { return "", false }
+	notInFlight := func(string, int) bool { return false }
+
+	scanned, removed, skippedInFlight, skippedUnresolved, err := pruneSessions(root, 14, now, "", noResolve, notInFlight)
+	if err != nil {
+		t.Fatalf("pruneSessions: %v", err)
+	}
+	if scanned != 1 || removed != 0 {
+		t.Errorf("scanned=%d removed=%d, want 1 0", scanned, removed)
+	}
+	if skippedUnresolved != 1 {
+		t.Errorf("skippedUnresolved=%d, want 1", skippedUnresolved)
+	}
+	if skippedInFlight != 0 {
+		t.Errorf("skippedInFlight=%d, want 0", skippedInFlight)
+	}
+	if _, err := os.Stat(oldFile); err != nil {
+		t.Errorf("session file under unresolved repo dir should be retained: %v", err)
+	}
+}
+
+// TestPruneSessionsNonExistentRoot verifies that pruneSessions returns clean
+// zero counts (not an error) when the sessions directory doesn't exist yet.
+func TestPruneSessionsNonExistentRoot(t *testing.T) {
+	nonExistentRoot := filepath.Join(t.TempDir(), "no-such-dir")
+	scanned, removed, skippedInFlight, skippedUnresolved, err := pruneSessions(
+		nonExistentRoot, 14, time.Now(), "owner/repo",
+		func(string) (string, bool) { return "", false },
+		func(string, int) bool { return false },
+	)
+	if err != nil {
+		t.Errorf("expected nil error for non-existent root, got: %v", err)
+	}
+	if scanned != 0 || removed != 0 || skippedInFlight != 0 || skippedUnresolved != 0 {
+		t.Errorf("expected zero counts for non-existent root, got scanned=%d removed=%d", scanned, removed)
+	}
+}
+
+// TestPruneSessionsDisabled verifies that retentionDays=0 disables age-based
+// pruning entirely — no files are scanned or removed.
+func TestPruneSessionsDisabled(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	ancient := now.Add(-365 * 24 * time.Hour)
+	issueDir := filepath.Join(root, "issue-1")
+	f := seedSessionFile(t, issueDir, "Implement.session", ancient)
+
+	scanned, removed, _, _, err := pruneSessions(root, 0, now, "owner/repo",
+		func(string) (string, bool) { return "", false },
+		func(string, int) bool { return false },
+	)
+	if err != nil {
+		t.Fatalf("pruneSessions: %v", err)
+	}
+	if scanned != 0 || removed != 0 {
+		t.Errorf("retentionDays=0: scanned=%d removed=%d, want 0 0", scanned, removed)
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Errorf("file should not be deleted when retentionDays=0: %v", err)
+	}
+}
+
+// TestPruneSessionsEmptyDirCleanup verifies that empty issue-N/ and
+// owner-repo/ directories are removed after pruning, while non-empty
+// directories are kept (parity with pruneLogs Phase 3; not required by the
+// Definition of Done but included since it's cheap given the directories
+// already collected during the walk).
+func TestPruneSessionsEmptyDirCleanup(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	ancient := now.Add(-30 * 24 * time.Hour)
+
+	// Single-repo layout: issue-1 becomes fully empty after pruning.
+	emptyIssueDir := filepath.Join(root, "issue-1")
+	seedSessionFile(t, emptyIssueDir, "Implement.session", ancient)
+
+	// Multi-repo layout: owner-repo/issue-2 becomes fully empty, and owner-repo/
+	// itself has no other children so it should be removed too.
+	repoDir := filepath.Join(root, "owner-repo")
+	emptyMultiIssueDir := filepath.Join(repoDir, "issue-2")
+	seedSessionFile(t, emptyMultiIssueDir, "Implement.session", ancient)
+
+	// Multi-repo layout: owner-repo2/issue-3 has one old + one new file, so it survives.
+	repoDir2 := filepath.Join(root, "owner-repo2")
+	nonEmptyIssueDir := filepath.Join(repoDir2, "issue-3")
+	seedSessionFile(t, nonEmptyIssueDir, "old.session", ancient)
+	seedSessionFile(t, nonEmptyIssueDir, "new.session", now)
+
+	resolve := func(dirName string) (string, bool) {
+		switch dirName {
+		case "owner-repo":
+			return "owner/repo", true
+		case "owner-repo2":
+			return "owner/repo2", true
+		default:
+			return "", false
+		}
+	}
+	notInFlight := func(string, int) bool { return false }
+
+	_, _, _, _, err := pruneSessions(root, 14, now, "owner/repo0", resolve, notInFlight)
+	if err != nil {
+		t.Fatalf("pruneSessions: %v", err)
+	}
+
+	if _, err := os.Stat(emptyIssueDir); !os.IsNotExist(err) {
+		t.Errorf("emptied issue-1/ dir should be removed")
+	}
+	if _, err := os.Stat(emptyMultiIssueDir); !os.IsNotExist(err) {
+		t.Errorf("emptied owner-repo/issue-2/ dir should be removed")
+	}
+	if _, err := os.Stat(repoDir); !os.IsNotExist(err) {
+		t.Errorf("emptied owner-repo/ dir should be removed")
+	}
+	if _, err := os.Stat(nonEmptyIssueDir); err != nil {
+		t.Errorf("non-empty owner-repo2/issue-3/ dir should be kept: %v", err)
+	}
+}
+
+// TestSessionJanitorIntegration verifies the periodic path (runSessionJanitor,
+// the function the janitor ticker calls every cycle): a stale session file for
+// a closed issue with no in-flight worker is removed, while a session file for
+// an issue with a live WorkerEntered worker is retained regardless of age.
+func TestSessionJanitorIntegration(t *testing.T) {
+	fabrikDir := t.TempDir()
+	sessionsRoot := filepath.Join(fabrikDir, ".fabrik", "sessions")
+
+	now := time.Now()
+	ancient := now.Add(-20 * 24 * time.Hour) // exceeds 14-day default
+
+	const repo = "owner/repo"
+
+	// Issue 20: closed, no worker — stale session file should be removed.
+	staleIssueDir := filepath.Join(sessionsRoot, "issue-20")
+	staleFile := seedSessionFile(t, staleIssueDir, "Implement.session", ancient)
+
+	// Issue 21: has a live in-flight worker — stale session file should be retained.
+	inFlightIssueDir := filepath.Join(sessionsRoot, "issue-21")
+	inFlightFile := seedSessionFile(t, inFlightIssueDir, "Review.session", ancient)
+
+	eng := NewWithDeps(Config{
+		Owner:                "owner",
+		Repo:                 "repo",
+		MaxConcurrent:        1,
+		JanitorIntervalHours: 1,
+		SessionRetentionDays: 14,
+	}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	eng.fabrikDir = fabrikDir
+
+	seedClosed(eng, repo, 20)
+	seedOpenOnStage(eng, repo, 21, "Implement")
+	eng.store.Apply(itemstate.WorkerEntered{
+		Repo:      repo,
+		Number:    21,
+		StageName: "Implement",
+		StartedAt: time.Now(),
+	})
+
+	eng.runSessionJanitor(context.Background())
+
+	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+		t.Errorf("stale session file for closed/no-worker issue should be removed, but still exists")
+	}
+	if _, err := os.Stat(inFlightFile); err != nil {
+		t.Errorf("session file for in-flight issue should be retained: %v", err)
+	}
+}
