@@ -456,6 +456,9 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 	if c := e.cache(); c != nil {
 		c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), hs.Name)
 	}
+	// Advances the probe staleness baseline (#1090) — the status move above just
+	// bumped the item's real GitHub updatedAt via the project-item mutation.
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	}
@@ -503,6 +506,9 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 		if c := e.cache(); c != nil {
 			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), next.Name)
 		}
+		// Advances the probe staleness baseline (#1090) — the status move above
+		// just bumped the item's real GitHub updatedAt via the project-item mutation.
+		e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}

@@ -1,6 +1,7 @@
 package itemstate
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -302,6 +303,59 @@ func TestApplyItemDeepFetched(t *testing.T) {
 	}
 	if st.LastDeepFetchAt.IsZero() {
 		t.Error("LastDeepFetchAt not set")
+	}
+}
+
+// ---- SelfWriteObserved ----
+
+func TestApplySelfWriteObserved(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	before := time.Now()
+	applyExpect(t, s, SelfWriteObserved{Repo: testRepo, Number: 1}, SelfWriteBaselineChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LastSeenSourceUpdatedAt.Before(before) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want >= %v", st.LastSeenSourceUpdatedAt, before)
+	}
+}
+
+// TestApplySelfWriteObservedMonotonic verifies the "never move the baseline
+// backward" requirement (#1090): a SelfWriteObserved applied after a deep
+// fetch that already recorded a later source updatedAt (e.g. clock skew, or a
+// deep fetch racing ahead of the self-write's cache write-through) must not
+// regress LastSeenSourceUpdatedAt to the earlier local wall-clock value.
+func TestApplySelfWriteObservedMonotonic(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	future := time.Now().Add(time.Hour)
+	fresh := testProjectItem(testRepo, 1)
+	fresh.UpdatedAt = future
+	if _, _, err := s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: fresh}); err != nil {
+		t.Fatalf("seed ItemDeepFetched: %v", err)
+	}
+
+	snap, changes, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 && changes[0].Fields&SelfWriteBaselineChanged != 0 {
+		t.Error("SelfWriteObserved advanced the baseline backward past a later recorded value")
+	}
+	if st := snap.State(); !st.LastSeenSourceUpdatedAt.Equal(future) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want unchanged %v", st.LastSeenSourceUpdatedAt, future)
+	}
+}
+
+// TestApplySelfWriteObservedTouchesOnlyBaseline verifies the requirement that
+// SelfWriteObserved touch no field other than LastSeenSourceUpdatedAt (#1090).
+func TestApplySelfWriteObservedTouchesOnlyBaseline(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	before := getItem(t, s, testRepo, 1)
+	if _, _, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	after := getItem(t, s, testRepo, 1)
+	before.LastSeenSourceUpdatedAt = after.LastSeenSourceUpdatedAt
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("SelfWriteObserved touched a field other than LastSeenSourceUpdatedAt:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
 

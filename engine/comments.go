@@ -462,8 +462,14 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 		// no write-through: excluded — issue body is not read from cache for dispatch decisions
 		if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
-		} else if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
+		} else {
+			// Advances the probe staleness baseline (#1090) — the edit above just
+			// bumped the issue's real GitHub updatedAt, so the next probe cycle
+			// must not treat that bump as a stale signal.
+			e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
+			}
 		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 		// Circuit breaker (#1089): a FABRIK_ISSUE_UPDATE is the only forward-progress

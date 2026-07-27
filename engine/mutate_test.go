@@ -3,10 +3,22 @@ package engine
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 )
+
+// lastSeenSourceUpdatedAt returns the current probe staleness baseline for
+// owner/repo#number, failing the test if the item isn't in the store.
+func lastSeenSourceUpdatedAt(t *testing.T, eng *Engine, repo string, number int) time.Time {
+	t.Helper()
+	snap, err := eng.store.Get(repo, number)
+	if err != nil {
+		t.Fatalf("store.Get(%q, %d): %v", repo, number, err)
+	}
+	return snap.State().LastSeenSourceUpdatedAt
+}
 
 // ── cache() ──────────────────────────────────────────────────────────────
 
@@ -511,5 +523,133 @@ func TestPauseIssue_RemoveAutoMerge(t *testing.T) {
 	}
 	if !containsLabel(labels, "fabrik:paused") || !containsLabel(labels, "fabrik:awaiting-input") {
 		t.Errorf("expected pause labels present, got %v", labels)
+	}
+}
+
+// ── SelfWriteObserved probe-staleness baseline (#1090) ───────────────────────
+//
+// These tests exercise the same three engine/mutate.go call sites as above,
+// but assert against the itemstate.Store's LastSeenSourceUpdatedAt baseline
+// rather than the boardcache write-through — the two are deliberately
+// independent mechanisms (see engine/mutate.go comments), so a passing
+// write-through test above does not imply the baseline advanced correctly.
+
+func TestApplyLabelAdd_AdvancesStaleness(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	before := time.Now()
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.applyLabelAdd(item, "fabrik:paused", true)
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful label add", got, before)
+	}
+}
+
+func TestApplyLabelAdd_ErrorDoesNotAdvanceStaleness(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			return errors.New("api error")
+		},
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.applyLabelAdd(item, "fabrik:paused", true)
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.IsZero() {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want unchanged (zero) on a failed label add", got)
+	}
+}
+
+// TestApplyLabelRemove_SuccessAdvancesStaleness covers the genuine-removal
+// path (echo=true), where syncLabelRemoval must advance the baseline.
+func TestApplyLabelRemove_SuccessAdvancesStaleness(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:blocked")
+	before := time.Now()
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.applyLabelRemove(item, "fabrik:blocked", true)
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful label removal", got, before)
+	}
+}
+
+// TestApplyLabelRemove_ErrNotFoundDoesNotAdvanceStaleness covers the
+// idempotent-no-op path (echo=false on gh.ErrNotFound): no real GitHub change
+// occurred, so the staleness baseline must not advance, mirroring the
+// adjacent RegisterEcho suppression.
+func TestApplyLabelRemove_ErrNotFoundDoesNotAdvanceStaleness(t *testing.T) {
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			return gh.ErrNotFound
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:editing")
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.applyLabelRemove(item, "fabrik:editing", true)
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.IsZero() {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want unchanged (zero) on an ErrNotFound no-op removal", got)
+	}
+}
+
+func TestPostComment_SuccessAdvancesStaleness(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 42, nil
+		},
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	before := time.Now()
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	if _, err := eng.postComment(item, "hello", false, true); err != nil {
+		t.Fatalf("postComment: %v", err)
+	}
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful comment post", got, before)
+	}
+}
+
+func TestPostComment_ErrorDoesNotAdvanceStaleness(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, errors.New("rate limited")
+		},
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	if _, err := eng.postComment(item, "hello", false, true); err == nil {
+		t.Fatal("expected an error from postComment")
+	}
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.IsZero() {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want unchanged (zero) on a failed comment post", got)
+	}
+}
+
+// TestApplyLabelAdd_AdvancesStalenessWithoutWebhookMgr verifies the "must work
+// identically in polling-only mode" requirement (#1090): the baseline advance
+// must not be gated on e.webhookMgr, unlike the adjacent RegisterEcho call.
+func TestApplyLabelAdd_AdvancesStalenessWithoutWebhookMgr(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	eng.webhookMgr = nil // polling-only mode
+	before := time.Now()
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.applyLabelAdd(item, "fabrik:paused", true)
+
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v in polling-only mode (webhookMgr == nil)", got, before)
 	}
 }

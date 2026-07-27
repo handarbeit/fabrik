@@ -170,3 +170,33 @@ The single production call to the old `isProbeOnlyTerminal` in `runProbeAndDeepF
 ### Consequence
 
 Items that are closed and in a Done/cleanup stage but whose worktrees still exist on disk proceed through the normal dispatch path: deep-fetch → `processItem` → `cleanup_worktree` → worktree removed → `isTerminalPredicate` (label-aware) confirms terminal on the next poll. The existing cost-saving short-circuit is preserved for items whose worktrees have already been cleaned up.
+
+## Addendum 4 — Self-write staleness baseline (issue #1090, 2026-07-27)
+
+### Problem
+
+The staleness check in step 7 of the probe loop compares `effectiveUpdatedAt` (GitHub-derived: `max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt)`) against `LastSeenSourceUpdatedAt`, a per-item baseline written only by `ItemDeepFetched` on a full deep-fetch. Fabrik's own board mutations — posting a comment, adding/removing a label, editing the issue body, moving the board status column — bump the real GitHub `updatedAt` exactly like an external change, but none of Fabrik's write paths touched `LastSeenSourceUpdatedAt` to match. The very next probe cycle therefore always saw the item as stale and forced an immediate `FetchItemDetails`, even though nothing actionable had changed.
+
+During the #1083 incident this is why the ping-pong comment loop ran as fast as polling allowed rather than backing off: every Fabrik reply forced its own immediate re-fetch on the next cycle. An echo-suppression mechanism already existed for the **webhook** delivery path (`webhookMgr.RegisterEcho`/`RegisterEchoIfSubscribed`, ADR-042), but nothing analogous existed for the **probe/poll staleness** comparison, which runs unconditionally every cycle regardless of webhook mode.
+
+### Fix
+
+A new, single-purpose mutation, `itemstate.SelfWriteObserved{Repo, Number}`, advances `LastSeenSourceUpdatedAt` to the local wall-clock time (`time.Now()`) at the moment of a self-write — no deep-fetch, no other field touched. `store.go`'s `applyToItem` guards the advance with `if now.After(item.LastSeenSourceUpdatedAt)`, making it monotonic: it can never regress a value a concurrent `ItemDeepFetched` already recorded, and a `DeepFetchInvalidated` reset (zero value) always wins against a stale `SelfWriteObserved` racing behind it. A local wall-clock timestamp was chosen over a GitHub-returned one because only `UpdateIssueBody`'s REST response would cheaply carry the issue's own `updated_at` — the other four categories' responses don't surface it, and fetching it separately would defeat the "no new deep-fetch" goal. This mirrors the existing `ItemDeepFetched`/`RegisterEcho` precedent of using `time.Now()` for comparable bookkeeping, accepting the same coarse-grained clock-skew characteristic `cacheIsStale` already has.
+
+The mutation is applied via `e.store.Apply(...)` directly, bypassing `boardcache.CacheImpl` — mirroring the existing `engine/comment_breaker.go` precedent of engine code writing straight to the shared `Store`. Since `Engine.store` is always non-nil regardless of cache/webhook wiring, this needs no `e.cache() != nil` guard and is not gated on `e.webhookMgr`, satisfying the requirement that polling-only mode (`webhookMgr == nil`) behave identically to webhook mode.
+
+It is wired into exactly five call sites, each gated on the same success signal that already gates the adjacent `RegisterEcho`/`RegisterEchoIfSubscribed` call:
+
+- Label add — `engine/mutate.go` `syncLabelAdd` (unconditional; reaching the call site already implies `AddLabelToIssue` succeeded).
+- Label remove — `engine/mutate.go` `syncLabelRemoval` (gated on `echo`, the same signal that suppresses the webhook echo on a `gh.ErrNotFound` no-op removal).
+- Comment post — `engine/mutate.go` `postComment` (unconditional; `AddComment` failure returns before this point).
+- Issue body edit — `engine/comments.go` `publishCommentOutput` (inside `UpdateIssueBody`'s success branch).
+- Project board status move — `engine/stages.go`'s `advanceToQueued` and `advanceToNextStage`, `engine/no_work_needed_settle.go`, and `engine/closed_item_advance_settle.go` (inside each site's `UpdateProjectItemStatus` success branch).
+
+This was deliberately **not** baked into the shared `LocalStatusUpdated`/`LocalLabelAdded`/`LocalLabelRemoved`/`LocalCommentAdded` self-mutation cases in `store.go`: `LocalStatusUpdated` has a genuine non-self-write caller (`engine/reconcile.go`'s Layer-1 webhook fallback, syncing the cache after an *externally observed* status change), and the `Local*` label/comment mutations have call sites well beyond the five named here. Baking the advance into those shared cases would have silently suppressed detection of external changes at those other sites — a direct violation of the "must not mask a genuine external change" requirement. A dedicated mutation, applied only at the five scoped sites, avoids that trap.
+
+### Consequence
+
+A Fabrik self-comment, self-label-add/remove, self-body-edit, or self-status-move no longer causes the very next probe cycle to treat the item as stale — the resulting `updatedAt` bump is already accounted for. A genuine external change (human/bot comment, label, or status change) landing with a later `effectiveUpdatedAt` still compares as stale and triggers a real deep-fetch on the next probe, since the baseline only ever advances to the self-write's own timestamp, never further.
+
+**Known scope boundary, left deliberately unaddressed**: PR-body self-writes (`engine/pr.go`'s `updatePRVerification`/`ensurePRLinksIssue`, `engine/prcreate.go`'s linkage-heal edit) and a second issue-body-edit site (`engine/item.go`'s stage-output publishing path) bump a component of `effectiveUpdatedAt` the same way but are outside the five call sites this issue scoped in. These will still reproduce the spurious-staleness pattern; a candidate follow-up issue if it proves to matter in practice, not a silent gap — documented here and in the PR description.

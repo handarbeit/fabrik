@@ -83,6 +83,14 @@ type ItemState struct {
 	// This is the "GraphQL fetching is primary; updatedAt makes the staleness check
 	// cheap" contract — webhooks remain an optimization that keeps the cache fresh
 	// between polls but never replace the polling refresh path.
+	//
+	// Has a second writer besides ItemDeepFetched: SelfWriteObserved (#1090)
+	// advances it to time.Now() at each of Fabrik's own self-write call sites
+	// (label add/remove, comment post, issue body edit, board status move) so a
+	// self-caused GitHub updatedAt bump isn't mistaken for external staleness on
+	// the next probe cycle. Both writers share the same monotonic guard in
+	// applyToItem, and DeepFetchInvalidated's zero-reset always wins against a
+	// stale SelfWriteObserved racing behind it.
 	LastSeenSourceUpdatedAt time.Time
 
 	// LastDeepFetchFailureAt is the time the most recent deep fetch attempt failed.

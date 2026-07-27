@@ -6,6 +6,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // cache returns e.readClient cast to *boardcache.CacheImpl, or nil when the
@@ -31,6 +32,11 @@ func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
 	if c := e.cache(); c != nil {
 		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), label)
 	}
+	// Reaching this point means the caller's GitHub label-add mutation already
+	// succeeded — this is the only real "did GitHub's own updatedAt just bump"
+	// signal available here, so the probe staleness baseline advances
+	// unconditionally (#1090).
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	if echo && e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label)
 	}
@@ -66,6 +72,13 @@ func (e *Engine) syncLabelRemoval(item gh.ProjectItem, label string, echo bool) 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if c := e.cache(); c != nil {
 		c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), label)
+	}
+	// echo is only true when the underlying RemoveLabelFromIssue call actually
+	// removed something on GitHub (not gh.ErrNotFound) — the same "real mutation
+	// happened" signal RegisterEcho below relies on, so the staleness baseline
+	// advances under the identical condition (#1090).
+	if echo {
+		e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	}
 	if echo && e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label)
@@ -111,6 +124,10 @@ func (e *Engine) postComment(item gh.ProjectItem, body string, react, echo bool)
 			DatabaseID: dbID, Body: body, Author: e.cfg.User, CreatedAt: time.Now(),
 		})
 	}
+	// AddComment already succeeded (the error path returned above), so the
+	// staleness baseline advances unconditionally, same as the cache
+	// write-through above (#1090).
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	if echo && e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}
