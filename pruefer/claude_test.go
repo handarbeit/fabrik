@@ -102,13 +102,19 @@ func TestParseClaudeReviewJSON_SingleObject(t *testing.T) {
 func TestParseClaudeReviewJSON_ConversationArray(t *testing.T) {
 	stream := `{"type":"system","subtype":"init"}
 {"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}}
-{"type":"result","result":"final review text","is_error":false}`
+{"type":"result","result":"final review text","is_error":false,"num_turns":4,"total_cost_usd":0.0567}`
 	resp, ok := parseClaudeReviewJSON([]byte(stream))
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
 	if resp.Result != "final review text" {
 		t.Errorf("Result = %q", resp.Result)
+	}
+	if resp.NumTurns != 4 {
+		t.Errorf("NumTurns = %d, want 4 (NDJSON envelope path must carry turns through)", resp.NumTurns)
+	}
+	if resp.CostUSD != 0.0567 {
+		t.Errorf("CostUSD = %v, want 0.0567 (NDJSON envelope path must carry cost through)", resp.CostUSD)
 	}
 }
 
