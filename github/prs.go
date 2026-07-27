@@ -804,6 +804,38 @@ func isAutoMergeAlreadyCleanError(err error) bool {
 	return strings.Contains(err.Error(), "Pull request is in clean status")
 }
 
+// DisablePullRequestAutoMerge disables GitHub's native auto-merge on a pull
+// request that previously had it enabled via EnablePullRequestAutoMerge.
+// Used to stop GitHub from merging underneath Fabrik's review-reinvoke loop
+// when an unresolved review thread appears on the current head during the
+// convergence window (#1207).
+//
+// Uses the same two-step pattern as EnablePullRequestAutoMerge: fetch the PR
+// node ID via GraphQL, then call the disablePullRequestAutoMerge mutation.
+func (c *Client) DisablePullRequestAutoMerge(owner, repo string, prNumber int) error {
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
+	}
+
+	mutation := `
+mutation($prId: ID!) {
+  disablePullRequestAutoMerge(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+	mutVars := map[string]interface{}{
+		"prId": nodeID,
+	}
+	var mutResult struct{}
+	if err := c.graphqlRequest(mutation, mutVars, &mutResult); err != nil {
+		return fmt.Errorf("disabling auto-merge on PR #%d: %w", prNumber, err)
+	}
+	return nil
+}
+
 // EnqueuePullRequest adds a pull request to the repository's merge queue.
 // expectedHeadOID is the current head SHA of the PR; if the PR has been
 // force-pushed since the caller read the SHA, the mutation fails safely
