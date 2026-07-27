@@ -21,6 +21,7 @@ const (
 	SkipExcludedLabel   SkipReason = "excluded label"
 	SkipExcludedPath    SkipReason = "excluded path: every touched file matches an exclusion glob"
 	SkipAlreadyReviewed SkipReason = "already reviewed at this head SHA"
+	SkipDiffTooLarge    SkipReason = "diff exceeds max_diff_bytes"
 )
 
 // EligibilityInput bundles everything Eligible needs to decide whether a PR
