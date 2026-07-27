@@ -195,12 +195,20 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		} `json:"reviewRequests"`
 		LatestReviews struct {
 			Nodes []struct {
-				DatabaseID int `json:"databaseId"`
+				ID         string `json:"id"`
+				DatabaseID int    `json:"databaseId"`
 				Author     *struct {
 					Login string `json:"login"`
 				} `json:"author"`
-				State string `json:"state"`
-				Body  string `json:"body"`
+				State          string `json:"state"`
+				Body           string `json:"body"`
+				SubmittedAt    string `json:"submittedAt"`
+				ReactionGroups []struct {
+					Content  string `json:"content"`
+					Reactors struct {
+						TotalCount int `json:"totalCount"`
+					} `json:"reactors"`
+				} `json:"reactionGroups"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -233,16 +241,24 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		}{Typename: "User", Login: "carol"}},
 	}
 	pr.LatestReviews.Nodes = []struct {
-		DatabaseID int `json:"databaseId"`
+		ID         string `json:"id"`
+		DatabaseID int    `json:"databaseId"`
 		Author     *struct {
 			Login string `json:"login"`
 		} `json:"author"`
-		State string `json:"state"`
-		Body  string `json:"body"`
+		State          string `json:"state"`
+		Body           string `json:"body"`
+		SubmittedAt    string `json:"submittedAt"`
+		ReactionGroups []struct {
+			Content  string `json:"content"`
+			Reactors struct {
+				TotalCount int `json:"totalCount"`
+			} `json:"reactors"`
+		} `json:"reactionGroups"`
 	}{
-		{DatabaseID: 1, Author: &struct {
+		{ID: "PRR_1", DatabaseID: 1, Author: &struct {
 			Login string `json:"login"`
-		}{Login: "carol"}, State: "APPROVED", Body: "lgtm"},
+		}{Login: "carol"}, State: "APPROVED", Body: "lgtm", SubmittedAt: "2026-01-01T00:00:00Z"},
 	}
 	node.LinkedPRs.Nodes = []struct {
 		ID                  string               `json:"id"`
@@ -268,12 +284,20 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		} `json:"reviewRequests"`
 		LatestReviews struct {
 			Nodes []struct {
-				DatabaseID int `json:"databaseId"`
+				ID         string `json:"id"`
+				DatabaseID int    `json:"databaseId"`
 				Author     *struct {
 					Login string `json:"login"`
 				} `json:"author"`
-				State string `json:"state"`
-				Body  string `json:"body"`
+				State          string `json:"state"`
+				Body           string `json:"body"`
+				SubmittedAt    string `json:"submittedAt"`
+				ReactionGroups []struct {
+					Content  string `json:"content"`
+					Reactors struct {
+						TotalCount int `json:"totalCount"`
+					} `json:"reactors"`
+				} `json:"reactionGroups"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -302,5 +326,11 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 	}
 	if len(item.LinkedPRReviews) != 1 || item.LinkedPRReviews[0].Author != "carol" {
 		t.Errorf("LinkedPRReviews = %+v", item.LinkedPRReviews)
+	}
+	if item.LinkedPRReviews[0].ID != "PRR_1" {
+		t.Errorf("LinkedPRReviews[0].ID = %q, want PRR_1", item.LinkedPRReviews[0].ID)
+	}
+	if item.LinkedPRReviews[0].CreatedAt.IsZero() {
+		t.Errorf("LinkedPRReviews[0].CreatedAt not populated")
 	}
 }
