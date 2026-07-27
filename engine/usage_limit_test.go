@@ -3,9 +3,12 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -273,6 +276,14 @@ func TestUsageLimitThenGenuineFailure_LeavesFullRetryBudget(t *testing.T) {
 	if err := eng.processItem(context.Background(), board, item); err != nil {
 		t.Fatalf("processItem (first call): %v", err)
 	}
+	// The first hit activated the account-wide Claude suspension (ADR-1120,
+	// exercised separately by TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection).
+	// This test is about per-issue retry-budget semantics, not the suspension
+	// window, so clear it here to simulate the second poll happening after the
+	// suspension has lifted — otherwise the second call would be gated before
+	// ever reaching Claude and callCount would never advance to the genuine
+	// failure branch.
+	eng.clearClaudeSuspension("test: simulate suspension window elapsed before second poll")
 	// Second poll: item now carries fabrik:claude-limit, as it would after a
 	// real board re-fetch following the first call's label add.
 	item.Labels = []string{"fabrik:claude-limit"}
@@ -342,5 +353,73 @@ func TestUsageLimitExit_SecondConsecutiveHit_DoesNotRepostComment(t *testing.T) 
 	}
 	if got := snap.Attempts("Research"); got != 0 {
 		t.Errorf("Attempts(\"Research\") = %d, want 0 after two usage-limit hits", got)
+	}
+}
+
+// TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection is the
+// account-wide suspension acceptance-criteria test (ADR-1120): once one worker
+// has detected the usage limit and activated the suspension, every other
+// concurrently-dispatched item must short-circuit via the gate in
+// runInvocationWithExtension without reaching e.claude.Invoke — "a single
+// detection suspends all workers; subsequent items do not each invoke and
+// fail."
+func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "hit your session limit", ResetTime: "10:20pm (America/Edmonton)"}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, MaxConcurrent: 5, Stages: testStages()},
+		client, claude, wm,
+	)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	// First dispatch: no suspension active yet, so this one actually reaches
+	// Claude, detects the limit, and activates the account-wide suspension.
+	detector := gh.ProjectItem{Number: 200, Title: "Detector", Status: "Research", ItemID: "PVTI_200"}
+	if err := eng.processItem(context.Background(), board, detector); err != nil {
+		t.Fatalf("processItem (detector): %v", err)
+	}
+	claude.mu.Lock()
+	callsAfterDetection := len(claude.calls)
+	claude.mu.Unlock()
+	if callsAfterDetection != 1 {
+		t.Fatalf("expected exactly 1 Claude invocation from the detecting call, got %d", callsAfterDetection)
+	}
+	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); !suspended {
+		t.Fatal("expected account-wide Claude suspension to be active after detection")
+	}
+
+	// N concurrent dispatches for other items — the suspension is already
+	// active, so every one of them must be gated in runInvocationWithExtension
+	// before e.claude.Invoke is ever called.
+	const n = 10
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			num := 201 + i
+			item := gh.ProjectItem{Number: num, Title: fmt.Sprintf("Concurrent %d", num), Status: "Research", ItemID: fmt.Sprintf("PVTI_%d", num)}
+			if err := eng.processItem(context.Background(), board, item); err != nil {
+				t.Errorf("processItem (concurrent #%d): %v", num, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	claude.mu.Lock()
+	finalCalls := len(claude.calls)
+	claude.mu.Unlock()
+	if finalCalls != callsAfterDetection {
+		t.Errorf("expected Claude invocation count to stay at %d while suspended, got %d — concurrent dispatch bypassed the gate", callsAfterDetection, finalCalls)
 	}
 }
