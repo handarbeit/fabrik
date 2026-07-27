@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -67,13 +68,20 @@ func (f *fakeReviewer) submitCallCount() int {
 	return len(f.submitCalls)
 }
 
+func (f *fakeReviewer) diffCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.diffCalls
+}
+
 // fakeClone returns a CloneFunc that records calls and returns a fresh temp
-// dir without touching the network or git at all.
-func fakeClone(t *testing.T, err error) (CloneFunc, *int) {
+// dir without touching the network or git at all. Safe for concurrent use
+// (daemon_test.go dispatches ReviewPR from multiple goroutines).
+func fakeClone(t *testing.T, err error) (CloneFunc, *atomic.Int32) {
 	t.Helper()
-	calls := 0
+	var calls atomic.Int32
 	fn := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
-		calls++
+		calls.Add(1)
 		if err != nil {
 			return "", func() {}, err
 		}
@@ -102,8 +110,8 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	if outcome.Err != nil {
 		t.Fatalf("outcome.Err = %v, want nil", outcome.Err)
 	}
-	if *cloneCalls != 1 {
-		t.Errorf("clone called %d times, want 1", *cloneCalls)
+	if cloneCalls.Load() != 1 {
+		t.Errorf("clone called %d times, want 1", cloneCalls.Load())
 	}
 	if claude.callCount() != 1 {
 		t.Errorf("claude called %d times, want 1", claude.callCount())
@@ -129,7 +137,7 @@ func TestReviewPR_RepollSameSHA_DoesNotReReview(t *testing.T) {
 	if !outcome.Skipped || outcome.Reason != SkipAlreadyReviewed {
 		t.Fatalf("outcome = %+v, want Skipped with SkipAlreadyReviewed", outcome)
 	}
-	if *cloneCalls != 0 {
+	if cloneCalls.Load() != 0 {
 		t.Error("expected no clone when the PR was already reviewed at this SHA")
 	}
 	if claude.callCount() != 0 {
@@ -151,7 +159,7 @@ func TestReviewPR_DraftPR_Skipped(t *testing.T) {
 	if !outcome.Skipped || outcome.Reason != SkipDraft {
 		t.Fatalf("outcome = %+v, want Skipped with SkipDraft", outcome)
 	}
-	if *cloneCalls != 0 || claude.callCount() != 0 || client.submitCallCount() != 0 {
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 || client.submitCallCount() != 0 {
 		t.Error("draft PR must not clone, invoke claude, or submit a review")
 	}
 	if client.diffCalls != 0 {
@@ -188,7 +196,7 @@ func TestReviewPR_ForceReview_BypassesAlreadyReviewed(t *testing.T) {
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true (forced re-review)", outcome)
 	}
-	if *cloneCalls != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
 		t.Error("forced re-review must clone, invoke claude, and submit exactly one review")
 	}
 	if !client.comments[0].HasReaction("ROCKET") {
@@ -209,7 +217,7 @@ func TestReviewPR_DiffTooLarge_Skipped(t *testing.T) {
 	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
 		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge", outcome)
 	}
-	if *cloneCalls != 0 || claude.callCount() != 0 {
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
 		t.Error("oversized diff must skip before cloning or invoking claude")
 	}
 }
@@ -227,7 +235,7 @@ func TestReviewPR_ExcludedPath_Skipped(t *testing.T) {
 	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath", outcome)
 	}
-	if *cloneCalls != 0 || claude.callCount() != 0 {
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
 		t.Error("excluded-path PR must skip before cloning or invoking claude")
 	}
 }
@@ -245,8 +253,8 @@ func TestReviewPR_ClaudeFailure_PostsNothing(t *testing.T) {
 	if outcome.Err == nil {
 		t.Fatal("expected a non-nil error when claude invocation fails")
 	}
-	if *cloneCalls != 1 {
-		t.Errorf("expected exactly one clone attempt, got %d", *cloneCalls)
+	if cloneCalls.Load() != 1 {
+		t.Errorf("expected exactly one clone attempt, got %d", cloneCalls.Load())
 	}
 	if client.submitCallCount() != 0 {
 		t.Error("expected no review submission when claude invocation fails — post nothing, not a stub")
