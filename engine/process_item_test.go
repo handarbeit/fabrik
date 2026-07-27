@@ -1585,3 +1585,212 @@ func TestItemMayNeedWork_CleanupStage_NoWM(t *testing.T) {
 		t.Error("itemMayNeedWork should return false when no WorktreeManager is registered")
 	}
 }
+
+// stallDetectionStages returns a single-stage config with an explicit MaxTurns,
+// required for the #1146 capped/declining stall signal — testStages()'s stages
+// default to MaxTurns 0, which always reads as "never capped".
+func stallDetectionStages(maxTurns int) []*stages.Stage {
+	return []*stages.Stage{
+		{
+			Name:       "Research",
+			Order:      1,
+			Prompt:     "Do research",
+			MaxTurns:   maxTurns,
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+}
+
+// TestProcessItem_StallDetection_ArmsCorrectiveHintOnCappedThenDeclining reproduces
+// #816's shape: a turn-capped attempt followed by a strictly-declining, still-incomplete
+// attempt. The engine must arm a corrective hint that is injected into the very next
+// invocation's InvokeOptions — and only that one.
+func TestProcessItem_StallDetection_ArmsCorrectiveHintOnCappedThenDeclining(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12, 3} // capped, declining, declining again
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5, // enough headroom to observe all three calls without escalation cutting the sequence short
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 20, Title: "Stall detection test", Status: "Research", ItemID: "PVTI_20"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[0].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 1 (turn-capped, first attempt): CorrectiveHint = %q, want empty", got)
+	}
+	if got := claude.calls[1].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 2 (declining, arms hint for next call): CorrectiveHint = %q, want empty", got)
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("call 3: CorrectiveHint = empty, want the armed corrective hint (capped-then-declining pattern from calls 1-2)")
+	}
+
+	foundStallComment := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			foundStallComment = true
+		}
+	}
+	if !foundStallComment {
+		t.Error("expected a stall-detection comment to be posted after call 2")
+	}
+}
+
+// TestProcessItem_StallDetection_NoArmWithoutPriorCap verifies the false-positive
+// guard: a declining turn count alone, without a turn-capped predecessor, must never
+// arm a corrective hint. A shrinking retry can simply mean less work remained.
+func TestProcessItem_StallDetection_NoArmWithoutPriorCap(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{20, 10, 5} // declining, but never hit the 50-turn cap
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 21, Title: "No false-positive test", Status: "Research", ItemID: "PVTI_21"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	for i, call := range claude.calls {
+		if call.opts.CorrectiveHint != "" {
+			t.Errorf("call %d: CorrectiveHint = %q, want empty (no turn-capped predecessor)", i+1, call.opts.CorrectiveHint)
+		}
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment without a turn-capped predecessor")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_ClearedOnStageSuccess verifies that once a stage
+// completes, the turn-history/armed-hint state that fed detection is cleared —
+// so a later, unrelated incomplete run of the same stage (e.g. after fabrik:revalidate)
+// does not inherit a stale hint from a long-past episode.
+func TestProcessItem_StallDetection_ClearedOnStageSuccess(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Call 1: turn-capped. Call 2: declining — arms the hint. Call 3: completes the stage.
+	callTurns := []int{50, 12}
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			if callIdx >= len(callTurns) {
+				return "done", true, TokenUsage{TurnsUsed: 8}, nil
+			}
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 22, Title: "Cleared on success test", Status: "Research", ItemID: "PVTI_22"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	// Precondition: call 3 did receive the armed hint (proves arming happened).
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Fatal("precondition failed: call 3 should have received the armed corrective hint")
+	}
+
+	snap, err := eng.store.Get("owner/repo", 22)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("StallHintPending(Research) should be cleared after the stage completed")
+	}
+	if snap.LastTurnsCapped("Research") {
+		t.Error("LastTurnsCapped(Research) should be cleared after the stage completed")
+	}
+	if snap.LastTurnsUsed("Research") != 0 {
+		t.Errorf("LastTurnsUsed(Research) = %d, want 0 after StageRetryCleared", snap.LastTurnsUsed("Research"))
+	}
+}
