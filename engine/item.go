@@ -1074,6 +1074,27 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			return
 		}
 		e.logf(item.Number, "warn", "claude invocation issue: %v\n", err)
+
+		// A Claude usage-limit exit is not a stage failure — the stage never ran.
+		// Route to a dedicated handler that records StageAttempted (so the normal
+		// dispatch cooldown applies, preventing a tight retry loop against the
+		// limit) but never StageRetryIncremented, and never stage:<name>:failed
+		// or fabrik:paused. See claudeUsageLimitError in claude.go.
+		var limitErr *claudeUsageLimitError
+		if errors.As(err, &limitErr) {
+			e.handleUsageLimitExit(p, limitErr)
+			return
+		}
+	}
+
+	// Any invocation reaching this point actually ran Claude and was not itself
+	// classified as a usage-limit exit (success, blocked-on-input, no-work-needed,
+	// genuine failure/retry, and PR-creation failure alike) — clear the gate label
+	// if present. A subsequent genuine failure is still tracked independently via
+	// stage:<name>:failed/MaxRetries, so clearing here rather than only on success
+	// is safe and correctly signals "not currently limited."
+	if hasLabel(item.Labels, "fabrik:claude-limit") {
+		e.removeLabel(item, "fabrik:claude-limit")
 	}
 
 	// Capture git metadata for the comment header
