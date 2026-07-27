@@ -447,6 +447,100 @@ func TestApplyEnqueueCycleIncremented(t *testing.T) {
 	}
 }
 
+// ---- StageTurnUsageRecorded (#1146 stall detection) ----
+
+func TestApplyStageTurnUsageRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true}, StageStateChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.StageState.LastTurnsUsed["Implement"] != 51 {
+		t.Errorf("LastTurnsUsed[Implement] = %d, want 51", st.StageState.LastTurnsUsed["Implement"])
+	}
+	if !st.StageState.LastTurnsCapped["Implement"] {
+		t.Error("LastTurnsCapped[Implement] not set")
+	}
+	snap, _ := s.Get(testRepo, 1)
+	if got := snap.LastTurnsUsed("Implement"); got != 51 {
+		t.Errorf("Snapshot.LastTurnsUsed() = %d, want 51", got)
+	}
+	if !snap.LastTurnsCapped("Implement") {
+		t.Error("Snapshot.LastTurnsCapped() = false, want true")
+	}
+	// A later, uncapped, declining invocation overwrites both fields — this is what
+	// makes stall detection self-limiting to a single corrective hint per episode.
+	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 12, Capped: false}, StageStateChanged)
+	st = getItem(t, s, testRepo, 1)
+	if st.StageState.LastTurnsUsed["Implement"] != 12 {
+		t.Errorf("LastTurnsUsed[Implement] = %d, want 12 after overwrite", st.StageState.LastTurnsUsed["Implement"])
+	}
+	if st.StageState.LastTurnsCapped["Implement"] {
+		t.Error("LastTurnsCapped[Implement] should be false after an uncapped attempt")
+	}
+}
+
+func TestSnapshot_LastTurnsUsed_ZeroWhenUnset(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	snap, _ := s.Get(testRepo, 1)
+	if got := snap.LastTurnsUsed("Implement"); got != 0 {
+		t.Errorf("LastTurnsUsed() = %d, want 0 when never recorded", got)
+	}
+	if snap.LastTurnsCapped("Implement") {
+		t.Error("LastTurnsCapped() = true, want false when never recorded")
+	}
+}
+
+func TestStageTurnUsageSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true}, StageStateChanged)
+	if held.LastTurnsUsed("Implement") != 51 {
+		t.Fatalf("precondition: held snapshot LastTurnsUsed = %d, want 51", held.LastTurnsUsed("Implement"))
+	}
+	s.Apply(StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 12, Capped: false})
+	if held.LastTurnsUsed("Implement") != 51 {
+		t.Errorf("held snapshot mutated by later record: LastTurnsUsed = %d, want 51", held.LastTurnsUsed("Implement"))
+	}
+	if !held.LastTurnsCapped("Implement") {
+		t.Error("held snapshot mutated by later record: LastTurnsCapped = false, want true")
+	}
+}
+
+// ---- StallHintArmed / StallHintConsumed (#1146 stall detection) ----
+
+func TestApplyStallHintArmedAndConsumed(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, StallHintArmed{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	snap, _ := s.Get(testRepo, 1)
+	if !snap.StallHintPending("Implement") {
+		t.Error("StallHintPending(Implement) = false, want true after arming")
+	}
+	// Arming one stage must not leak to another.
+	if snap.StallHintPending("Review") {
+		t.Error("StallHintPending(Review) = true, want false (per-stage isolation)")
+	}
+	applyExpect(t, s, StallHintConsumed{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	snap, _ = s.Get(testRepo, 1)
+	if snap.StallHintPending("Implement") {
+		t.Error("StallHintPending(Implement) = true, want false after consuming")
+	}
+}
+
+func TestApplyStageRetryClearedClearsStallState(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true})
+	s.Apply(StallHintArmed{Repo: testRepo, Number: 1, StageName: "Implement"})
+	applyExpect(t, s, StageRetryCleared{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	snap, _ := s.Get(testRepo, 1)
+	if snap.LastTurnsUsed("Implement") != 0 {
+		t.Error("LastTurnsUsed not cleared by StageRetryCleared")
+	}
+	if snap.LastTurnsCapped("Implement") {
+		t.Error("LastTurnsCapped not cleared by StageRetryCleared")
+	}
+	if snap.StallHintPending("Implement") {
+		t.Error("StallHintPending not cleared by StageRetryCleared")
+	}
+}
+
 // ---- PREnqueueRecorded (ADR-058 D4 FR-3) ----
 
 func TestApplyPREnqueueRecorded(t *testing.T) {
