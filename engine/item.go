@@ -1396,14 +1396,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
-		// Stall detection/arming is independent of MaxRetries: max_retries: 0 is a
-		// first-class "unlimited retries" config, not an edge case, and is exactly the
-		// setting where a stalled stage would otherwise grind identical retries forever
-		// with no mitigation at all. Only the retry-count/escalation bookkeeping below
-		// needs the MaxRetries > 0 guard.
-		if claudeRan {
-			e.detectAndArmStallHint(item, stage, repoStr, usage)
-		}
+		// Escalation is decided before stall-hint arming (see below) so arming can be
+		// skipped on the attempt that triggers it.
+		willEscalate := false
 		if claudeRan && e.cfg.MaxRetries > 0 {
 			e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 			var count int
@@ -1420,10 +1415,24 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 				)
 				e.postItemComment(item, warnComment, true)
 			}
-			if count >= e.cfg.MaxRetries {
-				e.escalateFailedStage(item, stage, degenerateReason)
-				releaseLock() // permanently giving up — release the lock
-			}
+			willEscalate = count >= e.cfg.MaxRetries
+		}
+		// Stall detection/arming is independent of MaxRetries: max_retries: 0 is a
+		// first-class "unlimited retries" config, not an edge case, and is exactly the
+		// setting where a stalled stage would otherwise grind identical retries forever
+		// with no mitigation at all. Only escalation (immediately below) needs the
+		// MaxRetries > 0 guard. Arming is skipped when this attempt is about to be
+		// escalated: detectAndArmStallHint's comment promises the hint will reach "the
+		// next invocation," but an escalated issue pauses immediately after, and a
+		// human's later clearFailedStage() applies StageRetryCleared, which wipes any
+		// pending hint before any further invocation happens — the promise would go
+		// unfulfilled and the state would exist only to be thrown away.
+		if claudeRan && !willEscalate {
+			e.detectAndArmStallHint(item, stage, repoStr, usage)
+		}
+		if willEscalate {
+			e.escalateFailedStage(item, stage, degenerateReason)
+			releaseLock() // permanently giving up — release the lock
 		}
 	}
 }

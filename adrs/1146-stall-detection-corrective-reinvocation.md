@@ -51,11 +51,18 @@ branch of `finalizeStageOutcome`, immediately before `StageRetryIncremented` is 
    later attempt is handled correctly without special-casing.
 3. Record this attempt's `TurnsUsed`/capped status via a new `itemstate.StageTurnUsageRecorded`
    mutation, unconditionally overwriting the previous values.
-4. If the previous attempt was capped, and this attempt used more than zero turns but strictly fewer
-   than the previous attempt's turns, arm a one-shot corrective hint (`itemstate.StallHintArmed`) and
-   post an informational comment citing both turn counts.
+4. If the previous attempt was capped, this attempt is **not** itself capped, and this attempt used
+   more than zero turns but strictly fewer than the previous attempt's turns, arm a one-shot corrective
+   hint (`itemstate.StallHintArmed`) and post an informational comment citing both turn counts.
 
-**Self-limiting by construction.** The attempt that satisfies step 4's condition is, by definition, not
+   The "not itself capped" precondition rules out a false positive from the pre-existing progress-based
+   turn-extension loop (`runInvocationWithExtension`, ADR-030): that loop can widen the effective budget
+   on one dispatch (e.g. to 2×/3× `stage.MaxTurns`) without that widening persisting to the next,
+   separate dispatch. Without this precondition, two consecutive turn-capped attempts could show a
+   smaller absolute `TurnsUsed` on the second purely because its own budget reset lower — not because it
+   is a declining, stalled retry — and would be misclassified as a stall.
+
+**Self-limiting by construction.** The attempt that satisfies step 4's condition is, by construction, not
 itself capped — so step 3's unconditional overwrite clears the arming precondition (`LastTurnsCapped`)
 immediately after arming. No separate one-shot guard is needed to keep this "a single corrective
 re-invocation," matching the issue's proposed fix rather than an escalation ladder — which also matches

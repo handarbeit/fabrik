@@ -1882,3 +1882,129 @@ func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.
 		t.Error("expected the corrective hint to survive the suspended dispatch and reach the first real invocation afterward")
 	}
 }
+
+// TestDetectAndArmStallHint_NoArmWhenCurrentAttemptAlsoCapped is a regression guard
+// for a false-positive found in review: the progress-based turn-extension loop
+// (runInvocationWithExtension) can widen the effective budget on one dispatch (e.g.
+// to 2x/3x stage.MaxTurns) without that widening persisting to the next, separate
+// dispatch. So a later, separate dispatch can be turn-capped again at a *lower*
+// absolute TurnsUsed than the previous capped attempt purely because its own budget
+// reset lower — not because it is a declining, stalled retry. Arming must require
+// the current attempt to be uncapped; comparing raw TurnsUsed against the previous
+// attempt's alone (ignoring the current attempt's own capped status) would
+// misclassify this as a stall.
+func TestDetectAndArmStallHint_NoArmWhenCurrentAttemptAlsoCapped(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 30, Title: "capped-then-capped", Status: "Research", ItemID: "PVTI_30"}
+	stage := eng.cfg.Stages[0]
+	repoStr := "owner/repo"
+
+	// First attempt: capped at 50/50 (e.g. a widened 2x/3x extension-loop budget).
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 50, MaxTurns: 50})
+	// Second, separate dispatch: also capped, but at a smaller absolute budget (its own
+	// extension loop never widened past 1x) — TurnsUsed (20) < prevTurns (50), but this
+	// attempt is itself capped, so it must not be read as a declining, stalled retry.
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 20, MaxTurns: 20})
+
+	snap, err := eng.store.Get(repoStr, item.Number)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending(stage.Name) {
+		t.Error("must not arm a corrective hint when the current attempt is itself turn-capped, even though turns declined")
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment when the current attempt is also turn-capped")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_ArmsUnderUnlimitedRetries verifies that stall
+// detection/arming runs even when MaxRetries=0 ("unlimited retries") — a regression
+// guard found in review: detectAndArmStallHint used to be called only inside the
+// `claudeRan && e.cfg.MaxRetries > 0` branch, so a stage configured for unlimited
+// retries got none of this mitigation and would grind an identical stall forever.
+// Detection must be unconditional on claudeRan; only the surrounding retry-count/
+// escalation bookkeeping is gated on MaxRetries > 0.
+func TestProcessItem_StallDetection_ArmsUnderUnlimitedRetries(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12, 3} // capped, declining, declining again
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 0, // unlimited
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 24, Title: "Unlimited retries stall test", Status: "Research", ItemID: "PVTI_24"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("expected the armed corrective hint on call 3 even with MaxRetries=0 (unlimited retries)")
+	}
+
+	// Retry-count bookkeeping (Attempts) must still stay at 0 — MaxRetries=0 exempts
+	// the escalation path, but not stall detection.
+	snap, err := eng.store.Get("owner/repo", 24)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.Attempts("Research") != 0 {
+		t.Errorf("expected Attempts=0 when MaxRetries=0, got %d", snap.Attempts("Research"))
+	}
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			t.Error("should not add fabrik:paused when MaxRetries=0")
+		}
+	}
+}
