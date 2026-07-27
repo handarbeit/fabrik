@@ -23,12 +23,16 @@
 .env
 /fabrik
 /print-plugin-hash
-/pruefer
-!/pruefer/
-.pruefer/pruefer.lock
-.pruefer/pruefer.log
-.pruefer/logs/
-.pruefer/*.pem
+# NOTE: `go build -o pruefer` cannot place a binary at the repo root — the
+# pruefer/ package directory already exists, so Go writes pruefer/pruefer
+# instead (polluting the source tree). Build to bin/ instead:
+#   go build -o bin/pruefer ./cmd/pruefer
+/bin/
+# Operator-local Pruefer runtime state: App private key, live config, lock, logs.
+# Ignored wholesale — unlike .fabrik/config.yaml this is per-operator (App ID,
+# watched repos) and must not be committed to a public repo. See cmd/pruefer/README.md
+# for the config format.
+.pruefer/
 # goreleaser build output — must be ignored or Go's buildvcs stamps release
 # artifacts +dirty (untracked dist/ makes the tree "modified" at build time).
 /dist/
