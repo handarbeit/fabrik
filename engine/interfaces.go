@@ -20,6 +20,7 @@ type GitHubClient interface {
 	AddComment(owner, repo string, issueNumber int, body string) (int, error)
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
 	AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error
+	AddReviewReaction(reviewID, content string) error
 	ResolveReviewThread(threadID string) error
 	UpdateComment(owner, repo string, commentDatabaseID int, body string) error
 	UpdateIssueBody(owner, repo string, issueNumber int, body string) error

@@ -117,10 +117,16 @@ type pullRequestPayload struct {
 type pullRequestReviewPayload struct {
 	Action string `json:"action"`
 	Review struct {
-		DatabaseID int    `json:"id"`
-		Body       string `json:"body"`
-		State      string `json:"state"`
-		User       struct {
+		DatabaseID int `json:"id"`
+		// NodeID is the review's GraphQL node ID, needed for the addReaction
+		// mutation (AddReviewReaction) — GitHub's REST API has no reactions
+		// endpoint for PullRequestReview.
+		NodeID string `json:"node_id"`
+		Body   string `json:"body"`
+		State  string `json:"state"`
+		// SubmittedAt mirrors gh.PRReview.CreatedAt.
+		SubmittedAt string `json:"submitted_at"`
+		User        struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"review"`
@@ -673,6 +679,34 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 }
 
+// preserveReviewReactions copies the Reactions field from any existing
+// stored review with the same DatabaseID into review, in place. The
+// pull_request_review webhook payload carries no reactions summary (unlike
+// issue_comment), and PRReviewSubmitted upserts by DatabaseID, wholesale
+// replacing the prior entry — so applying a webhook-sourced review naively
+// would silently erase a ROCKET watermark recorded by the last GraphQL deep
+// fetch until the next one runs. Must be called before the PRReviewSubmitted
+// mutation. review.DatabaseID == 0 (unavailable) is a no-op.
+func (c *CacheImpl) preserveReviewReactions(repo string, number int, review *gh.PRReview) {
+	if review.DatabaseID == 0 {
+		return
+	}
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		return
+	}
+	lpr := snap.LinkedPR()
+	if lpr == nil {
+		return
+	}
+	for _, r := range lpr.Reviews {
+		if r.DatabaseID == review.DatabaseID {
+			review.Reactions = r.Reactions
+			return
+		}
+	}
+}
+
 func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	var p pullRequestReviewPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -695,10 +729,14 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	}
 
 	review := gh.PRReview{
+		ID:         p.Review.NodeID,
 		Author:     p.Review.User.Login,
 		State:      strings.ToUpper(p.Review.State),
 		Body:       p.Review.Body,
 		DatabaseID: p.Review.DatabaseID,
+	}
+	if t, err := time.Parse(time.RFC3339, p.Review.SubmittedAt); err == nil {
+		review.CreatedAt = t
 	}
 
 	// Normal path: look up issue via Store's prToKey index (no c.mu held).
@@ -707,6 +745,11 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	if issFound {
 		issRepo, issNum, parseOK := parseItemKey(issKey)
 		if parseOK {
+			// The pull_request_review webhook payload carries no reactions summary
+			// (unlike issue_comment) — upserting review naively would silently wipe
+			// any ROCKET watermark a prior GraphQL deep fetch recorded, until the
+			// next deep fetch runs. Preserve it explicitly.
+			c.preserveReviewReactions(issRepo, issNum, &review)
 			c.store.Apply(itemstate.PRReviewSubmitted{
 				Repo:   issRepo,
 				Number: issNum,
@@ -747,6 +790,7 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 	})
+	c.preserveReviewReactions(repo, resolvedIssNum, &review)
 	c.store.Apply(itemstate.PRReviewSubmitted{
 		Repo:   repo,
 		Number: resolvedIssNum,
