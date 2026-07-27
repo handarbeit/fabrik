@@ -574,6 +574,114 @@ func TestDetectorSkipsFreshWorker(t *testing.T) {
 	}
 }
 
+// TestRunStartupOrphanedInProgressScan_RemovesStaleLabel verifies that the
+// broadened startup sweep removes a stage:in_progress label that co-occurs
+// with stage:complete for the same stage, even with no lock label present.
+func TestRunStartupOrphanedInProgressScan_RemovesStaleLabel(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 30, []string{
+		"stage:Implement:complete",
+		"stage:Implement:in_progress",
+	})
+
+	e.runStartupOrphanedInProgressScan()
+
+	removed := removeLabelsCalled(client, 30)
+	if !hasRemovedLabel(removed, "stage:Implement:in_progress") {
+		t.Errorf("expected stage:Implement:in_progress to be removed; got: %v", removed)
+	}
+	if hasRemovedLabel(removed, "stage:Implement:complete") {
+		t.Errorf("stage:Implement:complete should not be removed; got: %v", removed)
+	}
+}
+
+// TestRunStartupOrphanedInProgressScan_FailedCoOccurrence verifies that
+// stage:<Name>:failed also triggers the staleness predicate, not just
+// stage:<Name>:complete.
+func TestRunStartupOrphanedInProgressScan_FailedCoOccurrence(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 31, []string{
+		"stage:Review:failed",
+		"stage:Review:in_progress",
+	})
+
+	e.runStartupOrphanedInProgressScan()
+
+	removed := removeLabelsCalled(client, 31)
+	if !hasRemovedLabel(removed, "stage:Review:in_progress") {
+		t.Errorf("expected stage:Review:in_progress to be removed; got: %v", removed)
+	}
+}
+
+// TestRunStartupOrphanedInProgressScan_LeavesGenuineInFlightUntouched verifies
+// that an item whose in_progress stage has no complete/failed counterpart is
+// left untouched — even when a Worker is active, proving the predicate itself
+// (not worker-liveness) is what protects genuinely in-flight stages.
+func TestRunStartupOrphanedInProgressScan_LeavesGenuineInFlightUntouched(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 32, []string{"stage:Implement:in_progress"})
+	setWorker(e, 32, os.Getpid(), "Implement", time.Now())
+
+	e.runStartupOrphanedInProgressScan()
+
+	removed := removeLabelsCalled(client, 32)
+	if len(removed) > 0 {
+		t.Errorf("expected no labels removed for genuinely in-flight stage; got: %v", removed)
+	}
+}
+
+// TestRunStartupOrphanedInProgressScan_DifferentStageUnaffected verifies that
+// the predicate is scoped per stage name: a complete label for one stage must
+// not trigger removal of an in_progress label for a different stage.
+func TestRunStartupOrphanedInProgressScan_DifferentStageUnaffected(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 33, []string{
+		"stage:Implement:complete",
+		"stage:Review:in_progress",
+	})
+
+	e.runStartupOrphanedInProgressScan()
+
+	removed := removeLabelsCalled(client, 33)
+	if len(removed) > 0 {
+		t.Errorf("expected no labels removed for different-stage in_progress; got: %v", removed)
+	}
+}
+
+// TestRunStartupOrphanedInProgressScan_PreservesLockGatedSweep verifies that
+// the new broader pass composes correctly with the existing lock-gated sweep
+// when both run in sequence (as poll.go does): the stale lock label and the
+// orphaned in_progress label are both removed, without double-counting or panics.
+func TestRunStartupOrphanedInProgressScan_PreservesLockGatedSweep(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 34, []string{
+		"fabrik:locked:testuser",
+		"stage:Implement:complete",
+		"stage:Implement:in_progress",
+	})
+
+	e.runStartupCleanup()
+	e.runStartupOrphanedInProgressScan()
+
+	removed := removeLabelsCalled(client, 34)
+	if !hasRemovedLabel(removed, "fabrik:locked:testuser") {
+		t.Errorf("expected lock label to be removed; got: %v", removed)
+	}
+	if !hasRemovedLabel(removed, "stage:Implement:in_progress") {
+		t.Errorf("expected in_progress label to be removed; got: %v", removed)
+	}
+}
+
 // TestWorkerStaleTimeoutDefault verifies that workerStaleTimeout() returns 5 minutes
 // when Config.WorkerStaleTimeout is zero, and the configured value otherwise.
 func TestWorkerStaleTimeoutDefault(t *testing.T) {
