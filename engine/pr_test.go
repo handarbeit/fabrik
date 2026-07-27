@@ -538,7 +538,7 @@ func TestBuildThreadEntries_SkipsNonReviewComments(t *testing.T) {
 
 func TestFormatReviewFeedbackComment_HeaderContainsTitle(t *testing.T) {
 	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 42}}
-	result := formatReviewFeedbackComment("Review", "Claude output", "branch", "abc123", "main123", "2024-01-01", threads, 3)
+	result := formatReviewFeedbackComment("Review", "Claude output", "branch", "abc123", "main123", "2024-01-01", threads, 0, 3)
 
 	if !strings.Contains(result, "🏭 **Fabrik — stage: Review (review feedback addressed)**") {
 		t.Errorf("header not found in:\n%s", result)
@@ -547,7 +547,7 @@ func TestFormatReviewFeedbackComment_HeaderContainsTitle(t *testing.T) {
 
 func TestFormatReviewFeedbackComment_FooterSection(t *testing.T) {
 	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 42}}
-	result := formatReviewFeedbackComment("Review", "output", "branch", "c", "m", "ts", threads, 3)
+	result := formatReviewFeedbackComment("Review", "output", "branch", "c", "m", "ts", threads, 0, 3)
 
 	if !strings.Contains(result, "**Threads addressed:**") {
 		t.Errorf("missing 'Threads addressed:' section in:\n%s", result)
@@ -556,7 +556,7 @@ func TestFormatReviewFeedbackComment_FooterSection(t *testing.T) {
 
 func TestFormatReviewFeedbackComment_ThreadBulletWithLine(t *testing.T) {
 	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 42}}
-	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 1)
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 0, 1)
 
 	if !strings.Contains(result, "`engine/foo.go:42` — resolved") {
 		t.Errorf("expected path:line bullet, got:\n%s", result)
@@ -565,7 +565,7 @@ func TestFormatReviewFeedbackComment_ThreadBulletWithLine(t *testing.T) {
 
 func TestFormatReviewFeedbackComment_ThreadBulletWithoutLine(t *testing.T) {
 	threads := []reviewThreadEntry{{Path: "engine/bar.go", Line: 0}}
-	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 1)
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 0, 1)
 
 	if !strings.Contains(result, "`engine/bar.go` — resolved") {
 		t.Errorf("expected path-only bullet, got:\n%s", result)
@@ -580,16 +580,46 @@ func TestFormatReviewFeedbackComment_SummaryLine(t *testing.T) {
 		{Path: "a.go", Line: 1},
 		{Path: "b.go", Line: 2},
 	}
-	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 5)
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 0, 5)
 
 	if !strings.Contains(result, "Resolved 2 review thread(s) across 5 comment(s).") {
 		t.Errorf("expected summary line, got:\n%s", result)
 	}
 }
 
+func TestFormatReviewFeedbackComment_SummaryLineWithReviewBodies(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "a.go", Line: 1}}
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 2, 3)
+
+	if !strings.Contains(result, "Resolved 1 review thread(s) and 2 review body finding(s) across 3 comment(s).") {
+		t.Errorf("expected summary line with review body count, got:\n%s", result)
+	}
+}
+
+func TestFormatReviewFeedbackComment_SummaryLineOmitsReviewBodiesWhenZero(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "a.go", Line: 1}}
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 0, 1)
+
+	if strings.Contains(result, "review body finding") {
+		t.Errorf("expected no review body mention when count is 0, got:\n%s", result)
+	}
+}
+
+func TestCountReviewBodies(t *testing.T) {
+	comments := []gh.Comment{
+		{ReviewID: "PRR_1"},
+		{ReviewThreadID: "RT_1"},
+		{ReviewID: "PRR_2"},
+		{},
+	}
+	if got := countReviewBodies(comments); got != 2 {
+		t.Errorf("expected 2 review body comments, got %d", got)
+	}
+}
+
 func TestFormatReviewFeedbackComment_EmptyPathFallback(t *testing.T) {
 	threads := []reviewThreadEntry{{Path: "", Line: 0}}
-	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 1)
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 0, 1)
 
 	if !strings.Contains(result, "`(unknown path)` — resolved") {
 		t.Errorf("expected (unknown path) fallback bullet, got:\n%s", result)
@@ -628,7 +658,7 @@ func TestFormatPRSummaryComment_NeutralizesBotMention(t *testing.T) {
 func TestFormatReviewFeedbackComment_NeutralizesBotMention(t *testing.T) {
 	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 1}}
 	output := "**@coderabbitai**: No action taken."
-	result := formatReviewFeedbackComment("Validate", output, "b", "c", "m", "ts", threads, 1)
+	result := formatReviewFeedbackComment("Validate", output, "b", "c", "m", "ts", threads, 0, 1)
 	assertNoLiveBotMention(t, result)
 }
 
@@ -651,7 +681,7 @@ func TestUpdatePRVerification_NeutralizesBotMention(t *testing.T) {
 func TestFormatReviewFeedbackComment_TruncatesLongOutput(t *testing.T) {
 	long := strings.Repeat("x", 70000)
 	threads := []reviewThreadEntry{{Path: "a.go", Line: 1}}
-	result := formatReviewFeedbackComment("Review", long, "b", "c", "m", "ts", threads, 1)
+	result := formatReviewFeedbackComment("Review", long, "b", "c", "m", "ts", threads, 0, 1)
 
 	if !strings.Contains(result, "... (truncated)") {
 		t.Error("expected truncation marker for output > 60000 chars")

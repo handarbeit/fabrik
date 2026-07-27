@@ -1101,7 +1101,37 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	b.WriteString("\n\n")
 
 	b.WriteString("## New Comments to Process\n\n")
+	hasThreadComment, hasReviewBody := false, false
 	for _, c := range comments {
+		if c.ReviewThreadID != "" {
+			hasThreadComment = true
+		}
+		if c.ReviewID != "" {
+			hasReviewBody = true
+		}
+	}
+	if hasThreadComment && hasReviewBody {
+		b.WriteString("Some comments below are tagged `[Thread: ...]` (an inline, line-anchored review comment) " +
+			"and some are tagged `[Review: ...]` (the top-level summary of a PR review). A review's body and its " +
+			"own inline comments commonly overlap — a body finding that restates an inline comment is the same " +
+			"finding, not duplicate work. A body finding with no inline counterpart is additional feedback " +
+			"(e.g. raised about a file/line the review couldn't anchor to the diff) and must be addressed, not " +
+			"skipped as \"already covered\". Address the union of both without doing the same fix twice.\n\n")
+	}
+	for _, c := range comments {
+		if c.ReviewID != "" {
+			// Top-level PR review body: no file/line anchor, so it gets its own
+			// header (verdict + review node ID) rather than the thread-comment
+			// File/Line/Diff-context block below, which doesn't apply here.
+			header := fmt.Sprintf("**@%s** (%s)", c.Author, c.CreatedAt.Format("2006-01-02 15:04"))
+			if c.ReviewState != "" {
+				header += fmt.Sprintf(" [%s]", c.ReviewState)
+			}
+			header += fmt.Sprintf(" [Review: %s]", c.ReviewID)
+			b.WriteString(header + "\n")
+			b.WriteString(c.Body + "\n\n")
+			continue
+		}
 		if c.Path != "" {
 			// Review thread comment: include file/line/hunk context so Claude
 			// can navigate directly to the relevant location.

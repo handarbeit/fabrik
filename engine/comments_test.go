@@ -882,6 +882,72 @@ func TestAddComment_ReactsWithRocket(t *testing.T) {
 	}
 }
 
+// ── review-body reaction dispatch (third branch, #1205) ──────────────────────
+
+// TestAcknowledgeComments_ReviewBody_UsesAddReviewReaction verifies that a
+// synthetic review-body comment (ReviewID set) is acknowledged via the
+// GraphQL AddReviewReaction call, not the DatabaseID-keyed REST endpoints
+// used for issue/PR-conversation comments and inline thread comments — no
+// REST reactions endpoint exists for PullRequestReview itself.
+func TestAcknowledgeComments_ReviewBody_UsesAddReviewReaction(t *testing.T) {
+	type call struct{ reviewID, content string }
+	var calls []call
+	client := &mockGitHubClient{
+		addReviewReactionFn: func(reviewID, content string) error {
+			calls = append(calls, call{reviewID, content})
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	comments := []gh.Comment{
+		{ID: "PRR_1", ReviewID: "PRR_1", Author: "coderabbitai", Body: "additional findings"},
+	}
+	eng.acknowledgeComments("owner", "repo", 1, comments)
+
+	if len(calls) != 1 || calls[0].reviewID != "PRR_1" || calls[0].content != "eyes" {
+		t.Errorf("expected AddReviewReaction(%q, %q) call, got %+v", "PRR_1", "eyes", calls)
+	}
+	if len(client.addCommentReactionCalls) != 0 {
+		t.Errorf("expected no AddCommentReaction calls for a review-body comment, got %+v", client.addCommentReactionCalls)
+	}
+	if len(client.addPRReviewCommentReactionCalls) != 0 {
+		t.Errorf("expected no AddPRReviewCommentReaction calls for a review-body comment, got %+v", client.addPRReviewCommentReactionCalls)
+	}
+}
+
+// TestFinalizeComments_ReviewBody_UsesAddReviewReaction verifies the durable
+// 🚀 watermark for a review-body comment goes through AddReviewReaction, and
+// that no ResolveReviewThread call is attempted (a review body has no
+// ReviewThreadID to resolve).
+func TestFinalizeComments_ReviewBody_UsesAddReviewReaction(t *testing.T) {
+	skipIfNoGit(t)
+
+	type call struct{ reviewID, content string }
+	var calls []call
+	client := &mockGitHubClient{
+		addReviewReactionFn: func(reviewID, content string) error {
+			calls = append(calls, call{reviewID, content})
+			return nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, &mockClaudeInvoker{})
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Review", Order: 1}
+	item := gh.ProjectItem{Number: 42, Body: "spec"}
+	comments := []gh.Comment{
+		{ID: "PRR_1", ReviewID: "PRR_1", ReviewState: "COMMENTED", Author: "pruefer-bot", Body: "additional findings"},
+	}
+
+	eng.finalizeComments(context.Background(), board, item, stage, comments, "owner", "repo", "main", false, "")
+
+	if len(calls) != 1 || calls[0].reviewID != "PRR_1" || calls[0].content != "rocket" {
+		t.Errorf("expected AddReviewReaction(%q, %q) call, got %+v", "PRR_1", "rocket", calls)
+	}
+	if len(client.resolveReviewThreadCalls) != 0 {
+		t.Errorf("expected no ResolveReviewThread calls for a review-body comment, got %+v", client.resolveReviewThreadCalls)
+	}
+}
+
 // ── isReviewReinvoke ──────────────────────────────────────────────────────────
 
 func TestIsReviewReinvoke_AllReviewThreadIDs_ReturnsTrue(t *testing.T) {
@@ -920,6 +986,36 @@ func TestIsReviewReinvoke_EmptySlice_ReturnsFalse(t *testing.T) {
 	}
 	if isReviewReinvoke([]gh.Comment{}) {
 		t.Error("expected false for empty slice")
+	}
+}
+
+func TestIsReviewReinvoke_AllReviewBodies_ReturnsTrue(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "PRR_1", ReviewID: "PRR_1"},
+		{ID: "PRR_2", ReviewID: "PRR_2"},
+	}
+	if !isReviewReinvoke(comments) {
+		t.Error("expected true for a batch sourced purely from review bodies")
+	}
+}
+
+func TestIsReviewReinvoke_MixedThreadAndBody_ReturnsTrue(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "C_1", ReviewThreadID: "RT_abc"},
+		{ID: "PRR_1", ReviewID: "PRR_1"},
+	}
+	if !isReviewReinvoke(comments) {
+		t.Error("expected true for a batch mixing thread comments and review bodies — both are review-originated")
+	}
+}
+
+func TestIsReviewReinvoke_ReviewBodyPlusPlainComment_ReturnsFalse(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "PRR_1", ReviewID: "PRR_1"},
+		{ID: "C_2"}, // plain conversation comment
+	}
+	if isReviewReinvoke(comments) {
+		t.Error("expected false when a plain (non-review) comment is mixed in")
 	}
 }
 

@@ -402,14 +402,29 @@ func buildThreadEntries(comments []gh.Comment) []reviewThreadEntry {
 	return entries
 }
 
+// countReviewBodies returns the number of comments in the batch that
+// represent a top-level PR review body (c.ReviewID != "") rather than an
+// inline thread comment. Used to report review-body findings addressed as a
+// count distinct from resolved threads (#1205) — a review body has no
+// thread to resolve, so it can't be folded into buildThreadEntries.
+func countReviewBodies(comments []gh.Comment) int {
+	n := 0
+	for _, c := range comments {
+		if c.ReviewID != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // formatReviewFeedbackComment formats a Fabrik-marked comment for posting on a
 // linked PR after review-reinvoke processing completes. It includes:
 //   - a header line identifying the stage and action
 //   - standard metadata (branch, commit, main SHA, timestamp)
 //   - Claude's cleaned output (truncated at 60k)
 //   - a per-thread footer listing each addressed thread by path:line
-//   - a summary line with thread and comment counts
-func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, totalComments int) string {
+//   - a summary line with thread, review-body, and comment counts
+func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, reviewBodyCount, totalComments int) string {
 	output = neutralizeBotMentions(output)
 	const maxLen = 60000
 	if len(output) > maxLen {
@@ -431,6 +446,10 @@ func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, tim
 			sb.WriteString(fmt.Sprintf("- `%s` — resolved\n", displayPath))
 		}
 	}
-	sb.WriteString(fmt.Sprintf("\nResolved %d review thread(s) across %d comment(s).", len(threads), totalComments))
+	sb.WriteString(fmt.Sprintf("\nResolved %d review thread(s)", len(threads)))
+	if reviewBodyCount > 0 {
+		sb.WriteString(fmt.Sprintf(" and %d review body finding(s)", reviewBodyCount))
+	}
+	sb.WriteString(fmt.Sprintf(" across %d comment(s).", totalComments))
 	return sb.String()
 }
