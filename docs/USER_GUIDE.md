@@ -2252,8 +2252,15 @@ cost, and issue title. Status icons:
 | `✓` | Stage completed successfully |
 | `✗` | Stage failed (hit max retries) |
 | `?` | Stage blocked / awaiting user input |
-| `↻` | Stage retrying |
+| `↻` (retry) | Stage retrying after a genuine incomplete attempt |
+| `↻` (turn limit) | Invocation exhausted its turn budget — not a failure; the same Claude session resumes and picks up where it left off |
 | `💬` | Issue has unprocessed comments |
+
+A turn-capped invocation is distinguished from a genuine error using the Claude CLI's
+own result classification (`subtype: "error_max_turns"`), not by inferring it from turn
+counts. It renders with the same `↻` icon as a retry, since it is incomplete and
+resumable rather than a fault — `✗ (error)` is reserved for invocations that did not
+complete for some other reason.
 
 **Warnings panel**: Sits below History and surfaces actionable pre-flight issues that Fabrik detected at startup (e.g. `allow_auto_merge` disabled on a managed repo, stage-config drift). The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. The panel's appearance when there are no active warnings depends on whether there are dismissed warnings:
 

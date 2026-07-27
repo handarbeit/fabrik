@@ -490,6 +490,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastInvocationCompleted = v.Completed
 		item.LastInvocationBlocked = v.Blocked
 		item.LastInvocationErrored = v.Errored
+		item.LastInvocationTurnLimited = v.TurnLimited
 		item.LastInvocationIsComment = v.IsComment
 		item.LastInvocationDuration = v.Duration
 		item.LastTokenUsage = v.Usage

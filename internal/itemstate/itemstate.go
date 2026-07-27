@@ -114,11 +114,20 @@ type ItemState struct {
 	LastInvocationDuration time.Duration
 
 	// LastInvocationErrored records whether the most recent Claude invocation exited
-	// with a non-zero status (process error, timeout kill, etc.). This is recorded
-	// independently of LastInvocationCompleted: a stage can complete (FABRIK_STAGE_COMPLETE
-	// emitted) even when the process exits non-zero — e.g. a timeout kill after the stage
-	// finished. The error is surfaced as JobCompletedEvent.Success=false in history.
+	// with a non-zero status (process error, timeout kill, etc.) AND was not classified
+	// as a turn-limit exit (see LastInvocationTurnLimited) — i.e. a genuine fault. This
+	// is recorded independently of LastInvocationCompleted: a stage can complete
+	// (FABRIK_STAGE_COMPLETE emitted) even when the process exits non-zero — e.g. a
+	// timeout kill after the stage finished. The error is surfaced as
+	// JobCompletedEvent.Success=false in history.
 	LastInvocationErrored bool
+
+	// LastInvocationTurnLimited records whether the most recent Claude invocation
+	// exited because it exhausted its configured turn budget (CLI subtype
+	// error_max_turns), as opposed to a genuine failure. A turn-limited invocation
+	// is incomplete but resumable — surfaced as JobCompletedEvent.TurnLimited in
+	// history, rendered distinctly from a genuine error. See ADR-1178.
+	LastInvocationTurnLimited bool
 
 	// LastTokenUsage holds token consumption from the most recent Claude invocation.
 	// Replaces engine.lastUsage[iKey].

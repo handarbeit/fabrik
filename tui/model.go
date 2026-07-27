@@ -20,6 +20,7 @@ type HistoryEntry struct {
 	StageModel     string // model configured for the stage; empty means use claude default
 	IsComment      bool
 	Success        bool
+	TurnLimited    bool
 	Completed      bool
 	BlockedOnInput bool
 	Duration       time.Duration
@@ -836,6 +837,7 @@ func (m *Model) prepareDetailItem() {
 			StageName:      entry.StageName,
 			StageModel:     entry.StageModel,
 			Success:        entry.Success,
+			TurnLimited:    entry.TurnLimited,
 			Completed:      entry.Completed,
 			BlockedOnInput: entry.BlockedOnInput,
 			Duration:       entry.Duration,

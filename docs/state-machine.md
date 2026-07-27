@@ -2350,6 +2350,7 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `LastTokenUsage` | `InvocationRecorded{Usage: ...}` | `snap.State().LastTokenUsage` | `e.lastUsage[iKey]` |
 | `LastInvocationCompleted` | `InvocationRecorded{Completed: ...}` | `snap.State().LastInvocationCompleted` | `e.lastCompleted[iKey]` |
 | `LastInvocationBlocked` | `InvocationRecorded{Blocked: ...}` | `snap.State().LastInvocationBlocked` | `e.lastBlocked[iKey]` |
+| `LastInvocationTurnLimited` | `InvocationRecorded{TurnLimited: ...}` | `snap.State().LastInvocationTurnLimited` | N/A (new in #1178) |
 | `LastDeepFetchFailureAt` | `DeepFetchFailed{At: ...}` (set); `ItemDeepFetched` (clears) | `snap.State().LastDeepFetchFailureAt` | `e.deepFetchFailureTime[iKey]` |
 | `LinkedPR.CheckRuns` | `CheckRunCompleted` (when SHA is already in `shaToKey`); `PRHeadSHAUpdated` drain (flushes `pendingCheckRuns[sha]`); **`PRHeadSHAUpdated` prune** (clears the slice when the head SHA genuinely changes, not on first linkage — #958 leg 3); fallback populate in `FetchCheckRuns` | `snap.LinkedPR().CheckRuns` | CacheImpl: `c.checkRuns[sha]` (Phase 5 F4: migrated to Store in #563) |
 | `LinkedPR.LastCIFixNoOpSHA` | `CIFixNoOpRecorded{SHA}` (#958 leg 2) | `snap.LastCIFixNoOpSHA()` | N/A (new in #958) |
@@ -2530,7 +2531,7 @@ All ChangeFlags are produced by the single shared store. Field ownership is by m
 | `PRStateChanged` | Webhook/reconcile | `PRDetailsUpdated` only — a narrower sub-flag of `LinkedPRChanged` for genuine PR-level state transitions (merged, closed, draft↔ready). Emitted alongside `LinkedPRChanged`, never alone. **Not** set by `PRReviewSubmitted`/`PRReviewCommentCreated`/`ReviewThreadCommentAdded` — see `CommentBreakerObserver` (§4.6) for why that distinction is load-bearing. |
 | `CommentsChanged` | Webhook/reconcile | `IssueCommentCreated`, `LocalCommentAdded` |
 | `AssigneesChanged` | Webhook/reconcile | `IssueAssigneesUpdated` (via `applyIssuesDelta` on `issues.assigned`/`issues.unassigned` events) |
-| `InvocationChanged` | Engine-side | `InvocationRecorded` (token usage, completed, blocked, IsComment) |
+| `InvocationChanged` | Engine-side | `InvocationRecorded` (token usage, completed, blocked, turn-limited, IsComment) |
 | `StageStateChanged` | Engine-side | `StageAttempted`, `StageRetryIncremented`, `ReviewCycleIncremented`, etc. |
 | `WorkerChanged` | Engine-side | `WorkerEntered`, `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` — all worker-handle mutations |
 | `WorkerLifecycleChanged` | Engine-side | `WorkerEntered`, `WorkerExited` only — lifecycle transitions that change dispatch eligibility; emitted alongside `WorkerChanged`; this is the wake-relevant sub-flag |
@@ -2561,7 +2562,7 @@ The unconditional `wakeCh <- struct{}{}` send that previously lived in the webho
 |----------|--------------|-----------|-------|
 | `wakeChObserver` | shared store (once) | `Change.Fields & wakeChFlags != 0` | `wakeCh <- struct{}{}` (non-blocking) |
 | `mayNeedWorkObserver` | shared store (once) | `Change.Fields & cycleSetFlags != 0` (excludes `WorkerLifecycleChanged` — see §9.9) | adds `repo#number` to `e.mayNeedWork` |
-| `InvocationObserver` | shared store | `Change.Fields & InvocationChanged != 0` | `tui.JobCompletedEvent` |
+| `InvocationObserver` | shared store | `Change.Fields & InvocationChanged != 0` | `tui.JobCompletedEvent` (`Success`/`Errored` are `false`/`true` respectively only for a genuine fault as of #1178 — a turn-cap exit (CLI `subtype: "error_max_turns"`) sets `TurnLimited: true` instead and no longer counts as an error for rendering purposes, even though the underlying Claude process still exited non-zero and the existing retry/cooldown mechanics are unaffected; `Completed` remains a separate axis meaning "no `FABRIK_STAGE_COMPLETE` marker was seen") |
 | `StageChangeObserver` | shared store | `Change.Fields & StatusChanged != 0` | `tui.StageChangedEvent` |
 | Pause observer (closure) | `CacheImpl.SubscribePause` | `Pause()` / `Resume()` | `tui.WebhookStatusEvent` |
 

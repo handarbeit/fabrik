@@ -289,14 +289,22 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// non-zero exit does NOT veto completion; it is recorded separately via Errored so
 	// the error is still visible in history (JobCompletedEvent.Success=false).
 	completed := invCompleted
+	// A turn-limit exit (CLI subtype error_max_turns) is not a genuine fault —
+	// see the identical wiring in finalizeStageOutcome (engine/item.go) and
+	// claudeTurnLimitError in engine/claude.go. Only what feeds the
+	// InvocationRecorded write changes; err itself is left untouched for the
+	// retry/circuit-breaker logic below.
+	var turnLimitErr *claudeTurnLimitError
+	turnLimited := errors.As(err, &turnLimitErr)
 	e.store.Apply(itemstate.InvocationRecorded{
-		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
-		Number:    item.Number,
-		Completed: completed,
-		Errored:   err != nil,
-		Usage:     usage,
-		IsComment: true,
-		Duration:  time.Since(startedAt),
+		Repo:        itemOwnerRepoString(item, e.defaultRepo()),
+		Number:      item.Number,
+		Completed:   completed,
+		Errored:     err != nil && !turnLimited,
+		TurnLimited: turnLimited,
+		Usage:       usage,
+		IsComment:   true,
+		Duration:    time.Since(startedAt),
 	})
 	// Bail early ONLY if the stage did not complete. If FABRIK_STAGE_COMPLETE was
 	// emitted before the process exited non-zero (e.g. a timeout kill after the stage

@@ -162,6 +162,79 @@ func TestInterpretClaudeResult_NonStaleError_StillSavesSession(t *testing.T) {
 	}
 }
 
+// TestInterpretClaudeResult_TurnCapExit_ClassifiedAsTurnLimitError uses the
+// exact production payload shape from #1114 (Implement,
+// Implement-20260727-125747-*.log): subtype error_max_turns, terminal_reason
+// max_turns, is_error true, and a CLI-reported num_turns (51) past the
+// configured cap (50) — confirming the classification is read directly from
+// subtype rather than inferred from a turn-count comparison. session_id is
+// included per the confirmed carve-out (#1081): the CLI still reports
+// session_id on a max_turns hit even though result text is empty, which is
+// what parseClaudeJSON's ok-gate requires to accept the payload.
+func TestInterpretClaudeResult_TurnCapExit_ClassifiedAsTurnLimitError(t *testing.T) {
+	raw := []byte(`{"type":"result","subtype":"error_max_turns","terminal_reason":"max_turns",` +
+		`"session_id":"sid-1114","errors":["Reached maximum number of turns (50)"],"is_error":true,"num_turns":51}`)
+
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1114, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	if err == nil {
+		t.Fatalf("expected error to be returned")
+	}
+	if completed {
+		t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE marker)")
+	}
+	var turnLimitErr *claudeTurnLimitError
+	if !errors.As(err, &turnLimitErr) {
+		t.Fatalf("expected *claudeTurnLimitError, got %T: %v", err, err)
+	}
+	if turnLimitErr.TerminalReason != "max_turns" {
+		t.Errorf("TerminalReason = %q, want %q", turnLimitErr.TerminalReason, "max_turns")
+	}
+	if turnLimitErr.NumTurns != 51 {
+		t.Errorf("NumTurns = %d, want 51", turnLimitErr.NumTurns)
+	}
+}
+
+// TestInterpretClaudeResult_GenuineError_NotClassifiedAsTurnLimit uses the
+// exact production payload shape from #1128 (reaped session): subtype
+// error_during_execution, distinct from error_max_turns. It must classify as
+// a generic error, never as *claudeTurnLimitError.
+func TestInterpretClaudeResult_GenuineError_NotClassifiedAsTurnLimit(t *testing.T) {
+	raw := []byte(`{"type":"result","subtype":"error_during_execution","session_id":"3fefda47-9ea5-422a-9cdb-33da6e13244d",` +
+		`"errors":["No conversation found with session ID: 3fefda47-…"],"is_error":true,"num_turns":0}`)
+
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1128, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	if err == nil {
+		t.Fatalf("expected error to be returned")
+	}
+	if completed {
+		t.Errorf("expected completed=false")
+	}
+	var turnLimitErr *claudeTurnLimitError
+	if errors.As(err, &turnLimitErr) {
+		t.Errorf("expected genuine error NOT to be classified as *claudeTurnLimitError, got %v", turnLimitErr)
+	}
+}
+
+// TestInterpretClaudeResult_IncompleteWithoutCap_NotClassifiedAsTurnLimit
+// covers a non-zero exit with neither a completion marker nor any recognized
+// subtype (e.g. a crash or unrecognized failure) — must fall through to the
+// generic error path, not be misclassified as a turn cap.
+func TestInterpretClaudeResult_IncompleteWithoutCap_NotClassifiedAsTurnLimit(t *testing.T) {
+	raw := []byte(`{"result":"partial work, no marker","session_id":"sid-6"}`)
+
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	if err == nil {
+		t.Fatalf("expected error to be returned")
+	}
+	if completed {
+		t.Errorf("expected completed=false")
+	}
+	var turnLimitErr *claudeTurnLimitError
+	if errors.As(err, &turnLimitErr) {
+		t.Errorf("expected incomplete-without-cap NOT to be classified as *claudeTurnLimitError, got %v", turnLimitErr)
+	}
+}
+
 // TestInterpretClaudeResult_HealthyResume_SessionIDSaved confirms the
 // ordinary success path (no IsError) still persists the session ID —
 // the resave guard must not regress normal resume behavior.

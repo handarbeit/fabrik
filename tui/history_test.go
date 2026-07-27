@@ -267,6 +267,71 @@ func TestViewHistory_IsComment(t *testing.T) {
 	}
 }
 
+// TestViewHistory_TurnLimitClassification is the regression test for issue #1178. It
+// covers the full rendering matrix required by the issue's Definition of Done: a
+// turn-capped invocation must render as "↻  (turn limit)" (not an error), a genuine
+// error must still render as "✗  (error)", and the existing blocked-on-input,
+// incomplete-without-cap, and success renderings must be unchanged.
+func TestViewHistory_TurnLimitClassification(t *testing.T) {
+	redirectHistory(t)
+
+	cases := []struct {
+		name  string
+		entry HistoryEntry
+		want  string
+		unwnt []string
+	}{
+		{
+			name:  "turn-capped",
+			entry: HistoryEntry{IssueNumber: 1, StageName: "Implement", Success: true, TurnLimited: true, Completed: false},
+			want:  "(turn limit)",
+			unwnt: []string{"(error)", "(retry)"},
+		},
+		{
+			name:  "genuine error",
+			entry: HistoryEntry{IssueNumber: 2, StageName: "Implement", Success: false, TurnLimited: false, Completed: false},
+			want:  "(error)",
+			unwnt: []string{"(turn limit)", "(retry)"},
+		},
+		{
+			name:  "blocked on input",
+			entry: HistoryEntry{IssueNumber: 3, StageName: "Implement", Success: true, Completed: false, BlockedOnInput: true},
+			want:  "(input needed)",
+			unwnt: []string{"(error)", "(turn limit)", "(retry)"},
+		},
+		{
+			name:  "incomplete without cap",
+			entry: HistoryEntry{IssueNumber: 4, StageName: "Implement", Success: true, TurnLimited: false, Completed: false},
+			want:  "(retry)",
+			unwnt: []string{"(error)", "(turn limit)"},
+		},
+		{
+			name:  "success",
+			entry: HistoryEntry{IssueNumber: 5, StageName: "Implement", Success: true, Completed: true},
+			want:  "✓",
+			unwnt: []string{"(error)", "(turn limit)", "(retry)", "(input needed)"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+			m.history.history = []HistoryEntry{tc.entry}
+			next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			m = next.(Model)
+			view := m.history.View(m.width)
+			if !strings.Contains(view, tc.want) {
+				t.Errorf("%s: expected %q in view, got: %q", tc.name, tc.want, view)
+			}
+			for _, u := range tc.unwnt {
+				if strings.Contains(view, u) {
+					t.Errorf("%s: unexpected %q in view, got: %q", tc.name, u, view)
+				}
+			}
+		})
+	}
+}
+
 // TestViewHistory_ConfirmQuit verifies the quit confirmation prompt is shown in viewHistory.
 func TestViewHistory_ConfirmQuit(t *testing.T) {
 	redirectHistory(t)
@@ -429,7 +494,10 @@ func TestJobCompletedEvent_MultiAttempt(t *testing.T) {
 // TestHistory_TurnCappedRetries is the regression test for issue #847. It simulates
 // a stage that hits max_turns twice (capped, Completed: false) and then completes on
 // the third attempt, asserting all three invocations appear in history with distinct
-// costs and that only the final entry is marked Completed: true.
+// costs and that only the final entry is marked Completed: true. Per #1178, a capped
+// attempt is no longer a genuine fault: production now reports it as
+// Success: true, TurnLimited: true (not Success: false), so the two capped events here
+// are constructed the way finalizeStageOutcome actually emits them post-#1178.
 func TestHistory_TurnCappedRetries(t *testing.T) {
 	redirectHistory(t)
 
@@ -439,12 +507,13 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	t2 := t1.Add(95 * time.Minute)
 	t3 := t2.Add(30 * time.Minute)
 
-	sendEvent := func(cost float64, completed bool, ts time.Time) {
+	sendEvent := func(cost float64, completed, turnLimited bool, ts time.Time) {
 		comp, _ := h.Update(JobCompletedEvent{
 			IssueNumber: 1128,
 			Repo:        "example-org/example-repo",
 			StageName:   "Implement",
-			Success:     completed,
+			Success:     completed || turnLimited,
+			TurnLimited: turnLimited,
 			Completed:   completed,
 			CostUSD:     cost,
 			TurnsUsed:   101,
@@ -456,9 +525,9 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	}
 
 	// Two capped attempts followed by a completing attempt.
-	sendEvent(14.11, false, t1)
-	sendEvent(9.17, false, t2)
-	sendEvent(44.10, true, t3)
+	sendEvent(14.11, false, true, t1)
+	sendEvent(9.17, false, true, t2)
+	sendEvent(44.10, true, false, t3)
 
 	entries := h.History()
 
@@ -486,6 +555,18 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	}
 	if !entries[2].Completed {
 		t.Errorf("entries[2].Completed = false, want true (completing attempt)")
+	}
+
+	// (c2) First two entries must be TurnLimited: true (not rendered as errors); last
+	// must be TurnLimited: false.
+	if !entries[0].TurnLimited {
+		t.Errorf("entries[0].TurnLimited = false, want true (capped attempt)")
+	}
+	if !entries[1].TurnLimited {
+		t.Errorf("entries[1].TurnLimited = false, want true (capped attempt)")
+	}
+	if entries[2].TurnLimited {
+		t.Errorf("entries[2].TurnLimited = true, want false (completing attempt)")
 	}
 
 	// (d) SaveHistory/LoadHistory round-trip must preserve all three entries.
