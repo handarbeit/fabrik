@@ -117,14 +117,15 @@ type Model struct {
 	stopCh chan<- StopRequest
 
 	// components
-	header   HeaderComponent
-	alert    AlertBannerComponent
-	active   ActivePaneComponent
-	history  HistoryPaneComponent
-	warnings WarningsPaneComponent
-	detail   DetailPanelComponent
-	help     HelpPanelComponent
-	footer   FooterComponent
+	header     HeaderComponent
+	alert      AlertBannerComponent
+	usageLimit ClaudeUsageLimitBannerComponent
+	active     ActivePaneComponent
+	history    HistoryPaneComponent
+	warnings   WarningsPaneComponent
+	detail     DetailPanelComponent
+	help       HelpPanelComponent
+	footer     FooterComponent
 }
 
 // minHistoryRows is the minimum number of rows reserved for the history pane
@@ -173,10 +174,11 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			skillsStaleCount: skillsStaleCount,
 			customWorkflow:   customWorkflow,
 		},
-		alert:    AlertBannerComponent{now: now},
-		active:   active,
-		history:  NewHistoryPaneComponent(info.Repo),
-		warnings: NewWarningsPaneComponent(),
+		alert:      AlertBannerComponent{now: now},
+		usageLimit: ClaudeUsageLimitBannerComponent{now: now},
+		active:     active,
+		history:    NewHistoryPaneComponent(info.Repo),
+		warnings:   NewWarningsPaneComponent(),
 		footer: FooterComponent{
 			projectInfo: info,
 			now:         now,
@@ -629,6 +631,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.active = comp.(ActivePaneComponent)
 		comp, _ = m.alert.Update(msg)
 		m.alert = comp.(AlertBannerComponent)
+		comp, _ = m.usageLimit.Update(msg)
+		m.usageLimit = comp.(ClaudeUsageLimitBannerComponent)
 		comp, _ = m.footer.Update(msg)
 		m.footer = comp.(FooterComponent)
 		wcomp, _ := m.warnings.Update(msg)
@@ -664,6 +668,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RateLimitAlertEvent:
 		comp, _ := m.alert.Update(msg)
 		m.alert = comp.(AlertBannerComponent)
+		m.updateLayout(false)
+		return m, nil
+
+	case ClaudeUsageLimitAlertEvent:
+		comp, _ := m.usageLimit.Update(msg)
+		m.usageLimit = comp.(ClaudeUsageLimitBannerComponent)
 		m.updateLayout(false)
 		return m, nil
 
@@ -779,7 +789,7 @@ func (m *Model) updateLayout(scrollToTop bool) {
 		m.prepareDetailItem()
 		detailH = m.detail.Height()
 	}
-	totalAvail := m.height - m.header.Height() - m.alert.Height() - activeH - detailH - m.footer.Height()
+	totalAvail := m.height - m.header.Height() - m.alert.Height() - m.usageLimit.Height() - activeH - detailH - m.footer.Height()
 
 	helpH := 0
 	if m.helpPanel {
@@ -852,6 +862,9 @@ func (m Model) View() string {
 	sections = append(sections, m.header.View(m.width))
 	if alertView := m.alert.View(m.width); alertView != "" {
 		sections = append(sections, alertView)
+	}
+	if usageLimitView := m.usageLimit.View(m.width); usageLimitView != "" {
+		sections = append(sections, usageLimitView)
 	}
 	sections = append(sections, m.active.View(m.width))
 

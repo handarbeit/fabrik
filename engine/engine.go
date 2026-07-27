@@ -116,6 +116,8 @@ type Engine struct {
 	mergeTrainTrials         map[string][]time.Time // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
 	issueCtxs                sync.Map               // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
 	baseBranchWarnedSet      sync.Map               // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
+	claudeSuspendMu          sync.Mutex             // guards claudeSuspendedUntil
+	claudeSuspendedUntil     time.Time              // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
 	events                   chan tui.Event         // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                  *os.File               // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                    sync.Mutex             // serializes concurrent writes to logFile

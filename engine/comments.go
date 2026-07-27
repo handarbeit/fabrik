@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -140,6 +141,15 @@ func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	// Account-wide Claude usage-limit suspension gate (ADR-1120): checked before
+	// any side effect (reactions, labels, worktree setup) so a suspended cycle is
+	// a full no-op — the comment remains "new" and is retried on the next poll
+	// once dispatch resumes, rather than being consumed by a doomed invocation.
+	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
+		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping comment review\n")
+		return nil
+	}
 
 	// Merge any unresolved PR review thread comments into the working slice.
 	// This ensures that when a user nudge arrives (e.g. "please address Copilot
@@ -300,6 +310,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			e.logf(item.Number, "skip", "cancelled during claude comment review\n")
 			return nil
 		}
+		// A Claude usage-limit hit is not "no forward progress" — it's an
+		// account-wide condition unrelated to this issue's comment thread, already
+		// handled by activateClaudeSuspension above. Counting it toward the
+		// circuit breaker would risk tripping the breaker purely because the
+		// account ran dry, not because this issue is stuck.
+		var limitErr *claudeUsageLimitError
+		if errors.As(err, &limitErr) {
+			e.logf(item.Number, "claude-limit", "claude comment review hit the account usage limit; not counted toward the comment circuit breaker\n")
+			return nil
+		}
 		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		// A non-completing, erroring invocation is exactly the "no forward progress"
 		// case the circuit breaker exists to catch — check it here too, not only
@@ -383,6 +403,16 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 		invOutput, completed, invUsage, err = e.claude.InvokeForComments(ctx, stage, *item, comments, workDir, invokeOpts)
 		output += invOutput
 		usage = addTokenUsage(usage, invUsage)
+
+		var limitErr *claudeUsageLimitError
+		if errors.As(err, &limitErr) {
+			e.activateClaudeSuspension(item.Number, limitErr.ResetTime, time.Now())
+		} else if err == nil {
+			// Only a successful invocation is evidence the limit has cleared — a generic,
+			// unrelated error proves nothing about account-wide usage-limit state and must
+			// not clear it (see the matching comment in item.go's runInvocationWithExtension).
+			e.clearClaudeSuspension("comment review invocation reached Claude")
+		}
 
 		// hitLimit uses currentBudget > 0 (not base > 0) so that extension only fires
 		// when fabrik:extend-turns is present.

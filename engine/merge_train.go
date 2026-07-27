@@ -469,10 +469,23 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// Conflict — attempt Claude resolution.
 		e.logf(member.item.Number, "merge-train", "merge conflict for #%d: %s — attempting Claude resolution\n", member.item.Number, strings.TrimSpace(string(mergeOut)))
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride}
-		if e.resolveConflictWithClaude(ctx, member.item, wtDir, p.holdingStg, member.headSHA, opts) {
+		resolved, resolveErr := e.resolveConflictWithClaude(ctx, member.item, wtDir, p.holdingStg, member.headSHA, opts)
+		if resolved {
 			survivors = append(survivors, member)
 			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved by Claude\n", member.item.Number)
 			continue
+		}
+		if resolveErr != nil {
+			// Resolution could not even be attempted (account-wide Claude usage-limit
+			// suspension, ADR-1120) — this says nothing about whether #%d's conflict is
+			// resolvable, so ejecting the member here would be a correctness bug. Abort
+			// the in-progress merge and propagate as a fatal assembly error instead; the
+			// caller's fatal-error path cleans up trial artifacts and retries on the
+			// train's next natural cycle, with no member punished.
+			abortCmd := exec.Command("git", "merge", "--abort")
+			abortCmd.Dir = wtDir
+			abortCmd.CombinedOutput() // best-effort
+			return nil, "", fmt.Errorf("resolving conflict for #%d: %w", member.item.Number, resolveErr)
 		}
 
 		// Unresolvable — abort merge and eject.
@@ -807,16 +820,34 @@ func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string) gh.Comme
 }
 
 // resolveConflictWithClaude invokes Claude inline to resolve merge conflicts in the
-// trial branch worktree. Returns true if resolution succeeded (no conflict markers remain
-// and the resolution is committed).
-func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, opts InvokeOptions) bool {
+// trial branch worktree. Returns (true, nil) if resolution succeeded (no conflict markers
+// remain and the resolution is committed), (false, nil) if the conflict is genuinely
+// unresolvable (the caller ejects the member), or (false, non-nil) if resolution could not
+// even be attempted — currently only a claudeUsageLimitError (ADR-1120). Callers must treat
+// the two false cases differently: an account-wide usage-limit hit is not evidence this
+// member's conflict is unresolvable, so it must not be ejected.
+func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, opts InvokeOptions) (bool, error) {
+	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
+		e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
+		return false, &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+	}
+
 	comment := buildTrainConflictComment(memberItem, prSHA)
 
 	_, _, _, err := e.claude.InvokeForComments(ctx, holdingStg, memberItem, []gh.Comment{comment}, trainWorkDir, opts)
-	if err != nil {
-		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
-		return false
+	var limitErr *claudeUsageLimitError
+	if errors.As(err, &limitErr) {
+		e.activateClaudeSuspension(memberItem.Number, limitErr.ResetTime, time.Now())
+		return false, err
 	}
+	if err != nil {
+		// A generic, unrelated error proves nothing about account-wide usage-limit state
+		// and must not clear an active suspension (see the matching comment in item.go's
+		// runInvocationWithExtension) — only fall through to clear below on success.
+		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
+		return false, nil
+	}
+	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
 
 	// Check whether conflicts remain after Claude's work.
 	// Parse line-by-line to avoid false positives from file paths containing
@@ -830,7 +861,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 			if code == "UU" || code == "AA" || code == "DD" ||
 				code == "AU" || code == "UD" || code == "UA" || code == "DU" {
 				e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution\n")
-				return false
+				return false, nil
 			}
 		}
 	}
@@ -840,7 +871,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	diffCmd.Dir = trainWorkDir
 	if out, diffErr := diffCmd.CombinedOutput(); diffErr != nil {
 		e.logf(memberItem.Number, "merge-train", "git diff --check reports conflicts: %s\n", strings.TrimSpace(string(out)))
-		return false
+		return false, nil
 	}
 
 	// Verify git considers merge done (index clean or committed).
@@ -857,11 +888,11 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 		commitCmd.Dir = trainWorkDir
 		if out, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
 			e.logf(memberItem.Number, "merge-train", "could not commit resolution: %s\n", strings.TrimSpace(string(out)))
-			return false
+			return false, nil
 		}
 	}
 
-	return true
+	return true, nil
 }
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
