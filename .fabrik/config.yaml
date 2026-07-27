@@ -29,6 +29,19 @@ webhooks: true
 board_cache_mode: in-memory
 tui: true
 terminal: ghostty
+
+# Merge train (ADR-059): yolo items completing Validate advance to the Queued
+# holding stage instead of auto-merging individually, then land as one batched
+# integration PR. Requires a "Queued" column on the board matching
+# .fabrik/stages/queued.yaml.
+#
+# MUST be quoted: unquoted `on` is parsed as YAML boolean true, which fails to
+# unmarshal into the string field and silently leaves the train off.
+#
+# Note: fabrik:cruise items never enter the train — cruise short-circuits ahead
+# of the merge-train gate (engine/stages.go:246), leaving the PR for a human.
+# Only fabrik:yolo items are batched.
+merge_train: "on"
 # debug_output: false
 # symlink_env: false    # When true, creates a relative symlink at <worktree>/.env pointing to the fabrikDir .env.
 #                       # Enables worktree-based stages to pick up credentials (e.g. ANTHROPIC_API_KEY) from .env.
