@@ -923,6 +923,17 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 // reports how many budget multiples were ultimately used, so the caller can
 // compute a cumulative-budget stats footer.
 func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, baseBranch, workDir string, resume bool) (output string, completed bool, usage TokenUsage, totalMultiple int, err error) {
+	// Check the account-wide usage-limit suspension gate before building InvokeOptions
+	// or consuming any armed stall hint (#1146) — consumeStallHint destructively clears
+	// StallHintPending, so it must not run on a dispatch that will never actually invoke
+	// Claude. Otherwise a detected stall's one-shot corrective hint would be silently
+	// discarded here and never reach any invocation at all.
+	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
+		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
+		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+		return output, completed, usage, totalMultiple, err
+	}
+
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
@@ -970,12 +981,6 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		totalMultiple = 2
 	}
 	baseline := snapshotBaseline(stage, item, workDir)
-
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
-		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
-		return output, completed, usage, totalMultiple, err
-	}
 
 	currentBudget := firstBudget
 	for {
