@@ -105,6 +105,44 @@ func isBotServiceNotice(c gh.Comment) bool {
 	return false
 }
 
+// nonActionableReviewBodyPhrases are exact-match (after trimming whitespace
+// and lower-casing), not substring, non-actionable review-body verdicts — a
+// pure approval with no accompanying findings. Deliberately exact-match: a
+// substring scan risks dropping a real finding in a body that happens to
+// open with "LGTM" before diving into actual feedback, which is precisely
+// the failure mode issue #1205 exists to fix (see isNonActionableReviewBody).
+var nonActionableReviewBodyPhrases = []string{
+	"lgtm",
+	"lgtm!",
+	"looks good",
+	"looks good!",
+	"looks good to me",
+	"looks good to me!",
+	"approved",
+	"👍",
+}
+
+// isNonActionableReviewBody reports whether body is a pure approval/no-op
+// verdict not worth waking a worker for — an empty/whitespace-only body, or
+// an exact match (case-insensitive, trimmed) of a short curated approval
+// phrase. This is the mechanical, content-based half of the engine/skill
+// split from issue #1205: it does not attempt to decide whether a body
+// restates an inline comment or adds something new — that judgment belongs
+// to the comment-processing skill, which sees both.
+func isNonActionableReviewBody(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	for _, phrase := range nonActionableReviewBodyPhrases {
+		if lower == phrase {
+			return true
+		}
+	}
+	return false
+}
+
 // filterHuman filters a comment slice down to comments authored by a human —
 // excluding bot logins (gh.IsBotLogin) and comments with no resolvable author
 // (fail closed: an unattributed author, e.g. a deleted GitHub account, is

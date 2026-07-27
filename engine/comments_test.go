@@ -571,6 +571,45 @@ func TestIsBotServiceNotice(t *testing.T) {
 	}
 }
 
+func TestIsNonActionableReviewBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "empty body", body: "", want: true},
+		{name: "whitespace-only body", body: "   \n\t  ", want: true},
+		{name: "bare LGTM", body: "LGTM", want: true},
+		{name: "bare LGTM with exclamation", body: "LGTM!", want: true},
+		{name: "lowercase lgtm with surrounding whitespace", body: "  lgtm  ", want: true},
+		{name: "looks good to me", body: "Looks good to me!", want: true},
+		{name: "approved only", body: "Approved", want: true},
+		{name: "thumbs up emoji only", body: "👍", want: true},
+		{
+			name: "LGTM followed by a real finding must NOT be dropped",
+			body: "LGTM overall, but line 42 has an off-by-one error in the loop bound.",
+			want: false,
+		},
+		{
+			name: "genuine finding with no approval phrase",
+			body: "This function never checks for a nil pointer before dereferencing it.",
+			want: false,
+		},
+		{
+			name: "Pruefer-style demoted findings section",
+			body: "## Additional findings (could not anchor to diff)\n\n- `engine/foo.go`: missing error check",
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNonActionableReviewBody(tt.body); got != tt.want {
+				t.Errorf("isNonActionableReviewBody(%q) = %v, want %v", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
 // coderabbitRateLimitFixture reproduces the real observed shape of
 // CodeRabbit's rate-limit notice: a change-stack banner, promo imagery, and
 // collapsible help sections, wrapping the prose warning and the HTML comment
