@@ -185,6 +185,35 @@ not be capped, and a turn-limit exit is definitionally capped — so in effect t
 to requiring the declining attempt's `err` be `nil`. Guarded against regression by
 `TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns`.
 
+### Why must a non-clean attempt still be recorded (with `Capped=false`), rather than simply skipped?
+
+Found via a second pass of the same external review (relayed on issue #1146). The fix above gates
+*arming* on `clean`, but the first version of that fix also gated the `StageTurnUsageRecorded` write
+itself behind the same condition — i.e., `detectAndArmStallHint` was skipped entirely for a non-clean
+attempt, not just its arming half. That reintroduces a narrower version of the same staleness problem
+one level up: given a turn-capped attempt, then a *generic-error* attempt, then a clean-but-declining
+attempt, the middle attempt writes nothing, so `LastTurnsUsed`/`LastTurnsCapped` still describe the
+*first* (capped) attempt when the third attempt runs its comparison. The third attempt then arms —
+citing the first attempt's turn count as its point of comparison — even though the two attempts being
+compared are not actually consecutive; the error in between is invisible to both the trend and the
+comment. The ADR's premise (Decision, above) is specifically *two consecutive clean incomplete stops*;
+a non-clean attempt sitting between them breaks that premise regardless of whether the non-clean
+attempt itself was considered for arming.
+
+The fix separates recording from arming: `detectAndArmStallHint` now takes a `clean bool` and *always*
+applies `StageTurnUsageRecorded` — for a non-clean attempt, with `Capped` forced to `false` regardless
+of that attempt's own (irrelevant) turn count. Since arming requires `prevCapped == true`, recording a
+non-clean attempt with `Capped=false` immediately invalidates the precondition for the very next
+comparison — the chain is broken at the point of the error, not silently skipped over it. Arming
+(the comment-posting, hint-arming half) still only ever runs when the *current* attempt is clean;
+`clean` is threaded through as a parameter to `detectAndArmStallHint` rather than gating the call site,
+so recording and arming can no longer drift out of sync the way the first fix let them. Guarded against
+regression by
+`TestProcessItem_StallDetection_NoArmWhenGenericErrorInterveningBetweenCleanAttempts`, which reproduces
+the capped → generic-error → clean-declining sequence and asserts the third attempt does not arm
+(confirmed to fail without this fix, reproducing the exact misdiagnosis: turns "50 capped -> 10,
+declining", skipping over the intervening error).
+
 ### Why is the hint text generic rather than backgrounding-specific with certainty?
 
 A legitimately-progressing multi-retry stage (e.g., a Review resolving threads one at a time) can show

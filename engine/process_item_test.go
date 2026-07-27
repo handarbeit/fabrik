@@ -1919,11 +1919,11 @@ func TestDetectAndArmStallHint_NoArmWhenCurrentAttemptAlsoCapped(t *testing.T) {
 	repoStr := "owner/repo"
 
 	// First attempt: capped at 50/50 (e.g. a widened 2x/3x extension-loop budget).
-	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 50, MaxTurns: 50})
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, true)
 	// Second, separate dispatch: also capped, but at a smaller absolute budget (its own
 	// extension loop never widened past 1x) — TurnsUsed (20) < prevTurns (50), but this
 	// attempt is itself capped, so it must not be read as a declining, stalled retry.
-	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 20, MaxTurns: 20})
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 20, MaxTurns: 20}, true)
 
 	snap, err := eng.store.Get(repoStr, item.Number)
 	if err != nil {
@@ -2158,6 +2158,91 @@ func TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns(t *tes
 	for _, call := range client.addCommentCalls {
 		if strings.Contains(call.body, "possible stall detected") {
 			t.Error("unexpected stall-detection comment when the declining attempt was a generic error, not a clean stop")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_NoArmWhenGenericErrorInterveningBetweenCleanAttempts
+// covers the case the sibling test above does not: what the *next* clean attempt sees
+// after a generic error, not just whether the erroring attempt itself arms. Found via
+// external review (relayed on issue #1146): before this fix, StageTurnUsageRecorded was
+// only applied inside detectAndArmStallHint, which the (err == nil || turnLimited) call
+// site guard skipped entirely for a generic error — so an errored attempt was invisible
+// to the trend, and LastTurnsUsed/LastTurnsCapped still described the last *clean*
+// attempt. A later clean attempt would then wrongly compare against that non-consecutive
+// predecessor across the gap: attempt 1 capped 50/50, attempt 2 a generic error (turns
+// irrelevant to the fix — the chain-break comes from Capped=false, not from the value),
+// attempt 3 clean-incomplete at 10 turns — 10 < 50 looks like a decline, but the two
+// attempts being compared never actually stopped cleanly back-to-back. This test asserts
+// attempt 3 must not arm: the intervening error attempt must invalidate the "previous
+// capped" precondition, not merely fail to satisfy it itself.
+func TestProcessItem_StallDetection_NoArmWhenGenericErrorInterveningBetweenCleanAttempts(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callIdx++
+			switch callIdx {
+			case 1:
+				// Attempt 1: turn-capped, clean stop (err == nil).
+				return "partial output", false, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, nil
+			case 2:
+				// Attempt 2: a generic error — not a clean stop, and not a
+				// *claudeTurnLimitError — breaking the consecutive-clean-attempts chain.
+				return "partial output", false, TokenUsage{TurnsUsed: 30, MaxTurns: 50}, fmt.Errorf("transient network failure")
+			default:
+				// Attempt 3: clean stop again, fewer turns than attempt 1 — but attempt 1
+				// is no longer the immediate predecessor, so this must not arm.
+				return "partial output", false, TokenUsage{TurnsUsed: 10, MaxTurns: 50}, nil
+			}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 27, Title: "Generic error breaks the capped-chain test", Status: "Research", ItemID: "PVTI_27"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 3 (clean, declining relative to the non-consecutive capped attempt 1): CorrectiveHint = %q, want empty", got)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 27)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("must not arm a corrective hint when a generic error broke the chain between the capped attempt and this one")
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment when a generic error intervened between the capped attempt and this one")
 		}
 	}
 }

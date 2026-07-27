@@ -1417,10 +1417,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			}
 			willEscalate = count >= e.cfg.MaxRetries
 		}
-		// Stall detection/arming is independent of MaxRetries: max_retries: 0 is a
+		// Stall detection/recording is independent of MaxRetries: max_retries: 0 is a
 		// first-class "unlimited retries" config, not an edge case, and is exactly the
 		// setting where a stalled stage would otherwise grind identical retries forever
-		// with no mitigation at all. Only escalation (immediately below) needs the
+		// with no mitigation at all. Only escalation (immediately above) needs the
 		// MaxRetries > 0 guard. Arming is skipped when this attempt is about to be
 		// escalated: detectAndArmStallHint's comment promises the hint will reach "the
 		// next invocation," but an escalated issue pauses immediately after, and a
@@ -1428,21 +1428,26 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		// pending hint before any further invocation happens — the promise would go
 		// unfulfilled and the state would exist only to be thrown away.
 		//
-		// Also gated on (err == nil || turnLimited): the declining-turns heuristic only
-		// means what it claims when both attempts being compared stopped *cleanly* —
-		// genuinely ran out of runway rather than erroring out partway through. A
-		// generic error (network blip, git-push failure, malformed CLI output) can leave
-		// a small non-zero usage.TurnsUsed that "declines" relative to a prior capped
-		// attempt for reasons unrelated to a backgrounding stall — arming there would post
-		// a confident, specific misdiagnosis for what was actually a crash. err == nil
-		// alone is not sufficient, though: a turn-cap exit is itself reported as a
-		// non-nil *claudeTurnLimitError (see claude.go / ADR-1178), which is exactly the
-		// shape this feature must still classify as a clean, capped stop. turnLimited
-		// (already computed above for the InvocationRecorded write) is reused so both
-		// attempt-classification paths agree on what counts as clean. See adrs/1146-*.md
-		// ("Consequences" / open-question resolution) for the fuller discussion.
-		if claudeRan && !willEscalate && (err == nil || turnLimited) {
-			e.detectAndArmStallHint(item, stage, repoStr, usage)
+		// clean (err == nil || turnLimited) is passed through rather than gating the call
+		// itself: the declining-turns heuristic only means what it claims when both
+		// attempts being *compared* stopped cleanly — genuinely ran out of runway rather
+		// than erroring out partway through. But recording must still happen for a
+		// non-clean attempt (network blip, git-push failure, malformed CLI output) —
+		// otherwise its predecessor's turn-usage/capped state survives untouched, and a
+		// later clean attempt would wrongly compare against a non-consecutive prior
+		// clean attempt across the gap, misattributing an intervening crash as part of a
+		// declining-turns stall (see adrs/1146-*.md "Consequences" for the incident that
+		// prompted this). detectAndArmStallHint always records this attempt's own turn
+		// usage with Capped=false when !clean, which invalidates the "previous capped"
+		// precondition for the very next comparison — arming itself still only ever
+		// considers a clean current attempt. clean is not simply err == nil: a turn-cap
+		// exit is itself reported as a non-nil *claudeTurnLimitError (see claude.go /
+		// ADR-1178), which is exactly the shape this feature must still classify as a
+		// clean, capped stop. turnLimited (already computed above for the
+		// InvocationRecorded write) is reused so both attempt-classification paths agree
+		// on what counts as clean.
+		if claudeRan && !willEscalate {
+			e.detectAndArmStallHint(item, stage, repoStr, usage, err == nil || turnLimited)
 		}
 		if willEscalate {
 			e.escalateFailedStage(item, stage, degenerateReason)
@@ -1456,30 +1461,41 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 // and arming a one-shot corrective hint when a stall is detected (#1146). Called
 // whenever claudeRan, independent of MaxRetries — max_retries: 0 ("unlimited
 // retries") must still get the detection/hint mitigation; only the surrounding
-// retry-count/escalation bookkeeping needs the MaxRetries > 0 guard. The call site
-// additionally requires (err == nil || turnLimited) — see the comment there — so
-// only clean incomplete stops (including turn-cap exits, which are non-nil-err by
-// design) feed this comparison, never a genuine crash/network/parse error.
+// retry-count/escalation bookkeeping needs the MaxRetries > 0 guard.
 //
-// The signature: a turn-capped attempt (TurnsUsed >= MaxTurns, did not complete)
-// followed by an incomplete, NOT-capped attempt using strictly fewer turns. A
-// genuinely progressing retry does not shrink like that — remaining work only
-// running out of turns faster than a fuller attempt is a strong indicator the
-// worker re-derived the same stall (e.g. backgrounded a long command and waited
-// for a notification that never arrives) rather than making less progress toward
-// completion. The current attempt must NOT itself be capped: the pre-existing
-// progress-based turn-extension loop (runInvocationWithExtension) can widen the
-// effective budget on one dispatch (e.g. to 2x/3x stage.MaxTurns) without that
-// widening persisting to the next, separate dispatch — so two consecutive capped
-// attempts can show a smaller absolute TurnsUsed on the second purely because its
-// budget reset lower, not because it "declined" in the stalled sense this pattern
-// is meant to catch.
+// clean reports whether this attempt stopped cleanly (err == nil or a
+// *claudeTurnLimitError — see the call site) rather than erroring out partway
+// through (network blip, git-push failure, malformed CLI output). Recording
+// (StageTurnUsageRecorded) always happens, clean or not, so that a non-clean
+// attempt is never silently invisible to the trend: it is recorded with
+// Capped=false regardless of its actual turn count, which invalidates the
+// "previous capped" precondition for the next comparison. Without this, a
+// generic-error attempt between two clean ones would leave the last clean
+// attempt's turns/capped state untouched, and a later clean attempt would
+// wrongly compare against that non-consecutive predecessor across the gap —
+// misattributing an intervening crash as part of a declining-turns stall. Arming
+// itself is skipped entirely when !clean: an errored attempt cannot be the
+// "declining, no completion" half of the pattern this feature targets.
+//
+// The signature (for a clean attempt): a turn-capped predecessor (TurnsUsed >=
+// MaxTurns, did not complete) followed by an incomplete, NOT-capped attempt using
+// strictly fewer turns. A genuinely progressing retry does not shrink like that —
+// remaining work only running out of turns faster than a fuller attempt is a
+// strong indicator the worker re-derived the same stall (e.g. backgrounded a long
+// command and waited for a notification that never arrives) rather than making
+// less progress toward completion. The current attempt must NOT itself be capped:
+// the pre-existing progress-based turn-extension loop (runInvocationWithExtension)
+// can widen the effective budget on one dispatch (e.g. to 2x/3x stage.MaxTurns)
+// without that widening persisting to the next, separate dispatch — so two
+// consecutive capped attempts can show a smaller absolute TurnsUsed on the second
+// purely because its budget reset lower, not because it "declined" in the stalled
+// sense this pattern is meant to catch.
 //
 // Self-limiting to a single corrective hint per episode: StageTurnUsageRecorded
 // always overwrites LastTurnsCapped with this attempt's own capped status, and
 // arming requires the current attempt to be uncapped — so the precondition for a
 // re-arm is cleared immediately, without needing a separate one-shot guard.
-func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage, repoStr string, usage TokenUsage) {
+func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage, repoStr string, usage TokenUsage, clean bool) {
 	var prevTurns int
 	var prevCapped bool
 	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
@@ -1487,7 +1503,7 @@ func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage,
 		prevCapped = snap.LastTurnsCapped(stage.Name)
 	}
 
-	capped := usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns
+	capped := clean && usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns
 	e.store.Apply(itemstate.StageTurnUsageRecorded{
 		Repo:      repoStr,
 		Number:    item.Number,
@@ -1496,7 +1512,7 @@ func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage,
 		Capped:    capped,
 	})
 
-	if !prevCapped || capped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
+	if !clean || !prevCapped || capped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
 		return
 	}
 
