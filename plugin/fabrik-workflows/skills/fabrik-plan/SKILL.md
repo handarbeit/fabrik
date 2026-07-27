@@ -66,9 +66,11 @@ For each significant decision:
 For each significant decision you make, ask: would a new contributor need to discover this without reading the code? Does it constrain future contributors in a non-obvious way? If yes, the decision warrants an ADR.
 
 When an ADR is warranted:
-- Add `- [ ] Create ADR NNN: Title` to the task checklist (ADR drafting is Implement's job, not Plan's).
-- To pick the right number, check the current highest-numbered file in `adrs/` at implementation time — don't hardcode a number in the plan, as parallel issues may create ADRs concurrently.
-- ADR files follow the format `adrs/NNN-kebab-title.md` with sequential 3-digit zero-padded numbers (e.g., `011-my-decision.md`).
+- Add `- [ ] Create ADR <issue-number>: Title` to the task checklist (ADR drafting is Implement's job, not Plan's).
+- **Number the ADR after the issue number it comes from** — an ADR for issue #1089 is `adrs/1089-kebab-title.md` with the heading `# ADR 1089: Title`. This mirrors how `specs/` is numbered (`specs/895-conjunctive-ci-review-gate/`).
+- **Never pick "the next sequential number."** Issue numbers are unique and stable; sequential numbers are not. Several issues are typically in flight at once, and whichever merges first takes the number — so a sequentially-chosen number silently collides with a sibling branch, and git merges it cleanly because the filenames differ. A number chosen this way can also go stale while the PR waits in Review or Validate, long after it was verified as free.
+- If one issue genuinely needs two ADRs, suffix them: `1089-a-...`, `1089-b-...`.
+- ADRs numbered `001`–`073` are legacy sequential numbers. Leave them alone; never reuse or renumber them.
 
 If no decisions meet this threshold, note that explicitly so Implement doesn't wonder whether you forgot.
 
