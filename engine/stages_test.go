@@ -59,6 +59,126 @@ func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 	}
 }
 
+// TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers verifies
+// guard 1 (#1207): a yolo item with an unresolved review thread on its
+// current head does not advance out of Validate or have auto-merge enabled
+// — attemptMergeOnValidate returns (false, true, nil) and never calls
+// EnablePullRequestAutoMerge/MergePR/EnqueuePullRequest or applies the
+// fabrik:auto-merge-enabled label.
+func TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		LinkedPRHeadSHA: "sha1",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_1", IsOutdated: false},
+		},
+	}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when an unresolved current-head thread exists")
+	}
+	if !deferred {
+		t.Error("expected deferred=true when an unresolved current-head thread exists")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while blocked, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called while blocked, got %d call(s)", len(client.mergePRCalls))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called while blocked, got %d call(s)", len(client.enqueuePullRequestCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be applied while blocked")
+		}
+	}
+}
+
+// TestAttemptMergeOnValidate_AllOutdatedThreads_ProceedsNormally verifies the
+// stale-SHA scoping half of guard 1 (#1207): a thread GitHub has marked
+// isOutdated (superseded by a later push) must not block indefinitely —
+// attemptMergeOnValidate proceeds to enable auto-merge as if no thread existed.
+func TestAttemptMergeOnValidate_AllOutdatedThreads_ProceedsNormally(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha2"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		LinkedPRHeadSHA: "sha2",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "superseded finding", ReviewThreadID: "RT_1", IsOutdated: true},
+		},
+	}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deferred {
+		t.Error("expected deferred=false when the only unresolved thread is outdated")
+	}
+	if !enabled {
+		t.Error("expected enabled=true when the only unresolved thread is outdated")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Errorf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_ResolvedThread_ProceedsNormally verifies that a
+// thread comment already addressed (carrying a ROCKET reaction, per the
+// existing buildReviewThreadComments dedup) does not block guard 1 (#1207) —
+// reusing existing detection rather than a parallel path per the issue's
+// Requirements.
+func TestAttemptMergeOnValidate_ResolvedThread_ProceedsNormally(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha3"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		LinkedPRHeadSHA: "sha3",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{
+				ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "already addressed", ReviewThreadID: "RT_1",
+				IsOutdated: false,
+				Reactions:  []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+			},
+		},
+	}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deferred {
+		t.Error("expected deferred=false when the only unresolved thread is already addressed (ROCKET reaction)")
+	}
+	if !enabled {
+		t.Error("expected enabled=true when the only unresolved thread is already addressed")
+	}
+}
+
 // TestAttemptMergeOnValidate_CruiseSkipsAutoMerge verifies that cruise > yolo:
 // a cruise-labelled item returns (false, nil) without calling EnablePullRequestAutoMerge.
 func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
@@ -361,6 +481,61 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	}
 	if !foundCI {
 		t.Error("fabrik:awaiting-ci must be added when wait_for_ci: true")
+	}
+}
+
+// TestHandleStageComplete_UnresolvedCurrentHeadThread_DoesNotAdvance is an
+// end-to-end guard-1 test (#1207): a yolo item completing Validate with
+// wait_for_ci: false (the synchronous handleStageComplete call site) does
+// not enable auto-merge and does not advance to the next stage while an
+// unresolved review thread exists on the current head — proving the block
+// through the full handleStageComplete path, not just the direct
+// attemptMergeOnValidate call.
+func TestHandleStageComplete_UnresolvedCurrentHeadThread_DoesNotAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha9"}, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(t, client, stgs)
+
+	fls := false
+	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &fls}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		Labels:          []string{"fabrik:yolo"},
+		LinkedPRHeadSHA: "sha9",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_1", IsOutdated: false},
+		},
+	}
+
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
+
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while blocked, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be applied while blocked")
+		}
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("item must not advance to the next stage while blocked, got %d status update(s)", len(client.updateStatusCalls))
+	}
+	// stage:Validate:complete IS added (Validate itself did complete) — only
+	// advancement past it is suppressed, mirroring the autoMergeEnabled case.
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to still be added")
 	}
 }
 
