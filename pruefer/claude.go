@@ -113,11 +113,25 @@ func buildReviewPrompt(req ReviewRequest) string {
 // invocation. Always non-interactive (--permission-mode dontAsk) and always
 // the fixed read-only allowlist — there is no unrestricted/label-driven
 // escape hatch, unlike Fabrik stages.
+//
+// Together with reviewAllowedTools above and --permission-mode dontAsk
+// below, --setting-sources user is the third piece of Pruefer's security
+// posture: it requests only the operator's own ~/.claude/settings.json,
+// never the reviewed PR's .claude/settings.json or .claude/settings.local.json.
+// Those files come from code that has not been reviewed yet, so a
+// malicious or careless PR could otherwise widen the reviewer's own tool
+// grants via permissions.allow entries. This is additive, not a substitute
+// for the untrusted-workspace default that already blocks loading them —
+// the clone is never marked trusted (no hasTrustDialogAccepted) — it just
+// makes the restriction explicit instead of incidental, and stops Claude
+// Code from emitting an "Ignoring N permissions.allow entries" warning for
+// settings files it was never asked to load in the first place.
 func buildReviewArgs(req ReviewRequest) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "dontAsk",
+		"--setting-sources", "user",
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
