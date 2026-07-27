@@ -81,6 +81,11 @@ type PRReview struct {
 	State      string // "APPROVED", "CHANGES_REQUESTED", or "COMMENTED"
 	Body       string // Review summary body (may be empty for comment-only reviews)
 	DatabaseID int    // Numeric PR review ID (0 if not fetched or unavailable)
+	// CommitID is the SHA the review was submitted against (GitHub's REST
+	// "commit_id" field). Needed to determine whether a review targets the
+	// PR's current head SHA or a stale one (Pruefer's GitHub-derived
+	// review-state mechanism; see ADR-073).
+	CommitID string
 }
 
 // MergeQueueEntry holds the merge-queue position and state for a pull request.

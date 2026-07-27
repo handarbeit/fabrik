@@ -64,8 +64,9 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		User *struct {
 			Login string `json:"login"`
 		} `json:"user"`
-		State string `json:"state"`
-		Body  string `json:"body"`
+		State    string `json:"state"`
+		Body     string `json:"body"`
+		CommitID string `json:"commit_id"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -87,6 +88,7 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 			State:      r.State,
 			Body:       r.Body,
 			DatabaseID: r.ID,
+			CommitID:   r.CommitID,
 		}
 	}
 	out := make([]PRReview, 0, len(order))
@@ -187,6 +189,13 @@ type PRDetails struct {
 	// Nil when not in queue or populated via REST. Pointer because GitHub returns
 	// null after dequeueing and Go's json decoder maps null to nil only on pointers.
 	MergeQueueEntry *MergeQueueEntry
+
+	// Author is the GitHub login of the PR's author. Populated by ListPRs and
+	// ListOpenPRs; other constructors may leave it empty.
+	Author string
+	// Labels is the list of label names applied to the PR. Populated by ListPRs
+	// and ListOpenPRs; other constructors may leave it empty.
+	Labels []string
 }
 
 // FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
@@ -444,7 +453,11 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 		MergedAt string `json:"merged_at"` // non-null when merged; list endpoint omits the boolean "merged" field
 		Draft    bool   `json:"draft"`
 		Body     string `json:"body"`
-		Head     struct {
+		User     struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []rawLabel `json:"labels"`
+		Head   struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
@@ -463,9 +476,106 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 			HeadSHA:     pr.Head.SHA,
 			HeadRefName: pr.Head.Ref,
 			Body:        pr.Body,
+			Author:      pr.User.Login,
+			Labels:      labelNames(pr.Labels),
 		}
 	}
 	return out, nil
+}
+
+// rawLabel is the shared REST label shape ({"name": "..."}) used by both
+// ListPRs and ListOpenPRs.
+type rawLabel struct {
+	Name string `json:"name"`
+}
+
+// labelNames extracts label name strings from a slice of rawLabel.
+func labelNames(labels []rawLabel) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]string, len(labels))
+	for i, l := range labels {
+		out[i] = l.Name
+	}
+	return out
+}
+
+// ListOpenPRs returns all open pull requests for a repository (draft and
+// non-draft), including author and label metadata needed for Pruefer's PR
+// selection logic. Capped at 100 results (GitHub's max per_page); a warning
+// is logged (not silently truncated) when exactly 100 are returned, since
+// more open PRs may exist.
+func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=100", c.baseURL, owner, repo)
+	var raw []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Draft  bool   `json:"draft"`
+		Body   string `json:"body"`
+		User   struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []rawLabel `json:"labels"`
+		Head   struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("listing open PRs for %s/%s: %w", owner, repo, err)
+	}
+	if len(raw) == 100 {
+		logf(0, "prs", "ListOpenPRs %s/%s: received exactly 100 results — more open PRs may exist (pagination not implemented)\n", owner, repo)
+	}
+	out := make([]PRDetails, len(raw))
+	for i, pr := range raw {
+		out[i] = PRDetails{
+			Number:      pr.Number,
+			Title:       pr.Title,
+			State:       pr.State,
+			Draft:       pr.Draft,
+			Body:        pr.Body,
+			HeadSHA:     pr.Head.SHA,
+			HeadRefName: pr.Head.Ref,
+			Author:      pr.User.Login,
+			Labels:      labelNames(pr.Labels),
+		}
+	}
+	return out, nil
+}
+
+// FetchPRDiff fetches the raw unified diff for a pull request via GitHub's
+// diff media type, avoiding a local clone just to measure or inspect diff
+// size. Returns the diff as plain text.
+func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	_, respBody, err := c.doWithAccept("GET", apiURL, "application/vnd.github.v3.diff", nil)
+	if err != nil {
+		return "", fmt.Errorf("fetching diff for PR #%d: %w", prNumber, err)
+	}
+	return string(respBody), nil
+}
+
+// SubmitPRReview submits a formal pull_request_review comment (event=COMMENT)
+// against the given commit SHA. The event type is hardcoded and never
+// caller-controlled — Pruefer V1 never submits APPROVE or REQUEST_CHANGES
+// verdicts (see ADR-073). Returns the numeric review ID.
+func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string) (int, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", c.baseURL, owner, repo, prNumber)
+	reqBody := map[string]interface{}{
+		"commit_id": commitSHA,
+		"body":      body,
+		"event":     "COMMENT",
+	}
+	var result struct {
+		ID int `json:"id"`
+	}
+	if err := c.restPostWithResponse(apiURL, reqBody, &result); err != nil {
+		return 0, fmt.Errorf("submitting review on PR #%d: %w", prNumber, err)
+	}
+	return result.ID, nil
 }
 
 // prNodeID fetches the GraphQL node ID of a pull request by its REST number.

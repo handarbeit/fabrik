@@ -1,6 +1,10 @@
 package github
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // AddComment posts a comment on an issue and returns the comment's database ID.
 func (c *Client) AddComment(owner, repo string, issueNumber int, body string) (int, error) {
@@ -98,6 +102,64 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 		return fmt.Errorf("updating body of %s/%s#%d: %w", owner, repo, issueNumber, err)
 	}
 	return nil
+}
+
+// FetchIssueComments fetches the comments on an issue (or PR, since PRs are
+// issues on the REST API) via GET /issues/{n}/comments, including each
+// comment's reaction summary. Used by Pruefer to detect on-demand
+// "/pruefer review" comment commands and apply 👀/🚀 reaction idempotency.
+// Returns nil, nil on 404.
+func (c *Client) FetchIssueComments(owner, repo string, issueNumber int) ([]Comment, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=100", c.baseURL, owner, repo, issueNumber)
+	var raw []struct {
+		ID        int       `json:"id"`
+		Body      string    `json:"body"`
+		CreatedAt time.Time `json:"created_at"`
+		User      struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Reactions struct {
+			PlusOne  int `json:"+1"`
+			MinusOne int `json:"-1"`
+			Laugh    int `json:"laugh"`
+			Hooray   int `json:"hooray"`
+			Confused int `json:"confused"`
+			Heart    int `json:"heart"`
+			Rocket   int `json:"rocket"`
+			Eyes     int `json:"eyes"`
+		} `json:"reactions"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching comments for %s/%s#%d: %w", owner, repo, issueNumber, err)
+	}
+	out := make([]Comment, len(raw))
+	for i, rc := range raw {
+		var reactions []ReactionGroup
+		add := func(content string, count int) {
+			if count > 0 {
+				reactions = append(reactions, ReactionGroup{Content: content, Count: count})
+			}
+		}
+		add("THUMBS_UP", rc.Reactions.PlusOne)
+		add("THUMBS_DOWN", rc.Reactions.MinusOne)
+		add("LAUGH", rc.Reactions.Laugh)
+		add("HOORAY", rc.Reactions.Hooray)
+		add("CONFUSED", rc.Reactions.Confused)
+		add("HEART", rc.Reactions.Heart)
+		add("ROCKET", rc.Reactions.Rocket)
+		add("EYES", rc.Reactions.Eyes)
+		out[i] = Comment{
+			DatabaseID: rc.ID,
+			Author:     rc.User.Login,
+			Body:       rc.Body,
+			CreatedAt:  rc.CreatedAt,
+			Reactions:  reactions,
+		}
+	}
+	return out, nil
 }
 
 // GetIssueBody fetches the body of an issue (or PR, since PRs are issues on the REST API).
