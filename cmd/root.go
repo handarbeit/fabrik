@@ -77,6 +77,7 @@ type Config struct {
 	JanitorIntervalHours      int    // hours; 1 = default; 0 disables the janitor
 	LogRetentionDays          int    // days; 14 = default; 0 disables age-based log pruning
 	LogMaxBytes               int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
+	SessionRetentionDays      int    // days; 14 = default; 0 disables age-based session pruning
 	ArchiveAfter              string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone               string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
 }
@@ -180,6 +181,7 @@ func Execute() error {
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
 	flag.IntVar(&cfg.LogRetentionDays, "log-retention-days", 14, "Delete log files older than this many days; 0 disables age-based pruning (also FABRIK_LOG_RETENTION_DAYS)")
 	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for .fabrik/logs/ in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")
+	flag.IntVar(&cfg.SessionRetentionDays, "session-retention-days", 14, "Delete .session files older than this many days; 0 disables age-based pruning (also FABRIK_SESSION_RETENTION_DAYS)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
@@ -547,6 +549,21 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["session-retention-days"] {
+		if v := os.Getenv("FABRIK_SESSION_RETENTION_DAYS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.SessionRetentionDays = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_SESSION_RETENTION_DAYS=%q is invalid (must be a non-negative integer of days; 0 = disable); using default 14\n", v)
+			}
+		} else if pc.SessionRetentionDays != nil {
+			if *pc.SessionRetentionDays < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml session_retention_days=%d is invalid (must be a non-negative integer; 0 = disable); using default 14\n", *pc.SessionRetentionDays)
+			} else {
+				cfg.SessionRetentionDays = *pc.SessionRetentionDays
+			}
+		}
+	}
 	if !explicitFlags["kill-grace-sigint"] {
 		cfg.KillGraceSigInt = resolveDuration(cfg.KillGraceSigInt, "FABRIK_KILL_GRACE_SIGINT") // validated in killGraceSigInt() helper
 	}
@@ -758,6 +775,7 @@ func Execute() error {
 		JanitorIntervalHours:      cfg.JanitorIntervalHours,
 		LogRetentionDays:          cfg.LogRetentionDays,
 		LogMaxBytes:               cfg.LogMaxBytes,
+		SessionRetentionDays:      cfg.SessionRetentionDays,
 		ArchiveAfter:              archiveAfter(cfg.ArchiveAfter),
 		ArchiveDone:               archiveDoneMode(cfg.ArchiveDone),
 		ReadyCh:                   testReadyCh,

@@ -22,6 +22,22 @@ type janitorWMEntry struct {
 	wm        *WorktreeManager
 }
 
+// buildWMByDirName builds a reverse map from "owner-repo" directory name to
+// ownerRepo string + WorktreeManager, derived from e.worktreeManagers. Used by
+// both the worktree and session janitors to resolve multi-repo directory names.
+// The engine mutex is held only long enough to copy; callers get a snapshot.
+func (e *Engine) buildWMByDirName() map[string]janitorWMEntry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	wmByDirName := make(map[string]janitorWMEntry, len(e.worktreeManagers))
+	for ownerRepo, wm := range e.worktreeManagers {
+		owner, repo := parseOwnerRepo(ownerRepo)
+		dirName := owner + "-" + repo
+		wmByDirName[dirName] = janitorWMEntry{ownerRepo: ownerRepo, wm: wm}
+	}
+	return wmByDirName
+}
+
 // runWorktreeJanitor scans .fabrik/worktrees/<owner-repo>/issue-N/ directories
 // and reaps worktrees whose issues are provably terminal and whose directories
 // are clean. Conservative: when in doubt, leaves the worktree and logs the reason.
@@ -49,16 +65,7 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 
 	worktreesRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 
-	// Build reverse map: "owner-repo" dir name → ownerRepo string + WorktreeManager.
-	// Held only long enough to copy; the rest of the cycle is lock-free.
-	e.mu.Lock()
-	wmByDirName := make(map[string]janitorWMEntry, len(e.worktreeManagers))
-	for ownerRepo, wm := range e.worktreeManagers {
-		owner, repo := parseOwnerRepo(ownerRepo)
-		dirName := owner + "-" + repo
-		wmByDirName[dirName] = janitorWMEntry{ownerRepo: ownerRepo, wm: wm}
-	}
-	e.mu.Unlock()
+	wmByDirName := e.buildWMByDirName()
 
 	closedCache := make(map[string]bool) // "owner/repo#N" → isClosed; reset each cycle
 	var scanned, reaped int
@@ -309,6 +316,189 @@ func (e *Engine) runLogJanitor(ctx context.Context) {
 		"cycle complete: scanned %d files, removed %d (%d bytes), age=%d size=%d\n",
 		scanned, removed, bytes, ageRemoved, sizeRemoved,
 	)
+}
+
+// runSessionJanitor prunes .fabrik/sessions/ of .session files whose age
+// exceeds SessionRetentionDays (age-based expiry — see adrs/1136-session-janitor.md
+// for why liveness-checking against Claude Code's internal transcript layout was
+// rejected). Disabled when SessionRetentionDays == 0. Never deletes a session file
+// for a stage currently in flight: once any live (non-stale) worker is found for
+// an issue, the entire issue's session directory is skipped that cycle, not just
+// the file matching the worker's current stage (avoids a race where the active
+// stage transitions mid-cycle between the age check and the delete). Called from
+// poll.go at startup and on every periodic janitor tick, alongside the worktree
+// and log janitors — same cadence, no new scheduler.
+func (e *Engine) runSessionJanitor(ctx context.Context) {
+	_ = ctx // reserved for future use; the walk below performs no cancellable I/O
+	sessionsRoot := filepath.Join(e.fabrikDir, ".fabrik", "sessions")
+	wmByDirName := e.buildWMByDirName()
+
+	resolveOwnerRepo := func(dirName string) (string, bool) {
+		entry, ok := wmByDirName[dirName]
+		if !ok {
+			return "", false
+		}
+		return entry.ownerRepo, true
+	}
+	isInFlight := func(ownerRepo string, issueNumber int) bool {
+		snap, snapErr := e.store.Get(ownerRepo, issueNumber)
+		return snapErr == nil && snap.Worker() != nil && !isWorkerStale(snap.Worker(), e.workerStaleTimeout())
+	}
+
+	scanned, removed, skippedInFlight, skippedUnresolved, err := pruneSessions(
+		sessionsRoot, e.cfg.SessionRetentionDays, time.Now(), e.defaultRepo(), resolveOwnerRepo, isInFlight,
+	)
+	if err != nil {
+		e.logf(0, "session-janitor", "warn: prune error: %v\n", err)
+		return
+	}
+	skipped := scanned - removed
+	e.logf(0, "session-janitor",
+		"cycle complete: scanned %d session files, removed %d, skipped %d (in-flight=%d, unresolved-repo=%d)\n",
+		scanned, removed, skipped, skippedInFlight, skippedUnresolved,
+	)
+}
+
+// pruneSessions walks root (.fabrik/sessions/) and removes ".session" files
+// whose mtime is older than retentionDays. Handles both directory layouts
+// produced by engine/claude.go:
+//   - single-repo: root/issue-N/<Stage>.session (ownerRepo = singleRepoOwnerRepo)
+//   - multi-repo:  root/<owner>-<repo>/issue-N/<Stage>.session
+//
+// resolveOwnerRepo maps a multi-repo "<owner>-<repo>" directory name to an
+// "owner/repo" string; when it returns ok=false (unregistered/deregistered repo,
+// no git checkout to fall back on), the entire directory is skipped — counted
+// in skippedUnresolved, never deleted from — consistent with this codebase's
+// "ambiguity → don't touch, log and move on" convention.
+//
+// isInFlight reports whether an issue has a live (non-stale) worker registered;
+// when true, every ".session" file under that issue's directory is skipped that
+// cycle regardless of age (skippedInFlight), per the spec's conservative,
+// directory-wide in-flight guard.
+//
+// now is injected for deterministic testing (mirrors pruneLogs). Returns zero
+// counts without error when root does not exist (normal first-run case) or when
+// retentionDays <= 0 (age-based pruning disabled).
+func pruneSessions(
+	root string,
+	retentionDays int,
+	now time.Time,
+	singleRepoOwnerRepo string,
+	resolveOwnerRepo func(dirName string) (ownerRepo string, ok bool),
+	isInFlight func(ownerRepo string, issueNumber int) bool,
+) (scanned, removed, skippedInFlight, skippedUnresolved int, err error) {
+	if retentionDays <= 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	absRoot, resolveErr := filepath.Abs(root)
+	if resolveErr != nil {
+		absRoot = filepath.Clean(root)
+	}
+	topEntries, readErr := os.ReadDir(absRoot)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return 0, 0, 0, 0, nil
+		}
+		return 0, 0, 0, 0, fmt.Errorf("reading sessions root %s: %w", absRoot, readErr)
+	}
+
+	cutoff := now.AddDate(0, 0, -retentionDays)
+	var issueDirs []string // candidates for empty-dir cleanup (bottom level)
+	var repoDirs []string  // candidates for empty-dir cleanup (multi-repo top level)
+
+	pruneIssueDir := func(issueDirPath, ownerRepo string, issueNumber int) {
+		issueDirs = append(issueDirs, issueDirPath)
+		fileEntries, rdErr := os.ReadDir(issueDirPath)
+		if rdErr != nil {
+			return
+		}
+		inFlight := isInFlight(ownerRepo, issueNumber)
+		for _, fe := range fileEntries {
+			if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".session") {
+				continue
+			}
+			scanned++
+			if inFlight {
+				skippedInFlight++
+				continue
+			}
+			info, infoErr := fe.Info()
+			if infoErr != nil {
+				continue // skip unreadable file metadata; treat as still present
+			}
+			if info.ModTime().Before(cutoff) {
+				if rmErr := os.Remove(filepath.Join(issueDirPath, fe.Name())); rmErr == nil {
+					removed++
+				}
+			}
+		}
+	}
+
+	countUnresolved := func(repoDirPath string) {
+		issueEntries, rdErr := os.ReadDir(repoDirPath)
+		if rdErr != nil {
+			return
+		}
+		for _, ie := range issueEntries {
+			if !ie.IsDir() {
+				continue
+			}
+			files, _ := os.ReadDir(filepath.Join(repoDirPath, ie.Name()))
+			for _, fe := range files {
+				if !fe.IsDir() && strings.HasSuffix(fe.Name(), ".session") {
+					scanned++
+					skippedUnresolved++
+				}
+			}
+		}
+	}
+
+	for _, entry := range topEntries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if n := janitorParseIssueN(name); n > 0 {
+			// Single-repo layout: root/issue-N/*.session
+			pruneIssueDir(filepath.Join(absRoot, name), singleRepoOwnerRepo, n)
+			continue
+		}
+		// Multi-repo layout: root/<owner>-<repo>/issue-N/*.session
+		repoDirPath := filepath.Join(absRoot, name)
+		ownerRepo, ok := resolveOwnerRepo(name)
+		if !ok {
+			countUnresolved(repoDirPath)
+			continue
+		}
+		repoDirs = append(repoDirs, repoDirPath)
+		issueEntries, rdErr := os.ReadDir(repoDirPath)
+		if rdErr != nil {
+			continue
+		}
+		for _, ie := range issueEntries {
+			if !ie.IsDir() {
+				continue
+			}
+			n := janitorParseIssueN(ie.Name())
+			if n == 0 {
+				continue
+			}
+			pruneIssueDir(filepath.Join(repoDirPath, ie.Name()), ownerRepo, n)
+		}
+	}
+
+	// Empty-dir cleanup: bottom-up — issue-N dirs first, then their parent
+	// owner-repo dirs. os.Remove fails (silently, here) on a non-empty directory,
+	// so this only ever removes directories left fully empty by the prune above.
+	for _, d := range issueDirs {
+		_ = os.Remove(d)
+	}
+	for _, d := range repoDirs {
+		_ = os.Remove(d)
+	}
+
+	return
 }
 
 // logFileEntry holds metadata for a single file under .fabrik/logs/.
