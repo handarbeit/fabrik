@@ -76,7 +76,7 @@ After applying any fixes:
 2. Commit with a clear message
 3. Push to the remote branch
 
-### Verifying with a live server
+### Verifying with a live server or a long-running command
 
 If confirming a fix needs a running instance of the managed app (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call. Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls — and outlives the stage. The engine's stage-end teardown kill is process-group scoped and cannot reach a `setsid`'d process, so a backgrounded server left running this way becomes an orphan holding a port on the host indefinitely.
 
@@ -93,6 +93,9 @@ In preference order:
    ```bash
    timeout --signal=KILL <N> npm run dev …
    ```
+4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with the framework's own timeout flag (e.g. `go test -timeout`, `pytest --timeout`, `jest --testTimeout`) so the outcome is known before the turn ends. Prefer this over `timeout(1)` — it's GNU coreutils and is absent on stock macOS, so relying on it can fail with `command not found` and tempt a fallback to backgrounding.
+5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite — rather than backgrounding it.
+6. **If backgrounding is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver it, so the stage ends without `FABRIK_STAGE_COMPLETE`. Poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 
 ## Numbering findings in your output
 
@@ -116,7 +119,7 @@ Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Review returns cont
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full review** — focus on the specific findings the user addressed
 - **Do not make unrelated changes** while applying fixes
-- **Never background a dev server and continue in a later tool call to verify a fix** — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Verifying with a live server" above.
+- **Never background a dev server, test suite, benchmark, or CI wait and continue in a later tool call (or wait for a completion notification) to verify a fix** — a backgrounded dev server detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port; a backgrounded long-running command left to "wait for a completion notification" simply ends the stage silently, since there is no interactive session to deliver that notification. See "Verifying with a live server or a long-running command" above.
 - **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
 
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
