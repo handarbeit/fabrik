@@ -51,6 +51,7 @@ The freshness gate is correct for the overwhelming majority of deep-field consum
 **Negative / accepted trade-offs:**
 - `checkDependencies` is no longer purely in-memory for the already-blocked recheck path — see the ADR 016 status note below. This is a deliberate, permanent break from that ADR's original "no API calls" characterization, scoped narrowly to the recheck path only.
 - The pattern is per-instance, not centralized — each of the three call sites re-implements its own "bypass cache, throttle, maybe write back" logic rather than sharing a helper. No shared helper was extracted because the three instances differ enough in throttle mechanism and write-back behavior (see table above) that a forced abstraction would likely obscure more than it'd save; revisit if a fourth instance makes the duplication costlier than the abstraction.
+- `checkDependencies`'s `ItemDeepFetched` write-back is not scoped to `BlockedBy` alone — `applyProjectItem` (`internal/itemstate/store.go:377`) refreshes every synced field from the live response, including `Labels` and `Comments`, not just the one field the fix needed. The single-worker-per-issue invariant makes this safe today (no concurrent writer can observe a torn intermediate state), but it is a wider blast radius than the fix strictly requires. If a future report shows unexpected label or comment resets coinciding with a blocked-item recheck, this write-back is the first place to look.
 
 ## See Also
 
