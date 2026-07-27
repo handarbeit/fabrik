@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -337,5 +338,140 @@ func TestReviewPR_ExcludedAuthor_Skipped(t *testing.T) {
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedAuthor {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedAuthor", outcome)
+	}
+}
+
+// reviewTestDiff is a small synthetic unified diff with two hunks: one
+// adding a line at engine/claude.go:954 (a valid RIGHT-side anchor) and one
+// touching only context around line 10 of docs/readme.md (so line 999 in
+// that file is never a valid anchor).
+const reviewTestDiff = `diff --git a/engine/claude.go b/engine/claude.go
+index 1111111..2222222 100644
+--- a/engine/claude.go
++++ b/engine/claude.go
+@@ -952,2 +952,3 @@ func classify() {
+ line952
+ line953
++line954
+diff --git a/docs/readme.md b/docs/readme.md
+index 3333333..4444444 100644
+--- a/docs/readme.md
++++ b/docs/readme.md
+@@ -9,2 +9,2 @@
+ line9
+ line10
+`
+
+func TestReviewPR_FindingsMappedToChangedLines_PostsInlineComments(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = reviewTestDiff
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed the change. Looks solid.\n\n```json\n" +
+			`[{"path": "engine/claude.go", "line": 954, "body": "consider a comment here"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("SubmitPRReview called %d times, want exactly 1", client.submitCallCount())
+	}
+	call := client.submitCalls[0]
+	if len(call.comments) != 1 {
+		t.Fatalf("submitted %d comments, want exactly 1", len(call.comments))
+	}
+	if call.comments[0].Path != "engine/claude.go" || call.comments[0].Line != 954 {
+		t.Errorf("comment = %+v, want Path=engine/claude.go Line=954", call.comments[0])
+	}
+	if call.body != "Reviewed the change. Looks solid." {
+		t.Errorf("body = %q, want the prose summary only (no demoted-findings section)", call.body)
+	}
+}
+
+func TestReviewPR_UnanchorableFinding_DemotedToBody(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = reviewTestDiff
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Mixed bag.\n\n```json\n" +
+			`[{"path": "engine/claude.go", "line": 954, "body": "anchorable"},` +
+			`{"path": "docs/readme.md", "line": 999, "body": "not in the diff at all"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	call := client.submitCalls[0]
+	if len(call.comments) != 1 || call.comments[0].Line != 954 {
+		t.Fatalf("comments = %+v, want exactly the anchorable finding at line 954", call.comments)
+	}
+	if !strings.Contains(call.body, "Additional findings") || !strings.Contains(call.body, "not in the diff at all") {
+		t.Errorf("body = %q, want the unanchorable finding demoted into it under an explicit heading", call.body)
+	}
+}
+
+func TestReviewPR_NoAnchorableFindings_BodyOnly(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = reviewTestDiff
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Looks fine, one nit."}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	call := client.submitCalls[0]
+	if len(call.comments) != 0 {
+		t.Errorf("comments = %+v, want none (plain-prose review, no fenced findings)", call.comments)
+	}
+	if call.body != "Looks fine, one nit." {
+		t.Errorf("body = %q, want the unmodified prose", call.body)
+	}
+}
+
+func TestReviewPR_UnanchorableFinding_NeverPassedToSubmit(t *testing.T) {
+	// Guards the 422 risk at the unit level: a finding whose (path, line) is
+	// not a valid RIGHT-side anchor in the PR's diff must never reach
+	// SubmitPRReview's comments argument, since GitHub rejects the entire
+	// review if any one comment's anchor is invalid.
+	client := newFakeReviewer()
+	client.diff = reviewTestDiff
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Findings below.\n\n```json\n" +
+			`[{"path": "engine/claude.go", "line": 12345, "body": "line does not exist in this diff"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (unanchorable finding must not fail the review)", outcome)
+	}
+	call := client.submitCalls[0]
+	for _, c := range call.comments {
+		if c.Line == 12345 {
+			t.Fatalf("unanchorable finding at line 12345 was passed to SubmitPRReview's comments: %+v", call.comments)
+		}
+	}
+	if len(call.comments) != 0 {
+		t.Errorf("comments = %+v, want none", call.comments)
+	}
+	if !strings.Contains(call.body, "line does not exist in this diff") {
+		t.Errorf("body = %q, want the unanchorable finding demoted into it", call.body)
 	}
 }
