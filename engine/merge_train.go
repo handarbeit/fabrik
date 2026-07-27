@@ -1679,14 +1679,59 @@ func containsBranch(slice []string, branch string) bool {
 	return false
 }
 
-// pollTrainCI polls the integration PR's required CI checks, returning the typed result.
-// Blocks until the result is known or the CIWaitTimeout elapses.
+// describeCheckRuns renders a "name (status-or-conclusion)" summary for each
+// check run, joined by ", ", so a green/red/pending pollTrainCI decision can
+// be reconstructed after the fact from the logs alone (#1153). Mirrors the
+// naming convention already used by classifyCIFromCheckRuns (engine/ci.go).
+func describeCheckRuns(runs []gh.CheckRun) string {
+	if len(runs) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(runs))
+	for _, cr := range runs {
+		state := cr.Status
+		if cr.Status == "completed" {
+			state = cr.Conclusion
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", cr.Name, state))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// pollTrainCI polls the integration PR's CI signals, returning the typed
+// result. Blocks until the result is known or the CIWaitTimeout elapses.
+//
+// mergeable_state is a red/permission gate only, not a green shortcut:
+// GitHub computes it from required checks alone (per branch protection), so
+// it can read "accepted" (clean/unstable) while a non-required check (e.g.
+// the full test suite, if left unmarked-required) is still queued or
+// in_progress on the trial SHA — accepting it as green in that state is
+// exactly the #1150 defect this fixes (see adrs/1153-*.md). "dirty" is
+// unambiguous and still returns TrainCIRed immediately. Otherwise, an
+// accepted mergeable_state is recorded as necessary-but-not-sufficient: the
+// check-run pass below is what actually confirms completeness (no run left
+// queued/in_progress) before TrainCIGreen is returned. mergeable_state
+// remains the sole basis for green only when there is no check-run
+// footprint at all (e.g. GitHub Actions disabled — see the zero-check-runs
+// branch below), since in that case there is no per-check signal to fall
+// back on.
 func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) TrainCIResult {
 	ciWaitTimeout := e.cfg.CIWaitTimeout
 	if ciWaitTimeout <= 0 {
 		ciWaitTimeout = 30 * time.Minute
 	}
 	deadline := time.Now().Add(ciWaitTimeout)
+
+	var lastPending, lastFailed []gh.CheckRun
+
+	logTimeout := func() {
+		if len(lastFailed) > 0 || len(lastPending) > 0 {
+			e.logf(0, "merge-train", "CI wait timeout for integration PR #%d — pending: %s; failed: %s\n",
+				prNum, describeCheckRuns(lastPending), describeCheckRuns(lastFailed))
+		} else {
+			e.logf(0, "merge-train", "CI wait timeout for integration PR #%d\n", prNum)
+		}
+	}
 
 	for {
 		select {
@@ -1697,30 +1742,40 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		}
 
 		if time.Now().After(deadline) {
-			e.logf(0, "merge-train", "CI wait timeout for integration PR #%d\n", prNum)
+			logTimeout()
 			return TrainCIPending
 		}
 
-		// ADR-033 shortcut: check mergeable_state first.
 		_, mergeableState, err := e.client.FetchPRMergeableFields(owner, repo, prNum)
+		mergeableAccepted := false
 		if err != nil {
 			e.logf(0, "merge-train", "warn: FetchPRMergeableFields failed for PR #%d: %v\n", prNum, err)
-		} else if gh.MergeableStateAccepted(mergeableState) {
-			return TrainCIGreen
 		} else if mergeableState == "dirty" {
 			return TrainCIRed
+		} else if gh.MergeableStateAccepted(mergeableState) {
+			mergeableAccepted = true
 		}
 
 		// Check individual check runs via the shared classifier (mirrors
 		// settlePRMergeState/checkCIGate in engine/ci.go — this used to be an
 		// inline duplicate with its own dedup-by-ID drift; ClassifyCheckRuns
-		// fixes that as a side effect of sharing it here).
+		// fixes that as a side effect of sharing it here). This is now
+		// reachable on every iteration regardless of mergeable_state, so it
+		// is the thing that actually determines completeness.
 		checkRuns, err := e.client.FetchCheckRuns(owner, repo, trialSHA)
 		if err != nil {
 			e.logf(0, "merge-train", "warn: FetchCheckRuns failed for %s: %v\n", trialSHA, err)
 		} else if len(checkRuns) > 0 {
-			status, _, _ := gh.ClassifyCheckRuns(checkRuns)
+			status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
+			lastPending, lastFailed = pending, failed
 			if status == gh.CheckRunsFailed {
+				// Strict non-required-failure policy (adrs/1153-*.md): any
+				// confirmed check-run failure blocks the train, required or
+				// not — Fabrik has no general way to distinguish the two
+				// beyond the opt-in RequiredStatusContexts config, and a
+				// wrong-direction Strict call costs one bisection cycle, not
+				// a silently reintroduced version of this issue.
+				e.logf(0, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
 				return TrainCIRed
 			}
 			if status == gh.CheckRunsReady {
@@ -1732,12 +1787,17 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, trialSHA, checkRuns)
 				switch rcStatus {
 				case gh.RequiredContextsSatisfied:
+					e.logf(0, "merge-train", "trial %s green — checks: %s\n", trialSHA, describeCheckRuns(checkRuns))
 					return TrainCIGreen
 				case gh.RequiredContextsFailed:
 					e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
 					return TrainCIRed
 				}
 			}
+			// CheckRunsPending (or a required context still pending above):
+			// fall through and keep polling — this is the #1150 case, a
+			// non-required check still queued/in_progress while
+			// mergeable_state already reads accepted.
 		} else {
 			// ADR-933: zero check runs at all (e.g. GitHub Actions disabled —
 			// the local-CI-takeover case #933 was filed for) must still be
@@ -1755,12 +1815,21 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
 				return TrainCIRed
 			}
+			// #1153: with zero check runs there is no per-check completeness
+			// signal to consult at all, so an accepted mergeable_state is the
+			// only remaining evidence that nothing is outstanding — this is
+			// the one place mergeable_state is genuinely load-bearing for
+			// green.
+			if mergeableAccepted && rcStatus == gh.RequiredContextsSatisfied {
+				e.logf(0, "merge-train", "trial %s green — mergeable_state %q accepted, zero check runs, required contexts satisfied\n", trialSHA, mergeableState)
+				return TrainCIGreen
+			}
 		}
 
 		// Check deadline again before the sleep so a short CIWaitTimeout doesn't
 		// block unnecessarily in the poll interval when the deadline has already elapsed.
 		if time.Now().After(deadline) {
-			e.logf(0, "merge-train", "CI wait timeout for integration PR #%d\n", prNum)
+			logTimeout()
 			return TrainCIPending
 		}
 
