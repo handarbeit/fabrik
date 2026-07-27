@@ -88,6 +88,10 @@ type InvokeOptions struct {
 	// OnPIDReady, if non-nil, is called once after cmd.Start() with the Claude subprocess PID.
 	// Used by the heartbeat/liveness system to record the PID in the store.
 	OnPIDReady func(pid int)
+	// CorrectiveHint, when non-empty, is prepended to the prompt as a callout (#1146).
+	// Set by consumeStallHint when a stall was detected on the stage's previous
+	// incomplete attempt (a turn-capped run followed by one using fewer turns).
+	CorrectiveHint string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.

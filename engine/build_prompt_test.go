@@ -21,7 +21,7 @@ func TestBuildPrompt_Basic(t *testing.T) {
 		Body:   "It is broken",
 	}
 
-	prompt := buildPrompt(stage, issue, nil, "")
+	prompt := buildPrompt(stage, issue, nil, "", "")
 
 	if !strings.Contains(prompt, "You are a research agent.") {
 		t.Error("prompt missing stage prompt")
@@ -48,7 +48,7 @@ func TestBuildPrompt_WithLabels(t *testing.T) {
 		Labels: []string{"bug", "priority"},
 	}
 
-	prompt := buildPrompt(stage, issue, nil, "")
+	prompt := buildPrompt(stage, issue, nil, "", "")
 	if !strings.Contains(prompt, "## Labels") {
 		t.Error("prompt missing labels section")
 	}
@@ -68,7 +68,7 @@ func TestBuildPrompt_WithComments(t *testing.T) {
 		},
 	}
 
-	prompt := buildPrompt(stage, issue, comments, "")
+	prompt := buildPrompt(stage, issue, comments, "", "")
 	if !strings.Contains(prompt, "## New Comments") {
 		t.Error("prompt missing comments section")
 	}
@@ -84,7 +84,7 @@ func TestBuildPrompt_NoLabelsSection(t *testing.T) {
 	stage := &stages.Stage{Name: "Test", Prompt: "prompt"}
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
-	prompt := buildPrompt(stage, issue, nil, "")
+	prompt := buildPrompt(stage, issue, nil, "", "")
 	if strings.Contains(prompt, "## Labels") {
 		t.Error("prompt should not have labels section when no labels")
 	}
@@ -94,7 +94,7 @@ func TestBuildPrompt_NoCommentsSection(t *testing.T) {
 	stage := &stages.Stage{Name: "Test", Prompt: "prompt"}
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
-	prompt := buildPrompt(stage, issue, nil, "")
+	prompt := buildPrompt(stage, issue, nil, "", "")
 	if strings.Contains(prompt, "## New Comments") {
 		t.Error("prompt should not have comments section when no comments")
 	}
@@ -372,7 +372,7 @@ func TestBuildPrompt_BaseBranch(t *testing.T) {
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
 	// Non-empty baseBranch: branch name should appear in codebase-changes line and explicit statement.
-	prompt := buildPrompt(stage, issue, nil, "develop")
+	prompt := buildPrompt(stage, issue, nil, "develop", "")
 	if !strings.Contains(prompt, "develop") {
 		t.Error("expected branch name 'develop' in prompt when baseBranch is non-empty")
 	}
@@ -384,7 +384,7 @@ func TestBuildPrompt_BaseBranch(t *testing.T) {
 	}
 
 	// Empty baseBranch: explicit statement is omitted; codebase-changes line uses plain "the default branch".
-	promptEmpty := buildPrompt(stage, issue, nil, "")
+	promptEmpty := buildPrompt(stage, issue, nil, "", "")
 	if strings.Contains(promptEmpty, "default base branch is") {
 		t.Error("prompt should not include explicit base branch statement when baseBranch is empty")
 	}
@@ -393,6 +393,28 @@ func TestBuildPrompt_BaseBranch(t *testing.T) {
 	}
 	if strings.Contains(promptEmpty, "files changed on main") {
 		t.Error("prompt should not hardcode 'main' as the branch name")
+	}
+}
+
+func TestBuildPrompt_CorrectiveHint(t *testing.T) {
+	stage := &stages.Stage{Name: "Implement", Prompt: "Do the work."}
+	issue := gh.ProjectItem{Number: 1, Title: "T"}
+
+	// No hint: callout is absent, stage prompt still leads.
+	prompt := buildPrompt(stage, issue, nil, "", "")
+	if strings.Contains(prompt, "Note from Fabrik") {
+		t.Error("prompt should not contain a corrective-hint callout when hint is empty")
+	}
+
+	// Hint present: callout appears before the stage prompt.
+	hinted := buildPrompt(stage, issue, nil, "", stallCorrectiveHintText)
+	if !strings.Contains(hinted, stallCorrectiveHintText) {
+		t.Error("prompt missing corrective hint text")
+	}
+	hintIdx := strings.Index(hinted, stallCorrectiveHintText)
+	promptIdx := strings.Index(hinted, "Do the work.")
+	if hintIdx == -1 || promptIdx == -1 || hintIdx > promptIdx {
+		t.Error("corrective hint must appear before the stage prompt")
 	}
 }
 
