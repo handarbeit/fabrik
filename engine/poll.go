@@ -534,6 +534,7 @@ func (e *Engine) Run() error {
 	// Skipped on poll failure to avoid scanning an empty/partial store.
 	if firstPollErr == nil {
 		e.runStartupCleanup()
+		e.runStartupOrphanedInProgressScan()
 		e.runStartupTransientLabelScan()
 		e.runStartupTerminalScan()
 		if e.cfg.JanitorIntervalHours > 0 {

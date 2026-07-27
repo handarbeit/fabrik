@@ -5085,6 +5085,22 @@ When a Fabrik process crashes, deferred cleanup never runs. On the next startup,
 3. `store.Apply(WorkerExited{})` — no-op since `Worker` is already nil; applied for idempotency.
 4. Log the cleanup at `"startup"` tag.
 
+#### Startup Orphaned in_progress Scan (Broader Sweep)
+
+The lock-gated pass above only reaches items that *still hold* a stale lock label. An `in_progress` label orphaned after its paired lock was already cleanly released — the normal outcome when `release()` (`engine/item.go`) succeeds at removing the lock but the paired `removeInProgressLabel` call fails transiently, since that call has no retry — is invisible to it and survives every restart. `runStartupOrphanedInProgressScan()` closes this gap with a second, broader sweep.
+
+**Trigger:** Same call site as the lock-gated pass — runs immediately after `runStartupCleanup()`, inside the same `if firstPollErr == nil` block in `poll.go`.
+
+**Detection:** Scan `store.All()` — every managed item in the store, not filtered by lock label. For each item, build the set of stage names carrying `stage:<Name>:complete` or `stage:<Name>:failed`. Then, for each `stage:<Name>:in_progress` label on the same item whose `<Name>` is in that set, the label is stale by definition — a stage cannot be both finished and in progress — and is removed.
+
+**No `Worker()` or lock-label filter.** This is a deliberate divergence from the lock-gated pass, not an oversight: dispatch ordering already guarantees `complete`/`failed` and `in_progress` never legitimately co-occur for the same stage — `removeFailedLabel` runs before `in_progress` is re-added on retry, and `complete` blocks further dispatch of that stage entirely. Any occurrence of the co-occurrence is therefore stale regardless of whether a worker or lock is present, making the predicate self-justifying and safe to run unconditionally at startup.
+
+**Cleanup per item:** for each stale `in_progress` label found, `RemoveLabel(label)` from GitHub (with write-through to cache on success), logged as `[startup] removed stale label %q` — the same format as the lock-gated pass. Errors are logged as warnings and not retried, matching the lock-gated pass's behavior.
+
+**Additive, not a replacement:** this pass runs alongside, not instead of, the lock-gated sweep — the two predicates (stale lock label vs. `complete`/`failed` co-occurrence) are independent and both run every startup.
+
+**Scope:** startup-only. A periodic (mid-run) version of this sweep would additionally need to exclude items with a live in-process worker for that stage — the startup case is safe without that check only because no workers exist yet in a freshly-started process. Running this sweep periodically is not implemented (see issue #1135).
+
 #### Updated `fabrik:locked:<user>` Label Lifecycle
 
 The lock label is now removed by four paths (previously two):

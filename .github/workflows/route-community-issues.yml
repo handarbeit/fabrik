@@ -12,6 +12,19 @@ name: Route community issues to triage board
 # Requires a repo secret ADD_TO_PROJECT_PAT: a PAT with `project` (write) scope
 # for the handarbeit org — the default GITHUB_TOKEN cannot write org-level
 # Projects. Without the secret the job fails loudly (it never silently no-ops).
+# It also needs `read:org` scope for the membership-confirmation step below
+# (#1137), and its owning account must itself be a member of the org — without
+# either, that step fails closed on every NONE-association author.
+#
+# author_association alone is NOT sufficient to detect maintainers (#1137).
+# It reflects visible affiliation only: a maintainer whose org membership is
+# set to private reports NONE, identical to a genuine stranger. This bit us
+# on 2026-07-26 — an org admin with private membership had seven of their own
+# issues misrouted onto this public board before anyone noticed. Do not
+# "simplify" this workflow back to the association check alone; for a NONE
+# association we make one confirming call to the org-membership API before
+# deciding. OWNER/MEMBER/COLLABORATOR stay a free, correct fast path — the
+# extra call only fires for the ambiguous NONE case, so it stays rare.
 
 on:
   issues:
@@ -26,14 +39,56 @@ jobs:
     if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}
     runs-on: ubuntu-latest
     steps:
+      # NONE is ambiguous: it covers both genuine non-members and maintainers
+      # with private org membership (#1137). Confirm via the authoritative
+      # membership API rather than trusting the visible-affiliation proxy.
+      # This step is skipped (not run) for any other association value, in
+      # which case its outputs are empty and the routing steps below proceed
+      # unaffected.
+      - name: Confirm org membership for NONE-association authors
+        id: membership
+        if: github.event.issue.author_association == 'NONE'
+        env:
+          GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
+          ORG: handarbeit
+          AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          set +e
+          RAW=$(gh api -i "orgs/${ORG}/memberships/${AUTHOR}" 2>/tmp/membership-err.log)
+          set -e
+          # Strip CR so header/body parsing below isn't tripped up by CRLF.
+          RAW=$(printf '%s\n' "$RAW" | tr -d '\r')
+          # Read the numeric status straight from the HTTP status line — not
+          # from gh's human-readable error text, which is message-format text
+          # that can drift between gh CLI versions (#1137 review feedback).
+          HTTP_CODE=$(printf '%s\n' "$RAW" | awk 'NR==1 && /^HTTP\// {print $2; exit}')
+          BODY=$(printf '%s\n' "$RAW" | awk 'f{print} !NF{f=1}')
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            STATE=$(echo "$BODY" | jq -r '.state // "unknown"')
+            ROLE=$(echo "$BODY" | jq -r '.role // "unknown"')
+            echo "Membership check: ${AUTHOR} IS a member of ${ORG} (state=${STATE}, role=${ROLE}) despite author_association=NONE (private membership). Basis: HTTP 200 from /orgs/${ORG}/memberships/${AUTHOR}. Skipping community routing."
+            echo "route=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "Membership check: ${AUTHOR} is NOT a member of ${ORG}. Basis: HTTP 404 from /orgs/${ORG}/memberships/${AUTHOR}. Routing as community issue."
+            echo "route=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Error: membership check for ${AUTHOR} in ${ORG} returned an ambiguous result (HTTP status: ${HTTP_CODE:-none}) — failing closed and skipping routing rather than guessing. Raw output:"
+            cat /tmp/membership-err.log
+            echo "route=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
       - name: Add issue to Triage & Roadmap board (project #3)
         id: add
+        if: success() && steps.membership.outputs.route != 'false'
         uses: actions/add-to-project@v2.0.0
         with:
           project-url: https://github.com/orgs/handarbeit/projects/3
           github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
 
       - name: Set Status = Triage
+        if: success() && steps.membership.outputs.route != 'false'
         env:
           GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
           ITEM_ID: ${{ steps.add.outputs.itemId }}
