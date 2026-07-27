@@ -118,9 +118,10 @@ The turn budget is a **time-slicer**, not a deadline you have failed to meet. It
 
 If you run out of turns:
 
-- The engine commits and pushes your partial work.
-- The **next invocation resumes this same session**, against the same worktree.
+- The **next invocation resumes this same session**, so your reasoning and everything you have read so far are still in context.
 - You continue from where you stopped. Do not restart, re-plan, or redo completed work.
+
+Note that Plan is a `read_only` stage, so the engine does **not** commit partial work for you (`commitWIP` is skipped for read-only stages — their dirty state was restored from a stash, and committing it would misattribute the stash contents). Your continuity comes from the resumed session, not from committed files. Emit your plan inline in your final message as usual; do not try to persist intermediate state to disk expecting it to survive.
 
 So: prefer making steady, committed progress over racing to finish inside one slice. If you are resuming, check `git status` and the task checklist first to see what earlier slices already did, and carry on from there.
 
