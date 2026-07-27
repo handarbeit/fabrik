@@ -175,6 +175,14 @@ These files are the authoritative as-built specifications for Fabrik's engine be
 
 These are **as-built docs** — they describe what the engine currently does. They are distinct from `adrs/*.md`, which record architectural decisions and design rationale, not current state. Do not put state-machine content into ADRs or vice versa.
 
+### ADR numbering
+
+**New ADRs are numbered after the issue they come from**, not sequentially: an ADR for issue #1089 is `adrs/1089-kebab-title.md` with the heading `# ADR 1089: Title`. This matches `specs/` (`specs/895-conjunctive-ci-review-gate/`).
+
+Do **not** pick "the next free number." Several issues are normally in flight at once and whichever merges first takes the number, so a sequential choice collides with a sibling branch — and git merges it cleanly, because the filenames differ. Nothing catches it. The number can also go stale while the PR waits in Review or Validate, after it was verified as free. Four such collisions occurred in a single day on 2026-07-26 before this convention was adopted.
+
+`001`–`073` are legacy sequential numbers: leave them as they are, and never reuse or renumber them. Issue numbers are far above that range, so new ADRs cannot collide with legacy ones. If a single issue needs two ADRs, suffix them (`1089-a-...`, `1089-b-...`).
+
 PRs introducing new as-built behavioral docs should also add an entry here.
 
 ## Handling Community Bug Reports
