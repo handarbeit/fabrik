@@ -988,7 +988,12 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
 			e.activateClaudeSuspension(item.Number, limitErr.ResetTime, time.Now())
-		} else {
+		} else if err == nil {
+			// Only a successful invocation is evidence the limit has cleared (ADR-1120's
+			// "early clear on success"). A generic, unrelated error proves nothing about
+			// account-wide usage-limit state and must not clear it — doing so unconditionally
+			// would race with a concurrently-running worker that just activated the
+			// suspension, undoing it moments after detection.
 			e.clearClaudeSuspension("stage invocation reached Claude")
 		}
 

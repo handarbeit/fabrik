@@ -840,11 +840,14 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 		e.activateClaudeSuspension(memberItem.Number, limitErr.ResetTime, time.Now())
 		return false, err
 	}
-	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
 	if err != nil {
+		// A generic, unrelated error proves nothing about account-wide usage-limit state
+		// and must not clear an active suspension (see the matching comment in item.go's
+		// runInvocationWithExtension) — only fall through to clear below on success.
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
 		return false, nil
 	}
+	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
 
 	// Check whether conflicts remain after Claude's work.
 	// Parse line-by-line to avoid false positives from file paths containing

@@ -407,7 +407,10 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
 			e.activateClaudeSuspension(item.Number, limitErr.ResetTime, time.Now())
-		} else {
+		} else if err == nil {
+			// Only a successful invocation is evidence the limit has cleared — a generic,
+			// unrelated error proves nothing about account-wide usage-limit state and must
+			// not clear it (see the matching comment in item.go's runInvocationWithExtension).
 			e.clearClaudeSuspension("comment review invocation reached Claude")
 		}
 
