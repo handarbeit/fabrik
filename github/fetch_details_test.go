@@ -438,6 +438,99 @@ func TestFetchItemDetails_ReviewThreadLocationFields(t *testing.T) {
 	}
 }
 
+// TestFetchItemDetails_ReviewThreadIsOutdated verifies that a review thread's
+// GitHub-computed isOutdated flag is decoded and propagated onto every comment
+// in that thread — the signal currentHeadReviewThreadComments uses to exclude
+// threads opened against a since-superseded commit (#1207).
+func TestFetchItemDetails_ReviewThreadIsOutdated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+					"closedByPullRequestsReferences": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"id":     "PR_10",
+								"number": 10,
+								"comments": map[string]interface{}{
+									"nodes":    []interface{}{},
+									"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+								},
+								"reviewRequests": map[string]interface{}{"nodes": []interface{}{}},
+								"latestReviews":  map[string]interface{}{"nodes": []interface{}{}},
+								"reviewThreads": map[string]interface{}{
+									"nodes": []interface{}{
+										map[string]interface{}{
+											"id":         "RT_current",
+											"isResolved": false,
+											"isOutdated": false,
+											"path":       "engine/claude.go",
+											"comments": map[string]interface{}{
+												"nodes": []interface{}{
+													map[string]interface{}{
+														"id":             "PRC_1",
+														"databaseId":     1001,
+														"author":         map[string]interface{}{"login": "pruefer"},
+														"body":           "current-head finding",
+														"reactionGroups": []interface{}{},
+													},
+												},
+											},
+										},
+										map[string]interface{}{
+											"id":         "RT_stale",
+											"isResolved": false,
+											"isOutdated": true,
+											"path":       "engine/claude.go",
+											"comments": map[string]interface{}{
+												"nodes": []interface{}{
+													map[string]interface{}{
+														"id":             "PRC_2",
+														"databaseId":     1002,
+														"author":         map[string]interface{}{"login": "pruefer"},
+														"body":           "stale finding on superseded commit",
+														"reactionGroups": []interface{}{},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if len(item.LinkedPRReviewThreadComments) != 2 {
+		t.Fatalf("expected 2 review thread comments, got %d", len(item.LinkedPRReviewThreadComments))
+	}
+	byID := make(map[string]Comment)
+	for _, c := range item.LinkedPRReviewThreadComments {
+		byID[c.ID] = c
+	}
+	if byID["PRC_1"].IsOutdated {
+		t.Errorf("PRC_1 (current-head thread) IsOutdated = true, want false")
+	}
+	if !byID["PRC_2"].IsOutdated {
+		t.Errorf("PRC_2 (stale thread) IsOutdated = false, want true")
+	}
+}
+
 func TestFetchItemDetails_NilAuthor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
