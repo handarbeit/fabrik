@@ -1,0 +1,346 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"os/exec"
+	"strings"
+	"testing"
+
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
+)
+
+// TestUsageLimitExit_ExemptFromRetryAndLabeledDistinctly is the core
+// acceptance-criteria test: a usage-limit exit must not increment the retry
+// count, must not lead to stage:<name>:failed or fabrik:paused, must apply
+// fabrik:claude-limit, and must post an explanatory comment naming the
+// condition and (when parseable) the reset time.
+func TestUsageLimitExit_ExemptFromRetryAndLabeledDistinctly(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{TurnsUsed: 1, CostUSD: 0},
+				&claudeUsageLimitError{Message: "hit your session limit", ResetTime: "10:20pm (America/Edmonton)"}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 100, Title: "Limit test", Status: "Research", ItemID: "PVTI_100"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Retry count must be 0 — the stage never ran.
+	snap, err := eng.store.Get("owner/repo", 100)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.Attempts("Research"); got != 0 {
+		t.Errorf("Attempts(\"Research\") = %d, want 0 (usage-limit must not count against max_retries)", got)
+	}
+	// LastAttemptAt must be set — the dispatch cooldown must apply so the
+	// item doesn't retry on the very next poll and hammer the limit.
+	if snap.LastAttemptAt("Research").IsZero() {
+		t.Error("LastAttemptAt(\"Research\") is zero, want set (cooldown must apply)")
+	}
+
+	var sawLimitLabel, sawFailedLabel, sawPausedLabel bool
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:claude-limit":
+			sawLimitLabel = true
+		case "stage:Research:failed":
+			sawFailedLabel = true
+		case "fabrik:paused":
+			sawPausedLabel = true
+		}
+	}
+	if !sawLimitLabel {
+		t.Error("expected fabrik:claude-limit label to be added")
+	}
+	if sawFailedLabel {
+		t.Error("stage:Research:failed must NOT be applied for a usage-limit exit")
+	}
+	if sawPausedLabel {
+		t.Error("fabrik:paused must NOT be applied for a usage-limit exit")
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment posted, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "usage limit") {
+		t.Errorf("comment does not name the condition: %s", body)
+	}
+	if !strings.Contains(body, "10:20pm (America/Edmonton)") {
+		t.Errorf("comment does not include the parsed reset time: %s", body)
+	}
+	if !strings.Contains(body, "max_retries") {
+		t.Errorf("comment does not clarify retry-budget exemption: %s", body)
+	}
+}
+
+// TestGenuineStageFailure_StillCountsAgainstRetries is the control case:
+// a genuine non-zero exit (not a usage-limit exit) must be entirely
+// unaffected by this feature — it still counts against max_retries and
+// carries no fabrik:claude-limit label.
+func TestGenuineStageFailure_StillCountsAgainstRetries(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "partial output", false, TokenUsage{}, errors.New("some genuine transient failure")
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 101, Title: "Genuine failure", Status: "Research", ItemID: "PVTI_101"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 101)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.Attempts("Research"); got != 1 {
+		t.Errorf("Attempts(\"Research\") = %d, want 1 (genuine failure must count)", got)
+	}
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:claude-limit" {
+			t.Error("fabrik:claude-limit must NOT be applied for a genuine stage failure")
+		}
+		if c.labelName == "fabrik:paused" {
+			t.Error("should not escalate after a single failure below max_retries")
+		}
+	}
+}
+
+// TestStartFailure_ExcludedFromClaudeLimitHandling verifies that a process
+// start failure (binary not found) — a pre-existing classification distinct
+// from both "ran and failed" and "usage limit hit" — is unaffected: no
+// retry-count increment (claudeRan=false skips it already), and no
+// fabrik:claude-limit label.
+func TestStartFailure_ExcludedFromClaudeLimitHandling(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			cmd := exec.Command("this-binary-does-not-exist-fabrik-test")
+			_, startErr := cmd.Output()
+			return "partial output", false, TokenUsage{}, startErr
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 102, Title: "Start failure", Status: "Research", ItemID: "PVTI_102"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 102)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.Attempts("Research"); got != 0 {
+		t.Errorf("Attempts(\"Research\") = %d, want 0 (start failure must not count)", got)
+	}
+	if !snap.LastAttemptAt("Research").IsZero() {
+		t.Error("LastAttemptAt should NOT be set on a start-failure error")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:claude-limit" {
+			t.Error("fabrik:claude-limit must NOT be applied for a start failure")
+		}
+	}
+}
+
+// TestNormalCompletion_ClearsPriorClaudeLimitLabel verifies the auto-clear
+// requirement: an issue carrying fabrik:claude-limit from a prior episode has
+// the label removed on its next (non-limit) invocation, here a normal
+// successful completion.
+func TestNormalCompletion_ClearsPriorClaudeLimitLabel(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "done\nFABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 103, Title: "Clears label", Status: "Research", ItemID: "PVTI_103",
+		Labels: []string{"fabrik:claude-limit"},
+	}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	var sawComplete, sawRemoval bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Research:complete" {
+			sawComplete = true
+		}
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:claude-limit" {
+			sawRemoval = true
+		}
+	}
+	if !sawComplete {
+		t.Error("expected stage:Research:complete to be added on successful completion")
+	}
+	if !sawRemoval {
+		t.Error("expected fabrik:claude-limit to be removed on a non-limit invocation")
+	}
+}
+
+// TestUsageLimitThenGenuineFailure_LeavesFullRetryBudget is the spec's
+// explicit regression guard: a usage-limit exit followed by a real failure
+// must leave the full retry budget available for the real failure — the
+// limit hit must not have silently consumed one of the MaxRetries attempts.
+func TestUsageLimitThenGenuineFailure_LeavesFullRetryBudget(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callCount := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callCount++
+			if callCount == 1 {
+				return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "hit your session limit"}
+			}
+			return "partial output", false, TokenUsage{}, errors.New("some genuine transient failure")
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 104, Title: "Limit then failure", Status: "Research", ItemID: "PVTI_104"}
+
+	// First poll: usage-limit exit.
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first call): %v", err)
+	}
+	// Second poll: item now carries fabrik:claude-limit, as it would after a
+	// real board re-fetch following the first call's label add.
+	item.Labels = []string{"fabrik:claude-limit"}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second call): %v", err)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 104)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.Attempts("Research"); got != 1 {
+		t.Errorf("Attempts(\"Research\") = %d, want 1 (the usage-limit hit must not have consumed budget)", got)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("must not escalate — only 1 of 2 max_retries consumed")
+		}
+	}
+}
+
+// TestUsageLimitExit_SecondConsecutiveHit_DoesNotRepostComment verifies the
+// once-per-episode comment cadence: while fabrik:claude-limit remains applied
+// across repeated poll cycles, the explanatory comment must be posted only
+// once, not on every retry.
+func TestUsageLimitExit_SecondConsecutiveHit_DoesNotRepostComment(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "hit your session limit"}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 105, Title: "Repeated limit hits", Status: "Research", ItemID: "PVTI_105"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first call): %v", err)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("after first hit: expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+
+	// Simulate the next poll cycle observing the label the first call applied.
+	item.Labels = []string{"fabrik:claude-limit"}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second call): %v", err)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("after second consecutive hit: expected comment count to stay at 1, got %d", len(client.addCommentCalls))
+	}
+
+	// Retry count must still be 0 after both calls.
+	snap, err := eng.store.Get("owner/repo", 105)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.Attempts("Research"); got != 0 {
+		t.Errorf("Attempts(\"Research\") = %d, want 0 after two usage-limit hits", got)
+	}
+}

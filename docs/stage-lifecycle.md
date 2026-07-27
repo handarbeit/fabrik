@@ -489,6 +489,35 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 4. Lock held through cooldown
 5. Retry count incremented; after `max_retries`: `fabrik:paused` + `stage:<name>:failed`, lock released
 
+### Claude Usage-Limit Path
+
+A fourth outcome, distinct from Completion/Blocked-on-Input/Incomplete above: Claude exits non-zero
+because the account's usage limit was hit (e.g. `You've hit your session limit · resets 10:20pm
+(America/Edmonton)`), not because the stage genuinely failed. `interpretClaudeResult`
+(`engine/claude.go`) detects this by scanning raw invocation stdout for Anthropic's usage-limit exit
+message and, when Claude exited non-zero without a `FABRIK_STAGE_COMPLETE` marker, returns a
+`*claudeUsageLimitError` sentinel in place of the generic error. `finalizeStageOutcome` classifies it
+via `errors.As` after stash-restore (which must run regardless of outcome) but immediately following
+the engine-shutdown guard — before the normal `claudeRan`/retry classification logic runs — and routes
+to `handleUsageLimitExit`:
+
+1. `StageAttempted` recorded — the normal cooldown (`pollSeconds * 10`) applies, so the item does not
+   retry on the very next poll and hammer the limit in a tight loop.
+2. Retry count is **not** incremented — the stage never ran, so this does not consume `max_retries`.
+3. If `fabrik:claude-limit` is absent, an explanatory comment (naming the condition and the reset time
+   when parseable) is posted and the label is added — gated on the label's own absence so a repeated
+   hit within the same episode does not repost the comment. Neither `fabrik:paused` nor
+   `stage:<name>:failed` is applied.
+4. No partial-progress commit, no branch push, no `markCommentsSeenByStage` — nothing was produced.
+5. Lock released.
+
+`fabrik:claude-limit` clears automatically on the next invocation that is not itself classified as a
+usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure
+alike) — see `docs/state-machine.md` §7.3 and [ADR-1119](../adrs/1119-claude-usage-limit-detection.md)
+for the full rationale, including why this reuses the same `StageAttempted`-without-
+`StageRetryIncremented` split as the Post-Run Boundary Audit above (with the opposite pause/fail
+outcome — a usage limit is transient and self-resolving, a boundary violation is not).
+
 ### Branch Pushing
 
 Always pushed after Claude runs (success or failure): `git push --force-with-lease -u origin fabrik/issue-<N>`

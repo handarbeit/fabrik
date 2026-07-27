@@ -1094,10 +1094,27 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > `.fabrik/sessions/[<owner>-<repo>/]issue-<N>/<Stage>.session` file; moving the item out
 > of its board column and back does **not** work as a workaround, since an unresolved
 > comment always routes to comment processing regardless of board state.
+
+> **Troubleshooting: a stage keeps retrying with a `fabrik:claude-limit` label and no
+> progress.** If the issue carries `fabrik:claude-limit` and a comment naming a Claude
+> account usage limit (e.g. `You've hit your session limit · resets 10:20pm
+> (America/Edmonton)`), the underlying Claude account has run out of usage — this is
+> not a stage failure, and it is not GitHub's own rate limiting (a separate, unrelated
+> mechanism). Fabrik detected the CLI's usage-limit exit message, so it does **not**
+> count this attempt against `--max-retries`: no `stage:<name>:failed`, no
+> `fabrik:paused`, no escalation comment. The stage will keep retrying on the normal
+> poll cooldown (`poll_interval x 10`) until an invocation succeeds, at which point
+> `fabrik:claude-limit` clears automatically. No operator action is required beyond
+> waiting for the account's usage limit to reset — backing off until the stated reset
+> time and pausing dispatch account-wide are tracked as a follow-up; until then, expect
+> one wasted invocation per cooldown window for each affected issue during an outage.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
    - The issue stops being processed until a human investigates
+   - A Claude account usage-limit exit (see the `fabrik:claude-limit` troubleshooting
+     note above) is exempted from this count entirely — the stage never ran, so it
+     never consumes a retry attempt
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
