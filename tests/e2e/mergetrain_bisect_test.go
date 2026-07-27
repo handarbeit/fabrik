@@ -70,6 +70,6 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 		t.Logf("poison member #%d correctly not landed (status=%q)", poisonIssue, st)
 	}
 
-	assertNoStaleTrainArtifacts(t, env, env.RepoAlpha)
+	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)
 	t.Logf("bisection contract verified: red batch → O(log N) bisect → poisoner ejected → survivors landed")
 }

@@ -70,6 +70,6 @@ func TestMergeTrainHappyPathLanding(t *testing.T) {
 	}
 
 	// No stale train branches/PRs should remain after the landing.
-	assertNoStaleTrainArtifacts(t, env, env.RepoAlpha)
+	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)
 	t.Logf("happy-path land verified: 3 members → 1 integration PR → all Done, no O(N²) per-member retests")
 }

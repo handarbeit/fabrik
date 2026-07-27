@@ -1059,6 +1059,28 @@ func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
 	return n
 }
 
+// readEnvFileMergeTrainMode reads FABRIK_MERGE_TRAIN from the test bed's .env
+// file, normalizing exactly like cmd/root.go's mergeTrainMode: missing/empty
+// or unrecognized values default to "off" (logged via t.Logf, not stderr),
+// and only an exact case-insensitive "on" returns "on".
+func readEnvFileMergeTrainMode(t *testing.T, env *Env) string {
+	t.Helper()
+	envFile := filepath.Join(env.FabrikTestDir, ".env")
+	val, err := readEnvFileValue(envFile, "FABRIK_MERGE_TRAIN")
+	if err != nil {
+		return "off"
+	}
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "on":
+		return "on"
+	case "off", "":
+		return "off"
+	default:
+		t.Logf("FABRIK_MERGE_TRAIN=%q in %s is invalid (must be on or off); using default off", val, envFile)
+		return "off"
+	}
+}
+
 // assertTrainPoisonGuardRequired skips the test if "train-poison-guard" is not
 // a required status check on the repo's main branch. Accepts repo as a
 // parameter so it works for both Alpha and Beta repos. Skips (never fatals) so

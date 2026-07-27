@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1264,5 +1265,92 @@ func TestCheckAutoMergeConvergence_QueueRepo_AutoMergeDisabled_NoPause(t *testin
 		if c.labelName == "fabrik:auto-merge-enabled" {
 			t.Error("must NOT remove fabrik:auto-merge-enabled for a queued/ejected PR")
 		}
+	}
+}
+
+// ---- reenableAutoMergeAfterRebase (dispatchRebaseReinvoke's after callback) ----
+
+// TestReenableAutoMergeAfterRebase_AlreadyCleanFallback_Merges verifies the
+// happy path: EnablePullRequestAutoMerge returns ErrAutoMergeAlreadyClean, so
+// the function falls back to a direct MergePR call, which succeeds.
+func TestReenableAutoMergeAfterRebase_AlreadyCleanFallback_Merges(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:auto-merge-enabled"}}
+
+	eng.reenableAutoMergeAfterRebase(item)
+
+	if len(client.mergePRCalls) != 1 {
+		t.Fatalf("expected MergePR called once as already-clean fallback, got %d", len(client.mergePRCalls))
+	}
+	if client.mergePRCalls[0].prNumber != 42 {
+		t.Errorf("MergePR called with PR %d, want 42", client.mergePRCalls[0].prNumber)
+	}
+}
+
+// TestReenableAutoMergeAfterRebase_AlreadyCleanFallback_CINotGreen_SwallowsError
+// is the issue #1094 regression test for this call site: when the already-clean
+// fallback's MergePR call returns gh.ErrNotMergeableCI (mergeable_state flipped
+// away from clean/unstable between the settle and this call — a TOCTOU window),
+// the error is logged and swallowed exactly like any other MergePR failure here.
+// Critically, no fabrik:rebase-needed or fabrik:paused label is applied — a CI
+// refusal must not consume a rebase cycle or escalate; the next convergence
+// pass retries.
+func TestReenableAutoMergeAfterRebase_AlreadyCleanFallback_CINotGreen_SwallowsError(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:auto-merge-enabled"}}
+
+	// Must not panic and must return normally — the error is swallowed, not propagated.
+	eng.reenableAutoMergeAfterRebase(item)
+
+	if len(client.mergePRCalls) != 1 {
+		t.Fatalf("expected MergePR called once as already-clean fallback, got %d", len(client.mergePRCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("fabrik:rebase-needed must NOT be applied for a CI refusal at the already-clean fallback — that would incorrectly consume a rebase cycle")
+		}
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be applied for a CI refusal at the already-clean fallback — it should retry on the next convergence pass")
+		}
+	}
+}
+
+// TestReenableAutoMergeAfterRebase_NotInConvergenceFlow_NoOp verifies the
+// fabrik:auto-merge-enabled guard: without the label, neither
+// EnablePullRequestAutoMerge nor MergePR is called.
+func TestReenableAutoMergeAfterRebase_NotInConvergenceFlow_NoOp(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	eng.reenableAutoMergeAfterRebase(item)
+
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called without fabrik:auto-merge-enabled, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called without fabrik:auto-merge-enabled, got %d call(s)", len(client.mergePRCalls))
 	}
 }
