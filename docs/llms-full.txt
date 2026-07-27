@@ -3028,7 +3028,7 @@ Each active stage column has the same set of reachable sub-states:
 
 > **Note:** The Cooldown sub-state is purely in-memory — there is no label for it. The engine uses `LastAttemptAt[stageName]` from `itemstate.StageState` (written by `StageAttempted` mutation) to enforce dispatch cooldown. On restart, cooldown state is lost and the item is retried immediately.
 >
-> Distinct from Cooldown is **Deferred Dispatch**: an item whose dispatch was skipped in the current poll cycle solely because a worker from a prior cycle is still running. Deferred-Dispatch items still receive the `CooldownAt("periodic-re-eval")` stamp at end-of-poll — the cooldown avoids repeated deep-fetch evaluation (and the fallback GraphQL fetch when the cache is invalidated or disabled) for an item the dispatch guard (`snap.Worker() != nil`) would block anyway. Prompt re-dispatch after the prior worker exits is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and wakes the poll loop immediately (#544). Note: `WorkerLifecycleChanged` is excluded from `cycleSetFlags` (Fix B, issue #576) so it does not bypass the cooldown gate via `mayNeedWork`. For successful workers, `StatusChanged` from `advanceToNextStage` adds the item to cycleSet (bypassing the cooldown) so the next stage dispatches promptly. For aborted workers (max-turns, error), the cooldown expires naturally and the next ticker poll re-evaluates the item. See §3.2, §9.2, and §9.9.
+> Distinct from Cooldown is **Deferred Dispatch**: an item whose dispatch was skipped in the current poll cycle solely because a worker from a prior cycle is still running. Deferred-Dispatch items still receive the `CooldownAt("periodic-re-eval")` stamp at end-of-poll — the cooldown avoids repeated deep-fetch evaluation (and the fallback GraphQL fetch when the cache is invalidated or disabled) for an item the dispatch guard (`snap.Worker() != nil`) would block anyway. Prompt re-dispatch after the prior worker exits is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and wakes the poll loop immediately (#544). Note: `WorkerLifecycleChanged` is excluded from `cycleSetFlags` (Fix B, issue #576) so it does not bypass the cooldown gate via `mayNeedWork`. For successful workers, `StatusChanged` from `advanceToNextStage` adds the item to cycleSet (bypassing the cooldown) so the next stage dispatches promptly. For workers that ended without completing — whether preempted at the turn cap or genuinely errored — the cooldown expires naturally and the next ticker poll re-evaluates the item. See §3.2, §9.2, and §9.9.
 >
 > **Not listed above:** `fabrik:awaiting-placement` is a related but distinct marker applied to a spawned **child** issue whose initial board placement failed — by construction it is sitting **outside** any of these active-stage columns (typically `Backlog`, which is declared `unmanaged: true` — see below — and therefore never dispatched to regardless), so it never appears as a sub-state of an active-stage column. See §6.9.
 
@@ -3622,6 +3622,15 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 
 #### Turn Limit Extension
 
+> **The turn budget is a preemption mechanism, not a failure threshold.** It exists for two reasons, neither of which is "the work went wrong":
+>
+> 1. **Runaway guard** — bound an unbounded Claude loop.
+> 2. **Time-slicer** — chop a large job so a single issue cannot starve every other issue of workers.
+>
+> When the budget is exhausted, the engine commits and pushes partial work, and the *next dispatch resumes the same Claude session* (`--resume`) against the same worktree. Work continues from where it stopped; nothing is discarded and nothing restarts. A capped invocation is a **slice boundary**, and a job needing several slices is normal — cost typically rises across slices as each resumed session carries more accumulated context.
+>
+> Treat "turn limit hit" throughout this section as *this slice ended*, never as *this stage failed*. The distinction is load-bearing: the CLI reports it structurally as `subtype: "error_max_turns"` / `terminal_reason: "max_turns"` (captured since #1178), separate from a genuine fault, and the TUI renders it as `↻ (turn limit)` rather than `✗ (error)`.
+
 When Claude exits a stage invocation due to `max_turns` (i.e., the per-invocation turn usage satisfies `invUsage.TurnsUsed >= currentBudget` and `!completed && err == nil`), the engine evaluates whether to extend before entering the cooldown/retry path.
 
 **Extension trigger condition:** `!completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget`
@@ -3654,8 +3663,8 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple < 3`; progress detected | Same column, Locked + In Progress (extension) | | | `totalMultiple++`; `resume=true`; output accumulated; no WIP commit or push between extensions |
-| Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
-| Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
+| Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; slice ends (a **preemption**, not a failure — the session resumes on the next dispatch); `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
+| Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; slice ends (a **preemption**, not a failure — the session resumes on the next dispatch); `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
 | Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Normal completion flow; extend-turns label persists to next stage |
 
 #### Cleanup Stage
