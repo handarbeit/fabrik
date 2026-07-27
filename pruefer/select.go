@@ -50,7 +50,7 @@ type EligibilityInput struct {
 // ForceReview overrides only the already-reviewed-at-this-SHA check — draft,
 // self-authored, and excluded-author/label/path checks always apply, since
 // "/pruefer review" forces a *fresh* review, not a bypass of every safety
-// check (see adrs/074-pruefer-v1-architecture.md).
+// check (see adrs/1113-pruefer-v1-architecture.md).
 func Eligible(in EligibilityInput) (bool, SkipReason) {
 	if in.PR.Draft {
 		return false, SkipDraft
@@ -97,11 +97,40 @@ func allPathsExcluded(changed, patterns []string) bool {
 
 func matchesAny(path string, patterns []string) bool {
 	for _, pat := range patterns {
-		if ok, err := filepath.Match(pat, path); err == nil && ok {
+		if matchGlob(pat, path) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchGlob matches path against pattern using filepath.Match semantics per
+// path segment, plus "**" as a segment that matches zero or more path
+// segments (so "vendor/**" excludes everything under vendor/, matching the
+// documented behavior in cmd/pruefer/README.md — plain filepath.Match alone
+// never lets "*" cross a "/" and so cannot express that).
+func matchGlob(pattern, path string) bool {
+	return matchGlobParts(strings.Split(pattern, "/"), strings.Split(path, "/"))
+}
+
+func matchGlobParts(pat, name []string) bool {
+	if len(pat) == 0 {
+		return len(name) == 0
+	}
+	if pat[0] == "**" {
+		if matchGlobParts(pat[1:], name) {
+			return true
+		}
+		return len(name) > 0 && matchGlobParts(pat, name[1:])
+	}
+	if len(name) == 0 {
+		return false
+	}
+	ok, err := filepath.Match(pat[0], name[0])
+	if err != nil || !ok {
+		return false
+	}
+	return matchGlobParts(pat[1:], name[1:])
 }
 
 // alreadyReviewedAtHead reports whether reviews contains a review authored

@@ -3,7 +3,9 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -238,8 +240,9 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- d1.Run(ctx1) }()
 
-	// Give d1 a moment to acquire the lock.
-	time.Sleep(100 * time.Millisecond)
+	// Wait until d1 actually holds the lock, rather than assuming a fixed
+	// sleep is long enough — probe the same lock file ourselves.
+	waitUntil(t, 2*time.Second, func() bool { return lockHeld(t, d1.lockPath()) })
 
 	d2 := &Daemon{Client: client, Claude: claude, Clone: clone, Config: Config{PollInterval: time.Hour}, FabrikDir: dir}
 	if err := d2.Run(context.Background()); err == nil {
@@ -252,4 +255,21 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first Daemon.Run did not exit after context cancellation")
 	}
+}
+
+// lockHeld reports whether some other process/goroutine currently holds an
+// exclusive flock on path, by attempting (and immediately releasing) a
+// non-blocking flock of our own.
+func lockHeld(t *testing.T, path string) bool {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return false // lock file/dir may not exist yet
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }

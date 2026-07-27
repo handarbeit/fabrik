@@ -6,7 +6,7 @@ package pruefer
 // shared internal package: these are small, stable OS primitives, and
 // extracting them would touch engine's existing call sites for a
 // security-relevant piece of code for the sake of a one-time ~80-line copy
-// (see adrs/074-pruefer-v1-architecture.md).
+// (see adrs/1113-pruefer-v1-architecture.md).
 
 import (
 	"fmt"

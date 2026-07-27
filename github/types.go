@@ -84,7 +84,7 @@ type PRReview struct {
 	// CommitID is the SHA the review was submitted against (GitHub's REST
 	// "commit_id" field). Needed to determine whether a review targets the
 	// PR's current head SHA or a stale one (Pruefer's GitHub-derived
-	// review-state mechanism; see ADR-074).
+	// review-state mechanism; see ADR-1113).
 	CommitID string
 }
 

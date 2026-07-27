@@ -22,7 +22,7 @@ const appHTTPTimeout = 30 * time.Second
 
 // appHTTPClient is package-level so tests can point it at an httptest server
 // without needing a constructed *Client (these are free functions — see
-// ADR-074's rationale for why App-auth bootstrap does not live on *Client).
+// ADR-1113's rationale for why App-auth bootstrap does not live on *Client).
 var appHTTPClient = &http.Client{Timeout: appHTTPTimeout}
 
 // jwtClockSkew is subtracted from "issued at" to tolerate minor clock drift
@@ -110,8 +110,13 @@ type AppInstallation struct {
 
 // appRequest performs a JWT-authenticated GitHub App API request (installation
 // discovery, token minting, or self-identity lookup) and decodes the JSON
-// response into result. baseURL allows tests to target an httptest server.
+// response into result. baseURL allows tests to target an httptest server;
+// an empty baseURL (the production case) falls back to defaultBaseURL, the
+// same convention github.Client uses.
 func appRequest(method, baseURL, path, jwt string, result interface{}) error {
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
 	req, err := http.NewRequest(method, baseURL+path, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
@@ -145,7 +150,7 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 // authenticated by jwt via GET /app/installations. Used for dynamic
 // installation discovery: Pruefer watches whatever repos the App is
 // installed on, so adding a repo requires only a GitHub-side installation
-// change, not a Pruefer config or code change (see ADR-074).
+// change, not a Pruefer config or code change (see ADR-1113).
 func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, error) {
 	var raw []struct {
 		ID      int64 `json:"id"`

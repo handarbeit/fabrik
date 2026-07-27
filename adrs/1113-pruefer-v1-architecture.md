@@ -1,4 +1,4 @@
-# ADR 074: Pruefer V1 Architecture
+# ADR 1113: Pruefer V1 Architecture
 
 **Date**: 2026-07-27
 **Status**: Accepted

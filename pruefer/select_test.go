@@ -113,6 +113,25 @@ func TestEligible(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "excluded path: ** matches nested paths (README's documented vendor/** example)",
+			in: EligibilityInput{
+				PR:            gh.PRDetails{Author: "alice", HeadSHA: "sha1"},
+				ExcludedPaths: []string{"vendor/**"},
+				ChangedPaths:  []string{"vendor/pkg/foo/bar.go"},
+			},
+			wantOK:     false,
+			wantReason: SkipExcludedPath,
+		},
+		{
+			name: "excluded path: ** does not match outside the prefixed dir",
+			in: EligibilityInput{
+				PR:            gh.PRDetails{Author: "alice", HeadSHA: "sha1"},
+				ExcludedPaths: []string{"vendor/**"},
+				ChangedPaths:  []string{"engine/claude.go"},
+			},
+			wantOK: true,
+		},
+		{
 			name: "already reviewed at this head SHA is skipped",
 			in: EligibilityInput{
 				PR:              gh.PRDetails{Author: "alice", HeadSHA: "old-sha"},

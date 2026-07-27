@@ -3,7 +3,7 @@
 // invoking the claude CLI, and submits formal pull_request_review comments.
 // It mirrors the architectural shape of Fabrik's engine (poll loop, claude
 // CLI invocation, GitHub REST client) but shares no Go imports with engine —
-// see adrs/074-pruefer-v1-architecture.md.
+// see adrs/1113-pruefer-v1-architecture.md.
 package pruefer
 
 import (
@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Defaults, justified in adrs/074-pruefer-v1-architecture.md.
+// Defaults, justified in adrs/1113-pruefer-v1-architecture.md.
 const (
 	DefaultPollInterval   = 120 * time.Second
 	DefaultModel          = "sonnet"

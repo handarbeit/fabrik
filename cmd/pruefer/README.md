@@ -2,7 +2,7 @@
 
 Pruefer is a self-hosted PR review daemon. It watches configured GitHub repositories, reviews open pull requests by invoking the `claude` CLI (subscription-backed, not API-metered), and submits a formal comment-only `pull_request_review`.
 
-It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that wants a review bot) without depending on a hosted third-party reviewer's quota, and without per-token API billing. See [adrs/074-pruefer-v1-architecture.md](../../adrs/074-pruefer-v1-architecture.md) for the full architectural rationale.
+It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that wants a review bot) without depending on a hosted third-party reviewer's quota, and without per-token API billing. See [adrs/1113-pruefer-v1-architecture.md](../../adrs/1113-pruefer-v1-architecture.md) for the full architectural rationale.
 
 **V1 scope**: comment-only reviews (`event: COMMENT`). Pruefer never approves a PR and never requests changes — see the ADR for why.
 
@@ -29,7 +29,7 @@ Pruefer authenticates as a GitHub App so its reviews are attributed to a genuine
 2. Fill in:
    - **GitHub App name**: anything unique (e.g. `your-org-pruefer`). This becomes the `<slug>` in the App's `<slug>[bot]` identity.
    - **Homepage URL**: any placeholder URL — not used.
-   - **Webhook**: **uncheck "Active"**. Pruefer polls; it does not receive webhooks (see ADR-074 for why this doesn't conflict with ADR-032's webhook-delivery ruling).
+   - **Webhook**: **uncheck "Active"**. Pruefer polls; it does not receive webhooks (see ADR-1113 for why this doesn't conflict with ADR-032's webhook-delivery ruling).
 3. **Repository permissions**, minimum required:
    - **Pull requests**: Read and write (review submission, reading PR metadata/diff)
    - **Contents**: Read (cloning the PR head commit)

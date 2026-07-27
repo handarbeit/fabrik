@@ -23,7 +23,7 @@ import (
 // the issue's own illustrative example includes it: gh pr review --approve
 // / gh pr merge are reachable through an unscoped grant, which would make
 // "never approve" a prompt-level policy rather than a code-level guarantee
-// (see adrs/074-pruefer-v1-architecture.md).
+// (see adrs/1113-pruefer-v1-architecture.md).
 var reviewAllowedTools = []string{
 	"Read", "Grep", "Glob",
 	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
