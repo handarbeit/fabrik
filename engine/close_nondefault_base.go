@@ -24,10 +24,10 @@ import (
 //
 // Best-effort and non-blocking: every failure mode (missing WorktreeManager,
 // DefaultBaseBranch error, CloseIssue error) is logged and returns without
-// touching the caller's already-completed board advance. Durable retry for a
-// failed close is explicitly out of scope for this issue (tracked as a
-// chained follow-up, modeled on the fabrik:awaiting-member-close settle
-// pattern).
+// touching the caller's already-completed board advance. A failed CloseIssue
+// call is durably recorded via fabrik:awaiting-close so settleNonDefaultBaseCloses
+// retries it on a later poll (ADR-1097), modeled on the
+// fabrik:awaiting-member-close settle pattern (ADR-061).
 func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 	if item.IsPR {
 		return
@@ -83,6 +83,7 @@ func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 			// Issue no longer exists — already in the desired end state.
 			return
 		}
+		e.markNonDefaultBaseCloseOutstanding(item, owner, repo)
 		e.logf(item.Number, "pr-terminal", "explicit close of #%d failed: %v\n", item.Number, err)
 		return
 	}

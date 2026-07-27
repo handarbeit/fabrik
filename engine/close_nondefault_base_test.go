@@ -124,7 +124,7 @@ func TestCloseIssueIfNonDefaultBase_ErrNotFound_TreatedAsSuccess(t *testing.T) {
 	}
 }
 
-func TestCloseIssueIfNonDefaultBase_CloseFails_LogsAndDoesNotPanic(t *testing.T) {
+func TestCloseIssueIfNonDefaultBase_CloseFails_MarksOutstanding(t *testing.T) {
 	client := &mockGitHubClient{closeIssueFn: func(owner, repo string, n int) error {
 		return fmt.Errorf("rate limited")
 	}}
@@ -139,6 +139,18 @@ func TestCloseIssueIfNonDefaultBase_CloseFails_LogsAndDoesNotPanic(t *testing.T)
 
 	if len(client.closeIssueCalls) != 1 {
 		t.Fatalf("expected CloseIssue to have been attempted once, got %v", client.closeIssueCalls)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	markerAdded := false
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 42 && c.labelName == nonDefaultBaseAwaitingCloseLabel {
+			markerAdded = true
+		}
+	}
+	if !markerAdded {
+		t.Errorf("expected %s added on explicit close failure, got labels: %v", nonDefaultBaseAwaitingCloseLabel, client.addLabelCalls)
 	}
 }
 

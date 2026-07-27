@@ -1123,6 +1123,12 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// the setting is later turned off.
 	e.settleMergeTrainMemberCloses(board)
 
+	// Non-default-base explicit close settle scan (ADR-1097): retries the outstanding
+	// closeIssueIfNonDefaultBase CloseIssue call for any item carrying
+	// fabrik:awaiting-close. Runs unconditionally every poll, independent of
+	// itemMayNeedWork/itemNeedsWork dispatch — the item has already reached Done.
+	e.settleNonDefaultBaseCloses(board)
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
