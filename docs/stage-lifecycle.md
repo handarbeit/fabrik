@@ -497,8 +497,9 @@ because the account's usage limit was hit (e.g. `You've hit your session limit �
 (`engine/claude.go`) detects this by scanning raw invocation stdout for Anthropic's usage-limit exit
 message and, when Claude exited non-zero without a `FABRIK_STAGE_COMPLETE` marker, returns a
 `*claudeUsageLimitError` sentinel in place of the generic error. `finalizeStageOutcome` classifies it
-via `errors.As` immediately after the engine-shutdown guard — before stash-restore's normal
-`claudeRan`/retry logic runs — and routes to `handleUsageLimitExit`:
+via `errors.As` after stash-restore (which must run regardless of outcome) but immediately following
+the engine-shutdown guard — before the normal `claudeRan`/retry classification logic runs — and routes
+to `handleUsageLimitExit`:
 
 1. `StageAttempted` recorded — the normal cooldown (`pollSeconds * 10`) applies, so the item does not
    retry on the very next poll and hammer the limit in a tight loop.

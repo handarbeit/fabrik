@@ -1094,6 +1094,7 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > `.fabrik/sessions/[<owner>-<repo>/]issue-<N>/<Stage>.session` file; moving the item out
 > of its board column and back does **not** work as a workaround, since an unresolved
 > comment always routes to comment processing regardless of board state.
+
 > **Troubleshooting: a stage keeps retrying with a `fabrik:claude-limit` label and no
 > progress.** If the issue carries `fabrik:claude-limit` and a comment naming a Claude
 > account usage limit (e.g. `You've hit your session limit · resets 10:20pm

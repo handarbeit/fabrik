@@ -1092,6 +1092,7 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > `.fabrik/sessions/[<owner>-<repo>/]issue-<N>/<Stage>.session` file; moving the item out
 > of its board column and back does **not** work as a workaround, since an unresolved
 > comment always routes to comment processing regardless of board state.
+
 > **Troubleshooting: a stage keeps retrying with a `fabrik:claude-limit` label and no
 > progress.** If the issue carries `fabrik:claude-limit` and a comment naming a Claude
 > account usage limit (e.g. `You've hit your session limit · resets 10:20pm
@@ -6516,8 +6517,9 @@ because the account's usage limit was hit (e.g. `You've hit your session limit �
 (`engine/claude.go`) detects this by scanning raw invocation stdout for Anthropic's usage-limit exit
 message and, when Claude exited non-zero without a `FABRIK_STAGE_COMPLETE` marker, returns a
 `*claudeUsageLimitError` sentinel in place of the generic error. `finalizeStageOutcome` classifies it
-via `errors.As` immediately after the engine-shutdown guard — before stash-restore's normal
-`claudeRan`/retry logic runs — and routes to `handleUsageLimitExit`:
+via `errors.As` after stash-restore (which must run regardless of outcome) but immediately following
+the engine-shutdown guard — before the normal `claudeRan`/retry classification logic runs — and routes
+to `handleUsageLimitExit`:
 
 1. `StageAttempted` recorded — the normal cooldown (`pollSeconds * 10`) applies, so the item does not
    retry on the very next poll and hammer the limit in a tight loop.
