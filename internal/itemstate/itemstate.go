@@ -120,6 +120,13 @@ type ItemState struct {
 	// finished. The error is surfaced as JobCompletedEvent.Success=false in history.
 	LastInvocationErrored bool
 
+	// LastInvocationTurnLimited records whether the most recent Claude invocation
+	// exited because it exhausted its configured turn budget (CLI subtype
+	// error_max_turns), as opposed to a genuine failure. A turn-limited invocation
+	// is incomplete but resumable — surfaced as JobCompletedEvent.TurnLimited in
+	// history, rendered distinctly from a genuine error. See ADR-1178.
+	LastInvocationTurnLimited bool
+
 	// LastTokenUsage holds token consumption from the most recent Claude invocation.
 	// Replaces engine.lastUsage[iKey].
 	LastTokenUsage TokenUsage

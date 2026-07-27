@@ -535,11 +535,18 @@ type InvocationRecorded struct {
 	Number    int
 	Completed bool
 	Blocked   bool
-	// Errored is true when the Claude process exited non-zero. Recorded independently
-	// of Completed — the completion marker is authoritative for whether the stage
-	// completed; Errored only records that the process didn't exit cleanly.
+	// Errored is true when the Claude process exited non-zero AND the exit was not
+	// classified as a turn-limit hit (see TurnLimited). Recorded independently of
+	// Completed — the completion marker is authoritative for whether the stage
+	// completed; Errored only records that the process didn't exit cleanly for a
+	// genuine fault.
 	Errored bool
-	Usage   TokenUsage
+	// TurnLimited is true when the Claude invocation exited because it exhausted
+	// its configured turn budget (CLI subtype error_max_turns), as opposed to a
+	// genuine failure. A turn-limited run is incomplete but resumable, not an
+	// error — see claudeTurnLimitError in engine/claude.go and ADR-1178.
+	TurnLimited bool
+	Usage       TokenUsage
 	// IsComment is true when the invocation processed a user comment rather than
 	// running a stage. Stored in ItemState.LastInvocationIsComment so that the
 	// InvocationObserver can forward the correct flag to the TUI.
