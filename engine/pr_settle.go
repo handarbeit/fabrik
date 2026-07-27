@@ -44,6 +44,19 @@ type PRSettleResult struct {
 	MergeableState string // raw mergeable_state; used by checkCIGate R3 timeout path
 	CheckRuns      []gh.CheckRun
 	PR             *gh.PRDetails
+
+	// RequiredContextsStatus, RequiredMissing/Pending/Failed (ADR-933): the
+	// required-context classification observed for this settle pass. The
+	// zero value (RequiredContextsSatisfied) is correct whenever
+	// required_status_contexts isn't configured for the repo, or wasn't
+	// consulted on this code path (e.g. an earlier terminal/queued/conflict
+	// return) — callers must not assume a populated result means required
+	// contexts were actually checked; checkCIGate only relies on this when
+	// RequiredContextsStatus == RequiredContextsFailed.
+	RequiredContextsStatus gh.RequiredContextStatus
+	RequiredMissing        []string
+	RequiredPending        []string
+	RequiredFailed         []string
 }
 
 // settlePRMergeState fetches all PR merge/CI state in a single pass and returns
@@ -150,6 +163,24 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 	}
 
 	if len(checkRuns) == 0 {
+		// ADR-933: a confirmed required-context failure must block regardless
+		// of hadChecks/dwell/mergeable_state — those all exist to wait out
+		// transient GitHub propagation delays for check-run-based CI, but a
+		// classic commit status (the local-CI-takeover case #933 was filed
+		// for) has no check-run footprint for them to react to, and a
+		// confirmed failure is not transient. Checked here, ahead of all of
+		// them, so it isn't masked as generic PRMergeUnsettled by the R3
+		// mergeable_state branch below (which fires for almost any non-empty
+		// mergeable_state, e.g. "blocked" — exactly this scenario). A merely
+		// missing/pending required context is NOT short-circuited here: it
+		// defers to the existing hadChecks/dwell/R3 handling below, since
+		// nothing has regressed yet and unconfigured repos must see zero
+		// behavior change (classifyRequiredContexts is a no-op when
+		// required_status_contexts isn't configured for the repo).
+		if rcStatus, rcMissing, rcPending, rcFailed := e.classifyRequiredContexts(item.Number, owner, repo, pr.HeadSHA, nil); rcStatus == gh.RequiredContextsFailed {
+			return e.requiredContextsSettleResult(item.Number, mergeableState, nil, pr, rcStatus, rcMissing, rcPending, rcFailed)
+		}
+
 		var hadChecks bool
 		var lpr *itemstate.LinkedPRState
 		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
@@ -188,6 +219,14 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 			return PRSettleResult{Status: PRMergeUnsettled, Reason: fmt.Sprintf("no check runs, mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
 		}
 
+		// ADR-933: before declaring "no CI configured" ready, confirm any
+		// configured required context actually reported success on this exact
+		// head SHA — the local-CI-takeover case (#933) has zero check runs but
+		// a required classic commit status that must still be checked.
+		if rcStatus, rcMissing, rcPending, rcFailed := e.classifyRequiredContexts(item.Number, owner, repo, pr.HeadSHA, nil); rcStatus != gh.RequiredContextsSatisfied {
+			return e.requiredContextsSettleResult(item.Number, mergeableState, nil, pr, rcStatus, rcMissing, rcPending, rcFailed)
+		}
+
 		e.logf(item.Number, "settle", "no check runs for SHA %s — no CI configured\n",
 			pr.HeadSHA[:min(8, len(pr.HeadSHA))])
 		return PRSettleResult{Status: PRMergeReady, Reason: "no CI configured", MergeableState: mergeableState, PR: pr}
@@ -202,6 +241,36 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 	case gh.CheckRunsPending:
 		return PRSettleResult{Status: PRMergeUnsettled, Reason: "CI checks pending", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 	default:
+		// ADR-933: the present check runs alone read as "ready" — but that must
+		// not short-circuit a configured required context that skipped/neutraled
+		// out, or one whose only producer is a classic commit status not covered
+		// by check runs at all (the local-CI-takeover case #933 was filed for).
+		if rcStatus, rcMissing, rcPending, rcFailed := e.classifyRequiredContexts(item.Number, owner, repo, pr.HeadSHA, checkRuns); rcStatus != gh.RequiredContextsSatisfied {
+			return e.requiredContextsSettleResult(item.Number, mergeableState, checkRuns, pr, rcStatus, rcMissing, rcPending, rcFailed)
+		}
 		return PRSettleResult{Status: PRMergeReady, Reason: "all CI checks passed", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
+	}
+}
+
+// requiredContextsSettleResult builds the PRSettleResult for a non-satisfied
+// required-context classification (ADR-933): a confirmed failure blocks with
+// PRMergeBlocked (mirrors a failed check run); a missing/pending/skipped/
+// neutral required context blocks with PRMergeUnsettled (nothing has
+// regressed — it just hasn't confirmed success yet, so no CI-fix reinvoke
+// should fire from this alone; see classifyCIFromRequiredContexts in ci.go).
+func (e *Engine) requiredContextsSettleResult(itemNumber int, mergeableState string, checkRuns []gh.CheckRun, pr *gh.PRDetails, rcStatus gh.RequiredContextStatus, rcMissing, rcPending, rcFailed []string) PRSettleResult {
+	if rcStatus == gh.RequiredContextsFailed {
+		e.logf(itemNumber, "settle", "required status context(s) failed: %v\n", rcFailed)
+		return PRSettleResult{
+			Status: PRMergeBlocked, Reason: fmt.Sprintf("required status context(s) failed: %v", rcFailed),
+			MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr,
+			RequiredContextsStatus: rcStatus, RequiredFailed: rcFailed,
+		}
+	}
+	e.logf(itemNumber, "settle", "required status context(s) not yet confirmed — missing:%v pending:%v\n", rcMissing, rcPending)
+	return PRSettleResult{
+		Status: PRMergeUnsettled, Reason: fmt.Sprintf("required status context(s) not yet confirmed (missing:%v pending:%v)", rcMissing, rcPending),
+		MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr,
+		RequiredContextsStatus: rcStatus, RequiredMissing: rcMissing, RequiredPending: rcPending,
 	}
 }
