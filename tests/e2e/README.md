@@ -209,6 +209,11 @@ overall test timeout with `E2E_TIMEOUT` (default `90m`).
 
 The `e2e` build tag keeps all of this out of the default `go test ./...` run.
 
+Set **`E2E_JITTER_SEED`** (a `uint64`) to make the harness's poll-interval
+jitter (see below) reproducible — useful for locally reproducing a
+flaky-looking failure. Leave it unset for normal runs; the jitter self-seeds
+randomly by default.
+
 #### Parallelism cap — the shared bed oversubscribes easily
 
 15 of the 16 scenarios are `t.Parallel()`, but they **all drive one shared
@@ -230,6 +235,11 @@ Lower values reduce oversubscription at the cost of wall-clock. The long
 merge-train and CI-fix scenarios (see their notes above) are still best run in
 isolation. **Do not** run the full suite unbounded expecting a clean pass — the
 failure will be timeouts, not real regressions.
+
+On top of the `-parallel` cap, every GitHub-polling wait helper's retry
+interval is jittered ±20% (see `pollSleep` in `harness.go`) so concurrent
+scenarios' polls desynchronize instead of converging into lockstep bursts
+against the shared API budget (see #1104).
 
 ### Reset between runs
 
