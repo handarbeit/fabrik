@@ -56,6 +56,19 @@ like the other transient gate labels.
 
 ## Rationale
 
+> **Superseded in part by [ADR-1183](1183-structural-claude-usage-limit-detection.md).** The
+> "Why message-matching rather than a structural field" rationale immediately below states that "no
+> structural field reliably discriminates a usage-limit exit... today." That premise held when this
+> ADR was accepted, but became false once #1178 added `terminal_reason` capture to `claudeResponse`:
+> the CLI's own result object carries a `terminal_reason` value (`"blocking_limit"`) for a genuine
+> usage-limit exit, distinct from the generic `error_during_execution` subtype this ADR's Decision
+> section describes. The prose-matching detection this ADR documents (`detectUsageLimitExit`,
+> `usageLimitHitRE`, `usageLimitResetRE`) was deleted and replaced with structural detection
+> (`classifyUsageLimitExit`) after it produced an ~11-hour account-wide false-positive suspension by
+> matching a stage's own output prose (#1183). The rest of this ADR — the `StageAttempted`-without-
+> `StageRetryIncremented` split, the once-per-episode label idiom, the auto-clear-on-any-non-limit-
+> invocation rule — remains accurate and unchanged.
+
 ### Why detect on raw bytes rather than the parsed `Result` field?
 
 It is unconfirmed whether a real usage-limit exit populates `claudeResponse.Result`, only
