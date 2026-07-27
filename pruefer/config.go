@@ -47,6 +47,12 @@ type Config struct {
 	ExcludedPaths   []string // glob patterns; a PR is skipped only if ALL touched paths match
 	ExcludedLabels  []string // a PR is skipped if ANY label matches
 
+	// TUI controls whether Execute launches the bubbletea dashboard. Default
+	// true; -notui / PRUEFER_TUI=0 / config.yaml's `tui: false` disable it,
+	// mirroring cmd/root.go's --notui/FABRIK_TUI convention. Execute further
+	// gates this on a real terminal being detected (see tui_run.go's useTUI).
+	TUI bool
+
 	AppID             int64
 	AppPrivateKeyPath string
 	// AppInstallationID pins Pruefer to a single installation. Zero means
@@ -71,6 +77,7 @@ type yamlConfig struct {
 	AppID             *int64   `yaml:"github_app_id"`
 	AppPrivateKeyPath string   `yaml:"github_app_private_key_path"`
 	AppInstallationID *int64   `yaml:"github_app_installation_id"`
+	TUI               *bool    `yaml:"tui"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
@@ -106,6 +113,7 @@ type flagValues struct {
 	appPrivateKeyPath string
 	appInstallationID int64
 	configPath        string
+	noTUI             bool
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -131,6 +139,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.appPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's PEM private key")
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
 	fs.StringVar(&fv.configPath, "config", DefaultConfigPath, "Path to Pruefer's YAML config file")
+	fs.BoolVar(&fv.noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -161,6 +170,10 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedPaths:     yc.ExcludedPaths,
 		ExcludedLabels:    yc.ExcludedLabels,
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
+		TUI:               true,
+	}
+	if yc.TUI != nil {
+		cfg.TUI = *yc.TUI
 	}
 	if yc.PollIntervalSec != nil {
 		cfg.PollInterval = time.Duration(*yc.PollIntervalSec) * time.Second
@@ -231,6 +244,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["github-app-installation-id"] {
 		cfg.AppInstallationID = fv.appInstallationID
 	}
+	if explicit["notui"] {
+		cfg.TUI = !fv.noTUI
+	}
 
 	return cfg, nil
 }
@@ -287,6 +303,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_GITHUB_APP_INSTALLATION_ID"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.AppInstallationID = n
+		}
+	}
+	if v := os.Getenv("PRUEFER_TUI"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.TUI = b
 		}
 	}
 }
