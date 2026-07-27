@@ -77,11 +77,8 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 			if stage.CleanupWorktree || stageIsGateChecked(stage) {
 				continue
 			}
-			if stage.HoldingStage {
-				owner, repo := itemOwnerRepo(item, e.defaultRepo())
-				if e.mergeTrainWorkerActive(owner + "/" + repo) {
-					continue
-				}
+			if stage.HoldingStage && e.mergeTrainWorkerActive(itemOwnerRepoString(item, e.defaultRepo())) {
+				continue
 			}
 		}
 		e.advanceClosedItemToDone(board, item, optionID, cleanup.Name)
