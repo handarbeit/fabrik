@@ -64,7 +64,11 @@ func buildPlaceholderExe(t *testing.T, path string) {
 	}
 }
 
-func testDevBuildConfig(t *testing.T, dir, version string) (DevBuildConfig, *bool, *bool, *[]string) {
+// testDevBuildConfig builds a DevBuildConfig wired with stubbed
+// executableFn/execFn seams and an ExpectedRemote matching whatever remote
+// substring dir's origin was actually configured with (initDevSourceCheckout
+// or a real clone both need this to line up with IsSourceCheckout's check).
+func testDevBuildConfig(t *testing.T, dir, version, expectedRemote string) (DevBuildConfig, *bool, *bool, *[]string) {
 	t.Helper()
 	var logs []string
 	postBuildCalled := false
@@ -79,6 +83,14 @@ func testDevBuildConfig(t *testing.T, dir, version string) (DevBuildConfig, *boo
 	// overwrite a file that isn't a prior build's object file, so a plain
 	// placeholder file doesn't work here.
 	buildPlaceholderExe(t, scratchExe)
+	// Resolve once up front so the PostBuildHook assertion below compares
+	// against the same resolved form CheckAndRebuildDev itself produces
+	// (EvalSymlinks) — on macOS, t.TempDir() paths live under /var, which is
+	// itself a symlink to /private/var.
+	resolvedScratchExe, err := filepath.EvalSymlinks(scratchExe)
+	if err != nil {
+		t.Fatal(err)
+	}
 	executableFn = func() (string, error) { return scratchExe, nil }
 	t.Cleanup(func() { executableFn = origExecutableFn })
 
@@ -93,14 +105,14 @@ func testDevBuildConfig(t *testing.T, dir, version string) (DevBuildConfig, *boo
 		Dir:            dir,
 		Version:        version,
 		BaseBranch:     "main",
-		ExpectedRemote: "handarbeit/fabrik",
+		ExpectedRemote: expectedRemote,
 		Logf: func(format string, args ...any) {
 			logs = append(logs, fmt.Sprintf(format, args...))
 		},
 		PostBuildHook: func(exe, hookDir string) error {
 			postBuildCalled = true
-			if exe != scratchExe {
-				t.Errorf("PostBuildHook exe = %q, want %q", exe, scratchExe)
+			if exe != resolvedScratchExe {
+				t.Errorf("PostBuildHook exe = %q, want %q", exe, resolvedScratchExe)
 			}
 			if hookDir != dir {
 				t.Errorf("PostBuildHook dir = %q, want %q", hookDir, dir)
@@ -118,7 +130,7 @@ func TestCheckAndRebuildDev_NotSourceCheckout(t *testing.T) {
 	skipIfNoGit(t)
 	dir := t.TempDir() // no git init at all
 
-	cfg, postBuildCalled, execCalled, _ := testDevBuildConfig(t, dir, "dev(abc1234)")
+	cfg, postBuildCalled, execCalled, _ := testDevBuildConfig(t, dir, "dev(abc1234)", "handarbeit/fabrik")
 	CheckAndRebuildDev(cfg)
 
 	if *postBuildCalled {
@@ -140,7 +152,7 @@ func TestCheckAndRebuildDev_SHAMismatchTriggersRebuildWithoutFetch(t *testing.T)
 	dir := initDevSourceCheckout(t, "handarbeit/fabrik")
 
 	// A SHA that cannot possibly prefix the real local HEAD.
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, dir, "dev(0000000)")
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, dir, "dev(0000000)", "handarbeit/fabrik")
 	CheckAndRebuildDev(cfg)
 
 	if !*postBuildCalled {
@@ -158,7 +170,7 @@ func TestCheckAndRebuildDev_PostBuildHookFailureIsNonFatal(t *testing.T) {
 	skipIfNoGit(t)
 	dir := initDevSourceCheckout(t, "handarbeit/fabrik")
 
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, dir, "dev(0000000)")
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, dir, "dev(0000000)", "handarbeit/fabrik")
 	cfg.PostBuildHook = func(exe, hookDir string) error {
 		*postBuildCalled = true
 		return fmt.Errorf("simulated plugin refresh failure")
@@ -213,7 +225,9 @@ func TestCheckAndRebuildDev_RemoteAheadFetchesPullsAndRebuilds(t *testing.T) {
 
 	// Version is not a "dev(...)" string, so extractBinarySHA returns "" and
 	// the SHA-mismatch shortcut never fires — forcing the remote-check path.
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "")
+	// ExpectedRemote is originDir itself: `git clone <originDir> .` sets
+	// origin's URL to that literal path.
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", originDir)
 	CheckAndRebuildDev(cfg)
 
 	if !*postBuildCalled {
@@ -262,7 +276,7 @@ func TestCheckAndRebuildDev_LocalAheadDoesNotPull(t *testing.T) {
 	// Local gets an unpushed commit; origin does not change.
 	runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
 
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "")
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", originDir)
 	CheckAndRebuildDev(cfg)
 
 	if *postBuildCalled {
