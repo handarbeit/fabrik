@@ -102,7 +102,8 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	reviewText, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
-		HeadSHA: pr.HeadSHA, Model: cfg.Model, Effort: cfg.Effort, WorkDir: dir,
+		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
+		WorkDir: dir, MaxWallTime: cfg.MaxWallTime,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)

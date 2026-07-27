@@ -38,6 +38,11 @@ type Config struct {
 	Effort          string
 	ConcurrencyCap  int
 	MaxDiffBytes    int64
+	// MaxWallTime caps a single claude review invocation's wall-clock
+	// duration. Zero means no cap (only the fixed 15-minute inactivity
+	// watchdog applies), matching Fabrik's own stage `max_wall_time`
+	// convention: absent/zero = uncapped.
+	MaxWallTime     time.Duration
 	ExcludedAuthors []string
 	ExcludedPaths   []string // glob patterns; a PR is skipped only if ALL touched paths match
 	ExcludedLabels  []string // a PR is skipped if ANY label matches
@@ -59,6 +64,7 @@ type yamlConfig struct {
 	Effort            string   `yaml:"effort"`
 	ConcurrencyCap    *int     `yaml:"concurrency_cap"`
 	MaxDiffBytes      *int64   `yaml:"max_diff_bytes"`
+	MaxWallTimeSec    *int     `yaml:"max_wall_time_seconds"`
 	ExcludedAuthors   []string `yaml:"excluded_authors"`
 	ExcludedPaths     []string `yaml:"excluded_paths"`
 	ExcludedLabels    []string `yaml:"excluded_labels"`
@@ -92,6 +98,7 @@ type flagValues struct {
 	effort            string
 	concurrencyCap    int
 	maxDiffBytes      int64
+	maxWallTimeSec    int
 	excludedAuthors   string
 	excludedPaths     string
 	excludedLabels    string
@@ -116,6 +123,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.effort, "effort", "", "Claude thinking effort level (low, medium, high, max)")
 	fs.IntVar(&fv.concurrencyCap, "concurrency", 0, "Max concurrent claude invocations")
 	fs.Int64Var(&fv.maxDiffBytes, "max-diff-bytes", 0, "Skip PRs whose diff exceeds this many bytes")
+	fs.IntVar(&fv.maxWallTimeSec, "max-wall-time", 0, "Wall-clock cap in seconds for a single claude review invocation (0 = no cap)")
 	fs.StringVar(&fv.excludedAuthors, "excluded-authors", "", "Comma-separated PR authors to skip")
 	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs to skip (all touched paths must match)")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
@@ -169,6 +177,9 @@ func LoadConfig(args []string) (Config, error) {
 	if yc.MaxDiffBytes != nil {
 		cfg.MaxDiffBytes = *yc.MaxDiffBytes
 	}
+	if yc.MaxWallTimeSec != nil {
+		cfg.MaxWallTime = time.Duration(*yc.MaxWallTimeSec) * time.Second
+	}
 	if yc.AppID != nil {
 		cfg.AppID = *yc.AppID
 	}
@@ -198,6 +209,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["max-diff-bytes"] {
 		cfg.MaxDiffBytes = fv.maxDiffBytes
+	}
+	if explicit["max-wall-time"] {
+		cfg.MaxWallTime = time.Duration(fv.maxWallTimeSec) * time.Second
 	}
 	if explicit["excluded-authors"] {
 		cfg.ExcludedAuthors = splitCSV(fv.excludedAuthors)
@@ -246,6 +260,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_MAX_DIFF_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.MaxDiffBytes = n
+		}
+	}
+	if v := os.Getenv("PRUEFER_MAX_WALL_TIME"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.MaxWallTime = time.Duration(n) * time.Second
 		}
 	}
 	if v := os.Getenv("PRUEFER_EXCLUDED_AUTHORS"); v != "" {

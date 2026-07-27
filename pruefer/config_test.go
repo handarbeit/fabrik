@@ -37,6 +37,9 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if cfg.MaxDiffBytes != DefaultMaxDiffBytes {
 		t.Errorf("MaxDiffBytes = %d, want %d", cfg.MaxDiffBytes, DefaultMaxDiffBytes)
 	}
+	if cfg.MaxWallTime != 0 {
+		t.Errorf("MaxWallTime = %v, want 0 (uncapped by default)", cfg.MaxWallTime)
+	}
 	if cfg.AppPrivateKeyPath != DefaultPrivateKeyPath {
 		t.Errorf("AppPrivateKeyPath = %q, want %q", cfg.AppPrivateKeyPath, DefaultPrivateKeyPath)
 	}
@@ -88,6 +91,36 @@ excluded_labels:
 	}
 	if len(cfg.ExcludedLabels) != 1 || cfg.ExcludedLabels[0] != "skip-review" {
 		t.Errorf("ExcludedLabels = %v", cfg.ExcludedLabels)
+	}
+}
+
+func TestLoadConfig_MaxWallTimePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `max_wall_time_seconds: 600`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxWallTime != 600*time.Second {
+		t.Errorf("MaxWallTime = %v, want 600s (from YAML)", cfg.MaxWallTime)
+	}
+
+	t.Setenv("PRUEFER_MAX_WALL_TIME", "900")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxWallTime != 900*time.Second {
+		t.Errorf("MaxWallTime = %v, want 900s (env should override YAML)", cfg.MaxWallTime)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-max-wall-time", "1200"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxWallTime != 1200*time.Second {
+		t.Errorf("MaxWallTime = %v, want 1200s (flag should override env)", cfg.MaxWallTime)
 	}
 }
 

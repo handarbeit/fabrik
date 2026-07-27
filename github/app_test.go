@@ -7,12 +7,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+// roundTripFunc adapts a function to http.RoundTripper, letting tests
+// intercept appHTTPClient's requests without going over the network.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // testAppPrivateKey generates a small (1024-bit — fast, test-only) RSA key
 // and returns it both as *rsa.PrivateKey and PKCS1-PEM-encoded bytes.
@@ -194,6 +201,36 @@ func TestFetchAppSlug_MissingSlug(t *testing.T) {
 
 	if _, err := FetchAppSlug(srv.URL, "test-jwt"); err == nil {
 		t.Fatal("expected error when slug is missing, got nil")
+	}
+}
+
+// TestAppRequest_EmptyBaseURLFallsBackToDefaultBaseURL guards the production
+// code path specifically: every other Bootstrap/appRequest test in this file
+// supplies an explicit httptest URL, so none of them would have caught
+// appRequest building a request against a bare relative path (and failing
+// with "unsupported protocol scheme \"\"") when baseURL == "" — which is
+// exactly what every real (non-test) caller passes. This intercepts
+// appHTTPClient's transport instead of using httptest, so the assertion is
+// "the request targets defaultBaseURL" without actually hitting the network.
+func TestAppRequest_EmptyBaseURLFallsBackToDefaultBaseURL(t *testing.T) {
+	var capturedURL string
+	origTransport := appHTTPClient.Transport
+	appHTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		capturedURL = req.URL.String()
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`[]`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	defer func() { appHTTPClient.Transport = origTransport }()
+
+	if _, err := FetchAppInstallations("", "test-jwt"); err != nil {
+		t.Fatalf("FetchAppInstallations: %v", err)
+	}
+	want := defaultBaseURL + "/app/installations"
+	if capturedURL != want {
+		t.Errorf("request URL = %q, want %q (empty baseURL must fall back to defaultBaseURL)", capturedURL, want)
 	}
 }
 

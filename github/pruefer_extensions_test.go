@@ -138,6 +138,7 @@ func TestListOpenPRs(t *testing.T) {
 					{"name": "bug"}, {"name": "priority:high"},
 				},
 				"head": map[string]string{"sha": "sha1", "ref": "fix-branch"},
+				"base": map[string]string{"ref": "main"},
 			},
 			{
 				"number": 2, "title": "Draft work", "state": "open", "draft": true,
@@ -158,6 +159,9 @@ func TestListOpenPRs(t *testing.T) {
 	}
 	if prs[0].Author != "alice" {
 		t.Errorf("prs[0].Author = %q, want alice", prs[0].Author)
+	}
+	if prs[0].BaseRef != "main" {
+		t.Errorf("prs[0].BaseRef = %q, want main", prs[0].BaseRef)
 	}
 	if len(prs[0].Labels) != 2 || prs[0].Labels[0] != "bug" || prs[0].Labels[1] != "priority:high" {
 		t.Errorf("prs[0].Labels = %v", prs[0].Labels)

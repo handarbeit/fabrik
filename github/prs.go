@@ -196,6 +196,9 @@ type PRDetails struct {
 	// Labels is the list of label names applied to the PR. Populated by ListPRs
 	// and ListOpenPRs; other constructors may leave it empty.
 	Labels []string
+	// BaseRef is the PR's base branch name (e.g. "main"). Populated by
+	// ListOpenPRs; other constructors may leave it empty.
+	BaseRef string
 }
 
 // FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
@@ -522,6 +525,9 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
 		return nil, fmt.Errorf("listing open PRs for %s/%s: %w", owner, repo, err)
@@ -541,6 +547,7 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			HeadRefName: pr.Head.Ref,
 			Author:      pr.User.Login,
 			Labels:      labelNames(pr.Labels),
+			BaseRef:     pr.Base.Ref,
 		}
 	}
 	return out, nil

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -122,6 +123,30 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	call := client.submitCalls[0]
 	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit." {
 		t.Errorf("submitCall = %+v", call)
+	}
+}
+
+func TestReviewPR_PopulatesBaseBranchAndMaxWallTime(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", BaseRef: "main"}
+	cfg := Config{MaxWallTime: 10 * time.Minute}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if calls[0].BaseBranch != "main" {
+		t.Errorf("ReviewRequest.BaseBranch = %q, want %q", calls[0].BaseBranch, "main")
+	}
+	if calls[0].MaxWallTime != 10*time.Minute {
+		t.Errorf("ReviewRequest.MaxWallTime = %v, want %v", calls[0].MaxWallTime, 10*time.Minute)
 	}
 }
 
