@@ -32,12 +32,12 @@ const (
 // applying the flag > env > YAML file > default precedence chain in
 // LoadConfig.
 type Config struct {
-	WatchedRepos    []string // "owner/repo"
-	PollInterval    time.Duration
-	Model           string
-	Effort          string
-	ConcurrencyCap  int
-	MaxDiffBytes    int64
+	WatchedRepos   []string // "owner/repo"
+	PollInterval   time.Duration
+	Model          string
+	Effort         string
+	ConcurrencyCap int
+	MaxDiffBytes   int64
 	// MaxWallTime caps a single claude review invocation's wall-clock
 	// duration. Zero means no cap (only the fixed 15-minute inactivity
 	// watchdog applies), matching Fabrik's own stage `max_wall_time`

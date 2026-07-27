@@ -38,7 +38,7 @@ type HistoryEntry struct {
 // in-memory-only ring buffer of the most recent maxHistoryEntries entries.
 type HistoryPaneComponent struct {
 	entries []HistoryEntry // oldest first
-	idx     int             // selection index; 0 = most recent
+	idx     int            // selection index; 0 = most recent
 	focused bool
 }
 
