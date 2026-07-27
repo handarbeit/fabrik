@@ -17,7 +17,7 @@ type GitHubReviewer interface {
 	GitHubCommenter
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
-	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string) (int, error)
+	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, comments []gh.ReviewComment) (int, error)
 	Token() string
 }
 
@@ -112,7 +112,11 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		return ReviewOutcome{Err: fmt.Errorf("claude review invocation: %w", err)}
 	}
 
-	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, result.Text); err != nil {
+	summary, findings := parseReviewFindings(result.Text)
+	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
+	body := buildReviewBody(summary, demoted)
+
+	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, comments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
 	}
 
