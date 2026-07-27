@@ -433,10 +433,13 @@ func isAlreadyGoneRemoteBranchError(out []byte) bool {
 // notice as spurious warning-adjacent log noise; StrictHostKeyChecking is
 // unchanged, so host-key verification is not weakened.
 func quietGitSSHEnv() []string {
-	return append(os.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o LogLevel=ERROR",
-	)
+	env := nonInteractiveGitEnv()
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") {
+			env[i] = kv + " -o LogLevel=ERROR"
+		}
+	}
+	return env
 }
 
 // CleanupTrainWorktree removes the trial branch worktree and optionally its local
