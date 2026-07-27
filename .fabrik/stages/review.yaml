@@ -5,7 +5,7 @@ comment_skill: fabrik-review-comment
 model: sonnet
 max_turns: 100
 comment_max_turns: 50
-max_wall_time: "30m"
+max_wall_time: "60m"
 post_to_pr: true
 mark_pr_ready_on_complete: true
 wait_for_reviews: true
