@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -245,6 +246,75 @@ func TestFinalizeStageOutcome_CoordinatorWithOwnCommits_CreatesPR(t *testing.T) 
 
 	if len(client.closeIssueCalls) != 0 {
 		t.Errorf("expected no Done-path issue close for a normal PR-creating stage completion, got %v", client.closeIssueCalls)
+	}
+}
+
+// TestFinalizeStageOutcome_EmptyCoordinator_SkipCommentDoesNotClaimMarker verifies
+// that the "skipped: no work needed" comment posted for an empty-coordinator
+// completion does not claim FABRIK_NO_WORK_NEEDED was emitted by Implement — it
+// wasn't; the engine inferred completion from zero commits ahead of base. Reusing
+// the generic marker-attributing comment text here would be a durable, inaccurate
+// record on the issue (see issue #921 review discussion). This requires a stage
+// list with an intermediate stage between Implement and Done, since
+// coordinatorStages() has none for the skip-comment loop in settleNoWorkNeeded to
+// act on.
+func TestFinalizeStageOutcome_EmptyCoordinator_SkipCommentDoesNotClaimMarker(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+
+	stgs := []*stages.Stage{
+		{
+			Name:          "Implement",
+			Order:         1,
+			Prompt:        "implement it",
+			CreateDraftPR: true,
+			PostToPR:      true,
+			Completion:    stages.CompletionCriteria{Type: "claude"},
+		},
+		{
+			Name:       "Review",
+			Order:      2,
+			Prompt:     "review it",
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		},
+		{
+			Name:            "Done",
+			Order:           99,
+			CleanupWorktree: true,
+		},
+	}
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 83, Title: "Coordinator", Status: "Implement", ItemID: "PVTI_83",
+		Labels: []string{"fabrik:children-spawned"},
+	}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.addCommentCalls) == 0 {
+		t.Fatalf("expected a skipped-comment to be posted for the intermediate Review stage")
+	}
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "FABRIK_NO_WORK_NEEDED emitted by") {
+			t.Errorf("skip comment falsely claims a marker was emitted: %q", c.body)
+		}
+		if !strings.Contains(c.body, "delegated to spawned children") {
+			t.Errorf("skip comment missing empty-coordinator wording: %q", c.body)
+		}
 	}
 }
 
