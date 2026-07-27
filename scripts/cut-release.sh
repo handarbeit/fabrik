@@ -5,6 +5,7 @@
 #   scripts/cut-release.sh v0.0.67
 #   scripts/cut-release.sh v0.0.67 --skip-tests       # skip race-tested suite (last-resort)
 #   scripts/cut-release.sh v0.0.67 --no-doc-issue     # skip filing the doc-update issue
+#   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the plugin/fabrik version auto-bump
 #
 # Prereqs:
 #   - On main, clean working tree, ff'd to origin/main
@@ -19,6 +20,9 @@
 #   2. PAT identity check (must be arbeithand)
 #   3. go build + go test -race
 #   4. Commit release-notes.md (if dirty) as arbeithand
+#   4b. If plugin/fabrik's source changed since the previous tag, patch-bump
+#       plugin/fabrik/.claude-plugin/plugin.json and commit as arbeithand
+#       (skippable with --no-plugin-bump)
 #   5. Tag, push tag with credential helpers nuked + PAT-in-URL
 #   6. Watch the release workflow run; fail loudly on non-success
 #   7. Verify the published release author and discussion author are both arbeithand
@@ -33,18 +37,20 @@ set -euo pipefail
 VERSION="${1:-}"
 SKIP_TESTS=0
 NO_DOC_ISSUE=0
+NO_PLUGIN_BUMP=0
 shift || true
 while [ $# -gt 0 ]; do
   case "$1" in
-    --skip-tests)   SKIP_TESTS=1 ;;
-    --no-doc-issue) NO_DOC_ISSUE=1 ;;
+    --skip-tests)     SKIP_TESTS=1 ;;
+    --no-doc-issue)   NO_DOC_ISSUE=1 ;;
+    --no-plugin-bump) NO_PLUGIN_BUMP=1 ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
 done
 
 if [ -z "$VERSION" ]; then
-  echo "Usage: $0 vX.Y.Z [--skip-tests] [--no-doc-issue]" >&2
+  echo "Usage: $0 vX.Y.Z [--skip-tests] [--no-doc-issue] [--no-plugin-bump]" >&2
   exit 2
 fi
 if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -74,17 +80,19 @@ BRANCH="$(git branch --show-current)"
 [ "$BRANCH" = "main" ] || die "must be on main (currently on '$BRANCH')"
 ok "on main"
 
-# Allow uncommitted release-notes/<version>.md and plugin/known_embedded_versions.go
-# (the latter is updated by this script itself after the build step).
+# Allow uncommitted release-notes/<version>.md, plugin/known_embedded_versions.go,
+# and plugin/fabrik/.claude-plugin/plugin.json (all three are updated by this
+# script itself, after the build step and in step 4b).
 #
-# Allowlist disposition (reviewed for #1070): both files are committed by
-# this script's own step 4, *before* the tag is created and pushed in step 5.
-# By the time release.yml's CI job checks out the tag, it's a fresh clone —
-# it never sees this local working tree, dirty or not. So this allowlist
-# cannot affect the CI-built artifact and does not need to be tightened; the
-# built-artifact VCS check lives in .goreleaser.yaml/release.yml instead (see
+# Allowlist disposition (reviewed for #1070, extended for #816): all three
+# files are committed by this script's own step 4 / step 4b, *before* the tag
+# is created and pushed in step 5. By the time release.yml's CI job checks
+# out the tag, it's a fresh clone — it never sees this local working tree,
+# dirty or not. So this allowlist cannot affect the CI-built artifact and
+# does not need to be tightened; the built-artifact VCS check lives in
+# .goreleaser.yaml/release.yml instead (see
 # adrs/071-release-artifact-vcs-verification.md).
-DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$" || true)
+DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$| M plugin/fabrik/\.claude-plugin/plugin\.json$|^M  plugin/fabrik/\.claude-plugin/plugin\.json$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
 ok "working tree acceptable"
@@ -167,6 +175,11 @@ else
   ok "all tests pass with -race"
 fi
 
+# Capture the previous release tag now, before this release's tag exists,
+# for the plugin-bump change-detection diff in step 4b. Tags were already
+# fetched in pre-flight. Empty on a first-ever release (no v* tag yet).
+PREV_TAG="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
+
 # ─── 4. commit release notes as arbeithand ────────────────────────────────────
 step "Commit release notes"
 # Stage the per-version source-of-truth file and the updated known-versions list.
@@ -193,6 +206,85 @@ else
     push "https://x-access-token:${FABRIK_TOKEN}@github.com/${REPO}.git" main >/dev/null 2>&1 \
     || die "release-notes push failed"
   ok "release-notes commit pushed"
+fi
+
+# ─── 4b. auto-bump plugin/fabrik version if source changed ───────────────────
+# Claude Code's /plugin update compares plugin.json's version field against
+# marketplace.json@main; same version number means no refresh fires even if
+# the plugin's source changed. Patch-bump plugin/fabrik's manifest whenever
+# its source changed since the previous tag, so users always get fresh
+# content. plugin/fabrik-workflows is out of scope — it's not listed in
+# marketplace.json and has its own content-hash-based change detection.
+step "Plugin version bump"
+PLUGIN_MANIFEST="plugin/fabrik/.claude-plugin/plugin.json"
+if [ "$NO_PLUGIN_BUMP" -eq 1 ]; then
+  warn "--no-plugin-bump was passed; skipping plugin/fabrik version bump"
+elif [ -z "$PREV_TAG" ]; then
+  warn "no previous release tag found — skipping plugin/fabrik version bump (first release?)"
+else
+  if ! BUMP_OUTPUT="$(go run ./tools/bump-plugin-version/ plugin/fabrik "$PLUGIN_MANIFEST" "$PREV_TAG")"; then
+    die "bump-plugin-version failed for plugin/fabrik (prev tag: $PREV_TAG)"
+  fi
+  if [ -z "$BUMP_OUTPUT" ]; then
+    ok "plugin/fabrik unchanged since $PREV_TAG — no bump needed"
+  else
+    OLD_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f1)"
+    NEW_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f2)"
+    ok "bumped plugin/fabrik $OLD_PLUGIN_VER -> $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+
+    # Append a changelog line so the version bump is visible in the GitHub
+    # Release notes. release-notes/<version>.md was already committed and
+    # pushed above, so this lands in a second commit alongside the manifest
+    # bump rather than amending the already-pushed one.
+    CHANGELOG_LINE="- Auto-bumped fabrik plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+    if grep -Eq '^## Internal[[:space:]]*$' "$NOTES_FILE"; then
+      awk -v line="$CHANGELOG_LINE" '
+        { print }
+        /^## Internal[[:space:]]*$/ && !inserted { print line; inserted=1 }
+      ' "$NOTES_FILE" > "${NOTES_FILE}.tmp"
+      mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
+    elif grep -Eq '^## Upgrading[[:space:]]*$' "$NOTES_FILE"; then
+      # No existing Internal section: insert a new one directly before
+      # Upgrading (always the last section in the notes schema) rather than
+      # appending at the file's end, which would land after the closing
+      # ```bash fence and break the canonical section order.
+      awk -v line="$CHANGELOG_LINE" '
+        /^## Upgrading[[:space:]]*$/ && !inserted {
+          print "## Internal"
+          print line
+          print ""
+          inserted=1
+        }
+        { print }
+      ' "$NOTES_FILE" > "${NOTES_FILE}.tmp"
+      mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
+    else
+      {
+        echo ""
+        echo "## Internal"
+        echo "$CHANGELOG_LINE"
+      } >> "$NOTES_FILE"
+    fi
+
+    git add "$PLUGIN_MANIFEST" "$NOTES_FILE"
+    GIT_AUTHOR_NAME="$BOT_LOGIN" \
+    GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
+    GIT_COMMITTER_NAME="$BOT_LOGIN" \
+    GIT_COMMITTER_EMAIL="$BOT_EMAIL" \
+    git commit -m "Bump fabrik plugin to $NEW_PLUGIN_VER" --quiet
+    COMMIT_AUTHOR="$(git log -1 --pretty=format:'%an <%ae>')"
+    [ "$COMMIT_AUTHOR" = "$BOT_LOGIN <$BOT_EMAIL>" ] \
+      || die "plugin-bump commit author wrong (got: $COMMIT_AUTHOR)"
+    ok "committed as $COMMIT_AUTHOR"
+
+    step "Push plugin-bump commit as @$BOT_LOGIN"
+    git \
+      -c credential.helper= \
+      -c credential.https://github.com.helper= \
+      push "https://x-access-token:${FABRIK_TOKEN}@github.com/${REPO}.git" main >/dev/null 2>&1 \
+      || die "plugin-bump push failed — the release-notes commit for $VERSION was already pushed to main, but this plugin-bump commit ($(git rev-parse HEAD)) is still local only. Push it manually (git push origin main) or discard it (git reset --hard HEAD~1) before retrying."
+    ok "plugin-bump commit pushed"
+  fi
 fi
 
 # ─── 5. tag + push ────────────────────────────────────────────────────────────
