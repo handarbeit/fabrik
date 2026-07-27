@@ -1794,3 +1794,91 @@ func TestProcessItem_StallDetection_ClearedOnStageSuccess(t *testing.T) {
 		t.Errorf("LastTurnsUsed(Research) = %d, want 0 after StageRetryCleared", snap.LastTurnsUsed("Research"))
 	}
 }
+
+// TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension is a regression
+// guard for an interaction bug found in review: runInvocationWithExtension used to
+// build InvokeOptions (consuming any armed stall hint via consumeStallHint) BEFORE
+// checking the account-wide Claude usage-limit suspension gate. If the very next
+// dispatch after a stall was detected happened to land while dispatch was suspended,
+// the armed hint was destructively consumed and thrown away without ever reaching a
+// real Claude invocation — silently defeating the one-shot corrective re-invocation
+// for that stall episode. The suspension check must run first, so a gated dispatch
+// leaves the hint pending for the next dispatch that actually reaches Claude.
+func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12, 8} // capped, declining (arms hint), then the hinted retry
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 23, Title: "Hint survives suspension test", Status: "Research", ItemID: "PVTI_23"}
+
+	// Calls 1-2: capped then declining — arms the hint for the stage's next invocation.
+	for i := 0; i < 2; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+	snap, err := eng.store.Get("owner/repo", 23)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.StallHintPending("Research") {
+		t.Fatal("precondition failed: expected StallHintPending after capped-then-declining sequence")
+	}
+
+	// Activate the account-wide suspension before the 3rd dispatch — this dispatch
+	// must be gated before ever reaching Claude, and must NOT consume the hint.
+	eng.activateClaudeSuspension(0, "", time.Now())
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (suspended call): %v", err)
+	}
+	if len(claude.calls) != 2 {
+		t.Fatalf("expected the suspended dispatch to skip invoking Claude entirely, got %d total calls", len(claude.calls))
+	}
+	snap, err = eng.store.Get("owner/repo", 23)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.StallHintPending("Research") {
+		t.Error("StallHintPending(Research) should survive a dispatch gated by the usage-limit suspension")
+	}
+
+	// Clear the suspension and dispatch again — this is the first invocation that
+	// actually reaches Claude since the hint was armed, so it must carry the hint.
+	eng.clearClaudeSuspension("test")
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (post-suspension call): %v", err)
+	}
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected exactly 1 additional Claude invocation after clearing suspension, got %d total calls", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("expected the corrective hint to survive the suspended dispatch and reach the first real invocation afterward")
+	}
+}
