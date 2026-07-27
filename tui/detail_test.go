@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,27 @@ func TestUpdate_EscapeKey_ClosesDetailPanel(t *testing.T) {
 	nm := next.(Model)
 	if nm.detailPanel {
 		t.Error("expected detailPanel=false after escape key")
+	}
+}
+
+// TestDetailPanel_TurnLimitStatus verifies the detail panel's "Status" line renders
+// "incomplete (turn limit)" for a turn-capped entry, distinct from a plain "incomplete"
+// retry — part of the issue #1178 rendering fix (also applied in tui/history.go).
+func TestDetailPanel_TurnLimitStatus(t *testing.T) {
+	var d DetailPanelComponent
+	d.SetVisible(true)
+	d.SetWidth(80)
+
+	d.SetItem(&DetailItem{IssueNumber: 1, StageName: "Implement", Success: true, TurnLimited: true, Completed: false})
+	view := d.View(80)
+	if !strings.Contains(view, "incomplete (turn limit)") {
+		t.Errorf("expected %q in detail panel view for turn-capped entry, got: %q", "incomplete (turn limit)", view)
+	}
+
+	d.SetItem(&DetailItem{IssueNumber: 2, StageName: "Implement", Success: true, TurnLimited: false, Completed: false})
+	view = d.View(80)
+	if !strings.Contains(view, "Status:   incomplete") || strings.Contains(view, "turn limit") {
+		t.Errorf("expected plain %q (no turn limit) in detail panel view for retry entry, got: %q", "incomplete", view)
 	}
 }
 

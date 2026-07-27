@@ -63,6 +63,7 @@ type JobCompletedEvent struct {
 	StageModel     string // model configured for the stage (e.g. "sonnet")
 	IsComment      bool   // true when processing a user comment, not a stage run
 	Success        bool   // no error from processItem
+	TurnLimited    bool   // invocation exited due to turn-budget exhaustion (CLI subtype error_max_turns), not a genuine fault
 	Completed      bool   // stage actually completed (FABRIK_STAGE_COMPLETE detected)
 	BlockedOnInput bool   // stage needs user input (FABRIK_BLOCKED_ON_INPUT detected)
 	Duration       time.Duration

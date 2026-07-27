@@ -267,6 +267,71 @@ func TestViewHistory_IsComment(t *testing.T) {
 	}
 }
 
+// TestViewHistory_TurnLimitClassification is the regression test for issue #1178. It
+// covers the full rendering matrix required by the issue's Definition of Done: a
+// turn-capped invocation must render as "↻  (turn limit)" (not an error), a genuine
+// error must still render as "✗  (error)", and the existing blocked-on-input,
+// incomplete-without-cap, and success renderings must be unchanged.
+func TestViewHistory_TurnLimitClassification(t *testing.T) {
+	redirectHistory(t)
+
+	cases := []struct {
+		name  string
+		entry HistoryEntry
+		want  string
+		unwnt []string
+	}{
+		{
+			name:  "turn-capped",
+			entry: HistoryEntry{IssueNumber: 1, StageName: "Implement", Success: true, TurnLimited: true, Completed: false},
+			want:  "(turn limit)",
+			unwnt: []string{"(error)", "(retry)"},
+		},
+		{
+			name:  "genuine error",
+			entry: HistoryEntry{IssueNumber: 2, StageName: "Implement", Success: false, TurnLimited: false, Completed: false},
+			want:  "(error)",
+			unwnt: []string{"(turn limit)", "(retry)"},
+		},
+		{
+			name:  "blocked on input",
+			entry: HistoryEntry{IssueNumber: 3, StageName: "Implement", Success: true, Completed: false, BlockedOnInput: true},
+			want:  "(input needed)",
+			unwnt: []string{"(error)", "(turn limit)", "(retry)"},
+		},
+		{
+			name:  "incomplete without cap",
+			entry: HistoryEntry{IssueNumber: 4, StageName: "Implement", Success: true, TurnLimited: false, Completed: false},
+			want:  "(retry)",
+			unwnt: []string{"(error)", "(turn limit)"},
+		},
+		{
+			name:  "success",
+			entry: HistoryEntry{IssueNumber: 5, StageName: "Implement", Success: true, Completed: true},
+			want:  "✓",
+			unwnt: []string{"(error)", "(turn limit)", "(retry)", "(input needed)"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+			m.history.history = []HistoryEntry{tc.entry}
+			next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			m = next.(Model)
+			view := m.history.View(m.width)
+			if !strings.Contains(view, tc.want) {
+				t.Errorf("%s: expected %q in view, got: %q", tc.name, tc.want, view)
+			}
+			for _, u := range tc.unwnt {
+				if strings.Contains(view, u) {
+					t.Errorf("%s: unexpected %q in view, got: %q", tc.name, u, view)
+				}
+			}
+		})
+	}
+}
+
 // TestViewHistory_ConfirmQuit verifies the quit confirmation prompt is shown in viewHistory.
 func TestViewHistory_ConfirmQuit(t *testing.T) {
 	redirectHistory(t)
