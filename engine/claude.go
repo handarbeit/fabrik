@@ -67,9 +67,31 @@ func (e *claudeUsageLimitError) Error() string {
 // in resp.Result, only in resp.Errors[] (never copied into text today), or in
 // non-JSON plain stdout; scanning raw bytes is correct under all three shapes
 // without needing to know which is real.
-func detectUsageLimitExit(rawOutput []byte) (msg, resetTime string, detected bool) {
+// The usage-limit message is matched against raw output, which necessarily
+// includes text the assistant itself wrote. usage is therefore used as an
+// exclusion gate: an invocation that consumed turns and incurred cost cannot
+// have exited on an account usage limit, because such an exit terminates the
+// invocation immediately (0 turns, $0.00) before any work is billed.
+//
+// Note the asymmetry, which is deliberate and is the whole point of this guard.
+// #1119's spec correctly forbids using the "~1 turn, $0.00" shape to *confirm*
+// a usage limit, since a genuine immediate stage failure shares that shape —
+// that would risk false negatives. Using the inverse shape to *rule one out* is
+// sound: no real usage-limit exit does 51 turns of work first. Ruling in and
+// ruling out are not the same inference.
+//
+// Without this, any stage whose output merely discusses usage limits
+// self-triggers a suspension. That is not hypothetical in this repository: on
+// 2026-07-27 issue #1178's Implement stage, which was writing tests about
+// usage-limit detection, quoted #1084's example message and suspended Claude
+// dispatch account-wide for ~11 hours after a plain turn-cap exit (51 turns,
+// $2.28). See #1183.
+func detectUsageLimitExit(rawOutput []byte, usage TokenUsage) (msg, resetTime string, detected bool) {
 	match := usageLimitHitRE.Find(rawOutput)
 	if match == nil {
+		return "", "", false
+	}
+	if usage.TurnsUsed > 0 && usage.CostUSD > 0 {
 		return "", "", false
 	}
 	if m := usageLimitResetRE.FindSubmatch(rawOutput); m != nil {
@@ -907,10 +929,10 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
 			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
 		}
-		// Corroborating shape (~1 turn, $0.00) is logged only for diagnostics —
-		// per the issue spec it must never gate detection, since a genuine
-		// immediate stage failure can share the same shape.
-		if msg, resetTime, detected := detectUsageLimitExit(rawOutput); detected {
+		// usage is passed as an exclusion gate only: it can rule a usage-limit
+		// exit *out* (turns consumed and cost incurred means the invocation ran,
+		// so no limit was hit), but never rules one in — see detectUsageLimitExit.
+		if msg, resetTime, detected := detectUsageLimitExit(rawOutput, usage); detected {
 			claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (resetTime=%q, turns=%d, cost=$%.4f): %s\n", resetTime, usage.TurnsUsed, usage.CostUSD, msg)
 			return text, false, usage, &claudeUsageLimitError{Message: msg, ResetTime: resetTime}
 		}

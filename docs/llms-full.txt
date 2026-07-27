@@ -4880,9 +4880,25 @@ parsed `claudeResponse.Result` field, since it is unconfirmed whether a real occ
 in `claudeResponse.Errors[]`, or in non-JSON plain text — for Anthropic's usage-limit exit message via
 `detectUsageLimitExit()`. When Claude exits non-zero without a `FABRIK_STAGE_COMPLETE` marker and the
 message matches, `interpretClaudeResult` returns a `*claudeUsageLimitError{Message, ResetTime}`
-sentinel instead of the generic error wrapper. The turn-count/cost shape (`~1 turn, $0.00`) is logged
-alongside purely for diagnostic corroboration and never gates detection — a genuine immediate stage
-failure can share the same shape.
+sentinel instead of the generic error wrapper.
+
+The turn-count/cost shape gates detection in one direction only. It is **never** used to *confirm* a
+usage limit — a genuine immediate stage failure shares the `~1 turn, $0.00` shape, so treating that
+shape as positive evidence would produce false negatives on real failures. It **is** used to *exclude*
+one: `detectUsageLimitExit` returns `detected = false` when `usage.TurnsUsed > 0 && usage.CostUSD > 0`,
+because a real usage-limit exit terminates the invocation immediately, before any work is billed, so an
+invocation that consumed turns *and* incurred cost cannot have hit one. Ruling in and ruling out are
+different inferences; only the former is unsound here.
+
+The exclusion is conjunctive (turns **and** cost) so a partially-recorded usage struct cannot suppress
+a genuine detection.
+
+This guard exists because the message is matched against **raw invocation output**, which necessarily
+includes text the assistant itself wrote. Without it, any stage whose output merely discusses usage
+limits self-triggers an account-wide suspension — on 2026-07-27 a turn-capped run on #1178 that quoted
+#1084's example message suspended dispatch for ~11 hours (#1183). Matching prose remains the underlying
+weakness; classifying from the CLI's structured result (`subtype` / `terminal_reason`) is the durable
+fix and is not yet implemented.
 
 **Handling:** `finalizeStageOutcome()` (`engine/item.go`) detects the sentinel via `errors.As`,
 immediately after the existing engine-shutdown guard, and routes to `handleUsageLimitExit()`, which:
