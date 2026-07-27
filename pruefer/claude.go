@@ -70,7 +70,17 @@ type ReviewRequest struct {
 // engine.ClaudeInvoker — no stages.Stage, no gh.ProjectItem — since Pruefer
 // has no board/stage concept.
 type ClaudeInvoker interface {
-	Review(ctx context.Context, req ReviewRequest) (reviewText string, err error)
+	Review(ctx context.Context, req ReviewRequest) (ReviewResult, error)
+}
+
+// ReviewResult carries a completed review invocation's output text plus the
+// turn/cost instrumentation the TUI's cost-visibility requirement depends
+// on, mirroring engine/claude.go's TokenUsage capture (NumTurns/CostUSD
+// parsed from claude's stream-json "result" envelope).
+type ReviewResult struct {
+	Text     string
+	NumTurns int
+	CostUSD  float64
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -169,10 +179,13 @@ func (w *activityWriter) Write(p []byte) (int, error) {
 }
 
 // claudeReviewResponse mirrors the subset of claude --output-format
-// stream-json's final result object that Pruefer needs.
+// stream-json's final result object that Pruefer needs. NumTurns/CostUSD
+// mirror engine/claude.go's claudeResponse fields of the same JSON keys.
 type claudeReviewResponse struct {
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
+	Result   string  `json:"result"`
+	IsError  bool    `json:"is_error"`
+	NumTurns int     `json:"num_turns"`
+	CostUSD  float64 `json:"total_cost_usd"`
 }
 
 // parseClaudeReviewJSON parses claude's NDJSON stream output, handling both
@@ -190,14 +203,16 @@ func parseClaudeReviewJSON(output []byte) (claudeReviewResponse, bool) {
 			continue
 		}
 		var envelope struct {
-			Type    string `json:"type"`
-			Result  string `json:"result"`
-			IsError bool   `json:"is_error"`
+			Type     string  `json:"type"`
+			Result   string  `json:"result"`
+			IsError  bool    `json:"is_error"`
+			NumTurns int     `json:"num_turns"`
+			CostUSD  float64 `json:"total_cost_usd"`
 		}
 		if err := json.Unmarshal(line, &envelope); err != nil || envelope.Type != "result" {
 			continue
 		}
-		r := claudeReviewResponse{Result: envelope.Result, IsError: envelope.IsError}
+		r := claudeReviewResponse{Result: envelope.Result, IsError: envelope.IsError, NumTurns: envelope.NumTurns, CostUSD: envelope.CostUSD}
 		lastResult = &r
 	}
 	if lastResult != nil {
@@ -207,11 +222,12 @@ func parseClaudeReviewJSON(output []byte) (claudeReviewResponse, bool) {
 }
 
 // Review invokes the claude CLI once, in req.WorkDir, and returns its review
-// text. On any failure — process error, timeout, unparseable output, or an
-// is_error response — it returns a non-nil error and an empty string.
-// Per the issue's "on invocation failure, post nothing" requirement,
-// callers must not submit a review when err != nil.
-func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (string, error) {
+// text plus turn/cost instrumentation. On any failure — process error,
+// timeout, unparseable output, or an is_error response — it returns a
+// non-nil error and a zero-value ReviewResult. Per the issue's "on
+// invocation failure, post nothing" requirement, callers must not submit a
+// review when err != nil.
+func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (ReviewResult, error) {
 	logf(req.PRNumber, "claude", "reviewing %s/%s#%d (head %s) in %s\n", req.Owner, req.Repo, req.PRNumber, req.HeadSHA, req.WorkDir)
 
 	stageCtx := ctx
@@ -255,7 +271,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (stri
 
 	if err := cmd.Start(); err != nil {
 		watchdogCancel()
-		return "", fmt.Errorf("starting claude: %w", err)
+		return ReviewResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 	pid := cmd.Process.Pid
 
@@ -288,18 +304,18 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (stri
 	}
 
 	if runErr != nil {
-		return "", fmt.Errorf("claude exited with error: %w", runErr)
+		return ReviewResult{}, fmt.Errorf("claude exited with error: %w", runErr)
 	}
 
 	resp, ok := parseClaudeReviewJSON(bytes.TrimSpace(stdout.Bytes()))
 	if !ok {
-		return "", fmt.Errorf("could not parse claude output (%d bytes)", stdout.Len())
+		return ReviewResult{}, fmt.Errorf("could not parse claude output (%d bytes)", stdout.Len())
 	}
 	if resp.IsError {
-		return "", fmt.Errorf("claude reported an error: %s", resp.Result)
+		return ReviewResult{}, fmt.Errorf("claude reported an error: %s", resp.Result)
 	}
 	if strings.TrimSpace(resp.Result) == "" {
-		return "", fmt.Errorf("claude produced an empty review")
+		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
 	}
-	return resp.Result, nil
+	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}, nil
 }

@@ -10,11 +10,11 @@ import (
 // mutex-protected call log, safe for use from concurrent tests.
 type mockClaudeInvoker struct {
 	mu    sync.Mutex
-	fn    func(req ReviewRequest) (string, error)
+	fn    func(req ReviewRequest) (ReviewResult, error)
 	calls []ReviewRequest
 }
 
-func (m *mockClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (string, error) {
+func (m *mockClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (ReviewResult, error) {
 	m.mu.Lock()
 	m.calls = append(m.calls, req)
 	fn := m.fn
@@ -22,7 +22,7 @@ func (m *mockClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (stri
 	if fn != nil {
 		return fn(req)
 	}
-	return "mock review", nil
+	return ReviewResult{Text: "mock review"}, nil
 }
 
 func (m *mockClaudeInvoker) callCount() int {

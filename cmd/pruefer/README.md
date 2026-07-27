@@ -81,6 +81,20 @@ Pruefer loads `.env` (via the same `godotenv`-based loader Fabrik uses), reads `
 
 A lock file at `.pruefer/pruefer.lock` prevents two instances from polling the same working directory concurrently.
 
+## Terminal UI
+
+When run with a real terminal attached (both stdin and stdout), Pruefer launches an interactive TUI by default — the same `bubbletea`/`bubbles`/`lipgloss` stack and model/update/view structure as Fabrik's own `tui/` package, so the two feel like the same family of tool. It shows:
+
+- Watched repositories, each with its last poll time, PR count found, and last error (if any).
+- PRs currently under review, with elapsed time since the review started.
+- Recently completed reviews (last 200, in-memory — not persisted across restarts): repo, PR, outcome (reviewed / skipped / errored), turns, cost, and duration.
+- Skipped PRs with their reason, covering every skip category Pruefer tracks (draft, self-authored, excluded author/label/path, already reviewed at this head SHA, diff too large).
+- Errors, plus GitHub REST API rate-limit state and a running session-total cost/turn count.
+
+Keyboard: `q` or `ctrl+c` to quit, `tab` to switch panes, `↑`/`↓` or `j`/`k` to scroll and select an entry, `enter` to view its detail.
+
+The TUI is purely observational — it never changes which PRs get reviewed, when, or how. Running with `-notui` disables it entirely and falls back to Pruefer's existing structured `logf`-based console output, with **identical review behavior** either way. Use `-notui` (or `PRUEFER_TUI=0` / `tui: false` in the YAML config) when running under systemd, tmux with no attached TTY, or any other non-interactive environment.
+
 ## On-demand re-review
 
 Comment `/pruefer review` on any watched PR to force a fresh review of the current head, even if that SHA was already reviewed. Pruefer acknowledges the command with a 👀 reaction when it picks it up and a 🚀 reaction once the review has been submitted — the same idempotency convention Fabrik uses for its own comment processing.
@@ -105,12 +119,12 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | |
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (auto-discover) | Required if the App has more than one installation |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
+| `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 
 ## Out of scope for V1
 
-- A TUI (follow-up issue).
 - `APPROVE` / `REQUEST_CHANGES` verdicts.
 - Inline line-level review comments (top-level comment body only).
 - Non-GitHub forges.
