@@ -423,3 +423,47 @@ func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *t
 		t.Errorf("expected Claude invocation count to stay at %d while suspended, got %d — concurrent dispatch bypassed the gate", callsAfterDetection, finalCalls)
 	}
 }
+
+// TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSuspension
+// is a regression guard for a race in the "clear on non-limit error" path: an
+// invocation that started before any suspension was active can still be
+// in-flight when another worker detects the limit and activates the
+// suspension. If the in-flight invocation then returns a generic, unrelated
+// error (not a claudeUsageLimitError, and not a success), that must NOT clear
+// the suspension the other worker just activated — a generic error is not
+// evidence the account-wide limit has cleared. Only a successful invocation
+// (err == nil) may clear it (ADR-1120's "early clear on success").
+func TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSuspension(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	var eng *Engine
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Simulate a concurrent worker detecting the limit and activating the
+			// account-wide suspension while THIS invocation is still in flight.
+			eng.activateClaudeSuspension(999, "10:20pm (America/Edmonton)", time.Now())
+			// This invocation's own outcome is unrelated to the usage limit.
+			return "partial output", false, TokenUsage{}, errors.New("some genuine transient failure")
+		},
+	}
+
+	eng = NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 106, Title: "Race regression", Status: "Research", ItemID: "PVTI_106"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); !suspended {
+		t.Error("expected the concurrently-activated suspension to survive this invocation's unrelated error, but it was cleared")
+	}
+}
