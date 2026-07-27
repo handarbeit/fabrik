@@ -98,12 +98,11 @@ func bumpPatchVersion(manifestPath string) (oldVer, newVer string, err error) {
 	oldVer = fmt.Sprintf("%s.%s.%s", major, minor, patch)
 	newVer = fmt.Sprintf("%s.%s.%d", major, minor, patchN+1)
 
-	oldField := fmt.Sprintf(`"version": "%s"`, oldVer)
-	newField := fmt.Sprintf(`"version": "%s"`, newVer)
-	if strings.Count(content, oldField) != 1 {
-		return "", "", fmt.Errorf("%s: expected exactly one occurrence of %s, found %d", manifestPath, oldField, strings.Count(content, oldField))
-	}
-	updated := strings.Replace(content, oldField, newField, 1)
+	// Splice in the new patch digits at the exact byte range the regex
+	// matched, rather than reconstructing the field as a literal with
+	// hardcoded spacing — that would desync from versionFieldRe's \s*
+	// tolerance if the manifest's actual spacing ever differed.
+	updated := content[:m[6]] + strconv.Itoa(patchN+1) + content[m[7]:]
 
 	if err := os.WriteFile(manifestPath, []byte(updated), 0o644); err != nil {
 		return "", "", fmt.Errorf("writing %s: %w", manifestPath, err)
