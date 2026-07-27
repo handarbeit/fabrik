@@ -206,6 +206,44 @@ func TestUpdate_IssueBlockedEvent(t *testing.T) {
 	}
 }
 
+func TestUpdate_CommentBreakerTrippedEvent(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+
+	// An active job for the issue should be replaced by a blocked entry.
+	m.active.active[activeJobKey("", 314)] = &activeJob{IssueNumber: 314, StageName: "Review", StartedAt: time.Now()}
+	m.active.activeNumToKey[314] = activeJobKey("", 314)
+
+	next, _ := m.Update(CommentBreakerTrippedEvent{
+		IssueNumber:       314,
+		Title:             "runaway loop repro",
+		StageName:         "Review",
+		InvocationCount:   10,
+		Window:            30 * time.Minute,
+		LastCommentAuthor: "some-bot",
+	})
+	nm := next.(Model)
+	key314 := activeJobKey("", 314)
+
+	if _, ok := nm.active.active[key314]; ok {
+		t.Error("expected issue 314 removed from active map after CommentBreakerTrippedEvent")
+	}
+	b, ok := nm.active.blocked[key314]
+	if !ok {
+		t.Fatal("expected issue 314 in blocked map after CommentBreakerTrippedEvent")
+	}
+	if b.StageName != "Review" {
+		t.Errorf("StageName = %q, want Review", b.StageName)
+	}
+	if len(b.WaitingFor) != 1 || !strings.Contains(b.WaitingFor[0], "circuit breaker") {
+		t.Errorf("WaitingFor = %v, want a circuit-breaker explanation", b.WaitingFor)
+	}
+}
+
+func TestCommentBreakerTrippedEvent_tuiEvent(t *testing.T) {
+	CommentBreakerTrippedEvent{}.tuiEvent() // satisfies interface
+}
+
 func TestViewActive_BlockedIssue(t *testing.T) {
 	redirectHistory(t)
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)

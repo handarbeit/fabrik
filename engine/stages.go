@@ -59,6 +59,11 @@ func stageIsGateChecked(stage *stages.Stage) bool {
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
+	// Circuit breaker (#1089): a stage:*:complete transition is forward progress —
+	// reset before any of the completion side effects below so a breaker check
+	// triggered by the same cycle that produced this completion never trips.
+	e.resetCommentBreaker(item)
+
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// Clean up any failure label from a prior incomplete run.

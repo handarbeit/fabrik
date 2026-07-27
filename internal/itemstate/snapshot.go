@@ -51,6 +51,7 @@ func newSnapshot(s ItemState) Snapshot {
 	c.CooldownAt = copyMap(s.CooldownAt)
 	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)
 	c.StageState = copyStageState(s.StageState)
+	c.CommentBreaker.InvocationsAt = copyTimes(s.CommentBreaker.InvocationsAt)
 
 	if s.LinkedPR != nil {
 		lpr := *s.LinkedPR
@@ -244,6 +245,18 @@ func (s Snapshot) LinkageHealAttempted(stageName, prSHA string) bool {
 	return recorded != "" && recorded == prSHA
 }
 
+// CommentBreakerInvocationsAt returns a copy of the recorded comment-processing
+// invocation timestamps since the last reset (#1089).
+func (s Snapshot) CommentBreakerInvocationsAt() []time.Time {
+	return copyTimes(s.state.CommentBreaker.InvocationsAt)
+}
+
+// CommentBreakerLastAuthor returns the author of the comment that triggered
+// the most recent recorded comment-breaker invocation, or "" if none.
+func (s Snapshot) CommentBreakerLastAuthor() string {
+	return s.state.CommentBreaker.LastAuthor
+}
+
 // ---- deep-copy helpers ----
 
 func copyStrings(src []string) []string {
@@ -251,6 +264,15 @@ func copyStrings(src []string) []string {
 		return nil
 	}
 	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func copyTimes(src []time.Time) []time.Time {
+	if src == nil {
+		return nil
+	}
+	dst := make([]time.Time, len(src))
 	copy(dst, src)
 	return dst
 }

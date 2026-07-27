@@ -730,6 +730,13 @@ func TestPRDetailsUpdatedMutatesAndFiresObserver(t *testing.T) {
 	if lastChange.Fields&LinkedPRChanged == 0 {
 		t.Errorf("Fields %b does not include LinkedPRChanged", lastChange.Fields)
 	}
+	// PRStateChanged is the narrower sub-flag consumers (e.g. the
+	// comment-processing circuit breaker's PR-state reset trigger, #1089)
+	// should key off instead of the broader LinkedPRChanged, which also fires
+	// on review/comment/check-run activity that isn't a PR state transition.
+	if lastChange.Fields&PRStateChanged == 0 {
+		t.Errorf("Fields %b does not include PRStateChanged", lastChange.Fields)
+	}
 
 	snap, _ := s.Get(testRepo, 10)
 	lpr := snap.LinkedPR()

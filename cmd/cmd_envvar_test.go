@@ -522,3 +522,111 @@ func TestExecute_MaxBisectValidationsConfigNegativeIsInvalid(t *testing.T) {
 		t.Errorf("cfg.MaxBisectValidations = %d, want 0 (negative config.yaml value falls back to default)", cfg.MaxBisectValidations)
 	}
 }
+
+// ---- Comment-processing circuit breaker (#1089) ----
+
+func TestExecute_MaxCommentCyclesPerWindowConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_comment_cycles_per_window: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxCommentCyclesPerWindow != 8 {
+		t.Errorf("cfg.MaxCommentCyclesPerWindow = %d, want 8 from config.yaml", cfg.MaxCommentCyclesPerWindow)
+	}
+}
+
+func TestExecute_MaxCommentCyclesPerWindowEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_comment_cycles_per_window: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW", "15")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxCommentCyclesPerWindow != 15 {
+		t.Errorf("cfg.MaxCommentCyclesPerWindow = %d, want 15 (env var should beat config.yaml)", cfg.MaxCommentCyclesPerWindow)
+	}
+}
+
+func TestExecute_MaxCommentCyclesPerWindowFlagBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_comment_cycles_per_window: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--max-comment-cycles-per-window", "3"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxCommentCyclesPerWindow != 3 {
+		t.Errorf("cfg.MaxCommentCyclesPerWindow = %d, want 3 (explicit flag should beat config.yaml)", cfg.MaxCommentCyclesPerWindow)
+	}
+}
+
+func TestExecute_MaxCommentCyclesPerWindowInvalidConfigValue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_comment_cycles_per_window: 0\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxCommentCyclesPerWindow != 0 {
+		t.Errorf("cfg.MaxCommentCyclesPerWindow = %d, want 0 (invalid config.yaml value falls back to default)", cfg.MaxCommentCyclesPerWindow)
+	}
+}
+
+func TestExecute_MaxCommentCyclesPerWindowEnvInvalidValue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW", "bad")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxCommentCyclesPerWindow != 0 {
+		t.Errorf("cfg.MaxCommentCyclesPerWindow = %d, want 0 (invalid env value falls back to default)", cfg.MaxCommentCyclesPerWindow)
+	}
+}
+
+func TestExecute_CommentCycleWindowConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("comment_cycle_window: 45\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.CommentCycleWindowMinutes != 45 {
+		t.Errorf("cfg.CommentCycleWindowMinutes = %d, want 45 from config.yaml", cfg.CommentCycleWindowMinutes)
+	}
+}
+
+func TestExecute_CommentCycleWindowEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("comment_cycle_window: 45\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_COMMENT_CYCLE_WINDOW", "20")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.CommentCycleWindowMinutes != 20 {
+		t.Errorf("cfg.CommentCycleWindowMinutes = %d, want 20 (env var should beat config.yaml)", cfg.CommentCycleWindowMinutes)
+	}
+}
