@@ -243,6 +243,21 @@ else
         /^## Internal[[:space:]]*$/ && !inserted { print line; inserted=1 }
       ' "$NOTES_FILE" > "${NOTES_FILE}.tmp"
       mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
+    elif grep -Eq '^## Upgrading[[:space:]]*$' "$NOTES_FILE"; then
+      # No existing Internal section: insert a new one directly before
+      # Upgrading (always the last section in the notes schema) rather than
+      # appending at the file's end, which would land after the closing
+      # ```bash fence and break the canonical section order.
+      awk -v line="$CHANGELOG_LINE" '
+        /^## Upgrading[[:space:]]*$/ && !inserted {
+          print "## Internal"
+          print line
+          print ""
+          inserted=1
+        }
+        { print }
+      ' "$NOTES_FILE" > "${NOTES_FILE}.tmp"
+      mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
     else
       {
         echo ""
