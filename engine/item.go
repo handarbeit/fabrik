@@ -1396,8 +1396,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
-		if claudeRan && e.cfg.MaxRetries > 0 {
+		// Stall detection/arming is independent of MaxRetries: max_retries: 0 is a
+		// first-class "unlimited retries" config, not an edge case, and is exactly the
+		// setting where a stalled stage would otherwise grind identical retries forever
+		// with no mitigation at all. Only the retry-count/escalation bookkeeping below
+		// needs the MaxRetries > 0 guard.
+		if claudeRan {
 			e.detectAndArmStallHint(item, stage, repoStr, usage)
+		}
+		if claudeRan && e.cfg.MaxRetries > 0 {
 			e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 			var count int
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
@@ -1423,19 +1430,29 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 
 // detectAndArmStallHint compares this incomplete invocation's turn usage against
 // the previous incomplete attempt's, recording the trend for the next comparison
-// and arming a one-shot corrective hint when a stall is detected (#1146).
+// and arming a one-shot corrective hint when a stall is detected (#1146). Called
+// whenever claudeRan, independent of MaxRetries — max_retries: 0 ("unlimited
+// retries") must still get the detection/hint mitigation; only the surrounding
+// retry-count/escalation bookkeeping needs the MaxRetries > 0 guard.
 //
 // The signature: a turn-capped attempt (TurnsUsed >= MaxTurns, did not complete)
-// followed by an incomplete attempt using strictly fewer turns. A genuinely
-// progressing retry does not shrink like that — remaining work only running out
-// of turns faster than a fuller attempt is a strong indicator the worker re-derived
-// the same stall (e.g. backgrounded a long command and waited for a notification
-// that never arrives) rather than making less progress toward completion.
+// followed by an incomplete, NOT-capped attempt using strictly fewer turns. A
+// genuinely progressing retry does not shrink like that — remaining work only
+// running out of turns faster than a fuller attempt is a strong indicator the
+// worker re-derived the same stall (e.g. backgrounded a long command and waited
+// for a notification that never arrives) rather than making less progress toward
+// completion. The current attempt must NOT itself be capped: the pre-existing
+// progress-based turn-extension loop (runInvocationWithExtension) can widen the
+// effective budget on one dispatch (e.g. to 2x/3x stage.MaxTurns) without that
+// widening persisting to the next, separate dispatch — so two consecutive capped
+// attempts can show a smaller absolute TurnsUsed on the second purely because its
+// budget reset lower, not because it "declined" in the stalled sense this pattern
+// is meant to catch.
 //
 // Self-limiting to a single corrective hint per episode: StageTurnUsageRecorded
-// always overwrites LastTurnsCapped with this attempt's own capped status, and the
-// attempt that triggers detection is by definition not capped — so the precondition
-// for a re-arm is cleared immediately, without needing a separate one-shot guard.
+// always overwrites LastTurnsCapped with this attempt's own capped status, and
+// arming requires the current attempt to be uncapped — so the precondition for a
+// re-arm is cleared immediately, without needing a separate one-shot guard.
 func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage, repoStr string, usage TokenUsage) {
 	var prevTurns int
 	var prevCapped bool
@@ -1453,7 +1470,7 @@ func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage,
 		Capped:    capped,
 	})
 
-	if !prevCapped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
+	if !prevCapped || capped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
 		return
 	}
 
