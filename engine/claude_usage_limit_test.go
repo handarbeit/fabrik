@@ -16,6 +16,7 @@ func TestDetectUsageLimitExit(t *testing.T) {
 	tests := []struct {
 		name          string
 		raw           string
+		usage         TokenUsage
 		wantDetected  bool
 		wantMsg       string
 		wantResetTime string
@@ -74,11 +75,43 @@ func TestDetectUsageLimitExit(t *testing.T) {
 			raw:          ``,
 			wantDetected: false,
 		},
+		{
+			// Regression for #1183. A turn-capped run whose own output quotes the
+			// usage-limit message — which happens routinely in this repository,
+			// where issues, specs and tests discuss these exact strings — must not
+			// be classified as a usage-limit exit. On 2026-07-27 this suspended
+			// Claude dispatch account-wide for ~11 hours after a plain turn cap.
+			name: "negative: turn-capped run quoting the message in its own output",
+			raw: `{"subtype":"error_max_turns","terminal_reason":"max_turns","is_error":true,` +
+				`"num_turns":51,"result":"added a test fixture: You've hit your session limit ` +
+				`· resets 10:20pm (America/Edmonton)","errors":["Reached maximum number of turns (50)"]}`,
+			usage:        TokenUsage{TurnsUsed: 51, CostUSD: 2.2766},
+			wantDetected: false,
+		},
+		{
+			// The exclusion must be conjunctive: cost without turns (or vice versa)
+			// is not evidence the invocation ran, so detection still stands.
+			name:          "cost recorded but zero turns still detects",
+			raw:           `{"result":"You've hit your session limit · resets 6:05am (UTC)","is_error":true}`,
+			usage:         TokenUsage{TurnsUsed: 0, CostUSD: 0.01},
+			wantDetected:  true,
+			wantMsg:       "hit your session limit",
+			wantResetTime: "6:05am (UTC)",
+		},
+		{
+			// The canonical real shape: immediate exit, nothing consumed.
+			name:          "genuine limit exit with zero turns and zero cost detects",
+			raw:           `{"result":"You've hit your weekly limit · resets 6:05am (UTC)","is_error":true}`,
+			usage:         TokenUsage{},
+			wantDetected:  true,
+			wantMsg:       "hit your weekly limit",
+			wantResetTime: "6:05am (UTC)",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg, resetTime, detected := detectUsageLimitExit([]byte(tt.raw))
+			msg, resetTime, detected := detectUsageLimitExit([]byte(tt.raw), tt.usage)
 			if detected != tt.wantDetected {
 				t.Fatalf("detected = %v, want %v (msg=%q, resetTime=%q)", detected, tt.wantDetected, msg, resetTime)
 			}
