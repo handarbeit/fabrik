@@ -3,6 +3,7 @@ package github
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -49,6 +50,40 @@ func (c *Client) AddPRReviewCommentReaction(owner, repo string, commentDatabaseI
 	}
 	if err := c.restPost(apiURL, payload); err != nil {
 		return fmt.Errorf("adding %q reaction to PR review comment %d on %s/%s: %w", content, commentDatabaseID, owner, repo, err)
+	}
+	return nil
+}
+
+// AddReviewReaction adds a reaction to a PR review (the top-level review
+// body). content follows the same lowercase convention as AddCommentReaction/
+// AddPRReviewCommentReaction (e.g. "eyes", "rocket") and is uppercased to the
+// GraphQL ReactionContent enum. GitHub's REST API exposes no reactions
+// endpoint for PullRequestReview itself — only issue comments, PR review
+// (inline) comments, commit comments, issues, releases, and discussions — so
+// this goes through the GraphQL addReaction mutation, keyed on the review's
+// node ID (PRReview.ID) rather than its DatabaseID.
+func (c *Client) AddReviewReaction(reviewID, content string) error {
+	const query = `
+mutation($subjectId: ID!, $content: ReactionContent!) {
+  addReaction(input: { subjectId: $subjectId, content: $content }) {
+    reaction { content }
+  }
+}`
+	vars := map[string]interface{}{
+		"subjectId": reviewID,
+		"content":   strings.ToUpper(content),
+	}
+	var result struct {
+		Data struct {
+			AddReaction struct {
+				Reaction struct {
+					Content string `json:"content"`
+				} `json:"reaction"`
+			} `json:"addReaction"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return fmt.Errorf("adding %q reaction to review %s: %w", content, reviewID, err)
 	}
 	return nil
 }
