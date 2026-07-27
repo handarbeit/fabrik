@@ -295,10 +295,91 @@ func ReadSessionID(repo string, issueNumber int, stageName string) string {
 		sessDir = filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
 	}
 	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
+	id, _ := classifySessionFile(data, err)
+	return id
+}
+
+// resumeStatus classifies the outcome of attempting to load a session ID for resume.
+type resumeStatus int
+
+const (
+	// resumeFound indicates a usable, non-blank session ID was loaded.
+	resumeFound resumeStatus = iota
+	// resumeAbsent indicates the session file does not exist.
+	resumeAbsent
+	// resumeUnreadable indicates the session file exists but could not be read
+	// (an I/O error other than "does not exist").
+	resumeUnreadable
+	// resumeBlank indicates the session file is present and readable but its
+	// trimmed content is empty (zero bytes or whitespace-only).
+	resumeBlank
+)
+
+func (s resumeStatus) String() string {
+	switch s {
+	case resumeFound:
+		return "found"
+	case resumeAbsent:
+		return "absent"
+	case resumeUnreadable:
+		return "unreadable"
+	case resumeBlank:
+		return "blank"
+	default:
+		return "unknown"
+	}
+}
+
+// classifySessionFile classifies the result of an os.ReadFile call on a session
+// file, applying trim-before-check so whitespace-only content is treated the
+// same as zero-byte content (both resumeBlank). This is the single source of
+// truth for "is this session ID usable" — an untrimmed length check here would
+// let a whitespace-only file pass as "found" with an empty ID.
+func classifySessionFile(data []byte, err error) (id string, status resumeStatus) {
 	if err != nil {
+		if os.IsNotExist(err) {
+			return "", resumeAbsent
+		}
+		return "", resumeUnreadable
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return "", resumeBlank
+	}
+	return trimmed, resumeFound
+}
+
+// readSessionIDForResume reads and classifies the session file at path,
+// preserving the underlying read error (if any) for logging purposes.
+func readSessionIDForResume(path string) (id string, status resumeStatus, readErr error) {
+	data, err := os.ReadFile(path)
+	id, status = classifySessionFile(data, err)
+	return id, status, err
+}
+
+// resolveResumeSessionID loads the session ID to pass as --resume for a stage
+// invocation. When resume is false, it returns "" without logging. When resume
+// is true and a usable session ID is found, it returns the ID without logging
+// (the healthy path must produce no new log output). Otherwise it logs a
+// warning distinguishing why the session ID wasn't usable (absent / unreadable
+// / blank) and returns "", signaling that buildClaudeArgs should proceed as a
+// fresh session.
+func resolveResumeSessionID(issueNumber int, stageName, sessFilePath string, resume bool) string {
+	if !resume {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	id, status, readErr := readSessionIDForResume(sessFilePath)
+	switch status {
+	case resumeFound:
+		return id
+	case resumeAbsent:
+		claudeLog(issueNumber, "warn", "stage %q: no session file at %s — resume requested but none exists yet; proceeding as a fresh session\n", stageName, sessFilePath)
+	case resumeUnreadable:
+		claudeLog(issueNumber, "warn", "stage %q: session file %s could not be read (%v) — resume requested but unusable; proceeding as a fresh session\n", stageName, sessFilePath, readErr)
+	case resumeBlank:
+		claudeLog(issueNumber, "warn", "stage %q: session file %s is blank — resume requested but no session ID recorded; proceeding as a fresh session\n", stageName, sessFilePath)
+	}
+	return ""
 }
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
@@ -323,7 +404,8 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	if opts.MaxTurnsOverride > 0 {
 		effectiveBudget = opts.MaxTurnsOverride
 	}
-	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
+	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, resume)
+	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
@@ -356,7 +438,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	if opts.MaxTurnsOverride > 0 {
 		limit = opts.MaxTurnsOverride
 	}
-	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
+	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, true) // resume existing session
+	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
@@ -461,7 +544,7 @@ func mergeEnv(base, overrides []string) []string {
 	return append(result, overrides...)
 }
 
-func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
+func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -477,10 +560,8 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 		args = append(args, "--plugin-dir", claudePluginDir)
 	}
 
-	if resume {
-		if sessionID, err := os.ReadFile(sessFilePath); err == nil && len(sessionID) > 0 {
-			args = append(args, "--resume", strings.TrimSpace(string(sessionID)))
-		}
+	if resumeSessionID != "" {
+		args = append(args, "--resume", resumeSessionID)
 	}
 
 	// Model override from labels takes precedence over stage config

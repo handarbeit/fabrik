@@ -46,6 +46,12 @@ type ProjectConfig struct {
 	TrainTrialWindow          *int     `yaml:"train_trial_window"`
 	MaxCommentCyclesPerWindow *int     `yaml:"max_comment_cycles_per_window"`
 	CommentCycleWindow        *int     `yaml:"comment_cycle_window"`
+	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
+	// context names that must report a confirmed success on a PR's exact head
+	// SHA before the ci-gate will clear it. Unconfigured repos get no
+	// behavior change (ADR-933). Checked against the union of check-run names
+	// and classic commit-status contexts observed on the head SHA.
+	RequiredStatusContexts map[string][]string `yaml:"required_status_contexts"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -201,6 +203,238 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 		t.Fatalf("stat session dir: %v", err)
 	} else if perm := info.Mode().Perm(); perm != 0700 {
 		t.Errorf("session dir mode = %04o, want 0700", perm)
+	}
+}
+
+func TestClassifySessionFile(t *testing.T) {
+	notExistErr := &os.PathError{Op: "open", Path: "x", Err: os.ErrNotExist}
+	unreadableErr := errors.New("is a directory")
+
+	tests := []struct {
+		name       string
+		data       []byte
+		err        error
+		wantID     string
+		wantStatus resumeStatus
+	}{
+		{"found", []byte("sess_abc123"), nil, "sess_abc123", resumeFound},
+		{"found with surrounding whitespace trimmed", []byte("  sess_abc123\n"), nil, "sess_abc123", resumeFound},
+		{"absent", nil, notExistErr, "", resumeAbsent},
+		{"unreadable", nil, unreadableErr, "", resumeUnreadable},
+		{"blank zero-byte", []byte(""), nil, "", resumeBlank},
+		{"blank whitespace-only", []byte("  \n\t \n"), nil, "", resumeBlank},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, status := classifySessionFile(tt.data, tt.err)
+			if id != tt.wantID {
+				t.Errorf("id = %q, want %q", id, tt.wantID)
+			}
+			if status != tt.wantStatus {
+				t.Errorf("status = %v, want %v", status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestResolveResumeSessionID(t *testing.T) {
+	captureLogs := func(t *testing.T) *[]string {
+		t.Helper()
+		var logLines []string
+		var logMu sync.Mutex
+		origLogf := claudeLogf
+		claudeLogf = func(issueNumber int, tag, format string, args ...any) {
+			msg := fmt.Sprintf(format, args...)
+			logMu.Lock()
+			logLines = append(logLines, fmt.Sprintf("[#%d %s] %s", issueNumber, tag, msg))
+			logMu.Unlock()
+		}
+		t.Cleanup(func() { claudeLogf = origLogf })
+		return &logLines
+	}
+
+	t.Run("resume false: no read, no log", func(t *testing.T) {
+		logLines := captureLogs(t)
+		sessFilePath := filepath.Join(t.TempDir(), "does-not-matter.session")
+		id := resolveResumeSessionID(1, "Plan", sessFilePath, false)
+		if id != "" {
+			t.Errorf("id = %q, want empty", id)
+		}
+		if len(*logLines) != 0 {
+			t.Errorf("expected no log output, got %v", *logLines)
+		}
+	})
+
+	t.Run("healthy: valid non-blank session ID, no log", func(t *testing.T) {
+		logLines := captureLogs(t)
+		dir := t.TempDir()
+		sessFilePath := filepath.Join(dir, "Plan.session")
+		if err := os.WriteFile(sessFilePath, []byte("sess_valid"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		id := resolveResumeSessionID(2, "Plan", sessFilePath, true)
+		if id != "sess_valid" {
+			t.Errorf("id = %q, want sess_valid", id)
+		}
+		if len(*logLines) != 0 {
+			t.Errorf("expected no log output on healthy path, got %v", *logLines)
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		logLines := captureLogs(t)
+		sessFilePath := filepath.Join(t.TempDir(), "missing.session")
+		id := resolveResumeSessionID(3, "Research", sessFilePath, true)
+		if id != "" {
+			t.Errorf("id = %q, want empty", id)
+		}
+		if len(*logLines) != 1 {
+			t.Fatalf("expected exactly 1 log line, got %v", *logLines)
+		}
+		if !strings.Contains((*logLines)[0], "Research") || !strings.Contains((*logLines)[0], sessFilePath) {
+			t.Errorf("log line missing stage/path: %q", (*logLines)[0])
+		}
+	})
+
+	t.Run("empty file", func(t *testing.T) {
+		logLines := captureLogs(t)
+		dir := t.TempDir()
+		sessFilePath := filepath.Join(dir, "Plan.session")
+		if err := os.WriteFile(sessFilePath, []byte(""), 0600); err != nil {
+			t.Fatal(err)
+		}
+		id := resolveResumeSessionID(4, "Plan", sessFilePath, true)
+		if id != "" {
+			t.Errorf("id = %q, want empty", id)
+		}
+		if len(*logLines) != 1 {
+			t.Fatalf("expected exactly 1 log line, got %v", *logLines)
+		}
+	})
+
+	t.Run("whitespace-only file", func(t *testing.T) {
+		logLines := captureLogs(t)
+		dir := t.TempDir()
+		sessFilePath := filepath.Join(dir, "Plan.session")
+		if err := os.WriteFile(sessFilePath, []byte("  \n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		id := resolveResumeSessionID(5, "Plan", sessFilePath, true)
+		if id != "" {
+			t.Errorf("id = %q, want empty", id)
+		}
+		if len(*logLines) != 1 {
+			t.Fatalf("expected exactly 1 log line, got %v", *logLines)
+		}
+	})
+
+	t.Run("unreadable (directory in place of file)", func(t *testing.T) {
+		logLines := captureLogs(t)
+		dir := t.TempDir()
+		sessFilePath := filepath.Join(dir, "Plan.session")
+		if err := os.MkdirAll(sessFilePath, 0700); err != nil {
+			t.Fatal(err)
+		}
+		id := resolveResumeSessionID(6, "Plan", sessFilePath, true)
+		if id != "" {
+			t.Errorf("id = %q, want empty", id)
+		}
+		if len(*logLines) != 1 {
+			t.Fatalf("expected exactly 1 log line, got %v", *logLines)
+		}
+	})
+}
+
+func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
+	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
+
+	t.Run("empty resumeSessionID omits --resume", func(t *testing.T) {
+		args := buildClaudeArgs(stage, "", "", 0, false, "")
+		for i, a := range args {
+			if a == "--resume" {
+				t.Fatalf("did not expect --resume in args, got %v (at index %d)", args, i)
+			}
+		}
+	})
+
+	t.Run("non-empty resumeSessionID appends --resume <id>", func(t *testing.T) {
+		args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "")
+		found := false
+		for i, a := range args {
+			if a == "--resume" {
+				found = true
+				if i+1 >= len(args) || args[i+1] != "sess_xyz" {
+					t.Fatalf("expected --resume sess_xyz, got %v", args)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected --resume in args, got %v", args)
+		}
+	})
+}
+
+func TestInvokeClaude_WithResume_WhitespaceOnlySessionFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"fresh output","session_id":"sess_new","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logLines []string
+	var logMu sync.Mutex
+	origLogf := claudeLogf
+	claudeLogf = func(issueNumber int, tag, format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		logMu.Lock()
+		logLines = append(logLines, fmt.Sprintf("[#%d %s] %s", issueNumber, tag, msg))
+		logMu.Unlock()
+	}
+	defer func() { claudeLogf = origLogf }()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Plan",
+		Prompt:     "Plan",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 101, Title: "T"}
+
+	// Write a whitespace-only session file — the exact bug from #1117.
+	sessDir := SessionDir(101)
+	os.MkdirAll(sessDir, 0700)
+	os.WriteFile(sessionFile(101, "Plan"), []byte("  \n"), 0600)
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	fields := strings.Fields(string(args))
+	for i, f := range fields {
+		if f == "--resume" {
+			if i+1 >= len(fields) || fields[i+1] == "" {
+				t.Fatalf("--resume was passed an empty value, args: %q", string(args))
+			}
+			t.Fatalf("did not expect --resume at all for a whitespace-only session file, args: %q", string(args))
+		}
+	}
+
+	logMu.Lock()
+	captured := append([]string(nil), logLines...)
+	logMu.Unlock()
+	if len(captured) == 0 {
+		t.Error("expected a warning to be logged for the unfulfilled resume request")
 	}
 }
 

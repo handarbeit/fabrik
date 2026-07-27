@@ -544,6 +544,133 @@ func TestSettle_AllChecksGreen_ReturnsReady(t *testing.T) {
 	}
 }
 
+// TestSettle_AllSkippedChecks_RequiredContextConfigured_NotReady is the core
+// regression for #933: an all-skipped check-run set on the head must not read
+// as ready when a required status context is configured but hasn't reported
+// success on this exact SHA (the local-CI-takeover gap — no check run and no
+// classic commit status for "fantasy/local-test").
+func TestSettle_AllSkippedChecks_RequiredContextConfigured_NotReady(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "skipped"},
+				{Name: "test", Status: "completed", Conclusion: "neutral"},
+			}, nil
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status == PRMergeReady {
+		t.Fatalf("expected settle to NOT report ready when required context never confirmed success, got %v (%s)", r.Status, r.Reason)
+	}
+	if r.Status != PRMergeUnsettled {
+		t.Errorf("expected PRMergeUnsettled for a missing/skipped required context, got %v", r.Status)
+	}
+	if r.RequiredContextsStatus != gh.RequiredContextsPending {
+		t.Errorf("expected RequiredContextsStatus=Pending, got %v", r.RequiredContextsStatus)
+	}
+	if len(r.RequiredMissing) != 1 || r.RequiredMissing[0] != "fantasy/local-test" {
+		t.Errorf("expected RequiredMissing=[fantasy/local-test], got %v", r.RequiredMissing)
+	}
+}
+
+// TestSettle_NoCheckRuns_RequiredContextConfigured_NotReady covers the "no
+// check runs at all" leg of the same gap — before this fix, zero check runs
+// unconditionally read as "no CI configured" / ready.
+func TestSettle_NoCheckRuns_RequiredContextConfigured_NotReady(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status == PRMergeReady {
+		t.Fatalf("expected settle to NOT report ready with zero check runs and an unconfirmed required context, got %v (%s)", r.Status, r.Reason)
+	}
+}
+
+// TestSettle_RequiredContextFailedViaCommitStatus_ReturnsBlocked covers a
+// required context whose only producer is a classic commit status (not a
+// check run) reporting a confirmed failure — this must block like a failed
+// check run, and Fabrik must be able to see it at all (Requirement 3).
+func TestSettle_RequiredContextFailedViaCommitStatus_ReturnsBlocked(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return []gh.CommitStatus{{Context: "fantasy/local-test", State: "failure"}}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeBlocked {
+		t.Errorf("expected PRMergeBlocked for a failed required context, got %v", r.Status)
+	}
+	if r.RequiredContextsStatus != gh.RequiredContextsFailed {
+		t.Errorf("expected RequiredContextsStatus=Failed, got %v", r.RequiredContextsStatus)
+	}
+	if len(r.RequiredFailed) != 1 || r.RequiredFailed[0] != "fantasy/local-test" {
+		t.Errorf("expected RequiredFailed=[fantasy/local-test], got %v", r.RequiredFailed)
+	}
+}
+
+// TestSettle_Unconfigured_AllSkippedChecks_StillReady confirms the fix is a
+// no-op for repos without required_status_contexts configured (Risk: don't
+// regress the common vanilla-GHA case where skipped/neutral runs are
+// legitimately non-required and correctly don't block).
+func TestSettle_Unconfigured_AllSkippedChecks_StillReady(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "skipped"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client) // RequiredStatusContexts left unconfigured (nil)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeReady {
+		t.Errorf("expected PRMergeReady for unconfigured repo (no behavior change), got %v (%s)", r.Status, r.Reason)
+	}
+}
+
 func TestSettle_ChecksPending_ReturnsUnsettled(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {

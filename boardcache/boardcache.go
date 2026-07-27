@@ -17,6 +17,7 @@ type ReadClient interface {
 	FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)
 	FetchItemDetails(item *gh.ProjectItem) error
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
+	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)
 	FetchPRMergeableFields(owner, repo string, prNumber int) (mergeable *bool, mergeableState string, err error)
 	FetchPRMergeable(owner, repo string, prNumber int) (*bool, error)
@@ -54,6 +55,10 @@ func (a *GitHubAdapter) FetchItemDetails(item *gh.ProjectItem) error {
 
 func (a *GitHubAdapter) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	return a.client.FetchCheckRuns(owner, repo, sha)
+}
+
+func (a *GitHubAdapter) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
+	return a.client.FetchCombinedStatus(owner, repo, ref)
 }
 
 func (a *GitHubAdapter) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -809,6 +814,12 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 // FetchPRMergeableFields always delegates to GitHub — mergeability changes without webhooks.
 func (c *CacheImpl) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {
 	return c.fallback.FetchPRMergeableFields(owner, repo, prNumber)
+}
+
+// FetchCombinedStatus always delegates to GitHub — classic commit statuses change
+// without webhooks, same reasoning as FetchPRMergeableFields above.
+func (c *CacheImpl) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
+	return c.fallback.FetchCombinedStatus(owner, repo, ref)
 }
 
 // FetchPRMergeable always delegates to GitHub — mergeability changes without webhooks.
