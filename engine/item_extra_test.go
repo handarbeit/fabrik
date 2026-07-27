@@ -280,6 +280,14 @@ func TestBuildAwaitingInputComment(t *testing.T) {
 	})
 }
 
+// TestBuildAwaitingInputComment_NeutralizesBotMention is a #1141 regression:
+// the blockquoted summary is Claude-derived freeform text and must not carry
+// a live bot mention through to the posted comment.
+func TestBuildAwaitingInputComment_NeutralizesBotMention(t *testing.T) {
+	got := buildAwaitingInputComment("alice", "Validate", "**@coderabbitai**: No action taken.")
+	assertNoLiveBotMention(t, got)
+}
+
 // TestBlockOnInput_LabelErrors_LogsWarning covers the warning log branches.
 func TestBlockOnInput_LabelErrors_LogsWarning(t *testing.T) {
 	client := &mockGitHubClient{

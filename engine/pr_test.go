@@ -596,6 +596,58 @@ func TestFormatReviewFeedbackComment_EmptyPathFallback(t *testing.T) {
 	}
 }
 
+// ── #1141 regression: a bot-naming output must never render a live mention ──
+
+// assertNoLiveBotMention fails the test if body contains an unwrapped
+// "@coderabbitai" mention — i.e. one not immediately wrapped in backticks.
+func assertNoLiveBotMention(t *testing.T, body string) {
+	t.Helper()
+	if !strings.Contains(body, "@coderabbitai") {
+		t.Fatalf("expected body to reference @coderabbitai at all, got:\n%s", body)
+	}
+	if !strings.Contains(body, "`@coderabbitai`") {
+		t.Errorf("bot mention was not neutralized into a code span:\n%s", body)
+	}
+	if strings.Contains(body, "**@coderabbitai**") {
+		t.Errorf("body still contains a live (unwrapped) bot mention:\n%s", body)
+	}
+}
+
+func TestFormatOutputComment_NeutralizesBotMention(t *testing.T) {
+	output := "**@coderabbitai**: No action taken, no reply posted — same non-blocking loop, no change in state."
+	result := formatOutputComment("Validate (comment review)", output, "", "branch", "abc123", "main123", "2024-01-01")
+	assertNoLiveBotMention(t, result)
+}
+
+func TestFormatPRSummaryComment_NeutralizesBotMention(t *testing.T) {
+	output := "FABRIK_SUMMARY_BEGIN\n**@coderabbitai**: No action taken.\nFABRIK_SUMMARY_END"
+	result := formatPRSummaryComment("Validate", 42, output, "branch", "abc123", "main123", "2024-01-01")
+	assertNoLiveBotMention(t, result)
+}
+
+func TestFormatReviewFeedbackComment_NeutralizesBotMention(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 1}}
+	output := "**@coderabbitai**: No action taken."
+	result := formatReviewFeedbackComment("Validate", output, "b", "c", "m", "ts", threads, 1)
+	assertNoLiveBotMention(t, result)
+}
+
+func TestUpdatePRVerification_NeutralizesBotMention(t *testing.T) {
+	var updatedBody string
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "## Verification\n\nplaceholder.\n\n---\n\nCloses #10", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updatedBody = body
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.updatePRVerification(gh.ProjectItem{Number: 10}, 99, "**@coderabbitai**: No action taken.")
+	assertNoLiveBotMention(t, updatedBody)
+}
+
 func TestFormatReviewFeedbackComment_TruncatesLongOutput(t *testing.T) {
 	long := strings.Repeat("x", 70000)
 	threads := []reviewThreadEntry{{Path: "a.go", Line: 1}}

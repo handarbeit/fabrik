@@ -175,6 +175,7 @@ func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary
 	if summary == "" {
 		return
 	}
+	summary = neutralizeBotMentions(summary)
 	if prNumber <= 0 {
 		e.logf(item.Number, "warn", "invalid PR number %d for Verification update — skipping\n", prNumber)
 		return
@@ -341,6 +342,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 // mainSHA is the origin/{baseBranch} SHA at the time of capture; if empty,
 // the main: field is omitted for backward compatibility with older comments.
 func formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp string) string {
+	output = neutralizeBotMentions(output)
 	const maxLen = 60000
 	if len(output) > maxLen {
 		output = output[:maxLen] + "\n\n... (truncated)"
@@ -350,7 +352,7 @@ func formatOutputComment(stageName, output, footer, branch, commit, mainSHA, tim
 }
 
 func formatPRSummaryComment(stageName string, prNumber int, output, branch, commit, mainSHA, timestamp string) string {
-	summary := extractSummary(output)
+	summary := extractSummary(neutralizeBotMentions(output))
 	if summary == "" {
 		summary = "(no summary provided)"
 	}
@@ -408,6 +410,7 @@ func buildThreadEntries(comments []gh.Comment) []reviewThreadEntry {
 //   - a per-thread footer listing each addressed thread by path:line
 //   - a summary line with thread and comment counts
 func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, totalComments int) string {
+	output = neutralizeBotMentions(output)
 	const maxLen = 60000
 	if len(output) > maxLen {
 		output = output[:maxLen] + "\n\n... (truncated)"
