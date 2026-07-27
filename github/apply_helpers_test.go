@@ -140,12 +140,20 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 			} `json:"reviewRequests"`
 			LatestReviews struct {
 				Nodes []struct {
-					DatabaseID int `json:"databaseId"`
+					ID         string `json:"id"`
+					DatabaseID int    `json:"databaseId"`
 					Author     *struct {
 						Login string `json:"login"`
 					} `json:"author"`
-					State string `json:"state"`
-					Body  string `json:"body"`
+					State          string `json:"state"`
+					Body           string `json:"body"`
+					SubmittedAt    string `json:"submittedAt"`
+					ReactionGroups []struct {
+						Content  string `json:"content"`
+						Reactors struct {
+							TotalCount int `json:"totalCount"`
+						} `json:"reactors"`
+					} `json:"reactionGroups"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {

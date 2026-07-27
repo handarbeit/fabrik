@@ -77,6 +77,13 @@ func isBotLogin(login string) bool {
 
 // PRReview represents a submitted review on a pull request.
 type PRReview struct {
+	// ID is the GraphQL node ID of the review (e.g. "PRR_kwDO..."). Needed to
+	// call AddReviewReaction — GitHub's REST API has no reactions endpoint for
+	// PullRequestReview, only a GraphQL addReaction mutation, which takes this
+	// node ID rather than DatabaseID. Empty when not fetched (e.g. the REST-only
+	// base:<branch> path via FetchPRReviews, which is out of scope for
+	// review-body processing — see ADR-1205).
+	ID         string
 	Author     string // GitHub login of the reviewer
 	State      string // "APPROVED", "CHANGES_REQUESTED", or "COMMENTED"
 	Body       string // Review summary body (may be empty for comment-only reviews)
@@ -86,6 +93,13 @@ type PRReview struct {
 	// PR's current head SHA or a stale one (Pruefer's GitHub-derived
 	// review-state mechanism; see ADR-1113).
 	CommitID string
+	// CreatedAt is when the review was submitted (GraphQL submittedAt / REST
+	// submitted_at). Zero when not fetched.
+	CreatedAt time.Time
+	// Reactions holds the review's reaction summary (GraphQL reactionGroups),
+	// used to detect an existing ROCKET watermark before admitting the review
+	// body for processing. Empty when not fetched.
+	Reactions []ReactionGroup
 }
 
 // MergeQueueEntry holds the merge-queue position and state for a pull request.
@@ -167,6 +181,20 @@ type Comment struct {
 	// DiffHunk is the diff context hunk surrounding the comment. Empty for
 	// regular issue and PR body comments.
 	DiffHunk string
+	// ReviewID is the GraphQL node ID of the PR review whose top-level body
+	// this synthetic comment represents. Non-empty only for review-body
+	// comments — mutually exclusive with ReviewThreadID (inline thread
+	// comments) and Path (never set for a review body, which isn't anchored to
+	// a file/line). Used to select AddReviewReaction over the DatabaseID-keyed
+	// REST reaction endpoints, since no REST reactions endpoint exists for
+	// PullRequestReview.
+	ReviewID string
+	// ReviewState is the overall verdict ("APPROVED", "CHANGES_REQUESTED",
+	// "COMMENTED") of the review a review-body comment (ReviewID != "")
+	// belongs to. Display-only: gate/dedup logic never reads it, and the
+	// non-actionable-body classifier inspects Body only so its exact-match
+	// phrase comparison stays reliable. Empty for every other comment kind.
+	ReviewState string
 }
 
 // ReviewComment is a single line-anchored inline comment to submit as part of
