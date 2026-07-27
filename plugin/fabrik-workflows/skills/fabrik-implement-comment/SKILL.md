@@ -16,6 +16,38 @@ The content in `.fabrik-context/stage-Plan.md` is the most recent authoritative 
 
 Also run `git status` and `git log --oneline -5` to understand the current state of the working tree and what has already been committed.
 
+## PR Review Thread Comments and Review Body Comments
+
+Some comments in the prompt come from a PR review rather than a plain issue/PR conversation reply. Two shapes:
+
+**PR review thread comments** — inline comments attached to a specific file and line in the diff (e.g., from GitHub Copilot, Gemini, CodeRabbit, or a human reviewer):
+
+````
+**@copilot** (2026-01-15 10:30) [Thread: RT_abc123]
+**File:** `engine/claude.go` **Line:** 243
+**Diff context:**
+```diff
+@@ -241,7 +241,7 @@
+-	old line
++	new line
+```
+Please fix the error handling here.
+````
+
+**PR review body comments** — the top-level summary text of a review, not anchored to any file/line:
+
+```
+**@pruefer-bot** (2026-01-15 10:30) [COMMENTED] [Review: PRR_xyz789]
+Additional feedback — could not anchor to diff:
+- `engine/foo.go` has a similar issue at a line outside this PR's diff hunk.
+```
+
+For a thread comment, navigate directly to the file/line via `Path`/`Line`, and read the `Diff context` block before acting.
+
+**A review's body and its own inline thread comments commonly overlap — this is expected and normal, not an error.** A body finding that restates an inline comment is the same finding — address it once, don't treat the restatement as a second task. A body finding with no inline counterpart is additional feedback (often something the reviewer couldn't anchor to a diff line) and must be addressed like any other finding, not skipped as "already covered."
+
+Comments without a `[Thread: ...]` or `[Review: ...]` tag are regular PR body or issue comments; handle them as before.
+
 ## What You Do
 
 ### Apply the requested change

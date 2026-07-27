@@ -380,6 +380,45 @@ func TestBuildReviewThreadComments_ProcessedCommentsSkip(t *testing.T) {
 	}
 }
 
+// (f2b) Regression test for issue #1205's restart-safety claim: a review
+// thread comment already carrying a ROCKET reaction is excluded by
+// buildReviewThreadComments even on a brand-new Engine with an empty
+// in-memory store — i.e. even with zero ProcessedComments state, as if
+// Fabrik had just restarted and lost all in-memory dedup. This is the
+// durable half of the watermark (the GitHub-side reaction, not the
+// in-memory CommentProcessed map) and is what makes a restart safe.
+// acknowledgeComments/finalizeComments (engine/comments.go) already write
+// this reaction via AddPRReviewCommentReaction for both 👀 and 🚀 — this test
+// only confirms the read side holds, since #1205's investigation found no
+// pre-existing test proving it.
+func TestBuildReviewThreadComments_RocketReactionSurvivesRestart(t *testing.T) {
+	client := &mockGitHubClient{}
+	// A fresh Engine simulates a post-restart process: its store has never
+	// seen this item, so CommentProcessed is unset for every comment ID.
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{
+				ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Already handled before restart.",
+				ReviewThreadID: "RT_1",
+				Reactions:      []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+			},
+			{ID: "PRRC_2", DatabaseID: 102, Author: "human", Body: "Not yet handled.", ReviewThreadID: "RT_2"},
+		},
+	}
+
+	comments := eng.buildReviewThreadComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (ROCKET-reacted PRRC_1 excluded even with no in-memory state), got %d", len(comments))
+	}
+	if comments[0].ID != "PRRC_2" {
+		t.Errorf("expected remaining comment to be PRRC_2, got %q", comments[0].ID)
+	}
+}
+
 // (f3) catch-up loop skips dispatchReviewReinvoke when a goroutine is already
 // in-flight for the item, and does NOT increment ReviewCycles.
 func TestCatchUpLoop_InFlightGuard(t *testing.T) {
