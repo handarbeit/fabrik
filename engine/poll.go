@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1553,12 +1555,37 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 		e.fireRunawayGuard(ctx, owner, repo, items, count)
 		return
 	}
-	var parts []string
-	for _, item := range trainItems {
-		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))
+	// Log the batch snapshot only when its composition changed since the last emission
+	// for this repo — routeQueuedGroup runs every poll cycle for as long as a batch sits
+	// in Queued (e.g. the full CI-wait duration), and an unchanged composition would
+	// otherwise repeat the same full-title line every cycle.
+	sig := mergeTrainBatchSignature(trainItems)
+	if prev, ok := e.mergeTrainBatchSnapshotSeen.Load(repoKey); !ok || prev.(string) != sig {
+		var parts []string
+		for _, item := range trainItems {
+			parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))
+		}
+		e.logf(0, "merge-train", "batch snapshot for %s: %d item(s) — %s\n", repoKey, len(trainItems), strings.Join(parts, ", "))
+		e.mergeTrainBatchSnapshotSeen.Store(repoKey, sig)
 	}
-	e.logf(0, "merge-train", "batch snapshot for %s: %d item(s) — %s\n", repoKey, len(trainItems), strings.Join(parts, ", "))
 	e.dispatchMergeTrainWorker(ctx, trainItems, projectID)
+}
+
+// mergeTrainBatchSignature returns an order-independent signature for a Queued batch's
+// item composition (sorted item numbers, comma-joined). Used to dedupe the batch-snapshot
+// log line across poll cycles when membership and count are unchanged — a reordering of
+// the same members (GraphQL item order is not guaranteed stable) must not re-trigger it.
+func mergeTrainBatchSignature(items []gh.ProjectItem) string {
+	nums := make([]int, len(items))
+	for i, item := range items {
+		nums[i] = item.Number
+	}
+	sort.Ints(nums)
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ",")
 }
 
 func gitRevParse(dir, ref string) (string, error) {

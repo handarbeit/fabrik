@@ -2470,6 +2470,100 @@ func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
 	}
 }
 
+// TestHandleMergeTrainBatch_SnapshotDedup_UnchangedBatchLogsOnce is issue #1151's
+// Requirement 6: routeQueuedGroup runs every poll cycle for as long as a batch sits in
+// Queued (e.g. the whole CI-wait window), and a completely unchanged batch composition
+// must not repeat the "batch snapshot" log line on every call.
+func TestHandleMergeTrainBatch_SnapshotDedup_UnchangedBatchLogsOnce(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+	fillSem(eng)
+
+	events := make(chan tui.Event, 20)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 42, Title: "fix the bug", Status: "BatchHold"},
+			{Number: 44, Title: "another ready", Status: "BatchHold"},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+	if msgs := drainLogMessages(events); !anyContains(msgs, "batch snapshot for owner/repo: 2 item(s)") {
+		t.Fatalf("expected a batch snapshot log on the first call, got %v", msgs)
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+	if msgs := drainLogMessages(events); anyContains(msgs, "batch snapshot") {
+		t.Errorf("expected no batch snapshot log on a repeated call with unchanged composition, got %v", msgs)
+	}
+}
+
+// TestHandleMergeTrainBatch_SnapshotDedup_MembershipChangeRelogs verifies that a
+// change in batch composition (a member added) re-triggers the snapshot log — the
+// dedup guard tracks composition, not just "already logged once ever".
+func TestHandleMergeTrainBatch_SnapshotDedup_MembershipChangeRelogs(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+	fillSem(eng)
+
+	events := make(chan tui.Event, 20)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 42, Title: "fix the bug", Status: "BatchHold"},
+		},
+	}
+	eng.handleMergeTrainBatch(context.Background(), board)
+	if msgs := drainLogMessages(events); !anyContains(msgs, "batch snapshot for owner/repo: 1 item(s)") {
+		t.Fatalf("expected a batch snapshot log on the first call, got %v", msgs)
+	}
+
+	board.Items = append(board.Items, gh.ProjectItem{Number: 44, Title: "another ready", Status: "BatchHold"})
+	eng.handleMergeTrainBatch(context.Background(), board)
+	if msgs := drainLogMessages(events); !anyContains(msgs, "batch snapshot for owner/repo: 2 item(s)") {
+		t.Errorf("expected a re-logged batch snapshot after membership changed, got %v", msgs)
+	}
+}
+
+// TestHandleMergeTrainBatch_SnapshotDedup_ReorderDoesNotRelog verifies the dedup
+// signature is order-independent: GraphQL item ordering isn't guaranteed stable
+// poll-to-poll, so the same members in a different order must not re-trigger the log.
+func TestHandleMergeTrainBatch_SnapshotDedup_ReorderDoesNotRelog(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+	fillSem(eng)
+
+	events := make(chan tui.Event, 20)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 42, Title: "fix the bug", Status: "BatchHold"},
+			{Number: 44, Title: "another ready", Status: "BatchHold"},
+		},
+	}
+	eng.handleMergeTrainBatch(context.Background(), board)
+	if msgs := drainLogMessages(events); !anyContains(msgs, "batch snapshot") {
+		t.Fatalf("expected a batch snapshot log on the first call, got %v", msgs)
+	}
+
+	// Same two members, reordered.
+	board.Items = []gh.ProjectItem{board.Items[1], board.Items[0]}
+	eng.handleMergeTrainBatch(context.Background(), board)
+	if msgs := drainLogMessages(events); anyContains(msgs, "batch snapshot") {
+		t.Errorf("expected no re-log for a pure reordering of the same membership, got %v", msgs)
+	}
+}
+
 func TestHandleMergeTrainBatch_SilentWhenEmpty(t *testing.T) {
 	// Use a holding stage so the engine has a configured holding column; none of the
 	// board items have that status — the batch snapshot must be silent.
