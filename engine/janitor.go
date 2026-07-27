@@ -22,6 +22,22 @@ type janitorWMEntry struct {
 	wm        *WorktreeManager
 }
 
+// buildWMByDirName builds a reverse map from "owner-repo" directory name to
+// ownerRepo string + WorktreeManager, derived from e.worktreeManagers. Used by
+// both the worktree and session janitors to resolve multi-repo directory names.
+// The engine mutex is held only long enough to copy; callers get a snapshot.
+func (e *Engine) buildWMByDirName() map[string]janitorWMEntry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	wmByDirName := make(map[string]janitorWMEntry, len(e.worktreeManagers))
+	for ownerRepo, wm := range e.worktreeManagers {
+		owner, repo := parseOwnerRepo(ownerRepo)
+		dirName := owner + "-" + repo
+		wmByDirName[dirName] = janitorWMEntry{ownerRepo: ownerRepo, wm: wm}
+	}
+	return wmByDirName
+}
+
 // runWorktreeJanitor scans .fabrik/worktrees/<owner-repo>/issue-N/ directories
 // and reaps worktrees whose issues are provably terminal and whose directories
 // are clean. Conservative: when in doubt, leaves the worktree and logs the reason.
@@ -49,16 +65,7 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 
 	worktreesRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 
-	// Build reverse map: "owner-repo" dir name → ownerRepo string + WorktreeManager.
-	// Held only long enough to copy; the rest of the cycle is lock-free.
-	e.mu.Lock()
-	wmByDirName := make(map[string]janitorWMEntry, len(e.worktreeManagers))
-	for ownerRepo, wm := range e.worktreeManagers {
-		owner, repo := parseOwnerRepo(ownerRepo)
-		dirName := owner + "-" + repo
-		wmByDirName[dirName] = janitorWMEntry{ownerRepo: ownerRepo, wm: wm}
-	}
-	e.mu.Unlock()
+	wmByDirName := e.buildWMByDirName()
 
 	closedCache := make(map[string]bool) // "owner/repo#N" → isClosed; reset each cycle
 	var scanned, reaped int
