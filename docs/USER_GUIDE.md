@@ -569,6 +569,15 @@ user: your-github-username
 # Runaway guard (ADR-059 §D8): rolling window in minutes over which
 # max_train_trials_per_window is measured.
 # train_trial_window: 60
+
+# Comment-processing circuit breaker (#1089): maximum non-advancing
+# comment-processing invocations for a single issue within the rolling window
+# before pausing it with fabrik:paused + fabrik:awaiting-input. Defense-in-depth
+# backstop against a self-sustaining comment loop (see incident #1083).
+# max_comment_cycles_per_window: 10
+# Comment-processing circuit breaker (#1089): rolling window in minutes over
+# which max_comment_cycles_per_window is measured.
+# comment_cycle_window: 30
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
@@ -627,6 +636,8 @@ FABRIK_USER=my-personal-username
 | `--max-train-rebase-cycles` | Maximum main-moved rebase+revalidate cycles for a merge-train batch before it is dissolved back to Queued (0 = use default of 3; also `FABRIK_MAX_TRAIN_REBASE_CYCLES`). When an external direct push advances the base branch under an in-flight batch, the trial branch is rebased onto the new base and the combined Validate re-runs before landing; after this many failed catch-up attempts the batch is dissolved (integration PR closed, trial branch deleted, members left untouched in Queued) and a fresh train forms on the next poll. | `0` (3) |
 | `--max-train-trials-per-window` | Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero successful lands within the rolling window before pausing all `Queued` members (0 = use default of 20; also `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW`). Composition-agnostic — counts trials regardless of which batch composition produced them. | `0` (20) |
 | `--train-trial-window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `--max-train-trials-per-window` is measured (0 = use default of 60; also `FABRIK_TRAIN_TRIAL_WINDOW`). | `0` (60 min) |
+| `--max-comment-cycles-per-window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (0 = use default of 10; also `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW`). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083) — resets on any forward progress (stage completion, new commit, PR state change, issue-body edit, or manual unpause). | `0` (10) |
+| `--comment-cycle-window` | Comment-processing circuit breaker (#1089): rolling window in minutes over which `--max-comment-cycles-per-window` is measured (0 = use default of 30; also `FABRIK_COMMENT_CYCLE_WINDOW`). | `0` (30 min) |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output; prevents worker goroutines from blocking when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits (0 = use built-in default of 30 sec; also `FABRIK_CLAUDE_WAIT_DELAY`) | `0` (30 sec) |
 | `--janitor-interval` | Hours between janitor runs (closed-issue cleanup, stale-label eviction); 0 disables the janitor; also `FABRIK_JANITOR_INTERVAL` | `1` |
 | `--log-retention-days` | Delete `.fabrik/logs/` files older than this many days; 0 disables age-based pruning; also `FABRIK_LOG_RETENTION_DAYS` | `14` |
@@ -673,6 +684,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_TRAIN_REBASE_CYCLES` | `max_train_rebase_cycles` | Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (positive integer; invalid or unset values default to 3). On exhaustion the batch's integration PR is closed and trial branch deleted, members remain in Queued, and a fresh train forms next poll. See `--max-train-rebase-cycles`. | `3` |
 | `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` | `max_train_trials_per_window` | Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero successful lands within the rolling window before pausing all `Queued` members (positive integer; invalid or unset values default to 20). See `--max-train-trials-per-window`. | `20` |
 | `FABRIK_TRAIN_TRIAL_WINDOW` | `train_trial_window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` is measured (positive integer; invalid or unset values default to 60). See `--train-trial-window`. | `60` |
+| `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW` | `max_comment_cycles_per_window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083). See `--max-comment-cycles-per-window`. | `10` |
+| `FABRIK_COMMENT_CYCLE_WINDOW` | `comment_cycle_window` | Comment-processing circuit breaker (#1089): rolling window in minutes over which `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW` is measured (positive integer; invalid or unset values default to 30). See `--comment-cycle-window`. | `30` |
 | `FABRIK_CONVERGENCE_BUDGET` | *(no config.yaml key)* | Wall-clock budget for post-Validate yolo PR convergence (Go duration syntax: `30m`, `1h`, `2h30m`; `0` disables; invalid values default to 30 min). When the budget expires and the PR has not merged, Fabrik pauses the issue with `fabrik:awaiting-input`. | `30m` |
 | `FABRIK_AUTO_MERGE_STRATEGY` | `auto_merge_strategy` | Merge method Fabrik attempts first — both when calling GitHub's `enablePullRequestAutoMerge` for yolo PRs and when merging a PR directly (e.g. merge-train landings). If the repository disallows the configured method, Fabrik falls back through the remaining allowed methods (logged) rather than failing. Accepted values: `MERGE`, `SQUASH`, `REBASE`. Invalid or unset values default to `MERGE`. | `MERGE` |
 | `FABRIK_CLAUDE_WAIT_DELAY` | *(no config.yaml key)* | Seconds to wait after Claude exits before recovering buffered output (non-negative integer; `0` or unset uses the default of 30; invalid values default to 30). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits. | `30` |
@@ -1222,7 +1235,7 @@ When the parent advances to Implement, the engine's `preImplement` step fires **
 
 If step 2's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
 
-After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude emits `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` and the parent moves directly to Done.
+After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
 
 #### What You Observe
 
@@ -1244,7 +1257,7 @@ There is no depth limit. A child issue's own Plan can emit spawn blocks, creatin
 
 #### Pure-Coordinator Pattern
 
-When the parent issue has no implementation work of its own (it exists only to coordinate children), the parent's Implement runs after children close, finds nothing to do, and emits both `FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED`. The engine then moves the parent directly to Done without creating a PR. No special configuration is needed — this composes naturally with the existing no-work-needed path.
+When the parent issue has no implementation work of its own (it exists only to coordinate children), the parent's Implement runs after children close, finds nothing to do, and completes normally (`FABRIK_STAGE_COMPLETE`) with no new commits. Rather than attempting a draft PR — which would fail, since there is nothing to diff against the base branch — the engine detects that the parent carries `fabrik:children-spawned` and has zero commits ahead of base, and treats this exactly like a `FABRIK_NO_WORK_NEEDED` completion: the parent moves directly to Done without a PR. No special configuration is needed, and Claude does not need to self-detect or emit any marker — this is a deterministic engine-side check, not a prompt-driven one. A parent that *does* have its own implementation work is unaffected: as long as its own commits land, the normal draft-PR path runs.
 
 #### Re-triggering a Fresh Spawn
 

@@ -173,7 +173,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			skillsStaleCount: skillsStaleCount,
 			customWorkflow:   customWorkflow,
 		},
-		alert:   AlertBannerComponent{now: now},
+		alert:    AlertBannerComponent{now: now},
 		active:   active,
 		history:  NewHistoryPaneComponent(info.Repo),
 		warnings: NewWarningsPaneComponent(),
@@ -674,6 +674,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case IssueBlockedEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		m.updateLayout(false)
+		return m, nil
+
+	case CommentBreakerTrippedEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
 		m.updateLayout(false)

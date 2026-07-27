@@ -70,7 +70,7 @@ func (e *Engine) settleMergeTrainMemberClose(item gh.ProjectItem) {
 	}
 
 	if c := e.cache(); c != nil {
-		c.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
+		c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}
 	e.logf(item.Number, "merge-train", "closed member issue #%d (retry)\n", item.Number)
 	e.clearMergeTrainMemberCloseMarker(item, owner, repo)

@@ -19,13 +19,31 @@ import (
 // configured stage's retry count.
 const noWorkNeededRetryStage = "__no_work_needed__"
 
+// noWorkNeededSkipComment returns the "skipped: no work needed" comment body for
+// the decision that resolved through stage, the emitting stage. For an Implement
+// stage completing with the fabrik:children-spawned label and no commits ahead of
+// base (the empty-coordinator completion path — see commitsAheadOfBase in
+// item.go), FABRIK_NO_WORK_NEEDED was never actually emitted by Claude: the engine
+// inferred the same completion deterministically from zero commits. The comment
+// says so explicitly rather than claiming a marker was emitted when it wasn't —
+// a durable record that misdescribes its own mechanism erodes trust in it later
+// (see issue #921 review discussion). Every other case keeps the original,
+// marker-attributing wording.
+func noWorkNeededSkipComment(item gh.ProjectItem, stage *stages.Stage) string {
+	if stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
+		return "🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed — all work was delegated to spawned children and this issue has no commits of its own._"
+	}
+	return fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
+}
+
 // hasSkippedComment reports whether item already carries the "skipped: no work
-// needed" comment for stageName, so a retried settleNoWorkNeeded pass does not
-// re-post it.
-func hasSkippedComment(item gh.ProjectItem, stageName string) bool {
-	marker := fmt.Sprintf("FABRIK_NO_WORK_NEEDED emitted by %s", stageName)
+// needed" comment for this decision, so a retried settleNoWorkNeeded pass does
+// not re-post it. Derives the expected text via noWorkNeededSkipComment so the
+// idempotency check tracks whichever wording settleNoWorkNeeded would compose now.
+func hasSkippedComment(item gh.ProjectItem, stage *stages.Stage) bool {
+	want := noWorkNeededSkipComment(item, stage)
 	for _, c := range item.Comments {
-		if strings.Contains(c.Body, marker) {
+		if strings.Contains(c.Body, want) {
 			return true
 		}
 	}
@@ -113,8 +131,8 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		// comment for this emitting stage already exists, assume the full comment set was
 		// already posted and don't re-post. Skip labels remain independently idempotent
 		// per-stage via hasLabel.
-		skippedComment := fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
-		alreadyPostedSkipComments := hasSkippedComment(item, stage.Name)
+		skippedComment := noWorkNeededSkipComment(item, stage)
+		alreadyPostedSkipComments := hasSkippedComment(item, stage)
 		for _, s := range e.cfg.Stages {
 			// Unmanaged stages get no bookkeeping here — a parking column an operator
 			// misordered between the emitting stage and Done (the same misplacement
@@ -169,7 +187,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			return
 		}
 		if c := e.cache(); c != nil {
-			c.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
+			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), "Done")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
@@ -187,7 +205,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			return
 		}
 		if c := e.cache(); c != nil {
-			c.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
+			c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 		e.logf(item.Number, "done", "closed issue (no work needed)\n")
 	}

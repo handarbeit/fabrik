@@ -137,6 +137,26 @@ func TestApplyPRReviewSubmitted(t *testing.T) {
 	}
 }
 
+// TestApplyPRReviewSubmittedDoesNotSetPRStateChanged is a regression guard: a
+// new PR review is not a PR *state* transition (merged/closed/draft<->ready),
+// so it must not set PRStateChanged — consumers keying off that narrower flag
+// (e.g. the comment-processing circuit breaker's PR-state reset trigger,
+// #1089) would otherwise reset on every review, defeating their purpose.
+func TestApplyPRReviewSubmittedDoesNotSetPRStateChanged(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	rev := gh.PRReview{Author: "bob", State: "APPROVED"}
+	_, changes, err := s.Apply(PRReviewSubmitted{Repo: testRepo, Number: 1, Review: rev})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatal("expected a Change")
+	}
+	if changes[0].Fields&PRStateChanged != 0 {
+		t.Errorf("Fields %b unexpectedly includes PRStateChanged", changes[0].Fields)
+	}
+}
+
 // ---- PRReviewCommentCreated ----
 
 func TestApplyPRReviewCommentCreated(t *testing.T) {
@@ -146,6 +166,25 @@ func TestApplyPRReviewCommentCreated(t *testing.T) {
 	st := getItem(t, s, testRepo, 1)
 	if st.LinkedPR == nil || len(st.LinkedPR.ThreadComments) == 0 {
 		t.Fatal("LinkedPR.ThreadComments not set")
+	}
+}
+
+// TestApplyPRReviewCommentCreatedDoesNotSetPRStateChanged mirrors
+// TestApplyPRReviewSubmittedDoesNotSetPRStateChanged for inline review
+// comments — the exact event that fed the false-trip-defeating bug this
+// guards against (caught during PR review of #1089).
+func TestApplyPRReviewCommentCreatedDoesNotSetPRStateChanged(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	c := gh.Comment{ID: "rc2", Body: "nit"}
+	_, changes, err := s.Apply(PRReviewCommentCreated{Repo: testRepo, PRNumber: 1, Comment: c})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatal("expected a Change")
+	}
+	if changes[0].Fields&PRStateChanged != 0 {
+		t.Errorf("Fields %b unexpectedly includes PRStateChanged", changes[0].Fields)
 	}
 }
 
@@ -975,6 +1014,127 @@ func TestProbeBoardItemUpdatedNoChangeFlagsWhenSame(t *testing.T) {
 		if c.Fields&(StateChanged|StatusChanged|LabelsChanged) != 0 {
 			t.Errorf("unexpected change flags %b when probe matches existing state", c.Fields)
 		}
+	}
+}
+
+// ---- CommentBreakerInvocationRecorded / CommentBreakerReset (#1089) ----
+
+func TestApplyCommentBreakerInvocationRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	t1 := time.Unix(1000, 0)
+	applyExpect(t, s, CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: t1, Author: "alice"}, CommentBreakerChanged)
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 1 || !st.CommentBreaker.InvocationsAt[0].Equal(t1) {
+		t.Fatalf("InvocationsAt = %v, want [%v]", st.CommentBreaker.InvocationsAt, t1)
+	}
+	if st.CommentBreaker.LastAuthor != "alice" {
+		t.Errorf("LastAuthor = %q, want %q", st.CommentBreaker.LastAuthor, "alice")
+	}
+
+	// A second invocation appends and updates LastAuthor.
+	t2 := time.Unix(2000, 0)
+	applyExpect(t, s, CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: t2, Author: "some-bot"}, CommentBreakerChanged)
+	st = getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 2 {
+		t.Fatalf("InvocationsAt len = %d, want 2", len(st.CommentBreaker.InvocationsAt))
+	}
+	if st.CommentBreaker.LastAuthor != "some-bot" {
+		t.Errorf("LastAuthor = %q, want %q", st.CommentBreaker.LastAuthor, "some-bot")
+	}
+}
+
+// TestApplyCommentBreakerInvocationRecordedPrunesBeforeCutoff verifies that a
+// non-zero Cutoff drops any InvocationsAt entries older than it before
+// appending the new one — bounding growth for an issue that receives
+// invocations sparser than the configured window (caught during PR review of
+// #1089: without this, InvocationsAt grew without bound for such issues).
+func TestApplyCommentBreakerInvocationRecordedPrunesBeforeCutoff(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	old1 := time.Unix(1000, 0)
+	old2 := time.Unix(1100, 0)
+	fresh := time.Unix(5000, 0)
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: old1, Author: "alice"})
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: old2, Author: "bob"})
+
+	// Cutoff excludes old1/old2 but not fresh itself.
+	cutoff := time.Unix(4000, 0)
+	applyExpect(t, s, CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: fresh, Author: "carol", Cutoff: cutoff}, CommentBreakerChanged)
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 1 || !st.CommentBreaker.InvocationsAt[0].Equal(fresh) {
+		t.Fatalf("InvocationsAt = %v, want [%v] (stale entries pruned by Cutoff)", st.CommentBreaker.InvocationsAt, fresh)
+	}
+}
+
+// TestApplyCommentBreakerInvocationRecordedZeroCutoffNoPrune verifies that a
+// zero Cutoff (the default) performs no pruning, preserving the existing
+// append-only behavior for callers that don't opt in.
+func TestApplyCommentBreakerInvocationRecordedZeroCutoffNoPrune(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	old := time.Unix(1000, 0)
+	fresh := time.Unix(5000, 0)
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: old, Author: "alice"})
+
+	applyExpect(t, s, CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: fresh, Author: "bob"}, CommentBreakerChanged)
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 2 {
+		t.Fatalf("InvocationsAt len = %d, want 2 (zero Cutoff must not prune)", len(st.CommentBreaker.InvocationsAt))
+	}
+}
+
+func TestApplyCommentBreakerReset(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: time.Unix(1000, 0), Author: "alice"})
+
+	applyExpect(t, s, CommentBreakerReset{Repo: testRepo, Number: 1}, CommentBreakerChanged)
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.CommentBreaker.InvocationsAt) != 0 {
+		t.Errorf("InvocationsAt = %v, want empty after reset", st.CommentBreaker.InvocationsAt)
+	}
+	if st.CommentBreaker.LastAuthor != "" {
+		t.Errorf("LastAuthor = %q, want empty after reset", st.CommentBreaker.LastAuthor)
+	}
+}
+
+// TestApplyCommentBreakerResetNoOpOnEmpty verifies that resetting an
+// already-empty breaker produces no Change (invariant I6: no-op mutations
+// don't notify observers).
+func TestApplyCommentBreakerResetNoOpOnEmpty(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	_, changes, err := s.Apply(CommentBreakerReset{Repo: testRepo, Number: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(CommentBreakerReset) on already-empty breaker: got %d changes, want 0 (no-op)", len(changes))
+	}
+}
+
+func TestCommentBreakerSnapshotAccessors(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Unix(1234, 0)
+	s.Apply(CommentBreakerInvocationRecorded{Repo: testRepo, Number: 1, At: at, Author: "bob"})
+
+	snap, err := s.Get(testRepo, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	invocations := snap.CommentBreakerInvocationsAt()
+	if len(invocations) != 1 || !invocations[0].Equal(at) {
+		t.Errorf("CommentBreakerInvocationsAt() = %v, want [%v]", invocations, at)
+	}
+	if got := snap.CommentBreakerLastAuthor(); got != "bob" {
+		t.Errorf("CommentBreakerLastAuthor() = %q, want %q", got, "bob")
+	}
+
+	// Mutating the returned slice must not affect the Store's internal state.
+	invocations[0] = time.Unix(9999, 0)
+	again := snap.CommentBreakerInvocationsAt()
+	if !again[0].Equal(at) {
+		t.Errorf("CommentBreakerInvocationsAt() leaked mutation: got %v, want %v", again[0], at)
 	}
 }
 

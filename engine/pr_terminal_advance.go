@@ -159,6 +159,7 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 			if aerr := e.advanceToNextStage(board, item, stage); aerr != nil {
 				e.logf(item.Number, "warn", "pr-terminal: could not advance to Done: %v\n", aerr)
 			}
+			e.closeIssueIfNonDefaultBase(item, pr.Number)
 			advancedItems[iKey] = true
 			continue
 		}

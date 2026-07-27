@@ -277,6 +277,11 @@ func (e *Engine) Run() error {
 		}
 		unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
 
+		// CommentBreakerObserver resets the comment-processing circuit breaker on
+		// linked-PR state changes (#1089).
+		cbObs := &CommentBreakerObserver{Store: e.store}
+		unsubs = append(unsubs, e.store.Subscribe(cbObs))
+
 		if cacheImpl != nil {
 			// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
 			// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
@@ -675,7 +680,7 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 		} else {
 			e.logf(num, "poll", "removed stale lock label from closed issue\n")
 			if c := e.cache(); c != nil {
-				c.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lockLabel)
 			}
 		}
 	}

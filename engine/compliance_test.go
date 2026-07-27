@@ -11,7 +11,8 @@ package engine
 //
 // A body argument is compliant if and only if:
 //   - It is a call to formatOutputComment, formatPRSummaryComment,
-//     formatReviewFeedbackComment, or buildAwaitingInputComment, OR
+//     formatReviewFeedbackComment, buildAwaitingInputComment, buildBlockedComment,
+//     or noWorkNeededSkipComment, OR
 //   - It is a string literal whose value starts with "🏭 **Fabrik", OR
 //   - It is a local variable where any assignment in the same function scope
 //     is compliant (i.e. a fmt.Sprintf whose format string starts with
@@ -221,7 +222,7 @@ func isCompliantRHS(expr ast.Expr) bool {
 func isCompliantCallExpr(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment" || fn.Name == "buildAwaitingInputComment" || fn.Name == "buildBlockedComment"
+		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment" || fn.Name == "buildAwaitingInputComment" || fn.Name == "buildBlockedComment" || fn.Name == "noWorkNeededSkipComment"
 	case *ast.SelectorExpr:
 		// fmt.Sprintf("🏭 **Fabrik...", ...) — the first arg may be a plain literal
 		// or a binary string concatenation expression ("..." + "...").

@@ -164,6 +164,22 @@ type RateLimitAlertEvent struct {
 
 func (RateLimitAlertEvent) tuiEvent() {}
 
+// CommentBreakerTrippedEvent is emitted when the comment-processing circuit
+// breaker trips: the same issue underwent InvocationCount comment-processing
+// invocations within Window with no forward progress (#1089). This is a
+// defense-in-depth backstop of last resort — see incident #1083.
+type CommentBreakerTrippedEvent struct {
+	IssueNumber       int
+	Repo              string // "owner/repo" — empty for single-repo projects
+	Title             string
+	StageName         string
+	InvocationCount   int
+	Window            time.Duration
+	LastCommentAuthor string
+}
+
+func (CommentBreakerTrippedEvent) tuiEvent() {}
+
 // StopRequest is sent by the TUI on the stopCh channel to ask the engine to
 // cancel a specific in-flight issue and apply fabrik:paused.
 type StopRequest struct {

@@ -1,7 +1,7 @@
 # ADR 016: Use GraphQL `blockedBy` State for Cross-Repo Dependency Resolution
 
 **Date**: 2026-04-07  
-**Status**: Accepted
+**Status**: Accepted. Superseded in part by [ADR 957](957-live-reread-at-decision-point-for-cache-staleness.md) — the "purely in-memory, no API calls" consequence below no longer holds unconditionally. #977 (2026-07-13) proved that removing a `blockedBy` dependency via the REST dependencies API does not bump the blocked issue's `updatedAt`, so the GraphQL-sourced `item.BlockedBy` this ADR relies on can go stale indefinitely on the already-blocked recheck path. `checkDependencies` now performs a cache-bypassing live re-read (`e.client.FetchItemDetails`) specifically on that recheck path — see ADR 957 for the pattern and `docs/cache-refactor/05-webhook-correctness-audit.md` for the full classification. This ADR's original decision (source `blockedBy` via GraphQL rather than per-gate REST calls) still stands for the first-time-block case, which is unaffected.
 
 ## Context
 
@@ -46,6 +46,6 @@ If REST calls were used, caching the result per poll cycle would reduce repeated
 
 ## Consequences
 
-- `checkDependencies` is purely in-memory — it reads `item.BlockedBy` (populated by the board fetch) and does not make any API calls for state resolution.
+- `checkDependencies` is purely in-memory — it reads `item.BlockedBy` (populated by the board fetch) and does not make any API calls for state resolution. **Update (2026-07-26, ADR 957):** this no longer holds unconditionally. On the already-`fabrik:blocked` recheck path, `checkDependencies` now makes one cache-bypassing `FetchItemDetails` call via the raw `GitHubClient` before evaluating open dependencies, to guard against the `updatedAt`-freshness trap #977 exposed. First-time blocking (no prior `fabrik:blocked` label) is unaffected — that path remains purely in-memory as originally decided here.
 - Label mutations (`AddLabelToIssue`, `RemoveLabelFromIssue`) and comment posting (`AddComment`) are still made by `checkDependencies`, but these are write operations for status tracking, not reads for state resolution.
 - `FetchIssue` remains in `github/issues.go` but is not added to the `GitHubClient` interface. It can be added later if a use case requires fresh REST-based state verification.

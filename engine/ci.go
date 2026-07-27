@@ -219,7 +219,7 @@ func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.Project
 		e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
 		return // preserve fabrik:awaiting-ci so the next poll retries
 	} else if c := e.cache(); c != nil {
-		c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 	}
 	if stage.Name == "Validate" {
 		repoStr := owner + "/" + repo

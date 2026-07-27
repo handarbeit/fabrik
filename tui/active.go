@@ -64,6 +64,20 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			WaitingFor:  ev.WaitingFor,
 		}
 
+	case CommentBreakerTrippedEvent:
+		key := activeJobKey(ev.Repo, ev.IssueNumber)
+		delete(a.active, key)
+		if a.activeNumToKey[ev.IssueNumber] == key {
+			delete(a.activeNumToKey, ev.IssueNumber)
+		}
+		a.blocked[key] = &blockedIssue{
+			IssueNumber: ev.IssueNumber,
+			Repo:        ev.Repo,
+			Title:       ev.Title,
+			StageName:   ev.StageName,
+			WaitingFor:  []string{"comment-processing circuit breaker tripped"},
+		}
+
 	case JobCompletedEvent:
 		key := activeJobKey(ev.Repo, ev.IssueNumber)
 		delete(a.active, key)

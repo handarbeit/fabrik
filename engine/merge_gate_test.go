@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,48 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+// testEngineForMergeWithRealWM is like testEngineForMerge but registers a real
+// git-backed WorktreeManager at "owner/repo" (default branch "main", with a
+// "develop" branch present on origin) instead of the placeholder non-git one,
+// so baseBranchForItem/DefaultBaseBranch resolve against real git state —
+// required to exercise closeIssueIfNonDefaultBase's base:<branch> resolution.
+func testEngineForMergeWithRealWM(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
+	skipIfNoGit(t)
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+
+	shaCmd := exec.Command("git", "rev-parse", "HEAD")
+	shaCmd.Dir = wm.baseDir
+	shaOut, err := shaCmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", strings.TrimSpace(string(shaOut)))
+
+	stgs := testStagesWithValidate()
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+	return eng
+}
 
 func TestCheckMergeabilityGate_WaitForCIFalse_ClearsImmediately(t *testing.T) {
 	client := &mockGitHubClient{}
@@ -290,6 +333,99 @@ func TestCheckAutoMergeConvergence_PRMerged_RemovesLabelAndAdvances(t *testing.T
 	client.mu.Unlock()
 	if advanceCalls == 0 {
 		t.Error("expected UpdateProjectItemStatus to be called to advance to Done when PR merges")
+	}
+}
+
+// TestCheckAutoMergeConvergence_NonDefaultBase_ClosesIssue verifies the #1096
+// non-train-yolo explicit close: a merged PR whose item carries a base:develop
+// label (default branch main) must trigger CloseIssue via
+// advanceConvergedPRToDone's terminal-first guard, since GitHub's Closes #N
+// auto-close is inert for a non-default-base merge.
+func TestCheckAutoMergeConvergence_NonDefaultBase_ClosesIssue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "closed", Merged: true, AutoMergeEnabled: true}, nil
+		},
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	eng := testEngineForMergeWithRealWM(t, client)
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled", "base:develop"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeTerminal, PR: &gh.PRDetails{Number: 10, Merged: true}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
+
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected CloseIssue to be called once for a non-default-base merge, got %v", client.closeIssueCalls)
+	}
+	c := client.closeIssueCalls[0]
+	if c.owner != "owner" || c.repo != "repo" || c.issueNumber != 42 {
+		t.Errorf("unexpected CloseIssue args: %+v", c)
+	}
+}
+
+// TestCheckAutoMergeConvergence_DefaultBase_DoesNotCloseIssue verifies the
+// no-double-close guard on the non-train-yolo path: a merged PR whose item
+// carries no base: label (so its resolved base equals the repo default) must
+// NOT trigger an explicit CloseIssue.
+func TestCheckAutoMergeConvergence_DefaultBase_DoesNotCloseIssue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "closed", Merged: true, AutoMergeEnabled: true}, nil
+		},
+		closeIssueFn: func(owner, repo string, n int) error {
+			t.Fatalf("CloseIssue should not be called when base == default")
+			return nil
+		},
+	}
+	eng := testEngineForMergeWithRealWM(t, client)
+	item := gh.ProjectItem{Number: 43, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeTerminal, PR: &gh.PRDetails{Number: 10, Merged: true}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
+
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected no CloseIssue call when base == default, got %v", client.closeIssueCalls)
+	}
+}
+
+// TestCheckAutoMergeConvergence_ClosedWithoutMerging_DoesNotCloseIssue is a
+// regression test for the merged-vs-closed-without-merging distinction: the
+// terminal-first branch (settle.Status == PRMergeTerminal || pr.Merged ||
+// pr.State == "closed") also fires for a PR that was closed WITHOUT merging —
+// it still advances the item to Done, but must never explicitly close the
+// issue, even when base != default. Only a confirmed merge may trigger the
+// explicit close.
+func TestCheckAutoMergeConvergence_ClosedWithoutMerging_DoesNotCloseIssue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "closed", Merged: false, AutoMergeEnabled: true}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			return false, nil
+		},
+		closeIssueFn: func(owner, repo string, n int) error {
+			t.Fatalf("CloseIssue should not be called for a PR closed without merging")
+			return nil
+		},
+	}
+	eng := testEngineForMergeWithRealWM(t, client)
+	item := gh.ProjectItem{Number: 44, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled", "base:develop"}}
+	stage := &stages.Stage{Name: "Validate"}
+	// settle.Status == PRMergeTerminal with settle.PR.Merged == false mirrors
+	// settlePRMergeState's "closed without merging" return (pr_settle.go:88).
+	settle := PRSettleResult{Status: PRMergeTerminal, PR: &gh.PRDetails{Number: 10, Merged: false}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
+
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected no CloseIssue call for a PR closed without merging, got %v", client.closeIssueCalls)
+	}
+	// The item must still advance to Done — this issue's scope is only the
+	// explicit close, not this terminal branch's existing advance behavior.
+	if len(client.updateStatusCalls) == 0 {
+		t.Error("expected UpdateProjectItemStatus to still be called (advance to Done) for a closed-without-merging PR")
 	}
 }
 

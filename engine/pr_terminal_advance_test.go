@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"os/exec"
+	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -423,5 +425,111 @@ func TestValidatePRTerminalAdvance_NonValidateSkipped(t *testing.T) {
 
 	if len(client.updateStatusCalls) > 0 {
 		t.Error("expected no status update for non-Validate item")
+	}
+}
+
+// testEngineWithStagesAndRealWM is like testEngineWithStages but registers a
+// real git-backed WorktreeManager at "owner/repo" (default branch "main")
+// instead of the placeholder non-git one, so baseBranchForItem/DefaultBaseBranch
+// resolve against real git state — required to exercise
+// closeIssueIfNonDefaultBase's base:<branch> resolution.
+func testEngineWithStagesAndRealWM(t *testing.T, client *mockGitHubClient, stgs []*stages.Stage) *Engine {
+	t.Helper()
+	skipIfNoGit(t)
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+
+	shaCmd := exec.Command("git", "rev-parse", "HEAD")
+	shaCmd.Dir = wm.baseDir
+	shaOut, err := shaCmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", strings.TrimSpace(string(shaOut)))
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+	return eng
+}
+
+// TestValidatePRTerminalAdvance_NonDefaultBase_ClosesIssue verifies the #1096
+// cruise-path explicit close: a merged PR whose item carries a base:develop
+// label (default branch main) must trigger CloseIssue, since GitHub's
+// Closes #N auto-close is inert for a non-default-base merge.
+func TestValidatePRTerminalAdvance_NonDefaultBase_ClosesIssue(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	eng := testEngineWithStagesAndRealWM(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 42,
+		ItemID: "PVTI_42",
+		Repo:   "owner/repo",
+		Status: "Validate",
+		Labels: []string{"stage:Implement:complete", "base:develop"},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected CloseIssue to be called once for a non-default-base merge, got %v", client.closeIssueCalls)
+	}
+	c := client.closeIssueCalls[0]
+	if c.owner != "owner" || c.repo != "repo" || c.issueNumber != 42 {
+		t.Errorf("unexpected CloseIssue args: %+v", c)
+	}
+}
+
+// TestValidatePRTerminalAdvance_DefaultBase_DoesNotCloseIssue verifies the
+// no-double-close guard: a merged PR whose item carries no base: label (so its
+// resolved base equals the repo default) must NOT trigger an explicit
+// CloseIssue — GitHub's own Closes #N auto-close already handles that case.
+func TestValidatePRTerminalAdvance_DefaultBase_DoesNotCloseIssue(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 11, Merged: true, State: "closed"}, nil
+		},
+		closeIssueFn: func(owner, repo string, n int) error {
+			t.Fatalf("CloseIssue should not be called when base == default")
+			return nil
+		},
+	}
+	eng := testEngineWithStagesAndRealWM(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 43,
+		ItemID: "PVTI_43",
+		Repo:   "owner/repo",
+		Status: "Validate",
+		Labels: []string{"stage:Implement:complete"},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected no CloseIssue call when base == default, got %v", client.closeIssueCalls)
 	}
 }
