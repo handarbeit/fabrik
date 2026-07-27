@@ -119,6 +119,17 @@ on every `--resume` retry), and the new state is bookkeeping alongside — not i
 retry-count/cooldown logic. `docs/stage-lifecycle.md` now cross-references this section from the
 "Retry after a turn-cap kill" discussion to keep both readable together.
 
+### Why does `runInvocationWithExtension` check the usage-limit suspension gate before consuming the hint?
+
+`consumeStallHint` destructively clears `StallHintPending` as soon as it runs, regardless of whether
+the resulting `InvokeOptions` are ever actually used to invoke Claude. The account-wide usage-limit
+suspension gate (ADR-1119/#1120) can cause a dispatch to skip invoking Claude entirely. An earlier
+version of this change built `InvokeOptions` (and thus consumed the hint) before checking that gate —
+a dispatch landing while suspended would silently discard an armed corrective hint without it ever
+reaching a real invocation, defeating the one-shot re-invocation for that stall episode with no
+observable symptom other than the fix quietly not working. The suspension check now runs first, so a
+gated dispatch leaves the hint pending for whichever dispatch actually reaches Claude next.
+
 ### Why is the hint text generic rather than backgrounding-specific with certainty?
 
 A legitimately-progressing multi-retry stage (e.g., a Review resolving threads one at a time) can show
