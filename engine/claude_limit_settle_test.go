@@ -134,7 +134,7 @@ func TestSettleClaudeLimitLabelSweep_RemovesWhenNotSuspended(t *testing.T) {
 func TestSettleClaudeLimitLabelSweep_LeavesLabelWhileSuspended(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.activateClaudeSuspension(1, "", time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC))
+	eng.activateClaudeSuspension(1, "", time.Now())
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
