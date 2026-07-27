@@ -42,8 +42,8 @@ kill" section — no standalone `adrs/1081-*.md` exists).
 Implement signal (b) only — the trend-based detection — and defer signal (a) as an explicit follow-up.
 
 **Detection (`detectAndArmStallHint`, `engine/item.go`).** Runs inside the existing incomplete-outcome
-branch of `finalizeStageOutcome`, immediately before `StageRetryIncremented` is applied, whenever
-`claudeRan` is true:
+branch of `finalizeStageOutcome`, after `StageRetryIncremented` and the `count >= MaxRetries` escalation
+decision, whenever `claudeRan` is true **and this attempt is not the one that triggers escalation**:
 
 1. Read the previous incomplete attempt's `TurnsUsed` and capped status for this stage from the store.
 2. Compute this attempt's own capped status (`usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns`)
@@ -136,6 +136,19 @@ a dispatch landing while suspended would silently discard an armed corrective hi
 reaching a real invocation, defeating the one-shot re-invocation for that stall episode with no
 observable symptom other than the fix quietly not working. The suspension check now runs first, so a
 gated dispatch leaves the hint pending for whichever dispatch actually reaches Claude next.
+
+### Why is arming skipped on the attempt that triggers escalation?
+
+`detectAndArmStallHint`'s comment tells the operator "the next invocation will receive a corrective
+hint." If the capped-then-declining pattern is detected on the very attempt whose `count` also reaches
+`MaxRetries`, `escalateFailedStage` pauses the issue immediately afterward, and a human's later
+`clearFailedStage()` applies `StageRetryCleared` — which wipes `StallHintPending` before any further
+invocation happens. The promised hint would never be delivered, and the comment would be actively
+misleading about what already happened. `finalizeStageOutcome` now decides `willEscalate` (via
+`StageRetryIncremented` and the `count >= MaxRetries` check) before calling `detectAndArmStallHint`, and
+skips the call entirely when `willEscalate` is true — an earlier version of this change called
+`detectAndArmStallHint` unconditionally on `claudeRan`, before the escalation decision existed, which is
+exactly the ordering that produced this bug.
 
 ### Why is the hint text generic rather than backgrounding-specific with certainty?
 

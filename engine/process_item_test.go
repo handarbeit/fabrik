@@ -2008,3 +2008,81 @@ func TestProcessItem_StallDetection_ArmsUnderUnlimitedRetries(t *testing.T) {
 		}
 	}
 }
+
+// TestProcessItem_StallDetection_SkipsArmingOnEscalatingAttempt is a regression
+// guard for a bug found in review: detectAndArmStallHint used to run before the
+// count >= MaxRetries escalation check, so a capped-then-declining pattern that
+// lands exactly on the attempt exhausting MaxRetries would arm a hint and post a
+// comment promising "the next invocation will receive a corrective hint" — but the
+// issue is paused immediately after, and a human's later clearFailedStage() applies
+// StageRetryCleared, which wipes the pending hint before any further invocation
+// happens. The promise would never be kept. Arming must be skipped when this
+// attempt is the one that triggers escalation.
+func TestProcessItem_StallDetection_SkipsArmingOnEscalatingAttempt(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12} // capped, then declining — and also the final retry
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 2, // attempt 2 (the declining one) is also the escalating attempt
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 25, Title: "Escalating attempt stall test", Status: "Research", ItemID: "PVTI_25"}
+
+	for i := 0; i < 2; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 2 {
+		t.Fatalf("expected 2 Claude invocations, got %d", len(claude.calls))
+	}
+
+	escalated := false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			escalated = true
+		}
+	}
+	if !escalated {
+		t.Fatal("precondition failed: expected escalation (fabrik:paused) on the 2nd attempt")
+	}
+
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("must not post a stall-detected comment promising a next invocation when this attempt is the one being escalated")
+		}
+	}
+
+	snap, err := eng.store.Get("owner/repo", 25)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("must not arm a corrective hint on the attempt that triggers escalation — it will never be delivered")
+	}
+}
