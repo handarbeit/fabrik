@@ -5,7 +5,7 @@ import (
 )
 
 // requiredContextsForRepo returns the configured required status/check-run
-// context names for owner/repo (ADR-075), or nil if none are configured —
+// context names for owner/repo (ADR-933), or nil if none are configured —
 // nil means gh.ClassifyRequiredContexts is a no-op, preserving today's
 // permissive behavior for the common vanilla-GHA case.
 func (e *Engine) requiredContextsForRepo(owner, repo string) []string {

@@ -45,7 +45,7 @@ type PRSettleResult struct {
 	CheckRuns      []gh.CheckRun
 	PR             *gh.PRDetails
 
-	// RequiredContextsStatus, RequiredMissing/Pending/Failed (ADR-075): the
+	// RequiredContextsStatus, RequiredMissing/Pending/Failed (ADR-933): the
 	// required-context classification observed for this settle pass. The
 	// zero value (RequiredContextsSatisfied) is correct whenever
 	// required_status_contexts isn't configured for the repo, or wasn't
@@ -163,7 +163,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 	}
 
 	if len(checkRuns) == 0 {
-		// ADR-075: a confirmed required-context failure must block regardless
+		// ADR-933: a confirmed required-context failure must block regardless
 		// of hadChecks/dwell/mergeable_state — those all exist to wait out
 		// transient GitHub propagation delays for check-run-based CI, but a
 		// classic commit status (the local-CI-takeover case #933 was filed
@@ -219,7 +219,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 			return PRSettleResult{Status: PRMergeUnsettled, Reason: fmt.Sprintf("no check runs, mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
 		}
 
-		// ADR-075: before declaring "no CI configured" ready, confirm any
+		// ADR-933: before declaring "no CI configured" ready, confirm any
 		// configured required context actually reported success on this exact
 		// head SHA — the local-CI-takeover case (#933) has zero check runs but
 		// a required classic commit status that must still be checked.
@@ -241,7 +241,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 	case gh.CheckRunsPending:
 		return PRSettleResult{Status: PRMergeUnsettled, Reason: "CI checks pending", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 	default:
-		// ADR-075: the present check runs alone read as "ready" — but that must
+		// ADR-933: the present check runs alone read as "ready" — but that must
 		// not short-circuit a configured required context that skipped/neutraled
 		// out, or one whose only producer is a classic commit status not covered
 		// by check runs at all (the local-CI-takeover case #933 was filed for).
@@ -253,7 +253,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 }
 
 // requiredContextsSettleResult builds the PRSettleResult for a non-satisfied
-// required-context classification (ADR-075): a confirmed failure blocks with
+// required-context classification (ADR-933): a confirmed failure blocks with
 // PRMergeBlocked (mirrors a failed check run); a missing/pending/skipped/
 // neutral required context blocks with PRMergeUnsettled (nothing has
 // regressed — it just hasn't confirmed success yet, so no CI-fix reinvoke

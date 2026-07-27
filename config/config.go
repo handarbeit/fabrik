@@ -47,7 +47,7 @@ type ProjectConfig struct {
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no
-	// behavior change (ADR-075). Checked against the union of check-run names
+	// behavior change (ADR-933). Checked against the union of check-run names
 	// and classic commit-status contexts observed on the head SHA.
 	RequiredStatusContexts map[string][]string `yaml:"required_status_contexts"`
 }

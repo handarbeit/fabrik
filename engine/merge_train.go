@@ -1724,7 +1724,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				return TrainCIRed
 			}
 			if status == gh.CheckRunsReady {
-				// ADR-075: don't declare the trial green until any configured
+				// ADR-933: don't declare the trial green until any configured
 				// required context has confirmed success on this exact trial
 				// SHA — mirrors settlePRMergeState's guard in pr_settle.go. A
 				// required context that's merely missing/pending falls through
@@ -1739,7 +1739,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				}
 			}
 		} else {
-			// ADR-075: zero check runs at all (e.g. GitHub Actions disabled —
+			// ADR-933: zero check runs at all (e.g. GitHub Actions disabled —
 			// the local-CI-takeover case #933 was filed for) must still be
 			// checked against configured required contexts, mirroring
 			// settlePRMergeState's zero-check-runs branch (pr_settle.go rule

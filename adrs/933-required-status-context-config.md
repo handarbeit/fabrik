@@ -1,4 +1,4 @@
-# ADR 075: Required-Status-Context Awareness via Explicit Per-Repo Config
+# ADR 933: Required-Status-Context Awareness via Explicit Per-Repo Config
 
 **Date**: 2026-07-26
 **Status**: Accepted

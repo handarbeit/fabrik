@@ -79,7 +79,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false
 	}
 
-	// ADR-075: a confirmed required-context failure takes precedence over
+	// ADR-933: a confirmed required-context failure takes precedence over
 	// check-run/mergeable_state classification below — it can be driven
 	// solely by a classic commit status with no corresponding check run,
 	// which classifyCIFromCheckRuns' checkRuns-only view can never see.
@@ -163,7 +163,7 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 }
 
 // classifyCIFromRequiredContexts classifies the CI gate when a configured
-// required status context (ADR-075) has a confirmed failure on settle's head
+// required status context (ADR-933) has a confirmed failure on settle's head
 // SHA. This can be driven solely by a classic commit status with no
 // corresponding check run — a signal classifyCIFromCheckRuns' checkRuns-only
 // view never sees — so it must be checked ahead of (not folded into) that
@@ -338,7 +338,7 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 		}
 		sb.WriteString("\n")
 	} else if settle.RequiredContextsStatus == gh.RequiredContextsFailed && len(settle.RequiredFailed) > 0 {
-		// ADR-075: the failure may have no check-run footprint at all — its
+		// ADR-933: the failure may have no check-run footprint at all — its
 		// only producer can be a classic commit status (the local-CI-takeover
 		// case #933 was filed for). Naming it here, instead of the generic
 		// "check GitHub Actions" fallback below, points the reinvoked stage
