@@ -12,6 +12,9 @@ name: Route community issues to triage board
 # Requires a repo secret ADD_TO_PROJECT_PAT: a PAT with `project` (write) scope
 # for the handarbeit org — the default GITHUB_TOKEN cannot write org-level
 # Projects. Without the secret the job fails loudly (it never silently no-ops).
+# It also needs `read:org` scope for the membership-confirmation step below
+# (#1137), and its owning account must itself be a member of the org — without
+# either, that step fails closed on every NONE-association author.
 #
 # author_association alone is NOT sufficient to detect maintainers (#1137).
 # It reflects visible affiliation only: a maintainer whose org membership is
