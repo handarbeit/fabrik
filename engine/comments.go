@@ -73,6 +73,16 @@ var botServiceNoticePatterns = []string{
 	"rate limited by coderabbit.ai", // structural: HTML comment marker, not user-facing prose
 	"## review limit reached",       // markdown heading form used in the actual banner
 	"you've reached your pr review limit, so we couldn't start this review",
+	// Structural marker on CodeRabbit's auto-generated acknowledgement replies
+	// (e.g. "`@user`, acknowledged. No action taken.") — content-free replies
+	// to a prior comment, not review findings. Distinct marker/trigger from
+	// the rate-limit notice above (#1122, closed): this is CodeRabbit
+	// acknowledging it has nothing to add, not CodeRabbit declining to review
+	// due to quota. Admitting these spawned a comment-processing worker whose
+	// "not actionable" reply re-mentioned the bot, re-triggering another
+	// acknowledgement — a runaway loop distinct from #1083/#1088 ($7.75/39
+	// invocations observed on #933, #1141).
+	"auto-generated reply by coderabbit",
 }
 
 // isBotServiceNotice reports whether c is a non-actionable bot service/status

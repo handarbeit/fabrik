@@ -524,6 +524,29 @@ func TestIsBotServiceNotice(t *testing.T) {
 			want: false,
 		},
 		{
+			// #1141 / #933: CodeRabbit's structurally-marked auto-generated
+			// acknowledgement reply — content-free, and the trigger for the
+			// #933 mention-reply loop.
+			name: "coderabbit auto-generated reply: no action taken",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: coderabbitAutoReplyFixture("`@arbeithand`, acknowledged. No action taken.")},
+			want: true,
+		},
+		{
+			name: "coderabbit auto-generated reply: acknowledged, no action required",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: coderabbitAutoReplyFixture("`@arbeithand`, acknowledged—no action required.")},
+			want: true,
+		},
+		{
+			name: "coderabbit auto-generated reply: acknowledged. No action taken.",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: coderabbitAutoReplyFixture("`@arbeithand`, acknowledged. No action taken.")},
+			want: true,
+		},
+		{
+			name: "coderabbit auto-generated reply marker alone (no acknowledgement prose)",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: "<!-- This is an auto-generated reply by CodeRabbit -->"},
+			want: true,
+		},
+		{
 			name: "human comment discussing rate limiting is not a notice",
 			c: gh.Comment{Author: "humanuser", Body: "We should double check the review limit reached handling in the client — " +
 				"looks like it doesn't back off correctly when we've reached our rate limit."},
@@ -694,6 +717,17 @@ sequenceDiagram
 
 </details>
 `
+
+// coderabbitAutoReplyFixture reproduces the real structure of a CodeRabbit
+// auto-generated acknowledgement reply: the HTML comment marker, a "For best
+// results" tip, and the bot's acknowledgement prose (which varies by
+// phrasing — that's why the marker, not the prose, is the pattern matched).
+func coderabbitAutoReplyFixture(acknowledgement string) string {
+	return "<!-- This is an auto-generated reply by CodeRabbit -->\n" +
+		"> [!TIP]\n" +
+		"> For best results, initiate chat on the files or code changes.\n\n" +
+		acknowledgement
+}
 
 // TestFindNewComments_SkipsBotServiceNotice verifies the pre-admission filter
 // excludes a quota/rate-limit bot notice while still admitting a genuine bot
