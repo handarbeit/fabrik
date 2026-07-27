@@ -2328,7 +2328,16 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
   ```
   Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). Fabrik requires `gh` ≥ 2.32.0, enforced at startup with a clear error if the version is too old.
 - **`gh auth login`** with a token that has `admin:repo_hook` write scope (classic PAT) or equivalent repo admin access. Fine-grained tokens may lack this scope.
-- **`admin:org` scope** for org-level webhook subscription (see [Multi-Repo Boards](#multi-repo-boards)). If your token lacks this scope, Fabrik falls back to per-repo subscriptions automatically. To add it: `gh auth refresh -h github.com -s admin:org`. (`admin:org_hook` is a narrower alternative that grants only the webhook management permission.)
+- **`admin:org_hook` scope** for org-level webhook subscription (see [Multi-Repo Boards](#multi-repo-boards)). If your token lacks this scope, Fabrik falls back to per-repo subscriptions automatically. To add it: `gh auth refresh -h github.com -s admin:org_hook`.
+
+  > **`admin:org` is not sufficient.** The two scopes are independent — holding org-admin rights does not grant webhook management through the API. With `admin:org` but not `admin:org_hook`, org mode fails at startup with `org-level webhook failed (permission error)` and Fabrik falls back to per-repo. GitHub reports this explicitly if you probe it directly:
+  >
+  > ```
+  > $ gh api /orgs/<org>/hooks
+  > gh: This API operation needs the "admin:org_hook" scope.
+  > ```
+  >
+  > Repo-level hooks are unaffected — the `repo` scope already includes `admin:repo_hook`.
 - **Repo admin access** on each repository on your board, or org-admin access for org-level subscription.
 
 If any prerequisite is missing, Fabrik logs a clear warning and falls back to polling-only mode. Webhook mode failure is always non-fatal.
@@ -2439,7 +2448,20 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription. New repos in that org are covered automatically — when a new repo appears, the subprocess is briefly restarted, but the org-level subscription covers all repos in the org so no events are missed.
 2. Otherwise, Fabrik subscribes per-repo. When a new repo appears on the board, the subprocess is briefly restarted with the updated repo list (the safety-net poll covers any events missed during the restart).
 
-**Mixed-owner boards disable org mode entirely.** Org-level subscription requires every managed repo on the board to share the same owner. If your board spans two orgs or users (for example, during a repo migration), Fabrik silently falls back to per-repo webhooks for *all* repos — even if your token has admin access to both orgs. As noted above, per-repo webhooks never deliver `projects_v2_item` events, so board-column changes in this configuration are caught only by the Layer 2 status gate each poll cycle. To avoid this: migrate all repos to the target org simultaneously, or run two separate Fabrik instances (one per org) during the transition.
+**Mixed-owner boards disable org mode entirely.** Org-level subscription requires every managed repo on the board to share the same owner. If your board spans two orgs or users (for example, during a repo migration), Fabrik silently falls back to per-repo webhooks for *all* repos — even if your token has admin access to both orgs. Board-column changes are then caught only by the Layer 2 status gate each poll cycle. To avoid this: migrate all repos to the target org simultaneously, or run two separate Fabrik instances (one per org) during the transition.
+
+> **`projects_v2_item` is never delivered, in either mode.** `gh webhook forward` does not support that event type at all, so board-column changes are always caught by the Layer 2 status gate rather than by webhook — org mode does not change this. Fabrik logs the fact at startup:
+>
+> ```
+> [webhook] WARNING: projects_v2_item event not supported by gh webhook forward
+>           — board-column changes caught by safety-net poll only
+> ```
+>
+> Switching to org mode to get faster column updates will not work; the status gate is the only delivery path.
+
+> **Known limitation — one webhook session per GitHub account.** `gh webhook forward` appears to support only one active forwarding session per authenticated user, not one per repo. Running several Fabrik instances under the same GitHub identity therefore gives webhooks to only *one* of them; the rest must run with `webhooks: false` and rely on polling. This is observed behaviour — it is not documented upstream in `cli/gh-webhook` — so verify it against your own setup before designing around it.
+>
+> Related: Fabrik passes one `--repo=` flag per managed repo, but `gh webhook forward` declares `--repo` as a single value, so only the last one takes effect. On a multi-repo board without org mode, this means **only one repo is actually subscribed**, while the webhook stream still reports healthy. Check `.fabrik/fabrik.log` for `[webhook] event:` lines and confirm you see every repo you expect. Tracked in issue #1142.
 
 **Per-repo failure isolation.** When Fabrik is in per-repo subscription mode, auth-shaped quick exits (permission errors, missing `admin:repo_hook` scope, etc.) are conservatively attributed to all repos in the current subscription set. Each repo tracks its own consecutive failure count; a repo is quarantined for the session once it reaches the threshold (3 consecutive auth-shaped exits). Because failures are attributed across all repos, a single misconfigured repo will cause all repos to reach the threshold together over time. Quarantined repos fall back to the safety-net poll (same cadence as polling-only mode). To recover: fix the underlying issue (re-add token scopes, restore repo access) and restart Fabrik. The next startup re-attempts subscription for all repos, including any previously quarantined ones.
 
