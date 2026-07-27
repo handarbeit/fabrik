@@ -1074,6 +1074,27 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			return
 		}
 		e.logf(item.Number, "warn", "claude invocation issue: %v\n", err)
+
+		// A Claude usage-limit exit is not a stage failure — the stage never ran.
+		// Route to a dedicated handler that records StageAttempted (so the normal
+		// dispatch cooldown applies, preventing a tight retry loop against the
+		// limit) but never StageRetryIncremented, and never stage:<name>:failed
+		// or fabrik:paused. See claudeUsageLimitError in claude.go.
+		var limitErr *claudeUsageLimitError
+		if errors.As(err, &limitErr) {
+			e.handleUsageLimitExit(p, limitErr)
+			return
+		}
+	}
+
+	// Any invocation reaching this point actually ran Claude and was not itself
+	// classified as a usage-limit exit (success, blocked-on-input, no-work-needed,
+	// genuine failure/retry, and PR-creation failure alike) — clear the gate label
+	// if present. A subsequent genuine failure is still tracked independently via
+	// stage:<name>:failed/MaxRetries, so clearing here rather than only on success
+	// is safe and correctly signals "not currently limited."
+	if hasLabel(item.Labels, "fabrik:claude-limit") {
+		e.removeLabel(item, "fabrik:claude-limit")
 	}
 
 	// Capture git metadata for the comment header
@@ -2056,6 +2077,54 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 	})
 
 	releaseLock()
+}
+
+// handleUsageLimitExit is called by finalizeStageOutcome when a Claude
+// invocation exited because the account's usage limit was hit (see
+// claudeUsageLimitError in claude.go), not because the stage genuinely
+// failed. It mirrors handleBoundaryViolation's "StageAttempted without
+// StageRetryIncremented" split (ADR-1119): the invocation is recorded so the
+// normal dispatch cooldown applies (which is what prevents hammering the
+// limit in a tight retry loop), but nothing that implies a genuine failed
+// run happens — no commitWIP/push (nothing was produced), no
+// markCommentsSeenByStage, no StageRetryIncremented, no stage:<name>:failed,
+// no fabrik:paused. The explanatory comment and fabrik:claude-limit label
+// are applied only on the transition into the condition (label absent ->
+// applied); while the label remains set across repeated poll cycles, this
+// is a no-op, matching the non-spamming behavior of other gate labels such
+// as fabrik:awaiting-ci.
+func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsageLimitError) {
+	item := p.item
+	stage := p.stage
+	repoStr := p.repoStr
+
+	resetSuffix := ""
+	if limitErr.ResetTime != "" {
+		resetSuffix = fmt.Sprintf(" (resets %s)", limitErr.ResetTime)
+	}
+	e.logf(item.Number, "claude-limit", "stage %q did not run — Claude account usage limit hit%s\n", stage.Name, resetSuffix)
+
+	// Record StageAttempted so the normal dispatch cooldown applies — this is
+	// the fix for "don't simply set claudeRan=false", which would otherwise
+	// retry on the very next poll and hammer the limit in a tight loop.
+	// StageRetryIncremented is deliberately never called: the stage never ran.
+	e.store.Apply(itemstate.StageAttempted{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		At:        time.Now(),
+	})
+
+	if !hasLabel(item.Labels, "fabrik:claude-limit") {
+		comment := fmt.Sprintf(
+			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik will keep retrying on the normal poll cooldown; the `fabrik:claude-limit` label clears automatically once an invocation succeeds.",
+			stage.Name, resetSuffix,
+		)
+		e.postItemComment(item, comment, false)
+		e.addLabel(item, "fabrik:claude-limit")
+	}
+
+	p.release()
 }
 
 // handleStopRequest is called by the stop handler goroutine when the TUI sends a
