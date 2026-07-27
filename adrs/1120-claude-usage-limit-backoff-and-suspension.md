@@ -42,9 +42,16 @@ reconciliation) must keep running while Claude dispatch is suspended.
    check is `now.Before(claudeSuspendedUntil)`. `activateClaudeSuspension(issueNumber, resetTimeRaw,
    now)` computes the deadline and only updates the field if no suspension is active or the new deadline
    is later — concurrent workers reporting the same or different reset times converge on the latest one,
-   never shortening an active window. `clearClaudeSuspension(reason)` clears it. Both log and emit
-   `tui.ClaudeUsageLimitAlertEvent` only on an actual state change, the same non-spamming idiom already
-   used for `fabrik:claude-limit`/`fabrik:awaiting-ci`.
+   never shortening an active window. `clearClaudeSuspension(reason)` clears it, called only when an
+   invocation actually *succeeds* (`err == nil`) — not merely when it returns something other than a
+   `claudeUsageLimitError`. A generic, unrelated error is not evidence the account-wide limit has
+   cleared, and clearing on it unconditionally would race with a concurrently-running worker: worker A
+   can start an invocation before any suspension is active, worker B can detect the limit and activate
+   the suspension while A's invocation is still in flight, and A's invocation can then return an
+   unrelated error moments later — clearing on any-non-limit-error would wipe out B's just-activated
+   suspension before it ever gated anything. Both `activateClaudeSuspension` and `clearClaudeSuspension`
+   log and emit `tui.ClaudeUsageLimitAlertEvent` only on an actual state change, the same non-spamming
+   idiom already used for `fabrik:claude-limit`/`fabrik:awaiting-ci`.
 
 3. **Checked lazily at invocation time, not polled by a ticker.** `claudeSuspendedUntilTime(now)` is a
    cheap read evaluated at each of the three places a Claude invocation can actually be attempted:

@@ -2014,11 +2014,14 @@ resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
   simply returns "not suspended" once `now` reaches the deadline, so the very next dispatch attempt
   (which was going to happen anyway on the normal poll cadence) proceeds normally. Non-Claude engine
   work (board polling, settle scans, label reconciliation) is never gated by this mechanism.
-- **Early clear:** any of the three call sites that reaches Claude without a usage-limit error calls
+- **Early clear:** any of the three call sites whose invocation succeeds (`err == nil`) calls
   `clearClaudeSuspension(reason)`, which clears `claudeSuspendedUntil` (logging + emitting
   `tui.ClaudeUsageLimitAlertEvent{Suspended: false}`) if a suspension was active — the parsed/fallback
   deadline is a hint, not a contract, so a successful invocation ahead of it lifts the suspension
-  immediately rather than waiting it out.
+  immediately rather than waiting it out. A generic, unrelated error is deliberately *not* treated as
+  evidence the limit has cleared: it proves nothing about account-wide state, and clearing on it would
+  race with a concurrently-running worker that just activated the suspension, undoing the detection
+  moments after it happened.
 - **TUI surfacing:** `ClaudeUsageLimitAlertEvent` (`tui/events.go`) drives a dedicated
   `ClaudeUsageLimitBannerComponent` (`tui/usage_limit_banner.go`), independent of the GitHub
   rate-limit `AlertBannerComponent` per the naming distinction above — both can be visible at once. The
