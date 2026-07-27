@@ -413,9 +413,37 @@ func (wm *WorktreeManager) PushTrainBranch(name string) error {
 	return nil
 }
 
+// isAlreadyGoneWorktreeError reports whether out (the combined output of a failed
+// `git worktree remove` invocation) indicates the worktree path is already gone
+// rather than a genuine removal failure (permissions, in use, etc).
+func isAlreadyGoneWorktreeError(out []byte) bool {
+	return strings.Contains(string(out), "is not a working tree")
+}
+
+// isAlreadyGoneRemoteBranchError reports whether out (the combined output of a failed
+// `git push origin --delete` invocation) indicates the remote branch is already gone
+// rather than a genuine deletion failure (auth, branch protection, etc).
+func isAlreadyGoneRemoteBranchError(out []byte) bool {
+	return strings.Contains(string(out), "remote ref does not exist")
+}
+
+// quietGitSSHEnv extends nonInteractiveGitEnv with an SSH LogLevel override that
+// suppresses the informational "Warning: Permanently added '<host>' ... to the list
+// of known hosts." notice. Scoped to callers that would otherwise surface this
+// notice as spurious warning-adjacent log noise; StrictHostKeyChecking is
+// unchanged, so host-key verification is not weakened.
+func quietGitSSHEnv() []string {
+	return append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o LogLevel=ERROR",
+	)
+}
+
 // CleanupTrainWorktree removes the trial branch worktree and optionally its local
 // and remote branches. All operations are best-effort: failures are logged but do not
-// stop remaining cleanup steps.
+// stop remaining cleanup steps. An artifact that is already gone (the worktree path
+// no longer a working tree, or the remote branch already deleted) is treated as a
+// no-op success rather than a warning — only a genuine removal/deletion failure logs.
 func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) error {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
@@ -428,7 +456,7 @@ func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) 
 	// Best-effort local worktree removal — may already be gone.
 	rmCmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
 	rmCmd.Dir = wm.baseDir
-	if out, err := rmCmd.CombinedOutput(); err != nil {
+	if out, err := rmCmd.CombinedOutput(); err != nil && !isAlreadyGoneWorktreeError(out) {
 		wm.logf(0, "merge-train", "warn: could not remove train worktree %s: %s\n", wtDir, strings.TrimSpace(string(out)))
 	}
 
@@ -442,10 +470,12 @@ func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) 
 			wm.logf(0, "merge-train", "warn: could not delete local trial branch %s: %s\n", branch, strings.TrimSpace(string(out)))
 		}
 
-		// Push-delete the remote trial branch (best-effort).
+		// Push-delete the remote trial branch (best-effort). Uses quietGitSSHEnv
+		// to suppress SSH known-hosts chatter from polluting the warn line below.
 		remoteDel := exec.Command("git", "push", "origin", "--delete", branch)
 		remoteDel.Dir = wm.baseDir
-		if out, err := remoteDel.CombinedOutput(); err != nil {
+		remoteDel.Env = quietGitSSHEnv()
+		if out, err := remoteDel.CombinedOutput(); err != nil && !isAlreadyGoneRemoteBranchError(out) {
 			wm.logf(0, "merge-train", "warn: could not delete remote trial branch %s: %s\n", branch, strings.TrimSpace(string(out)))
 		}
 	}
