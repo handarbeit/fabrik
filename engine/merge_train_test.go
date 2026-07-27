@@ -413,6 +413,44 @@ func TestPollTrainCI_Unconfigured_AllSkippedChecks_StillGreen(t *testing.T) {
 	}
 }
 
+// TestPollTrainCI_MergeableStateAccepted_NonRequiredCheckStillPending_NotGreen
+// reproduces the #1150 shape (#1153): the repo's sole required check has
+// completed successfully, driving mergeable_state to "clean"/"unstable", but
+// a non-required check (e.g. the actual test suite, left unmarked-required —
+// handarbeit/fabrik's own configuration) is still in_progress on the trial
+// SHA. Before this fix, the mergeable_state shortcut would return
+// TrainCIGreen immediately; the check-run completeness pass below it never
+// ran. The result here must not be TrainCIGreen.
+func TestPollTrainCI_MergeableStateAccepted_NonRequiredCheckStillPending_NotGreen(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return &tr, "clean", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Analyze (go)", Status: "completed", Conclusion: "success"},
+				{Name: "Test and vet", Status: "in_progress"},
+			}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	// No RequiredStatusContexts configured — matches handarbeit/fabrik's
+	// actual unconfigured state; "Analyze (go)" is required only via GitHub
+	// branch protection, which Fabrik cannot see directly (ADR-933).
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	if result == TrainCIGreen {
+		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen while a non-required check is still in_progress, even with an accepted mergeable_state")
+	}
+	if result != TrainCIPending {
+		t.Errorf("expected TrainCIPending (CIWaitTimeout reached while the non-required check stays pending), got %v", result)
+	}
+}
+
 func TestPollTrainCI_ContextCancelled_ReturnsPending(t *testing.T) {
 	var callCount int
 	var mu sync.Mutex
