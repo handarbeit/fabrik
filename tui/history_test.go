@@ -494,7 +494,10 @@ func TestJobCompletedEvent_MultiAttempt(t *testing.T) {
 // TestHistory_TurnCappedRetries is the regression test for issue #847. It simulates
 // a stage that hits max_turns twice (capped, Completed: false) and then completes on
 // the third attempt, asserting all three invocations appear in history with distinct
-// costs and that only the final entry is marked Completed: true.
+// costs and that only the final entry is marked Completed: true. Per #1178, a capped
+// attempt is no longer a genuine fault: production now reports it as
+// Success: true, TurnLimited: true (not Success: false), so the two capped events here
+// are constructed the way finalizeStageOutcome actually emits them post-#1178.
 func TestHistory_TurnCappedRetries(t *testing.T) {
 	redirectHistory(t)
 
@@ -504,12 +507,13 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	t2 := t1.Add(95 * time.Minute)
 	t3 := t2.Add(30 * time.Minute)
 
-	sendEvent := func(cost float64, completed bool, ts time.Time) {
+	sendEvent := func(cost float64, completed, turnLimited bool, ts time.Time) {
 		comp, _ := h.Update(JobCompletedEvent{
 			IssueNumber: 1128,
 			Repo:        "example-org/example-repo",
 			StageName:   "Implement",
-			Success:     completed,
+			Success:     completed || turnLimited,
+			TurnLimited: turnLimited,
 			Completed:   completed,
 			CostUSD:     cost,
 			TurnsUsed:   101,
@@ -521,9 +525,9 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	}
 
 	// Two capped attempts followed by a completing attempt.
-	sendEvent(14.11, false, t1)
-	sendEvent(9.17, false, t2)
-	sendEvent(44.10, true, t3)
+	sendEvent(14.11, false, true, t1)
+	sendEvent(9.17, false, true, t2)
+	sendEvent(44.10, true, false, t3)
 
 	entries := h.History()
 
@@ -551,6 +555,18 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	}
 	if !entries[2].Completed {
 		t.Errorf("entries[2].Completed = false, want true (completing attempt)")
+	}
+
+	// (c2) First two entries must be TurnLimited: true (not rendered as errors); last
+	// must be TurnLimited: false.
+	if !entries[0].TurnLimited {
+		t.Errorf("entries[0].TurnLimited = false, want true (capped attempt)")
+	}
+	if !entries[1].TurnLimited {
+		t.Errorf("entries[1].TurnLimited = false, want true (capped attempt)")
+	}
+	if entries[2].TurnLimited {
+		t.Errorf("entries[2].TurnLimited = true, want false (completing attempt)")
 	}
 
 	// (d) SaveHistory/LoadHistory round-trip must preserve all three entries.
