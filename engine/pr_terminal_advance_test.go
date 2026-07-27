@@ -210,6 +210,58 @@ func TestValidatePRTerminalAdvance_SyntheticGateLabel(t *testing.T) {
 	}
 }
 
+// terminalAdvanceStagesWithHolding mirrors terminalAdvanceStages but inserts a
+// HoldingStage (Queued) between Validate and Done, matching the shipped
+// merge-train pipeline shape (Validate → Queued → Done).
+func terminalAdvanceStagesWithHolding() []*stages.Stage {
+	tr := true
+	return []*stages.Stage{
+		{Name: "Implement", Order: 1},
+		{Name: "Review", Order: 2, WaitForReviews: &tr},
+		{Name: "Validate", Order: 3, WaitForCI: &tr},
+		{Name: "Queued", Order: 4, HoldingStage: true},
+		{Name: "Done", Order: 5, CleanupWorktree: true},
+	}
+}
+
+// TestValidatePRTerminalAdvance_HoldingStageSkipped_AdvancesToDone is the
+// end-to-end regression guard for issue #1072: a merged Validate-stage PR
+// (cruise or human-merge shape — the single owner has no yolo/cruise gate)
+// must advance directly to Done even when a HoldingStage (Queued) is
+// configured immediately after Validate, never landing in Queued. Before the
+// NextStage fix, this path stranded every such item in Queued forever,
+// regardless of merge_train state.
+func TestValidatePRTerminalAdvance_HoldingStageSkipped_AdvancesToDone(t *testing.T) {
+	stgs := terminalAdvanceStagesWithHolding()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	item := gh.ProjectItem{
+		Number: 42,
+		ItemID: "PVTI_42",
+		Status: "Validate",
+		Labels: []string{"stage:Implement:complete", "fabrik:cruise"},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	iKey := issueKey(item, eng.defaultRepo())
+	if !advancedItems[iKey] {
+		t.Fatalf("expected item to be marked as advanced")
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+	if got := client.updateStatusCalls[0].optionID; got != "OPT_Done" {
+		t.Errorf("expected item to advance directly to Done (skipping Queued), got option %s", got)
+	}
+}
+
 // TestValidatePRTerminalAdvance_NoDoubleAdvance verifies that an item already
 // present in advancedItems is not advanced a second time.
 func TestValidatePRTerminalAdvance_NoDoubleAdvance(t *testing.T) {

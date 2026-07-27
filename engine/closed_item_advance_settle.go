@@ -8,12 +8,14 @@ import (
 
 // settleClosedItemsToDone is the per-poll settle scan that generalizes
 // runValidatePRTerminalAdvance's "closed item → advance to Done" transition
-// from Validate-only to any non-Done, non-Holding, non-cleanup, non-gate-checked
-// column. A closed issue sitting at Specify/Plan/Implement/Review/Backlog never
-// passes itemMayNeedWork/itemNeedsWork's admission guard (engine/item.go), so it
-// never reaches deepFetchCandidates and is never dispatched again — its worktree
-// is never reaped and it never gets archived. Sourced directly from board.Items,
-// not deepFetchCandidates, for the same reason as the child-placement and
+// from Validate-only to any non-Done, non-cleanup, non-gate-checked column —
+// including holding stages (e.g. Queued), which are excluded from admission
+// dispatch but not from this scan (see below). A closed issue sitting at
+// Specify/Plan/Implement/Review/Backlog never passes itemMayNeedWork/
+// itemNeedsWork's admission guard (engine/item.go), so it never reaches
+// deepFetchCandidates and is never dispatched again — its worktree is never
+// reaped and it never gets archived. Sourced directly from board.Items, not
+// deepFetchCandidates, for the same reason as the child-placement and
 // merge-train-member-close settle scans: the item this scan targets never
 // reaches deepFetchCandidates in the first place.
 //
@@ -26,6 +28,18 @@ import (
 // Gate-checked stages (currently only Validate) are excluded so this scan never
 // races or double-advances against runValidatePRTerminalAdvance, which remains
 // the exclusive owner of closed items at gate-checked stages.
+//
+// Holding stages (e.g. Queued) are a universal backstop for issue #1072: a
+// closed item stranded there — whatever the cause (a merge-train batch member
+// closed by a human merge outside the train, or a pre-#1072 stray item from the
+// old holding-stage-blind NextStage) — is rescued exactly like any other stage,
+// UNLESS a merge-train worker is currently in flight for that item's repo
+// (mergeTrainWorkerActive). That guard is the one real race here: an item can
+// be closed-without-merging while it is still a live batch member mid-assembly
+// or mid-bisection, and this scan must not yank it out from under the worker.
+// Once the worker exits, finishTrain clears the marker and the item is safe to
+// sweep unconditionally — same as any other stage, no PR-merge re-confirmation
+// needed (see ADR-1072).
 func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 	cleanup := cleanupStage(e.cfg)
 	if cleanup == nil {
@@ -56,11 +70,16 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 		// declared Backlog stage, issue #973) is deliberately NOT added to the
 		// skip condition below for the same reason: it has no worktree either,
 		// so a closed item there must still be advanced rather than stranded.
-		// Only a *resolved* stage that is itself Cleanup/Holding/gate-checked
-		// is grounds to skip.
+		// Only a *resolved* stage that is itself Cleanup/gate-checked, or a
+		// Holding stage with a live train worker for its repo, is grounds to skip.
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		if stage != nil && (stage.CleanupWorktree || stage.HoldingStage || stageIsGateChecked(stage)) {
-			continue
+		if stage != nil {
+			if stage.CleanupWorktree || stageIsGateChecked(stage) {
+				continue
+			}
+			if stage.HoldingStage && e.mergeTrainWorkerActive(itemOwnerRepoString(item, e.defaultRepo())) {
+				continue
+			}
 		}
 		e.advanceClosedItemToDone(board, item, optionID, cleanup.Name)
 	}
