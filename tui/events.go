@@ -164,6 +164,25 @@ type RateLimitAlertEvent struct {
 
 func (RateLimitAlertEvent) tuiEvent() {}
 
+// ClaudeUsageLimitAlertEvent is emitted by the engine when the account-wide
+// Claude usage-limit suspension state changes: Suspended=true when a worker
+// observes the account's usage limit (session or weekly) and suspends new
+// Claude dispatch account-wide; Suspended=false when the suspension clears,
+// either because the computed reset time passed or because an invocation
+// succeeded ahead of it. Reset is the time dispatch is expected to resume
+// (zero if unknown).
+//
+// Deliberately distinct from RateLimitAlertEvent: that event tracks GitHub's
+// GraphQL/REST rate-limit budget, an unrelated condition that can be active
+// at the same time. Conflating the two under one name would make it
+// impossible to tell which budget is exhausted from the log/TUI alone.
+type ClaudeUsageLimitAlertEvent struct {
+	Suspended bool
+	Reset     time.Time
+}
+
+func (ClaudeUsageLimitAlertEvent) tuiEvent() {}
+
 // CommentBreakerTrippedEvent is emitted when the comment-processing circuit
 // breaker trips: the same issue underwent InvocationCount comment-processing
 // invocations within Window with no forward progress (#1089). This is a

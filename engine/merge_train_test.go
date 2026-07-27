@@ -1022,6 +1022,93 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 	}
 }
 
+// TestMergeTrainWorker_UsageLimitDuringConflictResolution verifies ADR-1120: a Claude
+// usage-limit hit during inline conflict resolution must NOT eject the member (unlike a
+// genuine unresolvable conflict, exercised by TestMergeTrainWorker_UnresolvableConflict
+// above) — it's an account-wide condition unrelated to whether #2's conflict is
+// resolvable. assembleTrialBranch should instead propagate a fatal error, aborting the
+// whole trial assembly so no draft PR is created and no ejection comment is posted.
+func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	// Both branches modify the same line — guaranteed conflict.
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "branch1-value\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
+
+	var addCommentIssues []int
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+	}
+	// Claude conflict resolution hits the account usage limit instead of resolving.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "usage limit reached", ResetTime: "10:20pm (America/Edmonton)"}
+		},
+	}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	mu.Lock()
+	prs := createdPRs
+	comments := append([]int(nil), addCommentIssues...)
+	mu.Unlock()
+
+	// No draft PR — the whole trial assembly must abort as a fatal error, not land
+	// a partial survivor set.
+	if prs != 0 {
+		t.Errorf("expected 0 draft PRs (fatal assembly error), got %d", prs)
+	}
+	// Issue #2 must NOT receive an ejection comment — the usage limit says nothing
+	// about whether its conflict is resolvable.
+	for _, n := range comments {
+		if n == 2 {
+			t.Error("issue #2 must not be ejected on a Claude usage-limit hit")
+		}
+	}
+	// The account-wide suspension must have been activated by the detection.
+	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); !suspended {
+		t.Error("expected account-wide Claude suspension to be active after the usage-limit hit")
+	}
+	// In-flight entry must still be cleared despite the fatal error (ADR-067).
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared after fatal assembly error")
+	}
+}
+
 // TestMergeTrainWorker_ZeroSurvivors verifies FR-6: when FetchLinkedPR fails for
 // all members (ejecting each one), no draft PR is created and the in-flight entry
 // is cleared (Task 11e).

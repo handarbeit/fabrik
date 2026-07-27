@@ -970,6 +970,12 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 	}
 	baseline := snapshotBaseline(stage, item, workDir)
 
+	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
+		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
+		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+		return output, completed, usage, totalMultiple, err
+	}
+
 	currentBudget := firstBudget
 	for {
 		opts.MaxTurnsOverride = currentBudget
@@ -978,6 +984,18 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		invOutput, completed, invUsage, err = e.claude.Invoke(ctx, stage, item, nil, resume, workDir, opts)
 		output += invOutput
 		usage = addTokenUsage(usage, invUsage)
+
+		var limitErr *claudeUsageLimitError
+		if errors.As(err, &limitErr) {
+			e.activateClaudeSuspension(item.Number, limitErr.ResetTime, time.Now())
+		} else if err == nil {
+			// Only a successful invocation is evidence the limit has cleared (ADR-1120's
+			// "early clear on success"). A generic, unrelated error proves nothing about
+			// account-wide usage-limit state and must not clear it — doing so unconditionally
+			// would race with a concurrently-running worker that just activated the
+			// suspension, undoing it moments after detection.
+			e.clearClaudeSuspension("stage invocation reached Claude")
+		}
 
 		hitLimit := !completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget
 		if !hitLimit || totalMultiple >= 3 {
@@ -2084,15 +2102,17 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 // claudeUsageLimitError in claude.go), not because the stage genuinely
 // failed. It mirrors handleBoundaryViolation's "StageAttempted without
 // StageRetryIncremented" split (ADR-1119): the invocation is recorded so the
-// normal dispatch cooldown applies (which is what prevents hammering the
-// limit in a tight retry loop), but nothing that implies a genuine failed
-// run happens — no commitWIP/push (nothing was produced), no
+// normal per-issue dispatch cooldown applies, but nothing that implies a
+// genuine failed run happens — no commitWIP/push (nothing was produced), no
 // markCommentsSeenByStage, no StageRetryIncremented, no stage:<name>:failed,
-// no fabrik:paused. The explanatory comment and fabrik:claude-limit label
-// are applied only on the transition into the condition (label absent ->
-// applied); while the label remains set across repeated poll cycles, this
-// is a no-op, matching the non-spamming behavior of other gate labels such
-// as fabrik:awaiting-ci.
+// no fabrik:paused. The actual hammering prevention is the account-wide
+// Claude dispatch suspension activated by runInvocationWithExtension (see
+// activateClaudeSuspension in usage_limit_backoff.go, ADR-1120) before this
+// is even called — the per-issue cooldown here is a secondary guard. The
+// explanatory comment and fabrik:claude-limit label are applied only on the
+// transition into the condition (label absent -> applied); while the label
+// remains set across repeated poll cycles, this is a no-op, matching the
+// non-spamming behavior of other gate labels such as fabrik:awaiting-ci.
 func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsageLimitError) {
 	item := p.item
 	stage := p.stage
@@ -2117,7 +2137,7 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik will keep retrying on the normal poll cooldown; the `fabrik:claude-limit` label clears automatically once an invocation succeeds.",
+			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has suspended Claude dispatch account-wide (not just for this issue) until the reset time and will resume automatically once it passes, or as soon as any invocation succeeds — no operator action is required. The `fabrik:claude-limit` label clears automatically once an invocation for this issue succeeds.",
 			stage.Name, resetSuffix,
 		)
 		e.postItemComment(item, comment, false)
