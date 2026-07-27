@@ -48,7 +48,7 @@ type fakeAppServer struct {
 	tokenExpiry   func() time.Time
 	mintCount     atomic.Int32
 
-	mu          sync.Mutex
+	mu           sync.Mutex
 	lastMintedAt time.Time
 }
 
