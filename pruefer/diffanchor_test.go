@@ -97,6 +97,34 @@ index 1111111..2222222 100644
 	}
 }
 
+func TestValidRightAnchors_ContentLineResemblingFileHeader_NotMisreadMidHunk(t *testing.T) {
+	// An added content line that itself starts with "+++ " (e.g. a fixture
+	// file embedding diff text as test data) must not be mistaken for a new
+	// file header — that would reset currentPath/inHunk mid-hunk and
+	// truncate the anchor set for the rest of the file.
+	diff := "diff --git a/fixture.go b/fixture.go\n" +
+		"--- a/fixture.go\n" +
+		"+++ b/fixture.go\n" +
+		"@@ -1,1 +1,3 @@\n" +
+		" ctx\n" +
+		"+++ b/embedded.go\n" +
+		"+after\n"
+	anchors := validRightAnchors(diff)
+	want := map[anchorKey]bool{
+		{Path: "fixture.go", Line: 1}: true, // ctx
+		{Path: "fixture.go", Line: 2}: true, // "+++ b/embedded.go" content line
+		{Path: "fixture.go", Line: 3}: true, // after
+	}
+	if len(anchors) != len(want) {
+		t.Fatalf("anchors = %v, want %v", anchors, want)
+	}
+	for k := range want {
+		if !anchors[k] {
+			t.Errorf("missing expected anchor %+v", k)
+		}
+	}
+}
+
 func TestValidRightAnchors_MultipleFilesAndHunks(t *testing.T) {
 	diff := `diff --git a/a.go b/a.go
 --- a/a.go

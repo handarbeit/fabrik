@@ -46,10 +46,13 @@ func validRightAnchors(diff string) map[anchorKey]bool {
 			currentPath = ""
 			inHunk = false
 			continue
-		case strings.HasPrefix(line, "+++ "):
+		case !inHunk && strings.HasPrefix(line, "+++ "):
 			// "+++ b/<path>" gives the post-change path; "+++ /dev/null"
 			// (deleted file) or any other form leaves currentPath empty, so
-			// this file contributes no RIGHT-side anchors.
+			// this file contributes no RIGHT-side anchors. Gated on !inHunk
+			// so an added content line that itself happens to start with
+			// "+++ " (e.g. a diff fixture embedded as test data) is never
+			// misread as a new file header mid-hunk.
 			if m := diffNewFileHeaderRE.FindStringSubmatch(line); m != nil {
 				currentPath = m[1]
 			} else {
