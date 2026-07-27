@@ -1897,6 +1897,42 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 
 ---
 
+### 6.13 Non-Default-Base Explicit Close Retry
+
+**Trigger:** `closeIssueIfNonDefaultBase` (§2.8, ADR-1096) calls `e.client.CloseIssue` as the last step of the outbound explicit-close path, after the caller's (`runValidatePRTerminalAdvance`'s cruise path, or `advanceConvergedPRToDone`'s non-train yolo path) board advance to Done has already succeeded. This call fails (e.g. rate limit, transient API error).
+
+**Key difference from §6.8's `fabrik:awaiting-done`:** that marker is written *before* a chain of up to ten sequential calls, because any of them could be the one that first hits a rate limit. Here there is exactly one at-risk call, positioned *after* every other side effect of the caller has already landed — so the marker is written only in the failure branch, not unconditionally beforehand (ADR-1097, mirroring ADR-061).
+
+**Durable marker (`fabrik:awaiting-close`), written only on failure.** `markNonDefaultBaseCloseOutstanding` adds the label (idempotently — a no-op if already present) only inside the `if err != nil` branch of the explicit close, after the `gh.ErrNotFound` short-circuit (already-deleted issue is treated as success, never reaches this branch) and after the `item.IsClosed` short-circuit (already-closed issue never attempts the call at all).
+
+**No dispatch-suppression wiring — deliberately.** Unlike `fabrik:awaiting-done`, this marker is **not** checked by `itemMayNeedWork`/`itemNeedsWork`, and is **not** added to `transientLifecycleLabels`. By construction, the item has already reached Done (both callers advance the board *before* calling `closeIssueIfNonDefaultBase`) by the time this marker can exist — there is no per-stage redispatch this marker needs to prevent. This sidesteps the terminal-skip/`transientLifecycleLabels` interaction a naive verbatim port of §6.8's shape would have hit, identical to §6.10's reasoning (ADR-061 Context).
+
+**Code path:** `runValidatePRTerminalAdvance` / `advanceConvergedPRToDone` → `closeIssueIfNonDefaultBase` (writes the marker on close failure) — and, on retry, `settleNonDefaultBaseCloses` → `settleNonDefaultBaseClose` (both `engine/close_nondefault_base_settle.go`; `settleNonDefaultBaseCloses` is called from `poll()` in `poll.go`) directly.
+
+**Retry-owner: `settleNonDefaultBaseCloses` (`engine/close_nondefault_base_settle.go`; called from `poll()` in `poll.go`).** Runs unconditionally once per poll, immediately after `settleMergeTrainMemberCloses`. It iterates the **raw `board.Items`** (not `deepFetchCandidates` — this scan has no dependency on the deep-fetch/terminal-skip machinery at all). For every item carrying `fabrik:awaiting-close` and not `fabrik:paused` (mirroring `settleMergeTrainMemberCloses`'s own paused-item guard — an operator investigating a paused item must not be fought), it calls `settleNonDefaultBaseClose`.
+
+**`settleNonDefaultBaseClose` flow — idempotent; safe to call repeatedly:**
+1. If `item.IsClosed` is already true (a prior settle pass already closed it, or a human closed it manually), skip the redundant `CloseIssue` call and go straight to clearing the marker.
+2. Otherwise call `CloseIssue`. On success, clear the marker (and write through the boardcache via `ApplyIssueClosed`, matching `closeIssueIfNonDefaultBase`'s own success path). On failure, record a retry and stop — the next settle pass re-attempts.
+
+**Retry counting and escalation.** Every failed settle pass calls `recordNonDefaultBaseCloseRetry`, which increments the existing `itemstate.StageRetryIncremented`/`Attempts` counter — keyed by the dedicated constant `"__non_default_base_close__"` (same double-underscore-wrapped, YAML-unrepresentable shape as `"__merge_train_member_close__"`/`"__no_work_needed__"`, so it can never collide with a configured stage's own counter). `MaxRetries <= 0` means unlimited retries, never escalate (same guard as `recordMergeTrainMemberCloseRetry`). Once `Attempts("__non_default_base_close__") >= e.cfg.MaxRetries`, `escalateNonDefaultBaseCloseFailure` fires — mirroring `escalateMergeTrainMemberCloseFailure`: adds `fabrik:paused`, removes `fabrik:awaiting-close`, posts an explanatory comment naming the merged PR (`item.LinkedPRNumber`, when non-zero — already populated on the board item, so no new storage is needed to thread it from the original `closeIssueIfNonDefaultBase(item, prNumber)` call) with the manual recovery step (`gh issue close <N> --repo <owner>/<repo>`), and applies `itemstate.EnginePaused`.
+
+**Marker clearing.** `fabrik:awaiting-close` is removed in exactly two places: `clearNonDefaultBaseCloseMarker` (a fully successful settle pass, or an already-closed issue found on a later pass — the normal, expected path) and `escalateNonDefaultBaseCloseFailure` (giving up after `MaxRetries`). It is not referenced by `cleanupClosedIssueTransientLabels`'s defensive sweep at all — unlike `fabrik:awaiting-done`, there is no "silently resurrect the bug" risk from an early strip, since the settle scan's own `item.IsClosed` check already treats a closed issue as fully settled.
+
+**Scope:** this mechanism covers only the two terminal merge-advance sites' calls into `closeIssueIfNonDefaultBase` (the merge-train path and the `FABRIK_NO_WORK_NEEDED` short-circuit already close explicitly via their own paths and are unaffected — see §2.8). The generic `recordSettleRetry`/`escalateSettle`/`clearSettleMarker` helpers (`engine/settle.go`) this mechanism reuses are the same ones backing `fabrik:awaiting-done` (§6.8) and `fabrik:awaiting-member-close` (§6.10).
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Done | `closeIssueIfNonDefaultBase`'s explicit `CloseIssue` fails | Done, awaiting close (marker present) | `fabrik:awaiting-close` | — |
+| Done, awaiting close | Settle pass succeeds (issue closed, or already closed) | Done, settled | — | `fabrik:awaiting-close` |
+| Done, awaiting close | Settle pass fails `Attempts >= MaxRetries` times | Done, Paused | `fabrik:paused` | `fabrik:awaiting-close` |
+
+**References:** [ADR-1096: Explicit Close on Non-Default-Base Merge](../adrs/1096-explicit-close-on-nondefault-base-merge.md), [ADR-061: Merge-Train Singleton Member-Issue Close Retry](../adrs/061-merge-train-member-close-retry.md), [ADR-1097: Non-Default-Base Explicit Close Retry](../adrs/1097-non-default-base-close-retry.md)
+
+---
+
 ## 7. Edge Case States
 
 ### 7.1 Cooldown Retry
