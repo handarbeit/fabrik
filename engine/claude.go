@@ -27,18 +27,13 @@ var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
 var noWorkNeededRE = regexp.MustCompile(`(?m)^FABRIK_NO_WORK_NEEDED\r?$`)
 
-// usageLimitHitRE matches Anthropic's account usage-limit exit message (e.g.
-// "You've hit your session limit" / "...weekly limit"). Kept narrow and
-// literal, mirroring botServiceNoticePatterns' low-false-positive style, and
-// held in one named var so a future wording change is a one-line fix.
-var usageLimitHitRE = regexp.MustCompile(`(?i)hit your \S+ limit`)
-
-// usageLimitResetRE extracts the best-effort human-readable reset-time
-// fragment from a usage-limit message, e.g. "resets 10:20pm (America/Edmonton)".
-// Used only to enrich the explanatory comment; it never gates detection —
-// if the format shifts, detection still succeeds and the comment simply
-// omits the reset time.
-var usageLimitResetRE = regexp.MustCompile(`(?i)resets\s+(\d{1,2}:\d{2}\s*[ap]m\s*\([^)]+\))`)
+// usageLimitTerminalReason is the CLI's structural terminal_reason value for
+// a genuine account usage-limit exit, per the Agent SDK's published
+// terminal_reason enum (named alongside "max_turns" in the same changelog
+// entry that #1178 already proved this installed CLI version emits). This is
+// the sole positive trigger for claudeUsageLimitError — see
+// classifyUsageLimitExit and #1183.
+const usageLimitTerminalReason = "blocking_limit"
 
 // claudeUsageLimitError signals that a Claude invocation exited because the
 // account's usage limit (session or weekly) was exhausted, not because the
@@ -46,10 +41,13 @@ var usageLimitResetRE = regexp.MustCompile(`(?i)resets\s+(\d{1,2}:\d{2}\s*[ap]m\
 // condition must be excluded from max_retries — see handleUsageLimitExit
 // in item.go, which is the sole consumer (via errors.As).
 type claudeUsageLimitError struct {
-	// Message is the raw matched "hit your ... limit" phrase, for logging.
+	// Message describes the structural field that triggered detection (see
+	// classifyUsageLimitExit), for logging.
 	Message string
-	// ResetTime is the best-effort parsed reset-time fragment, or "" if the
-	// message didn't match usageLimitResetRE.
+	// ResetTime is always "" — the structural detector never parses a reset
+	// time from prose. Kept so computeUsageLimitResetDeadline's existing
+	// fallback-when-empty path (claudeUsageLimitFallbackBackoff) is exercised
+	// unconditionally; do not populate this from matched text (#1183).
 	ResetTime string
 }
 
@@ -82,44 +80,33 @@ func (e *claudeTurnLimitError) Error() string {
 	return fmt.Sprintf("claude exited: turn limit reached (num_turns=%d)", e.NumTurns)
 }
 
-// detectUsageLimitExit scans raw invocation output — the full NDJSON stdout
-// stream, not the parsed claudeResponse.Result or the already-collapsed text
-// variable — for Anthropic's account usage-limit exit message. Raw bytes are
-// scanned directly because it is unconfirmed whether a real limit exit lands
-// in resp.Result, only in resp.Errors[] (never copied into text today), or in
-// non-JSON plain stdout; scanning raw bytes is correct under all three shapes
-// without needing to know which is real.
-// The usage-limit message is matched against raw output, which necessarily
-// includes text the assistant itself wrote. usage is therefore used as an
-// exclusion gate: an invocation that consumed turns and incurred cost cannot
-// have exited on an account usage limit, because such an exit terminates the
-// invocation immediately (0 turns, $0.00) before any work is billed.
+// classifyUsageLimitExit determines whether a Claude invocation exited on a
+// genuine account usage-limit condition, using only the CLI's own structured
+// result object (resp) — never text the assistant itself wrote. This
+// replaces the original prose-matching detectUsageLimitExit, which scanned
+// raw invocation output for Anthropic's usage-limit exit message and
+// self-triggered on any stage whose output merely discussed usage limits.
 //
-// Note the asymmetry, which is deliberate and is the whole point of this guard.
-// #1119's spec correctly forbids using the "~1 turn, $0.00" shape to *confirm*
-// a usage limit, since a genuine immediate stage failure shares that shape —
-// that would risk false negatives. Using the inverse shape to *rule one out* is
-// sound: no real usage-limit exit does 51 turns of work first. Ruling in and
-// ruling out are not the same inference.
+// That was not hypothetical in this repository: on 2026-07-27 issue #1178's
+// Implement stage, which was writing tests about usage-limit detection,
+// quoted #1084's example message and suspended Claude dispatch account-wide
+// for ~11 hours after a plain turn-cap exit (51 turns, $2.28). See #1183.
 //
-// Without this, any stage whose output merely discusses usage limits
-// self-triggers a suspension. That is not hypothetical in this repository: on
-// 2026-07-27 issue #1178's Implement stage, which was writing tests about
-// usage-limit detection, quoted #1084's example message and suspended Claude
-// dispatch account-wide for ~11 hours after a plain turn-cap exit (51 turns,
-// $2.28). See #1183.
-func detectUsageLimitExit(rawOutput []byte, usage TokenUsage) (msg, resetTime string, detected bool) {
-	match := usageLimitHitRE.Find(rawOutput)
-	if match == nil {
-		return "", "", false
+// resp.TerminalReason == "blocking_limit" is the CLI's structural signal for
+// a genuine usage-limit exit (see usageLimitTerminalReason's doc comment for
+// sourcing). usage is kept as a belt-and-suspenders exclusion gate carried
+// over from the original prose-based guard (#1184): a genuine usage-limit
+// exit terminates the invocation immediately (0 turns, $0.00), so an
+// invocation that consumed turns and incurred cost is never classified as
+// one, regardless of what TerminalReason says.
+func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, detected bool) {
+	if resp.TerminalReason != usageLimitTerminalReason {
+		return "", false
 	}
 	if usage.TurnsUsed > 0 && usage.CostUSD > 0 {
-		return "", "", false
+		return "", false
 	}
-	if m := usageLimitResetRE.FindSubmatch(rawOutput); m != nil {
-		resetTime = string(m[1])
-	}
-	return string(match), resetTime, true
+	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
 }
 
 // defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
@@ -959,20 +946,29 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// not inferred from turn counts (the CLI's own accounting can report a
 		// turn count past the configured cap, e.g. num_turns: 51 against
 		// max_turns: 50, so an inference built on >= would be fragile). This
-		// check runs before detectUsageLimitExit precisely because relying on
-		// output-prose matching there caused this exact condition to
-		// misclassify as a usage-limit exit — see detectUsageLimitExit's doc
-		// comment and #1183.
+		// check runs before classifyUsageLimitExit precisely because relying
+		// on output-prose matching there previously caused this exact
+		// condition to misclassify as a usage-limit exit — see #1183.
 		if ok && resp.Subtype == "error_max_turns" {
 			claudeLog(issueNumber, "claude", "turn limit reached (subtype=error_max_turns, terminal_reason=%q, num_turns=%d)\n", resp.TerminalReason, resp.NumTurns)
 			return text, false, usage, &claudeTurnLimitError{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns}
 		}
-		// usage is passed as an exclusion gate only: it can rule a usage-limit
-		// exit *out* (turns consumed and cost incurred means the invocation ran,
-		// so no limit was hit), but never rules one in — see detectUsageLimitExit.
-		if msg, resetTime, detected := detectUsageLimitExit(rawOutput, usage); detected {
-			claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (resetTime=%q, turns=%d, cost=$%.4f): %s\n", resetTime, usage.TurnsUsed, usage.CostUSD, msg)
-			return text, false, usage, &claudeUsageLimitError{Message: msg, ResetTime: resetTime}
+		// Structural usage-limit classification from the CLI's own result
+		// object only — never from output prose (#1183). Requires a parsed
+		// result object (ok); an unparseable-JSON exit has no structured
+		// payload to trust, so it falls through to the generic error below
+		// rather than being classified by any means.
+		if ok {
+			if msg, detected := classifyUsageLimitExit(resp, usage); detected {
+				claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (turns=%d, cost=$%.4f): %s\n", usage.TurnsUsed, usage.CostUSD, msg)
+				return text, false, usage, &claudeUsageLimitError{Message: msg}
+			} else if resp.TerminalReason != "" && resp.TerminalReason != usageLimitTerminalReason {
+				// Diagnostic-only: records any other non-empty terminal_reason
+				// seen on an error exit (e.g. "rapid_refill_breaker"), so a
+				// real-world sighting is captured in logs for review rather
+				// than silently dropped. Never used to trigger classification.
+				claudeLog(issueNumber, "claude", "error exit with unmatched terminal_reason=%q (not classified as usage limit)\n", resp.TerminalReason)
+			}
 		}
 		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
 	}

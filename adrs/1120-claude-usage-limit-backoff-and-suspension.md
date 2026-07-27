@@ -182,6 +182,14 @@ list but not the escalation half. Cross-process coordination between multiple Fa
 one account is a known, accepted gap (see Consequences). `max_retries` semantics for genuine failures and
 GitHub's own (unrelated) rate-limit handling are untouched.
 
+> **Extended by [ADR-1183](1183-structural-claude-usage-limit-detection.md).** That deferred
+> escalation/safety-net path is now partially delivered: `fabrik:clear-claude-limit` gives an operator a
+> restart-free way to end a suspension believed to be a false positive, and `resetTimeRaw` is now always
+> `""` in practice (structural detection carries no reset-time fragment to parse), so
+> `activateClaudeSuspension`/`clearClaudeSuspension` and the reset-parsing machinery this ADR describes
+> are otherwise unchanged and remain accurate — only the caller-supplied `resetTimeRaw` value changed,
+> not this ADR's design.
+
 **References:** ADR-1119 (`1119-claude-usage-limit-detection.md`) — the detection and retry-exemption
 work this ADR builds on. `engine/backoff.go` (`shouldPauseForRESTRateLimit`, `nextRateLimitLow`),
 `engine/terminal.go` (`runProbeAndDeepFetch`) — the GitHub rate-limit suspension pattern this ADR mirrors

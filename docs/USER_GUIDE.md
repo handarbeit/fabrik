@@ -1134,24 +1134,26 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > comment always routes to comment processing regardless of board state.
 
 > **Troubleshooting: a stage carries `fabrik:claude-limit` and dispatch looks idle.** If
-> the issue carries `fabrik:claude-limit` and a comment naming a Claude account usage
-> limit (e.g. `You've hit your session limit · resets 10:20pm (America/Edmonton)`), the
-> underlying Claude account has run out of usage — this is not a stage failure, and it
-> is not GitHub's own rate limiting (a separate, unrelated mechanism; see *Rate Limit
-> Monitoring* below). Fabrik detected the CLI's usage-limit exit message, so it does
-> **not** count this attempt against `--max-retries`: no `stage:<name>:failed`, no
-> `fabrik:paused`, no escalation comment. As soon as one worker observes the limit,
-> Fabrik parses the reset time from the CLI's own message and suspends *all* new Claude
-> dispatch account-wide — not just for this issue — until that time, so a usage-limit
-> window costs one detection and one automatic resume rather than every concurrent item
-> independently rediscovering and waiting out the same limit. If the reset time can't be
-> parsed (unexpected wording, missing zone), Fabrik falls back to a fixed one-hour
-> suspension instead of hammering on the normal 5-minute cooldown. The suspension and
-> its expected end are visible in the log (tag `claude-limit`) and, in the TUI, as a
-> dedicated banner distinct from the GitHub rate-limit banner (see *Claude Usage-Limit
-> Suspension* below). It clears automatically — either at the computed reset time or as
-> soon as any invocation succeeds, whichever comes first — at which point
-> `fabrik:claude-limit` also clears on this issue. No operator action is required.
+> the issue carries `fabrik:claude-limit`, the underlying Claude account has run out of
+> usage — this is not a stage failure, and it is not GitHub's own rate limiting (a
+> separate, unrelated mechanism; see *Rate Limit Monitoring* below). Fabrik detects this
+> **structurally**, from the CLI's own result object (`terminal_reason == "blocking_limit"`)
+> — never from anything a stage's output happened to say, so a stage whose output merely
+> discusses usage limits cannot trigger this. It does **not** count this attempt against
+> `--max-retries`: no `stage:<name>:failed`, no `fabrik:paused`, no escalation comment. As
+> soon as one worker observes the limit, Fabrik suspends *all* new Claude dispatch
+> account-wide — not just for this issue — for a fixed one-hour backoff (structural
+> detection carries no reset time to parse, so this fallback backoff is always used), so a
+> usage-limit window costs one detection and one automatic resume rather than every
+> concurrent item independently rediscovering and waiting out the same limit. The
+> suspension and its expected end are visible in the log (tag `claude-limit`) and, in the
+> TUI, as a dedicated banner distinct from the GitHub rate-limit banner (see *Claude
+> Usage-Limit Suspension* below). It clears automatically — either at the one-hour
+> deadline or as soon as any invocation succeeds, whichever comes first — or you can clear
+> it immediately without restarting the engine by applying `fabrik:clear-claude-limit` to
+> any open board item (see *Claude Usage-Limit Suspension* below). Once the account-wide
+> suspension lifts, `fabrik:claude-limit` clears on every open issue that carries it, not
+> only on this one's next invocation.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
@@ -2091,6 +2093,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:extend-turns` | Pre-grant 2× `max_turns` for every stage invocation while the label is present. Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `fabrik:revalidate` | Force re-entry of the Validate stage. Removes `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, then itself; Validate then re-runs on the current HEAD SHA. Use this to recover from a stuck-Validate state in one action — no need to manually clear individual gate labels. Applied to non-Validate issues: removed with a warning, no work dispatched. Safe to apply while Validate is in-flight — the label is held until the worker exits, then processed normally. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
+| `fabrik:clear-claude-limit` | Clear an active account-wide Claude usage-limit suspension without restarting the engine. Apply to *any* open board item — it does not need to be one already carrying `fabrik:claude-limit`, since the suspension is account-wide, not per-issue. Read and consumed on the next poll: clears the suspension immediately and removes itself. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
@@ -2432,22 +2435,37 @@ Claude account's own usage limit (session or weekly), not GitHub's API budget. B
 polling, settle scans, and label reconciliation are unaffected; only the *start* of new
 Claude invocations is gated.
 
-When any worker's Claude invocation exits because the account's usage limit was hit,
-Fabrik suspends the start of every new Claude invocation — across all issues, not just
-the one that hit the limit — until the reset time named in the CLI's own error message,
-and displays a banner distinct from the GraphQL one:
+When any worker's Claude invocation exits because the account's usage limit was hit —
+detected structurally from the CLI's own result object, never from output text a stage
+happened to write — Fabrik suspends the start of every new Claude invocation across all
+issues, not just the one that hit the limit, and displays a banner distinct from the
+GraphQL one:
 
 ```
-⚠ Claude usage limit hit — dispatch suspended. Resumes in 47m (22:20 local time).
+⚠ Claude usage limit hit — dispatch suspended. Resumes in 1h (22:20 local time).
 ```
 
-If the reset time can't be parsed, Fabrik falls back to a fixed one-hour suspension
-instead of retrying on the normal cooldown. The suspension clears automatically —
-either once the reset time passes or as soon as any invocation succeeds, whichever
-comes first — and dispatch resumes with no operator action required. Already-running
-Claude invocations are never interrupted by this; the suspension only prevents new ones
-from starting. See the `fabrik:claude-limit` troubleshooting note above for the
-per-issue label/comment behavior layered on top of this account-wide gate.
+Structural detection carries no reset time to parse, so this is always a fixed one-hour
+suspension — a full order of magnitude longer than the normal 5-minute dispatch cooldown
+— rather than retrying on the normal cooldown. The suspension clears in any of three ways:
+
+1. **Automatically**, once the one-hour deadline passes or as soon as any invocation
+   succeeds, whichever comes first — no operator action required.
+2. **On operator request**, by applying `fabrik:clear-claude-limit` to *any* open board
+   item (it does not need to be one already carrying `fabrik:claude-limit` — the
+   suspension is account-wide, not per-issue). Fabrik reads the label on the next poll,
+   clears the suspension immediately, and removes the label. This is the lightest-weight
+   recovery from a suspected false positive — no engine restart required.
+3. **Via a full restart** (`ctrl+r`/SIGHUP) — see [Recovering from Wedged
+   State](#recovering-from-wedged-state) — which also drops the suspension, but along
+   with all other in-memory state. Prefer option 2 unless something else is also wedged.
+
+Already-running Claude invocations are never interrupted by this; the suspension only
+prevents new ones from starting. Once the account-wide suspension lifts (by any of the
+three paths above), a per-poll settle scan removes `fabrik:claude-limit` from every open
+issue that still carries it — not only from the issue that happens to be dispatched next.
+See the `fabrik:claude-limit` troubleshooting note above for the per-issue label/comment
+behavior layered on top of this account-wide gate.
 
 ---
 
@@ -2847,6 +2865,8 @@ If Claude doesn't seem to follow the skill instructions:
 ### Recovering from Wedged State
 
 Cache-stale bugs can occasionally leave Fabrik's in-memory state stuck — an issue that should advance doesn't, or a label that should clear doesn't. The safest escape hatch is a SIGHUP restart, which drops all in-memory state and re-execs the same binary in place, without tearing down the terminal session or TUI.
+
+**If the only symptom is a suspected false-positive Claude usage-limit suspension**, prefer applying `fabrik:clear-claude-limit` to any open board item instead — see [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). It clears just that one piece of state without dropping the board cache, observers, or `mayNeedWork` map a full SIGHUP restart discards. Reach for SIGHUP when something else is also wedged, or the lighter clear doesn't help.
 
 **How to trigger:**
 
