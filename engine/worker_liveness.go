@@ -196,3 +196,69 @@ func (e *Engine) runStartupCleanup() {
 		e.logf(0, "startup", "startup cleanup: attempted stale editing label removal on %d issue(s)\n", cleanedEditing)
 	}
 }
+
+// runStartupOrphanedInProgressScan scans every item in the store (not just
+// items with a stale lock label) for stage:<Name>:in_progress labels whose
+// stage <Name> also carries stage:<Name>:complete or stage:<Name>:failed on
+// the same item. That co-occurrence is stale by definition — a stage cannot
+// be both finished and in progress — so the in_progress label is removed.
+//
+// Unlike runStartupCleanup's lock-gated sweep, this pass does NOT check
+// Worker() or any lock label. This is deliberate, not an oversight: dispatch
+// ordering guarantees complete/failed and in_progress never legitimately
+// co-occur for the same stage during normal operation (removeFailedLabel
+// runs before in_progress is re-added on retry, and complete blocks further
+// dispatch entirely), so any occurrence found here is stale regardless of
+// whether a worker or lock is present. This makes the predicate self-
+// justifying and safe to run unconditionally at startup — see issue #1135.
+//
+// This sweep is startup-only. Running it mid-poll would additionally need to
+// exclude items with a live in-process worker for that stage, which this
+// issue's scope does not require (see docs/state-machine.md).
+//
+// Must be called after the store is populated by the first poll cycle.
+func (e *Engine) runStartupOrphanedInProgressScan() {
+	var cleaned int
+	for _, snap := range e.store.All() {
+		labels := snap.Labels()
+
+		terminalStages := make(map[string]bool)
+		for _, label := range labels {
+			if !strings.HasPrefix(label, "stage:") {
+				continue
+			}
+			if strings.HasSuffix(label, ":complete") {
+				terminalStages[strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":complete")] = true
+			} else if strings.HasSuffix(label, ":failed") {
+				terminalStages[strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":failed")] = true
+			}
+		}
+		if len(terminalStages) == 0 {
+			continue
+		}
+
+		owner, repoName := parseOwnerRepo(snap.Repo())
+		number := snap.Number()
+		for _, label := range labels {
+			if !strings.HasPrefix(label, "stage:") || !strings.HasSuffix(label, ":in_progress") {
+				continue
+			}
+			stageName := strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":in_progress")
+			if !terminalStages[stageName] {
+				continue
+			}
+			if err := e.client.RemoveLabelFromIssue(owner, repoName, number, label); err != nil {
+				e.logf(number, "warn", "could not remove orphaned in_progress label %q: %v\n", label, err)
+				continue
+			}
+			e.logf(number, "startup", "removed stale label %q\n", label)
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
+			}
+			cleaned++
+		}
+	}
+	if cleaned > 0 {
+		e.logf(0, "startup", "orphaned in_progress scan: removed %d stale label(s)\n", cleaned)
+	}
+}
