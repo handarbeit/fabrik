@@ -1,4 +1,4 @@
-# ADR 072: Live Re-Read at the Decision Point for Cache Staleness
+# ADR 074: Live Re-Read at the Decision Point for Cache Staleness
 
 **Date**: 2026-07-26
 **Status**: Accepted
