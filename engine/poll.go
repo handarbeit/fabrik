@@ -698,6 +698,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:rebase-needed",
 	"fabrik:bot-reprompted",
 	"fabrik:revalidate",
+	"fabrik:claude-limit",
 }
 
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
