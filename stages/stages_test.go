@@ -515,6 +515,35 @@ func TestNextStage_TrailingUnmanagedOnly(t *testing.T) {
 	}
 }
 
+// TestNextStage_SkipsHoldingStage is the regression guard for issue #1072: a
+// HoldingStage sitting positionally after the current stage must never be
+// returned as "next" by generic advancement. A holding stage is reachable
+// only via dedicated engine code (e.g. advanceToQueued) — landing there via
+// NextStage strands items with no active drain mechanism guaranteed.
+func TestNextStage_SkipsHoldingStage(t *testing.T) {
+	stages := []*Stage{
+		{Name: "Validate"},
+		{Name: "Queued", HoldingStage: true},
+		{Name: "Done"},
+	}
+	if s := NextStage(stages, "Validate"); s == nil || s.Name != "Done" {
+		t.Errorf("NextStage(Validate) = %v, want Done (Queued must be skipped)", s)
+	}
+}
+
+// TestNextStage_TrailingHoldingStageOnly verifies that if only a holding
+// stage remains after current, NextStage returns nil rather than parking the
+// item there.
+func TestNextStage_TrailingHoldingStageOnly(t *testing.T) {
+	stages := []*Stage{
+		{Name: "Validate"},
+		{Name: "Queued", HoldingStage: true},
+	}
+	if s := NextStage(stages, "Validate"); s != nil {
+		t.Errorf("NextStage(Validate) = %v, want nil (only holding stage remains)", s)
+	}
+}
+
 func TestLoadAll_CommentSkillField(t *testing.T) {
 	dir := t.TempDir()
 	writeStageFile(t, dir, "specify.yaml", `

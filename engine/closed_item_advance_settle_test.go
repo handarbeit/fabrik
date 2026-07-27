@@ -105,7 +105,14 @@ func TestSettleClosedItemsToDone_AlreadyAtDone_Idempotent(t *testing.T) {
 	}
 }
 
-func TestSettleClosedItemsToDone_ClosedAtHoldingStage_Skipped(t *testing.T) {
+// TestSettleClosedItemsToDone_ClosedAtHoldingStage_NoTrainWorker_Advances is
+// the regression guard for issue #1072: a closed item stranded at a Holding
+// stage (e.g. Queued) — however it got there — must be rescued to Done like
+// any other stage, as long as no merge-train worker is actively assembling a
+// batch for its repo. Before #1072 this scan blanket-skipped Holding stages,
+// which is exactly why 17 items merged outside the train's own landing path
+// stayed stranded in Queued forever.
+func TestSettleClosedItemsToDone_ClosedAtHoldingStage_NoTrainWorker_Advances(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineWithStages(t, client, closedAdvanceStages())
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -115,8 +122,33 @@ func TestSettleClosedItemsToDone_ClosedAtHoldingStage_Skipped(t *testing.T) {
 
 	eng.settleClosedItemsToDone(board)
 
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected a closed item at an idle Holding stage to be advanced, got %d status update calls", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].optionID != "OPT_Done" {
+		t.Errorf("expected advance to Done option, got %s", client.updateStatusCalls[0].optionID)
+	}
+}
+
+// TestSettleClosedItemsToDone_ClosedAtHoldingStage_TrainWorkerActive_Skipped
+// guards the one real race #1072's backstop must avoid: an item can be closed
+// without merging while it is still a live batch member mid-assembly or
+// mid-bisection. While a merge-train worker is in flight for the item's repo,
+// this scan must leave the item alone rather than yanking it out from under
+// the worker.
+func TestSettleClosedItemsToDone_ClosedAtHoldingStage_TrainWorkerActive_Skipped(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, closedAdvanceStages())
+	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{assembling: true})
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	item := gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued", IsClosed: true}
+	board.Items = []gh.ProjectItem{item}
+
+	eng.settleClosedItemsToDone(board)
+
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no status update for a closed item at a Holding stage, got %d", len(client.updateStatusCalls))
+		t.Errorf("expected no status update for a closed item at a Holding stage with an active train worker, got %d", len(client.updateStatusCalls))
 	}
 }
 
