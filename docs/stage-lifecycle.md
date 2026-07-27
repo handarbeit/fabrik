@@ -494,31 +494,40 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 ### Claude Usage-Limit Path
 
 A fourth outcome, distinct from Completion/Blocked-on-Input/Incomplete above: Claude exits non-zero
-because the account's usage limit was hit (e.g. `You've hit your session limit · resets 10:20pm
-(America/Edmonton)`), not because the stage genuinely failed. `interpretClaudeResult`
-(`engine/claude.go`) detects this by scanning raw invocation stdout for Anthropic's usage-limit exit
-message and, when Claude exited non-zero without a `FABRIK_STAGE_COMPLETE` marker, returns a
-`*claudeUsageLimitError` sentinel in place of the generic error. `finalizeStageOutcome` classifies it
-via `errors.As` after stash-restore (which must run regardless of outcome) but immediately following
-the engine-shutdown guard — before the normal `claudeRan`/retry classification logic runs — and routes
-to `handleUsageLimitExit`:
+because the account's usage limit was hit, not because the stage genuinely failed.
+`interpretClaudeResult` (`engine/claude.go`) detects this **structurally**, from the CLI's own parsed
+result object only — never from anything the assistant wrote: `classifyUsageLimitExit` checks
+`resp.TerminalReason == "blocking_limit"` (the same `terminal_reason` field the turn-cap check
+consults), and only when a result object actually parsed. When Claude exited non-zero without a
+`FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches, it returns a
+`*claudeUsageLimitError` sentinel in place of the generic error; an unparseable-JSON invocation is
+never classified as a usage-limit exit by any means. `finalizeStageOutcome` classifies it via
+`errors.As` after stash-restore (which must run regardless of outcome) but immediately following the
+engine-shutdown guard — before the normal `claudeRan`/retry classification logic runs — and routes to
+`handleUsageLimitExit`:
 
 1. `StageAttempted` recorded — the normal cooldown (`pollSeconds * 10`) applies, so the item does not
    retry on the very next poll and hammer the limit in a tight loop.
 2. Retry count is **not** incremented — the stage never ran, so this does not consume `max_retries`.
-3. If `fabrik:claude-limit` is absent, an explanatory comment (naming the condition and the reset time
-   when parseable) is posted and the label is added — gated on the label's own absence so a repeated
-   hit within the same episode does not repost the comment. Neither `fabrik:paused` nor
-   `stage:<name>:failed` is applied.
+3. If `fabrik:claude-limit` is absent, an explanatory comment naming the condition is posted and the
+   label is added — gated on the label's own absence so a repeated hit within the same episode does not
+   repost the comment. Neither `fabrik:paused` nor `stage:<name>:failed` is applied. The comment no
+   longer names a reset time — structural detection never parses one from prose.
 4. No partial-progress commit, no branch push, no `markCommentsSeenByStage` — nothing was produced.
 5. Lock released.
 
-`fabrik:claude-limit` clears automatically on the next invocation that is not itself classified as a
-usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure
-alike) — see `docs/state-machine.md` §7.3 and [ADR-1119](../adrs/1119-claude-usage-limit-detection.md)
-for the full rationale, including why this reuses the same `StageAttempted`-without-
-`StageRetryIncremented` split as the Post-Run Boundary Audit above (with the opposite pause/fail
-outcome — a usage limit is transient and self-resolving, a boundary violation is not).
+`fabrik:claude-limit` clears per-issue on the next invocation that is not itself classified as a
+usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure alike),
+and account-wide via `settleClaudeLimitLabelSweep`, a per-poll settle scan that removes it from every
+open item once the account-wide suspension has lifted — so an issue that is paused, blocked, or simply
+never redispatched no longer keeps the label indefinitely. An operator can also end an active suspension
+early, without restarting the engine, by applying `fabrik:clear-claude-limit` to any open board item;
+`settleClaudeLimitClearRequests` reads it each poll and clears the suspension. See
+`docs/state-machine.md` §7.3, [ADR-1119](../adrs/1119-claude-usage-limit-detection.md), and
+[ADR-1183](../adrs/1183-structural-claude-usage-limit-detection.md) for the full rationale, including
+why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
+Audit above (with the opposite pause/fail outcome — a usage limit is transient and self-resolving, a
+boundary violation is not).
 
 ### Branch Pushing
 

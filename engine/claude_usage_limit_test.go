@@ -7,135 +7,84 @@ import (
 	"testing"
 )
 
-// TestDetectUsageLimitExit covers the shapes a real usage-limit exit might
-// take (message in a JSON result field, message only in an errors[]-shaped
-// fixture, message in non-JSON raw stdout, the weekly-limit variant, and
-// reset-time present/absent), plus negative cases that must NOT match a
-// genuine unrelated failure.
-func TestDetectUsageLimitExit(t *testing.T) {
+// TestClassifyUsageLimitExit covers structural detection from the CLI's own
+// result object (claudeResponse.TerminalReason) — never from output prose.
+// See #1183: the original prose-matching detectUsageLimitExit self-triggered
+// on any stage whose output merely discussed usage limits.
+func TestClassifyUsageLimitExit(t *testing.T) {
 	tests := []struct {
-		name          string
-		raw           string
-		usage         TokenUsage
-		wantDetected  bool
-		wantMsg       string
-		wantResetTime string
+		name         string
+		resp         claudeResponse
+		usage        TokenUsage
+		wantDetected bool
 	}{
 		{
-			name:          "message in JSON result field with reset time",
-			raw:           `{"result":"You've hit your session limit · resets 10:20pm (America/Edmonton)","is_error":true}`,
-			wantDetected:  true,
-			wantMsg:       "hit your session limit",
-			wantResetTime: "10:20pm (America/Edmonton)",
+			name:         "blocking_limit with zero turns and zero cost detects",
+			resp:         claudeResponse{TerminalReason: "blocking_limit"},
+			usage:        TokenUsage{},
+			wantDetected: true,
 		},
 		{
-			name: "message only in errors[]-shaped fixture (result empty)",
-			raw: `{"subtype":"error_during_execution","is_error":true,"session_id":"sid-1",` +
-				`"errors":["You've hit your session limit · resets 6:05am (UTC)"]}`,
-			wantDetected:  true,
-			wantMsg:       "hit your session limit",
-			wantResetTime: "6:05am (UTC)",
-		},
-		{
-			name:          "message in non-JSON raw stdout",
-			raw:           "some preamble\nYou've hit your session limit · resets 10:20pm (America/Edmonton)\ntrailing",
-			wantDetected:  true,
-			wantMsg:       "hit your session limit",
-			wantResetTime: "10:20pm (America/Edmonton)",
-		},
-		{
-			// The reset-time regex expects a bare HH:MM(am/pm) — a day-name
-			// prefix like "Mon" doesn't match, so this degrades gracefully to
-			// detected=true with resetTime="" rather than failing detection.
-			name:          "weekly limit variant with day-prefixed reset time",
-			raw:           `{"result":"You've hit your weekly limit · resets Mon 9:00am (UTC)"}`,
-			wantDetected:  true,
-			wantMsg:       "hit your weekly limit",
-			wantResetTime: "",
-		},
-		{
-			name:          "reset time absent — degrades gracefully",
-			raw:           `{"result":"You've hit your session limit for now."}`,
-			wantDetected:  true,
-			wantMsg:       "hit your session limit",
-			wantResetTime: "",
-		},
-		{
-			name:         "negative: genuine context-limit-exceeded message must not match",
-			raw:          `{"result":"Error: context limit exceeded for this conversation"}`,
-			wantDetected: false,
-		},
-		{
-			name:         "negative: genuine unrelated rate-limit message must not match",
-			raw:          `{"subtype":"error_during_execution","is_error":true,"errors":["rate limit exceeded, please retry"]}`,
-			wantDetected: false,
-		},
-		{
-			name:         "negative: empty output",
-			raw:          ``,
-			wantDetected: false,
-		},
-		{
-			// Regression for #1183. A turn-capped run whose own output quotes the
-			// usage-limit message — which happens routinely in this repository,
-			// where issues, specs and tests discuss these exact strings — must not
-			// be classified as a usage-limit exit. On 2026-07-27 this suspended
-			// Claude dispatch account-wide for ~11 hours after a plain turn cap.
-			name: "negative: turn-capped run quoting the message in its own output",
-			raw: `{"subtype":"error_max_turns","terminal_reason":"max_turns","is_error":true,` +
-				`"num_turns":51,"result":"added a test fixture: You've hit your session limit ` +
-				`· resets 10:20pm (America/Edmonton)","errors":["Reached maximum number of turns (50)"]}`,
+			// The exclusion is a belt-and-suspenders carryover from #1184's
+			// prose-path guard: a genuine usage-limit exit terminates
+			// immediately, so turns+cost both nonzero rules it out regardless
+			// of terminal_reason.
+			name:         "blocking_limit with TurnsUsed>0 && CostUSD>0 does not detect",
+			resp:         claudeResponse{TerminalReason: "blocking_limit"},
 			usage:        TokenUsage{TurnsUsed: 51, CostUSD: 2.2766},
 			wantDetected: false,
 		},
 		{
-			// The exclusion must be conjunctive: cost without turns (or vice versa)
-			// is not evidence the invocation ran, so detection still stands.
-			name:          "cost recorded but zero turns still detects",
-			raw:           `{"result":"You've hit your session limit · resets 6:05am (UTC)","is_error":true}`,
-			usage:         TokenUsage{TurnsUsed: 0, CostUSD: 0.01},
-			wantDetected:  true,
-			wantMsg:       "hit your session limit",
-			wantResetTime: "6:05am (UTC)",
+			// rapid_refill_breaker is a distinct, unconfirmed terminal_reason
+			// value — deliberately not treated as a usage limit; see #1183.
+			name:         "rapid_refill_breaker does not detect",
+			resp:         claudeResponse{TerminalReason: "rapid_refill_breaker"},
+			usage:        TokenUsage{},
+			wantDetected: false,
 		},
 		{
-			// The canonical real shape: immediate exit, nothing consumed.
-			name:          "genuine limit exit with zero turns and zero cost detects",
-			raw:           `{"result":"You've hit your weekly limit · resets 6:05am (UTC)","is_error":true}`,
-			usage:         TokenUsage{},
-			wantDetected:  true,
-			wantMsg:       "hit your weekly limit",
-			wantResetTime: "6:05am (UTC)",
+			name:         "empty terminal_reason does not detect",
+			resp:         claudeResponse{TerminalReason: ""},
+			usage:        TokenUsage{},
+			wantDetected: false,
+		},
+		{
+			name:         "unrelated terminal_reason does not detect",
+			resp:         claudeResponse{TerminalReason: "max_turns"},
+			usage:        TokenUsage{},
+			wantDetected: false,
+		},
+		{
+			// The exclusion is conjunctive: cost without turns (or vice
+			// versa) is not evidence the invocation ran, so detection stands.
+			name:         "cost recorded but zero turns still detects",
+			resp:         claudeResponse{TerminalReason: "blocking_limit"},
+			usage:        TokenUsage{TurnsUsed: 0, CostUSD: 0.01},
+			wantDetected: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg, resetTime, detected := detectUsageLimitExit([]byte(tt.raw), tt.usage)
+			msg, detected := classifyUsageLimitExit(tt.resp, tt.usage)
 			if detected != tt.wantDetected {
-				t.Fatalf("detected = %v, want %v (msg=%q, resetTime=%q)", detected, tt.wantDetected, msg, resetTime)
+				t.Fatalf("detected = %v, want %v (msg=%q)", detected, tt.wantDetected, msg)
 			}
-			if !detected {
-				return
-			}
-			if !strings.EqualFold(msg, tt.wantMsg) {
-				t.Errorf("msg = %q, want %q", msg, tt.wantMsg)
-			}
-			if resetTime != tt.wantResetTime {
-				t.Errorf("resetTime = %q, want %q", resetTime, tt.wantResetTime)
+			if detected && msg == "" {
+				t.Errorf("expected non-empty msg when detected")
 			}
 		})
 	}
 }
 
 // TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError verifies that
-// interpretClaudeResult, when Claude exits non-zero with a usage-limit message
-// and no FABRIK_STAGE_COMPLETE marker, returns a *claudeUsageLimitError via
-// errors.As rather than the generic "claude exited with error" wrapper — this
-// is the seam finalizeStageOutcome (and a mocked ClaudeInvoker in item-level
-// tests) classifies on.
+// interpretClaudeResult, when Claude exits non-zero with terminal_reason
+// "blocking_limit" and no FABRIK_STAGE_COMPLETE marker, returns a
+// *claudeUsageLimitError via errors.As rather than the generic "claude
+// exited with error" wrapper — this is the seam finalizeStageOutcome (and a
+// mocked ClaudeInvoker in item-level tests) classifies on.
 func TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError(t *testing.T) {
-	raw := []byte(`{"result":"You've hit your session limit · resets 10:20pm (America/Edmonton)","num_turns":1,"total_cost_usd":0}`)
+	raw := []byte(`{"result":"","session_id":"sid-1","terminal_reason":"blocking_limit","is_error":true,"num_turns":0,"total_cost_usd":0}`)
 	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
 
 	if err == nil {
@@ -145,15 +94,13 @@ func TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError(t *testing.T)
 	if !errors.As(err, &limitErr) {
 		t.Fatalf("errors.As(err, *claudeUsageLimitError) = false; err = %v", err)
 	}
-	if limitErr.ResetTime != "10:20pm (America/Edmonton)" {
-		t.Errorf("ResetTime = %q, want %q", limitErr.ResetTime, "10:20pm (America/Edmonton)")
+	if limitErr.ResetTime != "" {
+		t.Errorf("ResetTime = %q, want empty — structural detection never populates a parsed reset time", limitErr.ResetTime)
 	}
 	if completed {
 		t.Errorf("expected completed=false for a usage-limit exit")
 	}
-	if !strings.Contains(text, "hit your session limit") {
-		t.Errorf("text = %q, want it to still contain the result text", text)
-	}
+	_ = text
 }
 
 // TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit is the
@@ -165,7 +112,9 @@ func TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError(t *testing.T)
 //
 // The shape reproduces the incident: a turn-capped run whose own output quotes
 // the usage-limit message (routine in this repository, where issues, specs and
-// tests discuss these exact strings). It must NOT return the sentinel.
+// tests discuss these exact strings). It must NOT return the sentinel — and
+// with structural detection, it can't even be considered, since
+// terminal_reason is "max_turns", not "blocking_limit".
 func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing.T) {
 	raw := []byte(`{"subtype":"error_max_turns","terminal_reason":"max_turns","is_error":true,` +
 		`"num_turns":51,"total_cost_usd":2.2766,` +
@@ -184,8 +133,9 @@ func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing
 	if errors.As(err, &limitErr) {
 		t.Fatalf("turn-capped run quoting the usage-limit message was classified as a usage-limit exit (ResetTime=%q); #1183 regression", limitErr.ResetTime)
 	}
-	if err == nil {
-		t.Errorf("expected a generic error for a non-zero exit, got nil")
+	var turnErr *claudeTurnLimitError
+	if !errors.As(err, &turnErr) {
+		t.Errorf("expected a claudeTurnLimitError for a turn-capped exit, got %v", err)
 	}
 	if completed {
 		t.Errorf("expected completed=false for a turn-capped run")
@@ -194,11 +144,11 @@ func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing
 
 // TestInterpretClaudeResult_UsageLimitExit_MarkerTakesPrecedence verifies that
 // a genuine stage completion (FABRIK_STAGE_COMPLETE present) is never
-// misclassified as a usage-limit exit, even if the output happens to also
-// contain limit-shaped text — the marker check runs first in
+// misclassified as a usage-limit exit, even when the structural
+// terminal_reason field is also present — the marker check runs first in
 // interpretClaudeResult and returns before usage-limit detection is reached.
 func TestInterpretClaudeResult_UsageLimitExit_MarkerTakesPrecedence(t *testing.T) {
-	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE\nNote: earlier you hit your session limit · resets 10:20pm (America/Edmonton)"}`)
+	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","terminal_reason":"blocking_limit"}`)
 	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
 
 	if err == nil {
@@ -210,5 +160,29 @@ func TestInterpretClaudeResult_UsageLimitExit_MarkerTakesPrecedence(t *testing.T
 	}
 	if !completed {
 		t.Errorf("expected completed=true (marker present)")
+	}
+}
+
+// TestInterpretClaudeResult_UsageLimitExit_UnparseableJSON_NotClassified
+// verifies that when JSON parsing fails (ok == false), there is no
+// structured result object to trust, so the invocation is never classified
+// as a usage-limit exit by any means — it falls through to the generic
+// error/timeout handling paths. See #1183 Requirement 2.
+func TestInterpretClaudeResult_UsageLimitExit_UnparseableJSON_NotClassified(t *testing.T) {
+	raw := []byte("not valid json, but mentions hit your session limit anyway")
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+
+	if err == nil {
+		t.Fatalf("expected error (non-zero exit)")
+	}
+	var limitErr *claudeUsageLimitError
+	if errors.As(err, &limitErr) {
+		t.Fatalf("unparseable JSON must never be classified as a usage-limit exit, got claudeUsageLimitError")
+	}
+	if completed {
+		t.Errorf("expected completed=false")
+	}
+	if !strings.Contains(err.Error(), "claude exited with error") {
+		t.Errorf("expected generic error, got %v", err)
 	}
 }

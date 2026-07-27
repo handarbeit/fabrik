@@ -704,6 +704,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:bot-reprompted",
 	"fabrik:revalidate",
 	"fabrik:claude-limit",
+	"fabrik:clear-claude-limit",
 }
 
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
@@ -1132,6 +1133,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// fabrik:awaiting-close. Runs unconditionally every poll, independent of
 	// itemMayNeedWork/itemNeedsWork dispatch — the item has already reached Done.
 	e.settleNonDefaultBaseCloses(board)
+
+	// Claude usage-limit settle scans (#1183): the operator-triggered restart-free
+	// clear runs first so a clear request and the resulting account-wide label sweep
+	// can both land in the same poll cycle. Both run unconditionally every poll,
+	// independent of itemMayNeedWork/itemNeedsWork — the suspension they manage is
+	// account-wide, not scoped to any one item's stage or column. Neither uses the
+	// retry/escalate machinery: a clear request is a one-shot idempotent command, and
+	// the label sweep is purely cosmetic (dispatch is gated by claudeSuspendedUntil,
+	// not the label), so a failed removal simply self-heals on the next poll.
+	e.settleClaudeLimitClearRequests(board)
+	e.settleClaudeLimitLabelSweep(board)
 
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label

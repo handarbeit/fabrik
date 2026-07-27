@@ -2151,7 +2151,7 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has suspended Claude dispatch account-wide (not just for this issue) until the reset time and will resume automatically once it passes, or as soon as any invocation succeeds — no operator action is required. The `fabrik:claude-limit` label clears automatically once an invocation for this issue succeeds.",
+			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has suspended Claude dispatch account-wide (not just for this issue) and will resume automatically once the backoff passes, or as soon as any invocation succeeds — no operator action is required. If this looks like a false positive, apply `fabrik:clear-claude-limit` to any open board item to end the suspension immediately, with no engine restart needed. The `fabrik:claude-limit` label clears once the suspension lifts, both on this issue (next non-limit invocation) and account-wide (every open issue still carrying it).",
 			stage.Name, resetSuffix,
 		)
 		e.postItemComment(item, comment, false)
