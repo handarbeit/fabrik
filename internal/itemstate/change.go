@@ -59,6 +59,13 @@ const (
 	// timestamps or last author) changed. Informational only — not in
 	// wakeChFlags/cycleSetFlags, same treatment as InvocationChanged.
 	CommentBreakerChanged
+	// PRStateChanged is a narrower sub-flag of LinkedPRChanged, set only by
+	// PRDetailsUpdated (LinkedPR.Title/State/Merged/Draft — a genuine PR-level
+	// state transition such as merged, closed, or draft<->ready). Distinct from
+	// LinkedPRChanged so consumers that only care about the PR's own state (not
+	// review activity, check runs, or thread comments, which also set
+	// LinkedPRChanged) can filter precisely.
+	PRStateChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

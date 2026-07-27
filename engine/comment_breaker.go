@@ -27,21 +27,32 @@ func (e *Engine) effectiveCommentBreakerWindow() (int, time.Duration) {
 
 // recordCommentBreakerInvocation records a comment-processing invocation for
 // item's circuit-breaker counter, attributing it to author (the triggering
-// comment's author — surfaced in the trip comment if the breaker fires).
+// comment's author — surfaced in the trip comment if the breaker fires). Also
+// passes the current window's cutoff so the Store prunes any InvocationsAt
+// entries that have already aged out — otherwise an issue that receives
+// invocations sparser than the window (never tripping, never hitting a reset
+// trigger) would grow InvocationsAt without bound.
 func (e *Engine) recordCommentBreakerInvocation(item gh.ProjectItem, author string) {
+	_, window := e.effectiveCommentBreakerWindow()
+	now := time.Now()
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.CommentBreakerInvocationRecorded{
 		Repo:   repoStr,
 		Number: item.Number,
-		At:     time.Now(),
+		At:     now,
 		Author: author,
+		Cutoff: now.Add(-window),
 	})
 }
 
 // commentBreakerCount returns the number of comment-processing invocations
-// recorded for item within the current rolling window. Window math (pruning)
-// lives here, not in itemstate — the Store holds raw timestamps only,
-// mirroring the mergeTrainTrials runaway-guard precedent (ADR-059 D8).
+// recorded for item within the current rolling window. Window math (the
+// threshold/window values and this read-time count) lives here, not in
+// itemstate — the Store holds raw timestamps only, mirroring the
+// mergeTrainTrials runaway-guard precedent (ADR-059 D8). recordCommentBreakerInvocation
+// already prunes InvocationsAt at write time using the window active when it
+// was called; this read-time prune is a cheap belt-and-suspenders pass that
+// also stays correct if the configured window shrinks between writes.
 func (e *Engine) commentBreakerCount(item gh.ProjectItem) int {
 	_, window := e.effectiveCommentBreakerWindow()
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())

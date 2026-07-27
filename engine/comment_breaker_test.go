@@ -65,6 +65,37 @@ func TestCommentBreakerCount_PrunesOutsideWindow(t *testing.T) {
 	}
 }
 
+// TestRecordCommentBreakerInvocation_PrunesStoredSliceAtWriteTime is a
+// regression guard: recordCommentBreakerInvocation must prune stale entries
+// out of the Store's InvocationsAt slice at write time (not just filter them
+// out at read time in commentBreakerCount), or an issue that receives
+// invocations sparser than the window — never tripping, never hitting a reset
+// trigger — grows InvocationsAt without bound over the issue's lifetime.
+func TestRecordCommentBreakerInvocation_PrunesStoredSliceAtWriteTime(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.CommentCycleWindow = 30 * time.Minute
+	item := gh.ProjectItem{Number: 6, Repo: "owner/repo"}
+	repoStr := "owner/repo"
+
+	// Two stale invocations, well outside the 30m window.
+	eng.store.Apply(itemstate.CommentBreakerInvocationRecorded{Repo: repoStr, Number: 6, At: time.Now().Add(-2 * time.Hour), Author: "a"})
+	eng.store.Apply(itemstate.CommentBreakerInvocationRecorded{Repo: repoStr, Number: 6, At: time.Now().Add(-time.Hour), Author: "b"})
+
+	// A fresh invocation through the real recording path should prune the two
+	// stale entries above, not just the new one appended.
+	eng.recordCommentBreakerInvocation(item, "c")
+
+	snap, err := eng.store.Get(repoStr, 6)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	invocations := snap.CommentBreakerInvocationsAt()
+	if len(invocations) != 1 {
+		t.Errorf("InvocationsAt len = %d, want 1 (stale entries pruned at write time, not left to accumulate)", len(invocations))
+	}
+}
+
 // ---- Trip after N non-advancing comment-processing cycles (#1089) ----
 
 // nonAdvancingClaude returns a mockClaudeInvoker whose InvokeForComments never
@@ -244,7 +275,7 @@ func TestCommentBreaker_ResetOnIssueBodyUpdate(t *testing.T) {
 	}
 }
 
-func TestCommentBreakerObserver_ResetsOnLinkedPRChanged(t *testing.T) {
+func TestCommentBreakerObserver_ResetsOnPRStateChanged(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 43, Repo: "owner/repo"}
@@ -253,14 +284,14 @@ func TestCommentBreakerObserver_ResetsOnLinkedPRChanged(t *testing.T) {
 		eng.recordCommentBreakerInvocation(item, "testuser")
 	}
 	if got := eng.commentBreakerCount(item); got != 6 {
-		t.Fatalf("commentBreakerCount before PR change = %d, want 6", got)
+		t.Fatalf("commentBreakerCount before PR state change = %d, want 6", got)
 	}
 
 	obs := &CommentBreakerObserver{Store: eng.store}
-	obs.OnChange(itemstate.Change{Repo: "owner/repo", Number: 43, Fields: itemstate.LinkedPRChanged}, itemstate.Snapshot{})
+	obs.OnChange(itemstate.Change{Repo: "owner/repo", Number: 43, Fields: itemstate.LinkedPRChanged | itemstate.PRStateChanged}, itemstate.Snapshot{})
 
 	if got := eng.commentBreakerCount(item); got != 0 {
-		t.Errorf("commentBreakerCount after LinkedPRChanged = %d, want 0 (reset)", got)
+		t.Errorf("commentBreakerCount after PRStateChanged = %d, want 0 (reset)", got)
 	}
 }
 
@@ -276,6 +307,37 @@ func TestCommentBreakerObserver_IgnoresUnrelatedChange(t *testing.T) {
 
 	if got := eng.commentBreakerCount(item); got != 1 {
 		t.Errorf("commentBreakerCount after unrelated change = %d, want 1 (unchanged)", got)
+	}
+}
+
+// TestCommentBreakerObserver_IgnoresLinkedPRChangedWithoutPRStateChanged is a
+// regression guard: LinkedPRChanged alone (without PRStateChanged) must NOT
+// reset the breaker. LinkedPRChanged also fires on a new PR review or inline
+// review comment (PRReviewSubmitted / PRReviewCommentCreated /
+// ReviewThreadCommentAdded) — the same event that supplies the comment
+// processComments is about to process for a review-reinvoke. Resetting on
+// that broader flag would zero the counter on every review-comment cycle,
+// capping the observed count at 1 forever and defeating the breaker for its
+// primary PR-review-comment-loop use case (caught during PR review of #1089).
+func TestCommentBreakerObserver_IgnoresLinkedPRChangedWithoutPRStateChanged(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 47, Repo: "owner/repo"}
+
+	for i := 0; i < 4; i++ {
+		eng.recordCommentBreakerInvocation(item, "review-bot")
+	}
+	if got := eng.commentBreakerCount(item); got != 4 {
+		t.Fatalf("commentBreakerCount before review comment = %d, want 4", got)
+	}
+
+	// Simulate a new PR review comment arriving: LinkedPRChanged fires (as
+	// PRReviewCommentCreated returns), but PRStateChanged does not.
+	obs := &CommentBreakerObserver{Store: eng.store}
+	obs.OnChange(itemstate.Change{Repo: "owner/repo", Number: 47, Fields: itemstate.LinkedPRChanged | itemstate.CommentsChanged}, itemstate.Snapshot{})
+
+	if got := eng.commentBreakerCount(item); got != 4 {
+		t.Errorf("commentBreakerCount after LinkedPRChanged-only (review comment) = %d, want 4 (unchanged — must not reset)", got)
 	}
 }
 

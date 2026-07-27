@@ -610,7 +610,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.State = v.State
 		item.LinkedPR.Merged = v.Merged
 		item.LinkedPR.Draft = v.Draft
-		return LinkedPRChanged
+		return LinkedPRChanged | PRStateChanged
 
 	case ReviewThreadCommentAdded:
 		ensureLinkedPR(item, 0)
@@ -624,6 +624,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return LinkedPRChanged | CommentsChanged
 
 	case CommentBreakerInvocationRecorded:
+		if !v.Cutoff.IsZero() {
+			pruned := item.CommentBreaker.InvocationsAt[:0]
+			for _, at := range item.CommentBreaker.InvocationsAt {
+				if !at.Before(v.Cutoff) {
+					pruned = append(pruned, at)
+				}
+			}
+			item.CommentBreaker.InvocationsAt = pruned
+		}
 		item.CommentBreaker.InvocationsAt = append(item.CommentBreaker.InvocationsAt, v.At)
 		item.CommentBreaker.LastAuthor = v.Author
 		return CommentBreakerChanged

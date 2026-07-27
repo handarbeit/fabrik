@@ -714,12 +714,18 @@ func (m LinkageHealAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Num
 // CommentBreakerInvocationRecorded appends a timestamp (and records the
 // triggering comment's author) to ItemState.CommentBreaker for the
 // runaway-loop circuit breaker (#1089). Applied once per comment-processing
-// invocation that actually reaches Claude.
+// invocation that actually reaches Claude. Cutoff, when non-zero, additionally
+// prunes any InvocationsAt entries older than Cutoff before appending — the
+// caller (engine) computes it from its own window setting so an issue that
+// receives invocations sparser than the window doesn't grow InvocationsAt
+// without bound; a zero Cutoff performs no pruning (mirrors zero-means-default
+// elsewhere, but here zero means "caller opted out of pruning").
 type CommentBreakerInvocationRecorded struct {
 	Repo   string
 	Number int
 	At     time.Time
 	Author string
+	Cutoff time.Time
 }
 
 func (CommentBreakerInvocationRecorded) isMutation()       {}

@@ -12,7 +12,7 @@ Incident #1083: a self-sustaining comment loop ran ~995 times over roughly $210 
 
 A per-issue comment-processing circuit breaker, tracked in the event-sourced `itemstate.Store` and enforced by the engine:
 
-**Counter.** `ItemState.CommentBreaker` (`internal/itemstate/itemstate.go`) holds `InvocationsAt []time.Time` and `LastAuthor string`, driven by two mutations — `CommentBreakerInvocationRecorded{Repo, Number, At, Author}` (append) and `CommentBreakerReset{Repo, Number}` (clear; a no-op, no `Change` emitted, when already empty). It is scoped to the item as a whole, not per-stage, because the #1083 incident stayed on a single stage throughout the entire run, and a stage-keyed counter would let a legitimate stage transition mid-window quietly reset the count to a number lower than what actually happened. Window math (threshold N, window T, prune-on-read) lives in the engine (`engine/comment_breaker.go`), not in `itemstate` — the Store stores raw timestamps only, mirroring the existing `mergeTrainTrials` runaway-guard precedent (ADR-059 D8) and keeping `itemstate` free of Fabrik-specific business thresholds.
+**Counter.** `ItemState.CommentBreaker` (`internal/itemstate/itemstate.go`) holds `InvocationsAt []time.Time` and `LastAuthor string`, driven by two mutations — `CommentBreakerInvocationRecorded{Repo, Number, At, Author, Cutoff}` (append, pruning `InvocationsAt` entries older than `Cutoff` first when `Cutoff` is non-zero) and `CommentBreakerReset{Repo, Number}` (clear; a no-op, no `Change` emitted, when already empty). It is scoped to the item as a whole, not per-stage, because the #1083 incident stayed on a single stage throughout the entire run, and a stage-keyed counter would let a legitimate stage transition mid-window quietly reset the count to a number lower than what actually happened. Window math (threshold N, window T) lives in the engine (`engine/comment_breaker.go`), not in `itemstate` — the Store stores raw timestamps only and prunes only against a caller-supplied `Cutoff`, mirroring the existing `mergeTrainTrials` runaway-guard precedent (ADR-059 D8) and keeping `itemstate` free of Fabrik-specific business thresholds. `recordCommentBreakerInvocation()` computes `Cutoff` from the current window on every call, so `InvocationsAt` is pruned at write time and doesn't grow without bound for an issue that receives invocations sparser than the window; `commentBreakerCount()` additionally prunes-and-counts on every read as a cheap belt-and-suspenders pass.
 
 **Recording point.** `recordCommentBreakerInvocation()` is called inside `processComments` (`engine/comments.go`) immediately before Claude is actually invoked — after the `fabrik:editing` label and worktree setup, but before the extension loop calls `InvokeForComments()`. An early return before that point (e.g. an editing-label API failure) is not counted as a wasted cycle.
 
@@ -24,7 +24,7 @@ A per-issue comment-processing circuit breaker, tracked in the event-sourced `it
 |---|---|
 | `stage:*:complete` transition | `handleStageComplete` (`engine/stages.go`) — the single choke point reached on stage completion regardless of whether it originated from a plain stage run or from `finalizeComments`'s completed branch |
 | New commit on the branch | Inside `processComments`, comparing `gitHeadSHA(workDir)` before/after the Claude invocation — detects the commit locally, without depending on a webhook-lagged PR head-SHA update |
-| PR state change | `CommentBreakerObserver` (`engine/observers.go`), subscribed to the Store, reacting to any `LinkedPRChanged` flag |
+| PR state change | `CommentBreakerObserver` (`engine/observers.go`), subscribed to the Store, reacting to the `PRStateChanged` flag |
 | Issue body edited (`FABRIK_ISSUE_UPDATE`) | Inside `publishCommentOutput`'s existing `extractUpdatedBody(output) != ""` branch — the only forward-progress signal pre-PR stages (Specify/Research/Plan) produce |
 | Manual human unpause | `clearFailedStage` (`engine/item.go`), alongside the existing `ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles` clears |
 
@@ -36,9 +36,11 @@ A per-issue comment-processing circuit breaker, tracked in the event-sourced `it
 
 Routing the trip through `pauseIssue` gets ADR-069's honorable-pause guarantee — a subsequent bot comment cannot silently lift the pause — automatically and for free, with zero new label semantics to teach the rest of the engine or document in `CLAUDE.md`. A bespoke label would have to re-implement that guarantee (and every other consumer that already special-cases `fabrik:paused`/`fabrik:awaiting-input`) from scratch.
 
-### Why is `LinkedPRChanged` used as-is instead of a new fine-grained "PR state changed" flag?
+### Why a new `PRStateChanged` flag instead of reusing `LinkedPRChanged`?
 
-A narrower flag would require injecting circuit-breaker-specific before/after diffing into `itemstate.Store`'s core mutation switch — business logic that doesn't belong in a generic event-sourced package. `LinkedPRChanged` is diff-based already (it only fires on a genuine field change, never merely because a field is present), so reusing it is both simpler and correct for a majority of the intended cases (merge, close, draft↔ready). It is also broader than that literal set — it also fires on review-request or check-run churn on the PR — which resets the counter more often than the minimal correct trigger would. For a defense-in-depth backstop of last resort, erring toward fewer false trips is accepted here, the same trade-off ADR-070 made explicitly for bot-noise filtering ("false negatives accepted by design").
+The first draft of this design reused the existing broad `LinkedPRChanged` flag, reasoning that its "fires on any genuine field change" semantics were diff-based enough to avoid false trips, and that erring toward more resets (fewer false trips) was the correct trade-off for a last-resort backstop — the same trade-off ADR-070 made explicitly for bot-noise filtering. PR review of this issue caught that this reasoning had a fatal gap: `LinkedPRChanged` also fires on `PRReviewSubmitted`/`PRReviewCommentCreated`/`ReviewThreadCommentAdded` — a new PR review or inline review comment. That is the *same event* that supplies the comment `processComments` is about to process for a review-reinvoke. Keying the reset off `LinkedPRChanged` there resets the counter on the same cycle that records its own invocation, capping the observed count at 1 forever — silently defeating the breaker for exactly the PR-review-comment-loop shape it exists to catch.
+
+The fix adds `PRStateChanged`, a narrower `ChangeFlags` sub-flag set only by `PRDetailsUpdated` (the mutation that carries `LinkedPR.State`/`Merged`/`Draft` — genuine PR-level transitions: merged, closed, draft↔ready). This still doesn't require injecting circuit-breaker-specific diffing into `itemstate.Store`'s core mutation switch — `PRDetailsUpdated` already exists as a distinct mutation type for exactly this purpose (populated from `boardcache/delta.go`'s `pull_request` webhook handling), so the fix is additive: one more `ChangeFlags` bit returned alongside `LinkedPRChanged` at that one call site, not new business logic. `PRReviewSubmitted`/`PRReviewCommentCreated`/`ReviewThreadCommentAdded` continue to set `LinkedPRChanged` only, so other existing consumers (`wakeChFlags`, etc.) are unaffected.
 
 ### Why does an issue-body edit count as forward progress?
 
@@ -60,15 +62,15 @@ Pre-PR stages (Specify, Research, Plan) iterate purely via `FABRIK_ISSUE_UPDATE`
 - All five reset triggers are chosen at points where the signal is already locally and reliably available — no new polling, no new GitHub API calls beyond what `processComments`, `handleStageComplete`, `publishCommentOutput`, and the existing `itemstate.Store` subscription already do.
 
 **Negative / Trade-offs:**
-- **`LinkedPRChanged` is broader than the literal "merged/closed/draft↔ready" set**, so a PR that receives frequent review-request or check-run churn resets the breaker more often than the minimal correct trigger would, in principle giving a genuine PR-side loop more room before tripping. Accepted per the "last-resort backstop, avoid false trips" framing shared with ADR-070; can be tightened later with a dedicated, narrower flag if it proves too permissive in practice.
 - **`gitHeadSHA` now shells out to `git rev-parse HEAD` twice per comment-processing invocation** (before/after), rather than only when `fabrik:extend-turns` progress detection needs it. The cost is negligible (a single local git call), and the pattern (`detectProgress`) was already established elsewhere in the engine.
 - **The breaker is a backstop, not a fix** — it does not prevent the underlying loop from running N times and costing N invocations' worth of tokens before it trips. It bounds damage; it does not eliminate it. Fixes 1/4 and 2/4 remain the primary defenses against the two known pump shapes.
+- **`PRStateChanged` is still coarser than a per-transition flag** (it doesn't distinguish merge from close from draft↔ready) — acceptable because the breaker only needs "did the PR's own state move," not which direction.
 
 ## Related Work
 
 - Incident #1083 (human incident report — not modified by this ADR or its issue).
 - ADR-069 / #1087 — fix 1/4; establishes the honorable-pause guarantee this ADR's trip action depends on.
-- ADR-070 / #1088 — fix 2/4; establishes the "false negatives accepted by design" trade-off this ADR reuses for the `LinkedPRChanged` reset trigger.
+- ADR-070 / #1088 — fix 2/4; establishes the "false negatives accepted by design" framing this ADR's PR-state reset trigger is judged against.
 - #1090 — fix 4/4 of the same runaway-loop remediation series (decoupling Fabrik's own writes from cache invalidation/re-poll), out of scope here.
 - ADR-059 D8 — the `mergeTrainTrials` runaway-guard precedent this breaker's window-pruning-in-the-engine design mirrors.
 
