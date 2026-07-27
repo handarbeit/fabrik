@@ -1,7 +1,10 @@
 // Package selfupgrade implements generic binary self-management: compare the
-// running version against a source of truth, fetch a replacement, verify it,
-// and re-exec. It supports two paths — a GitHub-Releases-backed release build
-// (PerformReleaseUpgrade) and a git-source-checkout dev build
+// running version against a source of truth, fetch a replacement, put it in
+// place, and re-exec. "Put it in place" is deliberately not "verify": beyond
+// an HTTP status check on the download and, on darwin, re-signing so the
+// binary passes AMFI, there is no checksum or signature verification of
+// release asset contents. It supports two paths — a GitHub-Releases-backed
+// release build (PerformReleaseUpgrade) and a git-source-checkout dev build
 // (CheckAndRebuildDev) — both extracted from Fabrik's engine/upgrade.go.
 //
 // This package must never import engine. It exists precisely so that a

@@ -6,7 +6,7 @@
 
 ## Context
 
-Fabrik's self-upgrade logic — version comparison, release-asset download/verify, dev-build rebuild, re-exec — lived entirely in `engine/upgrade.go`. Pruefer needs the same capability, but ADR-1113 established a hard boundary: Pruefer must not import `engine` (it must not depend on board/stage concepts). That boundary held cleanly for V1 because Pruefer had no self-upgrade code at all — only one daemon could self-upgrade.
+Fabrik's self-upgrade logic — version comparison, release-asset download, dev-build rebuild, re-exec — lived entirely in `engine/upgrade.go`. (No step here cryptographically verifies release asset contents — only an HTTP status check on the download and, on darwin, an ad-hoc re-sign so the binary passes AMFI; see `internal/selfupgrade/doc.go`.) Pruefer needs the same capability, but ADR-1113 established a hard boundary: Pruefer must not import `engine` (it must not depend on board/stage concepts). That boundary held cleanly for V1 because Pruefer had no self-upgrade code at all — only one daemon could self-upgrade.
 
 Unlike Fabrik, a stale Pruefer is silent: it has no board, no issues, nothing that visibly looks wrong. On 2026-07-27, #1189 and #1190 both landed while a running Pruefer instance kept using pre-#1189/#1190 logic until someone noticed by hand. The fix is for Pruefer to gain the same self-upgrade capability, without violating the no-`engine`-import boundary.
 
