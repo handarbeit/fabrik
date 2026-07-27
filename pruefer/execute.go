@@ -15,7 +15,11 @@ import (
 // bootstraps GitHub App auth, constructs the GitHub client and Daemon, and
 // runs until interrupted (SIGINT/SIGTERM). Mirrors cmd.Execute()'s shape
 // for the main fabrik binary (see cmd/root.go), scaled down to Pruefer's
-// needs — no board/stage machinery, no TUI.
+// needs — no board/stage machinery. The interactive TUI is enabled by
+// default when a real terminal is detected (see useTUI); -notui or a
+// non-interactive environment (systemd/tmux with no TTY) falls back to
+// Pruefer's existing logf-based structured logging with identical review
+// behavior.
 func Execute() error {
 	if err := config.LoadDotenv(); err != nil {
 		return fmt.Errorf("loading .env: %w", err)
@@ -52,6 +56,10 @@ func Execute() error {
 		Clone:    CloneForReview,
 		Config:   cfg,
 		BotLogin: auth.BotLogin,
+	}
+
+	if useTUI(cfg) {
+		return runTUI(ctx, daemon)
 	}
 	return daemon.Run(ctx)
 }
