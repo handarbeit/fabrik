@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -162,6 +164,60 @@ func SetIssueStatus(t *testing.T, env *Env, itemID, columnName string) {
 	}
 }
 
+// pollRandMu guards pollRand, since ~15 of the 16 e2e test functions run
+// under t.Parallel() and several call multiple wait-helpers concurrently.
+var pollRandMu sync.Mutex
+var pollRand = newPollRand()
+
+// newPollRand builds the package-scoped RNG source used by pollSleep. It
+// self-seeds randomly unless E2E_JITTER_SEED is set to a valid uint64, in
+// which case both PCG seed halves derive from it, making the jitter sequence
+// reproducible for harness unit tests and for local repro of flaky-looking
+// failures. A malformed E2E_JITTER_SEED falls back to auto-seeding rather
+// than failing — a bad env var shouldn't break every e2e test.
+func newPollRand() *rand.Rand {
+	if s := os.Getenv("E2E_JITTER_SEED"); s != "" {
+		if seed, err := strconv.ParseUint(s, 10, 64); err == nil {
+			// Reusing seed for both PCG state and sequence is intentional:
+			// we only need a reproducible sequence from a single uint64 for
+			// test determinism, not two independent streams.
+			return rand.New(rand.NewPCG(seed, seed))
+		}
+	}
+	return rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
+}
+
+// jitterWithRand returns a duration uniformly distributed over
+// [base*0.8, base*1.2) using the supplied RNG. It is pure (no global state)
+// so unit tests can exercise it with their own seeded generator.
+func jitterWithRand(r *rand.Rand, base time.Duration) time.Duration {
+	f := r.Float64() // [0, 1)
+	return base + time.Duration(float64(base)*0.20*(2*f-1))
+}
+
+// pollSleep sleeps for base, jittered ±20% (uniform, a fixed proportional-
+// jitter band centered on base — not AWS's "equal jitter", which is
+// asymmetric and floored at base/2). This is deliberately not full jitter
+// (rand in [0, base]), whose
+// mean of base/2 would roughly double the harness's steady-state request
+// rate against the exact shared GitHub API/GraphQL budget this jitter is
+// meant to protect. It's also deliberately not decorrelated jitter, which
+// grows a retry sequence from the previous sleep — these wait-helpers are
+// steady-state condition polls, not retry-after-failure backoff, so there's
+// no "previous sleep" to grow from. Fixed base ± 20% preserves the mean
+// interval (so total request volume and suite wall-clock stay essentially
+// unchanged) while still desynchronizing concurrent scenarios, since each
+// poller's phase drifts every iteration and lockstep breaks within a few
+// cycles. This does widen a wait-helper's existing tail-sleep deadline
+// overshoot from at most one base to at most base*1.2 (e.g. 15s to 18s) —
+// negligible against per-scenario timeouts measured in minutes to hours.
+func pollSleep(base time.Duration) {
+	pollRandMu.Lock()
+	d := jitterWithRand(pollRand, base)
+	pollRandMu.Unlock()
+	time.Sleep(d)
+}
+
 // WaitForProjectStatus polls the project board until the item for issueNumber
 // reports Status == columnName, or fails after timeout. Use this after
 // SetIssueStatus when a subsequent action (e.g. an external PR merge that
@@ -195,7 +251,7 @@ func WaitForProjectStatus(t *testing.T, env *Env, repo string, issueNumber int, 
 				}
 			}
 		}
-		time.Sleep(10 * time.Second)
+		pollSleep(10 * time.Second)
 	}
 	t.Fatalf("timed out waiting for project status %q on %s#%d (last observed %q)",
 		columnName, repo, issueNumber, last)
@@ -210,7 +266,7 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 		labels, err := tryIssueLabels(env, repo, issueNumber)
 		if err != nil {
 			t.Logf("WaitForIssueLabel: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
-			time.Sleep(15 * time.Second)
+			pollSleep(15 * time.Second)
 			continue
 		}
 		for _, l := range labels {
@@ -218,7 +274,7 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 				return
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	last, _ := tryIssueLabels(env, repo, issueNumber)
 	t.Fatalf("timed out waiting for label %q on %s#%d (had: %v)", label, repo, issueNumber, last)
@@ -276,7 +332,7 @@ func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, ti
 		} else if state == "CLOSED" {
 			return
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	state, _ := tryIssueState(env, repo, issueNumber)
 	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
@@ -291,7 +347,7 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		labels, err := tryIssueLabels(env, repo, issueNumber)
 		if err != nil {
 			t.Logf("WaitForLabelAbsent: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
-			time.Sleep(15 * time.Second)
+			pollSleep(15 * time.Second)
 			continue
 		}
 		present := false
@@ -304,7 +360,7 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		if !present {
 			return
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for label %q to disappear from %s#%d", label, repo, issueNumber)
 }
@@ -431,7 +487,7 @@ func WaitForLinkedPR(t *testing.T, env *Env, repo string, issueNum int, timeout 
 				}
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for an open PR with head=%s in %s", branch, repo)
 	return 0
@@ -524,7 +580,7 @@ func WaitForChildIssueInRepo(t *testing.T, env *Env, childRepo string, since tim
 				return nums[0]
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for a child sub-issue in %s (since %s)", childRepo, sinceStr)
 	return 0
@@ -848,7 +904,7 @@ func LinkedPRNumber(t *testing.T, env *Env, repo string, issueNumber int) int {
 		if err == nil && n > 0 {
 			return n
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for linked PR on %s#%d", repo, issueNumber)
 	return 0
@@ -883,7 +939,7 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 		bodies, err := tryPRComments(env, repo, prNumber)
 		if err != nil {
 			t.Logf("WaitForPRCommentContaining: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
-			time.Sleep(15 * time.Second)
+			pollSleep(15 * time.Second)
 			continue
 		}
 		for _, b := range bodies {
@@ -891,7 +947,7 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 				return
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for PR comment containing %q on %s#%d", substring, repo, prNumber)
 }
@@ -982,7 +1038,7 @@ func WaitForCheckConclusion(t *testing.T, env *Env, repo string, prNumber int, c
 				return
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for check %q to reach conclusion %q on %s#%d (last observed %q)",
 		checkName, want, repo, prNumber, last)
@@ -1278,14 +1334,14 @@ func WaitForPRCommentReaction(t *testing.T, env *Env, repo string, prNumber int,
 			"--jq", filter)
 		if err != nil {
 			t.Logf("WaitForPRCommentReaction: transient error on %s PR #%d: %v (will retry)", repo, prNumber, err)
-			time.Sleep(15 * time.Second)
+			pollSleep(15 * time.Second)
 			continue
 		}
 		count, parseErr := strconv.Atoi(strings.TrimSpace(out))
 		if parseErr == nil && count > 0 {
 			return
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for %q reaction on comment containing %q on %s PR #%d",
 		reactionContent, commentSubstring, repo, prNumber)
