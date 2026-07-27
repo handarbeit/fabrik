@@ -297,15 +297,18 @@ func loadOne(path string) (*Stage, error) {
 
 // NextStage returns the stage after the given one, skipping over any stage
 // marked Unmanaged (a parking column is never a valid auto-advance target —
-// items land there only via explicit human action). Returns nil if current is
-// the last stage, or if only unmanaged stages remain after it.
+// items land there only via explicit human action) or HoldingStage (a batch
+// holding pen is reachable only via dedicated engine code, e.g.
+// advanceToQueued — generic positional advancement must never land an item
+// there, since nothing may be actively draining it). Returns nil if current
+// is the last stage, or if only unmanaged/holding stages remain after it.
 func NextStage(stages []*Stage, current string) *Stage {
 	for i, s := range stages {
 		if s.Name != current {
 			continue
 		}
 		for j := i + 1; j < len(stages); j++ {
-			if !stages[j].Unmanaged {
+			if !stages[j].Unmanaged && !stages[j].HoldingStage {
 				return stages[j]
 			}
 		}

@@ -189,6 +189,18 @@ func (e *Engine) finishTrain(repoKey string) {
 	e.mergeTrainInFlight.Delete(repoKey)
 }
 
+// mergeTrainWorkerActive reports whether a merge-train worker is currently in
+// flight for repoKey ("owner/repo") — from dispatchMergeTrainWorker's
+// LoadOrStore through the goroutine's exit, when finishTrain clears the
+// marker (see ADR-067). This is broader than "assembling": it also covers
+// bisecting and the post-CI landing window, since the marker isn't cleared
+// until the worker goroutine fully exits. Used by settleClosedItemsToDone to
+// avoid racing a live batch member that was closed without merging.
+func (e *Engine) mergeTrainWorkerActive(repoKey string) bool {
+	_, ok := e.mergeTrainInFlight.Load(repoKey)
+	return ok
+}
+
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
 // acquisition, repo readiness, base-branch resolution, holding-stage lookup,
 // extend-turns computation, trialParams construction, restart-time state
