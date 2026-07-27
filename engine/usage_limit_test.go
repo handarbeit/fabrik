@@ -467,3 +467,44 @@ func TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSus
 		t.Error("expected the concurrently-activated suspension to survive this invocation's unrelated error, but it was cleared")
 	}
 }
+
+// TestProcessComments_SuspendedGate_IsFullNoOp verifies the ADR-1120 claim in
+// processComments' own gate comment: while the account-wide Claude suspension
+// is active, the function must return immediately with zero side effects — no
+// 👀 reaction, no fabrik:editing label, no Claude invocation — so the comment
+// remains "new" and is retried on a later poll once dispatch resumes, rather
+// than being partially consumed by a doomed cycle.
+func TestProcessComments_SuspendedGate_IsFullNoOp(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.activateClaudeSuspension(0, "10:20pm (America/Edmonton)", time.Now())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 11, Body: "spec"}
+	userComments := []gh.Comment{
+		{ID: "C_1", DatabaseID: 111, Author: "testuser", Body: "please continue"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments returned error while suspended: %v", err)
+	}
+
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected 0 Claude invocations while suspended, got %d", len(claude.forCommentsCalls))
+	}
+	if len(client.addCommentReactionCalls) != 0 {
+		t.Errorf("expected 0 👀 reactions while suspended, got %d: %v", len(client.addCommentReactionCalls), client.addCommentReactionCalls)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:editing" {
+			t.Error("expected fabrik:editing to NOT be added while suspended (gate must fire before any side effect)")
+		}
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected 0 label mutations while suspended, got %d: %v", len(client.addLabelCalls), client.addLabelCalls)
+	}
+}
