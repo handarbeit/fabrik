@@ -61,9 +61,9 @@ func TestParseUsageLimitResetTime(t *testing.T) {
 			name:      "now in a different zone than the fragment",
 			resetTime: "10:20pm (America/Edmonton)",
 			// 2026-07-27 20:00 America/Edmonton == 2026-07-28 04:00 UTC.
-			now:       time.Date(2026, 7, 28, 4, 0, 0, 0, time.UTC),
-			wantOK:    true,
-			want:      time.Date(2026, 7, 27, 22, 20, 0, 0, loc),
+			now:    time.Date(2026, 7, 28, 4, 0, 0, 0, time.UTC),
+			wantOK: true,
+			want:   time.Date(2026, 7, 27, 22, 20, 0, 0, loc),
 		},
 	}
 
