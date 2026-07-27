@@ -690,7 +690,7 @@ func Execute() error {
 		ReviewWaitTimeout:        reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:          maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:            ciWaitTimeout(cfg.CIWaitTimeout),
-		RequiredStatusContexts:   pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-072)
+		RequiredStatusContexts:   pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-075)
 		PostPushDwell:            postPushDwell(cfg.PostPushDwell),
 		WorkerStaleTimeout:       workerStaleTimeout(cfg.WorkerStaleMins),
 		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),

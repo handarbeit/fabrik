@@ -356,6 +356,37 @@ func TestPollTrainCI_RequiredContextFailedViaCommitStatus_ReturnsRed(t *testing.
 	}
 }
 
+// TestPollTrainCI_EmptyCheckRuns_RequiredContextFailedViaCommitStatus_ReturnsRed
+// covers the zero-check-runs case (e.g. GitHub Actions entirely disabled —
+// the local-CI-takeover case #933 was filed for): the required-context
+// pre-filter used to live only inside the `len(checkRuns) > 0` branch, so a
+// trial head with NO check runs at all never got checked against a required
+// classic commit status and would just poll to TrainCIPending instead of
+// ejecting the poisoning member from the batch. This must return TrainCIRed.
+func TestPollTrainCI_EmptyCheckRuns_RequiredContextFailedViaCommitStatus_ReturnsRed(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return nil, "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // no check runs at all — GitHub Actions disabled
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return []gh.CommitStatus{{Context: "fantasy/local-test", State: "failure"}}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	if result != TrainCIRed {
+		t.Errorf("expected TrainCIRed for a required context confirmed-failed via classic commit status with zero check runs, got %v", result)
+	}
+}
+
 // TestPollTrainCI_Unconfigured_AllSkippedChecks_StillGreen confirms the fix
 // is a no-op for repos without required_status_contexts configured (same
 // vanilla-GHA-common-case protection as TestSettle_Unconfigured_AllSkippedChecks_StillReady).

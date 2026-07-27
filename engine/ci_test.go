@@ -595,6 +595,36 @@ func TestBuildCIFixComment_IncludesFailedChecks(t *testing.T) {
 	}
 }
 
+// TestBuildCIFixComment_RequiredContextFailure_NamesTheContext covers a
+// required-context failure whose only producer is a classic commit status
+// (the local-CI-takeover case #933 was filed for) — there are no failed
+// check runs at all, so the comment must name the failed required context
+// instead of falling back to the generic "check GitHub Actions" message,
+// which would point the reinvoked stage at a signal that was never the
+// actual failure.
+func TestBuildCIFixComment_RequiredContextFailure_NamesTheContext(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	tr := true
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status:                 PRMergeBlocked,
+		Reason:                 "required status context(s) failed: [fantasy/local-test]",
+		RequiredContextsStatus: gh.RequiredContextsFailed,
+		RequiredFailed:         []string{"fantasy/local-test"},
+		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha7"},
+	}
+	comment := eng.buildCIFixComment(item, stage, "/tmp", settle)
+	if !strings.Contains(comment.Body, "fantasy/local-test") {
+		t.Errorf("expected failed required context name 'fantasy/local-test' in comment body, got: %s", comment.Body)
+	}
+	if strings.Contains(comment.Body, "Could not determine specific failed checks") {
+		t.Error("must not fall back to the generic 'could not determine' message when a required-context failure is known")
+	}
+}
+
 // TestCheckCIGate_FetchLinkedPRError_BlocksGate verifies that a transient
 // FetchLinkedPR API error returns blocked=true rather than clearing the gate,
 // preventing auto-advance when CI status is unknown.
@@ -1315,7 +1345,7 @@ func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 	}
 }
 
-// ── classifyCIFromRequiredContexts (ADR-072 / #933) ───────────────────────────
+// ── classifyCIFromRequiredContexts (ADR-075 / #933) ───────────────────────────
 
 // TestCheckCIGate_RequiredContextFailed_BlocksAndAddsLabel covers the #933
 // regression: a confirmed required-context failure (e.g. a classic commit

@@ -549,7 +549,7 @@ user: your-github-username
 # log_max_bytes: 2147483648
 
 # Required status/check-run context names the ci-gate must see confirmed
-# `success` for, on the PR's exact head SHA, before it will clear (ADR-072).
+# `success` for, on the PR's exact head SHA, before it will clear (ADR-075).
 # Keyed by "owner/repo" (works in both single-repo and multi-repo mode).
 # Only needed for repos whose required CI signal isn't a normal GitHub Actions
 # check run — e.g. a "local-CI-takeover" repo that posts a classic commit

@@ -1724,7 +1724,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				return TrainCIRed
 			}
 			if status == gh.CheckRunsReady {
-				// ADR-072: don't declare the trial green until any configured
+				// ADR-075: don't declare the trial green until any configured
 				// required context has confirmed success on this exact trial
 				// SHA — mirrors settlePRMergeState's guard in pr_settle.go. A
 				// required context that's merely missing/pending falls through
@@ -1737,6 +1737,23 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 					e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
 					return TrainCIRed
 				}
+			}
+		} else {
+			// ADR-075: zero check runs at all (e.g. GitHub Actions disabled —
+			// the local-CI-takeover case #933 was filed for) must still be
+			// checked against configured required contexts, mirroring
+			// settlePRMergeState's zero-check-runs branch (pr_settle.go rule
+			// 13). Without this, a confirmed required-context failure on a
+			// trial branch with no check-run footprint at all would never
+			// resolve to TrainCIRed — it would just poll to CIWaitTimeout and
+			// return TrainCIPending, stalling the batch instead of ejecting
+			// the poisoning member. A merely missing/pending required context
+			// is not short-circuited here — it keeps polling like any other
+			// not-yet-settled signal.
+			rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, trialSHA, nil)
+			if rcStatus == gh.RequiredContextsFailed {
+				e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
+				return TrainCIRed
 			}
 		}
 
