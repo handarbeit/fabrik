@@ -245,6 +245,24 @@ func (s Snapshot) LinkageHealAttempted(stageName, prSHA string) bool {
 	return recorded != "" && recorded == prSHA
 }
 
+// LastTurnsUsed returns the TurnsUsed recorded for the most recent incomplete
+// invocation of a stage, or zero if none has been recorded (#1146).
+func (s Snapshot) LastTurnsUsed(stageName string) int {
+	return s.state.StageState.LastTurnsUsed[stageName]
+}
+
+// LastTurnsCapped reports whether the most recent incomplete invocation of a stage
+// hit its turn cap without completing (#1146).
+func (s Snapshot) LastTurnsCapped(stageName string) bool {
+	return s.state.StageState.LastTurnsCapped[stageName]
+}
+
+// StallHintPending reports whether a stall was detected for a stage and its next
+// invocation should receive a corrective hint (#1146).
+func (s Snapshot) StallHintPending(stageName string) bool {
+	return s.state.StageState.StallHintPending[stageName]
+}
+
 // CommentBreakerInvocationsAt returns a copy of the recorded comment-processing
 // invocation timestamps since the last reset (#1089).
 func (s Snapshot) CommentBreakerInvocationsAt() []time.Time {
@@ -352,5 +370,8 @@ func copyStageState(s StageState) StageState {
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
+		LastTurnsUsed:        copyMap(s.LastTurnsUsed),
+		LastTurnsCapped:      copyMap(s.LastTurnsCapped),
+		StallHintPending:     copyMap(s.StallHintPending),
 	}
 }
