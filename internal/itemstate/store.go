@@ -574,6 +574,14 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastSeenSourceUpdatedAt = time.Time{}
 		return DeepFetchChanged
 
+	case SelfWriteObserved:
+		now := time.Now()
+		if now.After(item.LastSeenSourceUpdatedAt) {
+			item.LastSeenSourceUpdatedAt = now
+			return SelfWriteBaselineChanged
+		}
+		return 0
+
 	case PRHeadSHAUpdated:
 		ensureLinkedPR(item, v.LinkedPRNum)
 		if v.LinkedPRNum != 0 {
