@@ -174,7 +174,7 @@ In preference order:
    ```bash
    timeout --signal=KILL <N> npm run dev …
    ```
-4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with an explicit timeout (`timeout --signal=KILL <N> <command>`, or the framework's own timeout flag) so the command's outcome is known before the turn ends.
+4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with the framework's own timeout flag (e.g. `go test -timeout`, `pytest --timeout`, `jest --testTimeout`) so the command's outcome is known before the turn ends. Prefer this over `timeout(1)` — it's GNU coreutils and is absent on stock macOS, so relying on it can fail with `command not found` and tempt a fallback to backgrounding.
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it to save time.
 6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage simply ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning that led there is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 
