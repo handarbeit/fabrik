@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"math/rand/v2"
+	"sync"
 	"testing"
 	"time"
 )
@@ -107,4 +108,32 @@ func TestNewPollRandMalformedSeedFallsBack(t *testing.T) {
 	if d < 12*time.Second || d >= 18*time.Second {
 		t.Fatalf("jitter from fallback-seeded generator out of bounds: %v", d)
 	}
+}
+
+// TestPollSleepBoundsAndConcurrency exercises pollSleep itself (not just the
+// pure jitterWithRand helper), verifying the observed sleep duration is
+// consistent with the documented ±20% band and that the shared, mutex-guarded
+// pollRand survives concurrent callers under -race.
+func TestPollSleepBoundsAndConcurrency(t *testing.T) {
+	const base = 20 * time.Millisecond
+	// time.Sleep only guarantees "at least" the requested duration, so bounds
+	// are checked loosely (half the lower bound, 3x the upper bound) to avoid
+	// flaking under scheduler slack on a loaded CI machine.
+	lo := time.Duration(float64(base)*0.8) / 2
+	hi := time.Duration(float64(base)*1.2) * 3
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			pollSleep(base)
+			elapsed := time.Since(start)
+			if elapsed < lo || elapsed > hi {
+				t.Errorf("pollSleep(%v) returned after %v, outside sanity bounds [%v, %v]", base, elapsed, lo, hi)
+			}
+		}()
+	}
+	wg.Wait()
 }

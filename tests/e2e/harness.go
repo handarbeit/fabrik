@@ -178,6 +178,9 @@ var pollRand = newPollRand()
 func newPollRand() *rand.Rand {
 	if s := os.Getenv("E2E_JITTER_SEED"); s != "" {
 		if seed, err := strconv.ParseUint(s, 10, 64); err == nil {
+			// Reusing seed for both PCG state and sequence is intentional:
+			// we only need a reproducible sequence from a single uint64 for
+			// test determinism, not two independent streams.
 			return rand.New(rand.NewPCG(seed, seed))
 		}
 	}
@@ -192,8 +195,10 @@ func jitterWithRand(r *rand.Rand, base time.Duration) time.Duration {
 	return base + time.Duration(float64(base)*0.20*(2*f-1))
 }
 
-// pollSleep sleeps for base, jittered ±20% (uniform, the "equal jitter"
-// family). This is deliberately not full jitter (rand in [0, base]), whose
+// pollSleep sleeps for base, jittered ±20% (uniform, a fixed proportional-
+// jitter band centered on base — not AWS's "equal jitter", which is
+// asymmetric and floored at base/2). This is deliberately not full jitter
+// (rand in [0, base]), whose
 // mean of base/2 would roughly double the harness's steady-state request
 // rate against the exact shared GitHub API/GraphQL budget this jitter is
 // meant to protect. It's also deliberately not decorrelated jitter, which
