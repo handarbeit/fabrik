@@ -2086,3 +2086,78 @@ func TestProcessItem_StallDetection_SkipsArmingOnEscalatingAttempt(t *testing.T)
 		t.Error("must not arm a corrective hint on the attempt that triggers escalation — it will never be delivered")
 	}
 }
+
+// TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns verifies
+// that a generic (non-turn-limit) error must not feed the declining-turns stall
+// heuristic. Found via an external review (relayed on issue #1146 since Fabrik
+// only consumes inline PR review-thread comments, not review bodies — see #1189):
+// claudeRan is true for most invocation errors (network blip, git-push failure,
+// malformed CLI output), so without this guard, a genuinely-erroring attempt whose
+// partial usage.TurnsUsed happens to be smaller than a prior turn-capped attempt's
+// would arm a corrective hint and post a confident "possible stall detected"
+// misdiagnosis for what was actually an unrelated crash.
+func TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callIdx++
+			if callIdx == 1 {
+				// Attempt 1: turn-capped, clean stop (err == nil).
+				return "partial output", false, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, nil
+			}
+			// Attempt 2: a generic error (e.g. transient network failure) that happens to
+			// have parsed a smaller, non-zero partial turn count — NOT a clean stop, and
+			// NOT a *claudeTurnLimitError, so this must not be read as a declining retry.
+			return "partial output", false, TokenUsage{TurnsUsed: 12, MaxTurns: 50}, fmt.Errorf("transient network failure")
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 26, Title: "Generic error stall false-positive test", Status: "Research", ItemID: "PVTI_26"}
+
+	for i := 0; i < 2; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 2 {
+		t.Fatalf("expected 2 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[1].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 2 (generic error, declining turns): CorrectiveHint = %q, want empty", got)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 26)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("must not arm a corrective hint when the declining attempt errored out rather than stopping cleanly")
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment when the declining attempt was a generic error, not a clean stop")
+		}
+	}
+}

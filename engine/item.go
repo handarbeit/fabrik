@@ -1427,7 +1427,21 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		// human's later clearFailedStage() applies StageRetryCleared, which wipes any
 		// pending hint before any further invocation happens — the promise would go
 		// unfulfilled and the state would exist only to be thrown away.
-		if claudeRan && !willEscalate {
+		//
+		// Also gated on (err == nil || turnLimited): the declining-turns heuristic only
+		// means what it claims when both attempts being compared stopped *cleanly* —
+		// genuinely ran out of runway rather than erroring out partway through. A
+		// generic error (network blip, git-push failure, malformed CLI output) can leave
+		// a small non-zero usage.TurnsUsed that "declines" relative to a prior capped
+		// attempt for reasons unrelated to a backgrounding stall — arming there would post
+		// a confident, specific misdiagnosis for what was actually a crash. err == nil
+		// alone is not sufficient, though: a turn-cap exit is itself reported as a
+		// non-nil *claudeTurnLimitError (see claude.go / ADR-1178), which is exactly the
+		// shape this feature must still classify as a clean, capped stop. turnLimited
+		// (already computed above for the InvocationRecorded write) is reused so both
+		// attempt-classification paths agree on what counts as clean. See adrs/1146-*.md
+		// ("Consequences" / open-question resolution) for the fuller discussion.
+		if claudeRan && !willEscalate && (err == nil || turnLimited) {
 			e.detectAndArmStallHint(item, stage, repoStr, usage)
 		}
 		if willEscalate {
@@ -1442,7 +1456,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 // and arming a one-shot corrective hint when a stall is detected (#1146). Called
 // whenever claudeRan, independent of MaxRetries — max_retries: 0 ("unlimited
 // retries") must still get the detection/hint mitigation; only the surrounding
-// retry-count/escalation bookkeeping needs the MaxRetries > 0 guard.
+// retry-count/escalation bookkeeping needs the MaxRetries > 0 guard. The call site
+// additionally requires (err == nil || turnLimited) — see the comment there — so
+// only clean incomplete stops (including turn-cap exits, which are non-nil-err by
+// design) feed this comparison, never a genuine crash/network/parse error.
 //
 // The signature: a turn-capped attempt (TurnsUsed >= MaxTurns, did not complete)
 // followed by an incomplete, NOT-capped attempt using strictly fewer turns. A

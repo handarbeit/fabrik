@@ -51,9 +51,11 @@ decision, whenever `claudeRan` is true **and this attempt is not the one that tr
    later attempt is handled correctly without special-casing.
 3. Record this attempt's `TurnsUsed`/capped status via a new `itemstate.StageTurnUsageRecorded`
    mutation, unconditionally overwriting the previous values.
-4. If the previous attempt was capped, this attempt is **not** itself capped, and this attempt used
-   more than zero turns but strictly fewer than the previous attempt's turns, arm a one-shot corrective
-   hint (`itemstate.StallHintArmed`) and post an informational comment citing both turn counts.
+4. If the previous attempt was capped, this attempt is **not** itself capped, this attempt used more
+   than zero turns but strictly fewer than the previous attempt's turns, **and this attempt stopped
+   cleanly** (`err == nil`) **or was itself a classified turn-cap exit** (`turnLimited`, see below), arm
+   a one-shot corrective hint (`itemstate.StallHintArmed`) and post an informational comment citing both
+   turn counts.
 
    The "not itself capped" precondition rules out a false positive from the pre-existing progress-based
    turn-extension loop (`runInvocationWithExtension`, ADR-030): that loop can widen the effective budget
@@ -150,6 +152,39 @@ skips the call entirely when `willEscalate` is true — an earlier version of th
 `detectAndArmStallHint` unconditionally on `claudeRan`, before the escalation decision existed, which is
 exactly the ordering that produced this bug.
 
+### Why gate arming on `err == nil || turnLimited`, and why isn't `err == nil` alone sufficient?
+
+Found via external review (relayed manually on issue #1146 since Fabrik only consumes inline PR
+review-thread comments today, not review bodies — tracked as #1189). The original implementation
+called `detectAndArmStallHint` for any `claudeRan` incomplete attempt, without examining `err` at all.
+`claudeRan` (`engine/item.go`) is true for *any* invocation error except a process-start failure
+(`*exec.Error`/`*os.PathError`) — so a transient network failure, a git-push error surfaced as `err`,
+or malformed CLI-output parsing all reach the retry branch with `completed = false` and whatever
+partial `usage.TurnsUsed` happened to be parsed before the error. If that partial count is smaller than
+a prior capped attempt's, the heuristic matched and armed a hint — posting a specific, confident
+diagnosis ("likely backgrounded a long-running command") for what was actually an unrelated crash. This
+is the same failure shape as #1183 (an automated diagnosis derived from a weak signal, trusted at face
+value), and this feature's whole output is advisory prose an operator is meant to trust — a wrong-but-
+plausible diagnosis is worse than none.
+
+The fix gates arming on `err == nil || turnLimited`, reusing the `turnLimited` local (`errors.As(err,
+&turnLimitErr)`, already computed earlier in `finalizeStageOutcome` for the `InvocationRecorded` write).
+`err == nil` alone is **not** sufficient and was considered and rejected: a turn-cap exit — the *primary*
+shape this feature exists to detect — is itself reported as a non-nil `*claudeTurnLimitError` (see
+`claude.go`, ADR-1178), not `err == nil`. A bare `err == nil` gate would exclude every turn-capped
+attempt from ever being recorded as `prevCapped`, silently disabling the detector for the exact `#816`
+shape it was built for. `turnLimited` is the same classification `finalizeStageOutcome` already uses to
+distinguish a genuine fault from an incomplete-but-resumable run for the `Errored`/`TurnLimited` fields
+on `InvocationRecorded` (`Errored: err != nil && !turnLimited`) — reusing it here means both places agree
+on what "clean" means, rather than defining the concept twice.
+
+In practice this only changes behavior for the *declining* attempt in a pair: the previous (capped)
+attempt is unaffected, since `turnLimited` is true for it. The declining attempt itself is never
+`turnLimited` in a way that matters here — `detectAndArmStallHint` already requires the current attempt
+not be capped, and a turn-limit exit is definitionally capped — so in effect the added condition amounts
+to requiring the declining attempt's `err` be `nil`. Guarded against regression by
+`TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns`.
+
 ### Why is the hint text generic rather than backgrounding-specific with certainty?
 
 A legitimately-progressing multi-retry stage (e.g., a Review resolving threads one at a time) can show
@@ -170,7 +205,9 @@ only a disregardable suggestion in the false-positive case.
 
 **Negative / Trade-offs:**
 - False positives are possible for a legitimately-shrinking, non-stalled retry; mitigated by requiring
-  a turn-capped predecessor as a precondition and by hedging the hint text, but not eliminated.
+  a turn-capped predecessor as a precondition, by requiring the declining attempt to have stopped
+  cleanly (`err == nil || turnLimited` — see Rationale), and by hedging the hint text, but not
+  eliminated.
 - In-memory-only state means a Fabrik restart between the capped attempt and the declining retry loses
   the trend — the same accepted restart-gap tradeoff every other `StageState` field already carries
   (see ADR-030).
