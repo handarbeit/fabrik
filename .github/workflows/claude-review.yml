@@ -54,6 +54,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Capture the SDK execution log for debugging. The action hides full output
+      # (show_full_output: false) for security, writing it to a temp file that is
+      # otherwise lost when the runner is torn down. Uploading it as an
+      # access-controlled artifact lets us read the real error behind an
+      # is_error:true failure without exposing it in the (public) run logs.
+      - name: Upload Claude execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-execution-output
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: warn
+          retention-days: 7
+
       # Fallback: if the agent produced no formal review (it errored, was
       # skipped, or didn't post), surface that HONESTLY — never claim "no
       # issues", since a false all-clear is worse than a visible failure (a

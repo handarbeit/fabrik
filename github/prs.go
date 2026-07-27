@@ -380,6 +380,16 @@ func MergeableStateAccepted(mergeableState string) bool {
 // use errors.Is(err, github.ErrNotMergeable) to distinguish this from API failures.
 var ErrNotMergeable = errors.New("PR is not mergeable")
 
+// ErrNotMergeableCI is returned by MergePR when the PR has no merge conflicts
+// (mergeable is true) but mergeable_state is not in the MergeableStateAccepted
+// allowlist ({clean, unstable}) — e.g. a required status check is failing or
+// still pending ("blocked"), or GitHub has not finished computing the state
+// ("unknown"/""). This is distinct from ErrNotMergeable: it is a CI-readiness
+// refusal, not a merge conflict, and callers must not route it into the
+// fabrik:rebase-needed / rebase-reinvoke path. Callers should treat it as
+// "not ready yet" and retry on their existing cadence.
+var ErrNotMergeableCI = errors.New("PR mergeable_state is not CI-clean")
+
 // CreateDraftPR creates a draft pull request for the given issue branch.
 // Returns the PR number. Callers should first call FindPRForIssue to avoid duplicates.
 // The body parameter is the full PR body; callers are responsible for including "Closes #N".
@@ -759,10 +769,15 @@ func mergeMethodAttemptOrder(strategy string) []string {
 
 // MergePR merges the pull request identified by prNumber. It first checks
 // GitHub's mergeable status: if null (not yet computed) or false, it returns
-// ErrNotMergeable. It attempts the configured merge strategy (see
-// SetMergeStrategy) first; if the repository does not allow that method
-// (405), it falls back through the remaining methods (merge, squash, rebase,
-// minus the one already tried) until one succeeds or a non-405 error occurs.
+// ErrNotMergeable. It then self-gates on CI readiness — regardless of what
+// branch protection would otherwise allow (e.g. enforce_admins: false) —
+// by fetching mergeable_state via FetchPRMergeableFields and refusing with
+// ErrNotMergeableCI unless the state is in the MergeableStateAccepted
+// allowlist ({clean, unstable}); see ADR-072. Only then does it attempt the
+// configured merge strategy (see SetMergeStrategy) first; if the repository
+// does not allow that method (405), it falls back through the remaining
+// methods (merge, squash, rebase, minus the one already tried) until one
+// succeeds or a non-405 error occurs.
 func (c *Client) MergePR(owner, repo string, prNumber int) error {
 	// Check PR state and mergeable status.
 	prURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
@@ -780,13 +795,23 @@ func (c *Client) MergePR(owner, repo string, prNumber int) error {
 		return ErrNotMergeable
 	}
 
+	// Self-gate on CI readiness before attempting the merge, independent of
+	// whatever branch protection would otherwise allow.
+	_, mergeableState, err := c.FetchPRMergeableFields(owner, repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("fetching PR mergeable_state: %w", err)
+	}
+	if !MergeableStateAccepted(mergeableState) {
+		logf(0, "merge", "PR #%d/%s/%s: refusing merge, mergeable_state=%q not in {clean, unstable}\n", prNumber, owner, repo, mergeableState)
+		return fmt.Errorf("%w: mergeable_state=%q", ErrNotMergeableCI, mergeableState)
+	}
+
 	mergeURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", c.baseURL, owner, repo, prNumber)
 	var mergeResult struct {
 		Merged  bool   `json:"merged"`
 		Message string `json:"message"`
 	}
 
-	var err error
 	for _, method := range mergeMethodAttemptOrder(c.MergeStrategy()) {
 		err = c.restPutWithResponse(mergeURL, map[string]interface{}{"merge_method": method}, &mergeResult)
 		if err == nil {

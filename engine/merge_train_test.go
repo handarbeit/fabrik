@@ -1623,6 +1623,120 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 	// runMergeTrainWorker's top-level defer, not here (ADR-067).
 }
 
+// TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation is the issue #1094
+// regression test for the landSingleton call site: pollForMergeable already judged the
+// singleton landing PR acceptable (mergeable_state=clean), but MergePR's own new
+// precondition check observes a flipped state and refuses with gh.ErrNotMergeableCI.
+// landSingleton must handle this exactly like any other MergePR failure — log and
+// return, leaving the member in Queued with no Done advancement, no PR/issue closure,
+// and no fabrik:paused or fabrik:rebase-needed escalation label — confirming the new
+// precondition does not strand a PR pollForMergeable already judged acceptable.
+func TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.T) {
+	m := makeQueuedMember(9, 90, "Issue Nine")
+	client := &mockGitHubClient{
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 900, nil },
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
+		},
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, holdingStg: holdingStage(eng.cfg)}
+
+	eng.landSingleton(context.Background(), state, p, m, "merge-train-singleton-ci")
+
+	client.mu.Lock()
+	advanced := len(client.updateStatusCalls)
+	closed := len(client.closeIssueCalls)
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+
+	if advanced != 0 {
+		t.Errorf("expected 0 board status updates after CI-not-green refusal, got %d", advanced)
+	}
+	if closed != 0 {
+		t.Errorf("expected 0 issue/PR closures after CI-not-green refusal, got %d", closed)
+	}
+	for _, c := range labels {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be applied for a CI-not-green MergePR refusal — it should retry on the next merge-train cycle")
+		}
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("fabrik:rebase-needed must NOT be applied for a CI-not-green MergePR refusal — that would incorrectly consume a rebase cycle")
+		}
+	}
+}
+
+// TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation is the issue #1094
+// regression test for this call site: pollForMergeable already judged the integration
+// PR acceptable (mergeable_state=clean), but MergePR's own new precondition check
+// observes a flipped state (a TOCTOU window between the two GETs) and refuses with
+// gh.ErrNotMergeableCI. This must be handled exactly like any other MergePR failure
+// here — members stay in Queued, no Done advancement, no PR closure, no fabrik:paused
+// or fabrik:rebase-needed escalation label — confirming the new precondition does not
+// strand a PR the calling gate already judged acceptable.
+func TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(1, 10, "Issue One"),
+		makeQueuedMember(2, 11, "Issue Two"),
+	}
+
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			return 100, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	client.mu.Lock()
+	advanced := len(client.updateStatusCalls)
+	closed := len(client.closeIssueCalls)
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+
+	// Members must not be advanced or closed after a CI-not-green merge refusal —
+	// same invariant as any other merge failure at this call site.
+	if advanced != 0 {
+		t.Errorf("expected 0 board status updates after CI-not-green refusal, got %d", advanced)
+	}
+	if closed != 0 {
+		t.Errorf("expected 0 PR closures after CI-not-green refusal, got %d", closed)
+	}
+	for _, c := range labels {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be applied for a CI-not-green MergePR refusal — it should retry on the next merge-train cycle")
+		}
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("fabrik:rebase-needed must NOT be applied for a CI-not-green MergePR refusal — that would incorrectly consume a rebase cycle")
+		}
+	}
+}
+
 // TestLandMergeTrainBatch_ResetsEjectionCounter verifies that a successful landing resets
 // the per-member ejection counter, so stale history from a prior train does not count
 // toward the pause cap on a future train.
