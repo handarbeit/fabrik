@@ -123,7 +123,7 @@ If you run out of turns:
 
 Note that Plan is a `read_only` stage, so the engine does **not** commit partial work for you (`commitWIP` is skipped for read-only stages — their dirty state was restored from a stash, and committing it would misattribute the stash contents). Your continuity comes from the resumed session, not from committed files. Emit your plan inline in your final message as usual; do not try to persist intermediate state to disk expecting it to survive.
 
-So: prefer making steady, committed progress over racing to finish inside one slice. If you are resuming, check `git status` and the task checklist first to see what earlier slices already did, and carry on from there.
+So: prefer steady, incremental progress in your reasoning over racing to finish inside one slice. If you are resuming, take stock of what you have already established — the research you have read, the approach you have settled on, the tasks you have already enumerated — and carry on from there rather than re-deriving it.
 
 ## What You Do NOT Do
 
