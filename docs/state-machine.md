@@ -2273,6 +2273,28 @@ Webhooks continue to apply deltas to the cache via `ApplyDelta` but no longer dr
 
 **Backoff impact.** Before the fix for issue #490, the `case <-e.wakeCh:` branch unconditionally reset `e.idleStart` and `prevMultiplier = 1` before calling `doPollCycle`. Self-feedback events would therefore destroy the idle-backoff state on every stage advance, defeating the GraphQL budget savings webhooks provide. After the fix, those unconditional resets are removed. A webhook wake triggers an immediate poll, but backoff is preserved unless `result.Active == true` (see 7.7).
 
+### 7.10 Stall Detection and Corrective Re-Invocation
+
+A stalled attempt — one where the worker backgrounded a long-running command (a dev server, build, or test run) and then idled waiting for a completion notification that never arrives in a headless environment — is distinguishable from a genuinely failed one by its turn-usage trend across retries within §7.1's cooldown loop: a stage that did real work and failed burns turns roughly consistently across attempts; a stalled one shows a turn-capped attempt followed by a retry that completes **fewer** turns, still without completing. A genuinely-progressing retry does not shrink like that. See issue #1146 and ADR-1146 for the incident (#816) that motivated this.
+
+**Detection (`detectAndArmStallHint`, `engine/item.go`).** Runs inside §7.1's incomplete-outcome branch, immediately before `StageRetryIncremented` is applied, whenever `claudeRan` is true:
+
+1. Reads the previous attempt's `TurnsUsed`/capped status for this stage from the store (`LastTurnsUsed`, `LastTurnsCapped` — zero-valued if this is the first attempt).
+2. Computes this attempt's own capped status: `usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns`. This is evaluated against *this attempt's own* `MaxTurns`, so it is unaffected by `fabrik:extend-turns` widening the budget between attempts.
+3. Records this attempt's `TurnsUsed`/capped status via `itemstate.StageTurnUsageRecorded`, overwriting the previous values — this is what makes detection self-limiting to a single corrective hint per stall episode (see step 5).
+4. If the *previous* attempt was turn-capped, and this attempt used more than zero turns but strictly fewer than the previous attempt, the pattern is a detected stall: applies `itemstate.StallHintArmed` for the stage and posts a one-time informational comment citing both turn counts.
+5. Because the attempt that triggers detection is (by definition) not itself capped, step 3's overwrite clears the precondition for arming again immediately — no separate one-shot guard is needed to keep this a single corrective re-invocation rather than an escalation ladder.
+
+A detected stall still applies `StageRetryIncremented` and counts against `MaxRetries` exactly like any other non-completion — unlike §7.3's usage-limit exemption, the stage genuinely ran and spent real tokens; the fix targets spending the existing retry budget more effectively, not exempting stalls from it.
+
+**Injection (`consumeStallHint`, `engine/item.go`; `buildPrompt`, `engine/claude.go`).** When building `InvokeOptions` for the next invocation of a stage (`runInvocationWithExtension`), the engine checks `StallHintPending` for that stage. If armed, it applies `itemstate.StallHintConsumed` (clearing the flag) and sets `InvokeOptions.CorrectiveHint` to a fixed, stage-agnostic, hedged callout describing the suspected cause and suggesting the worker run any long-running command in the foreground with an explicit timeout instead of backgrounding it — the same guidance already deployed worker-side per #1077. `buildPrompt` prepends this text as a callout when non-empty; it is otherwise absent from the prompt. Because retries `--resume` the same underlying Claude session (§1's resume semantics; see also the "Retry after a turn-cap kill" section of `docs/stage-lifecycle.md` for the retry-trustworthiness fix, #1081, this must not regress), the hint reads as a new turn in a conversation that already has full context of its own prior attempt — it does not need to re-explain the task, only redirect the strategy.
+
+**Cross-stage isolation and cleanup.** `StageRetryCleared` (applied by `clearFailedStage()` on unpause, and by a stage's completion) deletes `LastTurnsUsed`, `LastTurnsCapped`, and `StallHintPending` for that stage alongside the existing `Attempts` reset — so a later, unrelated incomplete run of the same stage (e.g. after `fabrik:revalidate`) never inherits a stale armed hint from a long-past episode.
+
+**State:** In-memory only (`StageState.LastTurnsUsed`/`LastTurnsCapped`/`StallHintPending`, all `map[string]bool`/`map[string]int` keyed by stage name), mirroring every other per-stage `StageState` field — same restart-gap tradeoff already accepted by ADR-030's turn-extension baseline.
+
+**Scope note:** this implements only the "cheaper to detect" trend signal from issue #1146 — a turn-capped attempt followed by a declining, incomplete one. It does not add live NDJSON tool-use parsing to detect backgrounding-then-silence within a single invocation (the issue's other suggested signal); that remains a possible follow-up if the trend signal proves insufficient in practice.
+
 ---
 
 ## 8. Invalid / Unexpected States

@@ -34,4 +34,5 @@ contributors and future maintainers.
 | [1089](1089-comment-processing-circuit-breaker.md) | Comment-Processing Circuit Breaker | Accepted |
 | [1113](1113-pruefer-v1-architecture.md) | Pruefer V1 architecture (GitHub App identity, review-state, defaults) | Accepted |
 | [1114](1114-pruefer-tui-architecture.md) | Pruefer terminal UI architecture (event plumbing, retention, rate-limit surfacing) | Accepted |
+| [1146](1146-stall-detection-corrective-reinvocation.md) | Stall Detection and Corrective Re-Invocation | Accepted |
 | [1189](1189-pruefer-inline-review-comments.md) | Pruefer inline review comments (structured findings, client-side anchor validation, body-demotion) | Accepted |

@@ -106,6 +106,8 @@ Two consequences follow, and both routinely look like defects to someone reading
 
 Conversely, a successor that *announces* the situation (e.g. "found the implementation already complete from a prior interrupted session") is accurately describing its own resumed state.
 
+**Distinguishing a legitimate few-turn resume from a stall.** The prior paragraph describes a *healthy* capped-then-short-retry shape — a resume that only needs a few turns to write up work already done. A *stalled* retry looks superficially similar (short, incomplete) but never completes and, critically, is followed by a *further* decline rather than a completion. §7.10 of `docs/state-machine.md` covers the engine-side detection of that pattern (a turn-capped attempt followed by a strictly-declining, still-incomplete one) and the one-shot corrective hint it arms for the next invocation (#1146). That detection is purely additive to the resume mechanics described here — it does not change `resume`, session-file handling, or output attribution, which is what keeps it clear of the successor-reports-phantom-work problem #1081 fixed.
+
 **Failure modes — the session ID is not always honoured, but the fallback is now logged.** Before building args, `InvokeClaude` and `InvokeClaudeForComments` each call `resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, resume)` (`engine/claude.go`), which reads and classifies the session file via `classifySessionFile` — trimming **before** checking for emptiness, so whitespace-only content is never mistaken for a usable ID. `buildClaudeArgs` itself is a pure formatter: it receives the already-resolved `resumeSessionID string` and appends `--resume <id>` only when it's non-empty.
 
 `classifySessionFile` produces one of four outcomes:
@@ -489,7 +491,8 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 2. Branch pushed
 3. Cooldown timer: `pollSeconds * 10` seconds
 4. Lock held through cooldown
-5. Retry count incremented; after `max_retries`: `fabrik:paused` + `stage:<name>:failed`, lock released
+5. Stall detection (`detectAndArmStallHint`, #1146): this attempt's turn usage is compared against the previous incomplete attempt's. A turn-capped predecessor followed by a strictly-declining, still-incomplete attempt arms a one-shot corrective hint — consumed by the *next* invocation of this stage, injected into its prompt via `InvokeOptions.CorrectiveHint` — and posts an informational comment. See `docs/state-machine.md` §7.10 for the full detection and injection rule.
+6. Retry count incremented; after `max_retries`: `fabrik:paused` + `stage:<name>:failed`, lock released
 
 ### Claude Usage-Limit Path
 
