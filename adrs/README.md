@@ -33,3 +33,4 @@ contributors and future maintainers.
 | [073](073-outbound-bot-mention-neutralization.md) | Outbound Bot-Mention Neutralization | Accepted |
 | [1089](1089-comment-processing-circuit-breaker.md) | Comment-Processing Circuit Breaker | Accepted |
 | [1113](1113-pruefer-v1-architecture.md) | Pruefer V1 architecture (GitHub App identity, review-state, defaults) | Accepted |
+| [1114](1114-pruefer-tui-architecture.md) | Pruefer terminal UI architecture (event plumbing, retention, rate-limit surfacing) | Accepted |
