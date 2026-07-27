@@ -105,6 +105,11 @@ func buildReviewPrompt(req ReviewRequest) string {
 	}
 	b.WriteString("Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. Skip nitpicks and style preferences unless they matter.\n\n")
 	b.WriteString("You are NOT approving or requesting changes — this is a comment-only review. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\".\n\n")
+	b.WriteString("Output has two parts, in this exact order:\n\n")
+	b.WriteString("1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own.\n\n")
+	b.WriteString("2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns:\n\n")
+	b.WriteString("```json\n[{\"path\": \"engine/claude.go\", \"line\": 954, \"body\": \"...\"}]\n```\n\n")
+	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only.\n\n")
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
 	return b.String()
 }

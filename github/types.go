@@ -169,6 +169,18 @@ type Comment struct {
 	DiffHunk string
 }
 
+// ReviewComment is a single line-anchored inline comment to submit as part of
+// a pull_request_review's comments[] array (outbound request shape only —
+// narrower than Comment, which carries response-only fields like ID/Author/
+// ReviewThreadID that don't apply to a submission). Line anchors the RIGHT
+// (post-change) side only; SubmitPRReview hardcodes "side": "RIGHT" — see
+// adrs/1189-pruefer-inline-review-comments.md.
+type ReviewComment struct {
+	Path string
+	Line int
+	Body string
+}
+
 // ReactionGroup represents a reaction type and its count on a comment.
 type ReactionGroup struct {
 	Content string // e.g. "THUMBS_UP", "EYES", etc.

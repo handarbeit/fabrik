@@ -15,7 +15,7 @@ Every `poll_interval_seconds`, Pruefer lists open, non-draft PRs on each watched
 - Has Pruefer already reviewed this exact head SHA? Skip — **unless** an unprocessed `/pruefer review` comment is on the PR, which forces a fresh review of the current head.
 - Is the diff larger than `max_diff_bytes`? Skip (logged, not truncated).
 
-Otherwise, Pruefer clones the PR's head commit into a temporary directory, invokes `claude` with a read-only tool allowlist to produce review text, and submits it as a formal `pull_request_review` (event `COMMENT`) pinned to that head SHA. On any failure — clone, invocation, or submission — Pruefer posts nothing and logs the failure; the PR is naturally retried on the next poll.
+Otherwise, Pruefer clones the PR's head commit into a temporary directory, invokes `claude` with a read-only tool allowlist to produce a prose summary plus structured findings, and submits it as a formal `pull_request_review` (event `COMMENT`) pinned to that head SHA. Findings that map to a changed line in the diff are posted as line-anchored inline comments in the same request; any finding that can't be anchored (a line the diff doesn't touch) is demoted into the summary body instead of dropping it or failing the whole review. Inline comments are what let Fabrik's review-reinvoke path pick up Pruefer's findings and act on them automatically — see [adrs/1189-pruefer-inline-review-comments.md](../../adrs/1189-pruefer-inline-review-comments.md). On any failure — clone, invocation, or submission — Pruefer posts nothing and logs the failure; the PR is naturally retried on the next poll.
 
 Review state ("already reviewed at SHA X") is derived from GitHub itself (existing reviews authored by Pruefer's bot identity), not stored locally — a restart never causes a review storm.
 
@@ -126,6 +126,6 @@ Draft PRs are always skipped — there is no configuration flag to include them 
 ## Out of scope for V1
 
 - `APPROVE` / `REQUEST_CHANGES` verdicts.
-- Inline line-level review comments (top-level comment body only).
+- Multi-line (`start_line`) inline comment ranges — single-line anchors only.
 - Non-GitHub forges.
 - Removing `.github/workflows/claude-review.yml` from any repo — that stays until Pruefer is proven in practice.

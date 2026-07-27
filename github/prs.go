@@ -566,15 +566,33 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 }
 
 // SubmitPRReview submits a formal pull_request_review comment (event=COMMENT)
-// against the given commit SHA. The event type is hardcoded and never
+// against the given commit SHA, optionally with line-anchored inline
+// comments posted in the same request. The event type is hardcoded and never
 // caller-controlled — Pruefer V1 never submits APPROVE or REQUEST_CHANGES
-// verdicts (see ADR-1113). Returns the numeric review ID.
-func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string) (int, error) {
+// verdicts (see ADR-1113). Each comment's side is likewise hardcoded to
+// "RIGHT" — V1 supports only single-line, post-change-side anchors (see
+// adrs/1189-pruefer-inline-review-comments.md). The "comments" key is
+// omitted entirely when comments is empty, preserving the exact body-only
+// wire shape callers relied on before this parameter existed. Returns the
+// numeric review ID.
+func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, comments []ReviewComment) (int, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", c.baseURL, owner, repo, prNumber)
 	reqBody := map[string]interface{}{
 		"commit_id": commitSHA,
 		"body":      body,
 		"event":     "COMMENT",
+	}
+	if len(comments) > 0 {
+		wireComments := make([]map[string]interface{}, len(comments))
+		for i, cm := range comments {
+			wireComments[i] = map[string]interface{}{
+				"path": cm.Path,
+				"line": cm.Line,
+				"side": "RIGHT",
+				"body": cm.Body,
+			}
+		}
+		reqBody["comments"] = wireComments
 	}
 	var result struct {
 		ID int `json:"id"`

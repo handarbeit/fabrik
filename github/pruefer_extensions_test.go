@@ -106,7 +106,7 @@ func TestSubmitPRReview_HardcodesCommentEvent(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	id, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text")
+	id, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", nil)
 	if err != nil {
 		t.Fatalf("SubmitPRReview: %v", err)
 	}
@@ -117,9 +117,93 @@ func TestSubmitPRReview_HardcodesCommentEvent(t *testing.T) {
 
 // SubmitPRReview's signature has no event parameter at all — verified at
 // compile time by the call above passing exactly (owner, repo, prNumber,
-// commitSHA, body). This test additionally guards the wire format so a
-// future refactor can't reintroduce a caller-supplied event without failing
-// TestSubmitPRReview_HardcodesCommentEvent above.
+// commitSHA, body, comments). This test additionally guards the wire format
+// so a future refactor can't reintroduce a caller-supplied event without
+// failing TestSubmitPRReview_HardcodesCommentEvent above.
+
+func TestSubmitPRReview_NoComments_OmitsCommentsField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		if _, ok := body["comments"]; ok {
+			t.Errorf("expected no \"comments\" key when comments is empty, got %v", body["comments"])
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", nil); err != nil {
+		t.Fatalf("SubmitPRReview: %v", err)
+	}
+}
+
+func TestSubmitPRReview_WithComments_PostsCommentsArray(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		comments, ok := body["comments"].([]interface{})
+		if !ok || len(comments) != 2 {
+			t.Fatalf("comments = %v, want a 2-element array", body["comments"])
+		}
+		first, ok := comments[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("comments[0] = %v, want an object", comments[0])
+		}
+		if first["path"] != "engine/claude.go" {
+			t.Errorf("comments[0].path = %v, want engine/claude.go", first["path"])
+		}
+		if first["line"] != float64(954) {
+			t.Errorf("comments[0].line = %v, want 954", first["line"])
+		}
+		if first["body"] != "finding 1" {
+			t.Errorf("comments[0].body = %v, want %q", first["body"], "finding 1")
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	comments := []ReviewComment{
+		{Path: "engine/claude.go", Line: 954, Body: "finding 1"},
+		{Path: "engine/claude.go", Line: 960, Body: "finding 2"},
+	}
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", comments); err != nil {
+		t.Fatalf("SubmitPRReview: %v", err)
+	}
+}
+
+func TestSubmitPRReview_HardcodesRightSide(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		comments, ok := body["comments"].([]interface{})
+		if !ok || len(comments) != 1 {
+			t.Fatalf("comments = %v, want a 1-element array", body["comments"])
+		}
+		entry, ok := comments[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("comments[0] = %v, want an object", comments[0])
+		}
+		if entry["side"] != "RIGHT" {
+			t.Errorf("comments[0].side = %v, want RIGHT (must never be caller-controlled)", entry["side"])
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	comments := []ReviewComment{{Path: "foo.go", Line: 1, Body: "x"}}
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", comments); err != nil {
+		t.Fatalf("SubmitPRReview: %v", err)
+	}
+}
 
 func TestListOpenPRs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
