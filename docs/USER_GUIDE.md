@@ -1133,19 +1133,25 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > of its board column and back does **not** work as a workaround, since an unresolved
 > comment always routes to comment processing regardless of board state.
 
-> **Troubleshooting: a stage keeps retrying with a `fabrik:claude-limit` label and no
-> progress.** If the issue carries `fabrik:claude-limit` and a comment naming a Claude
-> account usage limit (e.g. `You've hit your session limit · resets 10:20pm
-> (America/Edmonton)`), the underlying Claude account has run out of usage — this is
-> not a stage failure, and it is not GitHub's own rate limiting (a separate, unrelated
-> mechanism). Fabrik detected the CLI's usage-limit exit message, so it does **not**
-> count this attempt against `--max-retries`: no `stage:<name>:failed`, no
-> `fabrik:paused`, no escalation comment. The stage will keep retrying on the normal
-> poll cooldown (`poll_interval x 10`) until an invocation succeeds, at which point
-> `fabrik:claude-limit` clears automatically. No operator action is required beyond
-> waiting for the account's usage limit to reset — backing off until the stated reset
-> time and pausing dispatch account-wide are tracked as a follow-up; until then, expect
-> one wasted invocation per cooldown window for each affected issue during an outage.
+> **Troubleshooting: a stage carries `fabrik:claude-limit` and dispatch looks idle.** If
+> the issue carries `fabrik:claude-limit` and a comment naming a Claude account usage
+> limit (e.g. `You've hit your session limit · resets 10:20pm (America/Edmonton)`), the
+> underlying Claude account has run out of usage — this is not a stage failure, and it
+> is not GitHub's own rate limiting (a separate, unrelated mechanism; see *Rate Limit
+> Monitoring* below). Fabrik detected the CLI's usage-limit exit message, so it does
+> **not** count this attempt against `--max-retries`: no `stage:<name>:failed`, no
+> `fabrik:paused`, no escalation comment. As soon as one worker observes the limit,
+> Fabrik parses the reset time from the CLI's own message and suspends *all* new Claude
+> dispatch account-wide — not just for this issue — until that time, so a usage-limit
+> window costs one detection and one automatic resume rather than every concurrent item
+> independently rediscovering and waiting out the same limit. If the reset time can't be
+> parsed (unexpected wording, missing zone), Fabrik falls back to a fixed one-hour
+> suspension instead of hammering on the normal 5-minute cooldown. The suspension and
+> its expected end are visible in the log (tag `claude-limit`) and, in the TUI, as a
+> dedicated banner distinct from the GitHub rate-limit banner (see *Claude Usage-Limit
+> Suspension* below). It clears automatically — either at the computed reset time or as
+> soon as any invocation succeeds, whichever comes first — at which point
+> `fabrik:claude-limit` also clears on this issue. No operator action is required.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
@@ -2390,6 +2396,30 @@ polling resumes. You do not need to restart Fabrik — it recovers on its own. O
 recovery from near-zero exhaustion, Fabrik fires an immediate probe rather than
 waiting for the next scheduled poll tick, so processing resumes as soon as the
 budget is restored.
+
+### Claude Usage-Limit Suspension
+
+This is a separate mechanism from GitHub rate-limit monitoring above — it tracks the
+Claude account's own usage limit (session or weekly), not GitHub's API budget. Board
+polling, settle scans, and label reconciliation are unaffected; only the *start* of new
+Claude invocations is gated.
+
+When any worker's Claude invocation exits because the account's usage limit was hit,
+Fabrik suspends the start of every new Claude invocation — across all issues, not just
+the one that hit the limit — until the reset time named in the CLI's own error message,
+and displays a banner distinct from the GraphQL one:
+
+```
+⚠ Claude usage limit hit — dispatch suspended. Resumes in 47m (22:20 local time).
+```
+
+If the reset time can't be parsed, Fabrik falls back to a fixed one-hour suspension
+instead of retrying on the normal cooldown. The suspension clears automatically —
+either once the reset time passes or as soon as any invocation succeeds, whichever
+comes first — and dispatch resumes with no operator action required. Already-running
+Claude invocations are never interrupted by this; the suspension only prevents new ones
+from starting. See the `fabrik:claude-limit` troubleshooting note above for the
+per-issue label/comment behavior layered on top of this account-wide gate.
 
 ---
 
