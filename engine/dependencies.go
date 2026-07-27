@@ -113,6 +113,48 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
+	alreadyBlocked := false
+	for _, l := range item.Labels {
+		if l == "fabrik:blocked" {
+			alreadyBlocked = true
+			break
+		}
+	}
+
+	// blockedByList is the edge list used for the open-dependency computation
+	// below. item.BlockedBy is a deep field whose freshness is keyed on the
+	// board's updatedAt — but removing a dependency via the REST dependencies
+	// API does not bump the blocked issue's updatedAt (#977), so the cache can
+	// keep serving a stale edge list indefinitely even though nothing is open
+	// at the API anymore. checkDependencies is the correctness-critical
+	// decision point that gates real work suppression, so on the recheck path
+	// (the item is already fabrik:blocked) we bypass the cache entirely with a
+	// raw, uncached FetchItemDetails call — mirroring recoverMissingPlanComment
+	// (engine/spawn.go) and verifyAndHealLinkage (engine/prcreate.go) — and
+	// write the corrected state back into the Store so other readers see it
+	// too. The first time an item becomes blocked is unaffected: that
+	// BlockedBy came from a fresh deep-fetch (first population is always a
+	// cache miss), so only the recheck path needs the live read.
+	//
+	// This needs no new cooldown: an already-blocked item is only re-admitted
+	// to checkDependencies once its "dep-blocked" cooldown expires
+	// (engine/item.go's itemMayNeedWork), which already throttles how often
+	// this live read fires.
+	blockedByList := item.BlockedBy
+	if alreadyBlocked && len(item.BlockedBy) > 0 {
+		fresh := item
+		if err := e.client.FetchItemDetails(&fresh); err != nil {
+			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)
+		} else {
+			blockedByList = fresh.BlockedBy
+			e.store.Apply(itemstate.ItemDeepFetched{
+				Repo:       itemRepo,
+				Number:     item.Number,
+				FreshState: fresh,
+			})
+		}
+	}
+
 	// Collect open (non-CLOSED) blocking dependencies.
 	//
 	// Prefer the engine Store's view of each blocker's IsClosed over dep.State
@@ -124,7 +166,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	// and prevents the pull-path from re-blocking an issue that the push-path
 	// has already correctly unblocked, just because the dep edge state is stale.
 	var openDeps []gh.Dependency
-	for _, dep := range item.BlockedBy {
+	for _, dep := range blockedByList {
 		depRepo := dep.Repo
 		if depRepo == "" {
 			depRepo = itemRepo
@@ -167,14 +209,6 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 
 	e.logf(item.Number, "blocked", "waiting for %s to close\n", strings.Join(waitingFor, ", "))
 
-	alreadyBlocked := false
-	for _, l := range item.Labels {
-		if l == "fabrik:blocked" {
-			alreadyBlocked = true
-			break
-		}
-	}
-
 	newComment := buildBlockedComment(waitingFor)
 
 	if !alreadyBlocked {
@@ -197,7 +231,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 			if err := e.client.UpdateComment(owner, repo, existing.DatabaseID, newComment); err != nil {
 				e.logf(item.Number, "warn", "could not update blocked comment: %v\n", err)
 			} else if c := e.cache(); c != nil {
-				c.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				c.ApplyCommentAdded(boardcache.ItemKey(itemRepo, item.Number), gh.Comment{
 					DatabaseID: existing.DatabaseID, Body: newComment, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}

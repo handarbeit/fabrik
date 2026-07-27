@@ -169,7 +169,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			return
 		}
 		if c := e.cache(); c != nil {
-			c.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
+			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), "Done")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
@@ -187,7 +187,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			return
 		}
 		if c := e.cache(); c != nil {
-			c.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
+			c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 		e.logf(item.Number, "done", "closed issue (no work needed)\n")
 	}

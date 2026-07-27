@@ -727,3 +727,126 @@ func TestCheckDependencies_RemoveBlocked_ErrNotFound(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckDependencies_BlockedByFreshnessTrap_SelfHeals is the #977 regression
+// test: an already-blocked item's cached BlockedBy still lists a dependency
+// that was removed at the API — with no updatedAt bump, since removing a
+// dependency edge via the REST API doesn't touch updatedAt. Before the fix,
+// checkDependencies trusted item.BlockedBy as-is on every recheck and never
+// cleared fabrik:blocked. After the fix, the recheck path (alreadyBlocked==true)
+// performs a live, uncached re-read via FetchItemDetails and self-heals without
+// any updatedAt bump.
+func TestCheckDependencies_BlockedByFreshnessTrap_SelfHeals(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchCalls++
+			// Live re-read reveals the dependency was removed at the API.
+			item.BlockedBy = nil
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 977,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+		// Stale cached edge: the API no longer reports this dependency, but
+		// item.BlockedBy (as served from the cache-backed deep fetch) still
+		// carries it because updatedAt never advanced.
+		BlockedBy: []gh.Dependency{
+			{Number: 976, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked: live re-read should reveal the dependency was removed")
+	}
+	if fetchCalls != 1 {
+		t.Errorf("expected exactly 1 live re-read (FetchItemDetails) call, got %d", fetchCalls)
+	}
+	if len(client.removeLabelCalls) != 1 || client.removeLabelCalls[0].labelName != "fabrik:blocked" {
+		t.Errorf("expected fabrik:blocked to be removed, got removeLabelCalls=%v", client.removeLabelCalls)
+	}
+
+	// The corrected BlockedBy must be written back to the Store so other
+	// readers (e.g. PushUnblockObserver) also see the resolved state.
+	snap, err := eng.store.Get("owner/repo", 977)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if len(snap.State().BlockedBy) != 0 {
+		t.Errorf("expected Store's BlockedBy to be updated to empty after live re-read, got %v", snap.State().BlockedBy)
+	}
+}
+
+// TestCheckDependencies_BlockedByLiveReadFails_FallsBackGracefully verifies
+// that when the live re-read errors (e.g. transient API failure), checkDependencies
+// falls back to the existing (possibly-stale) cached BlockedBy list rather than
+// panicking or treating the item as unconditionally unblocked.
+func TestCheckDependencies_BlockedByLiveReadFails_FallsBackGracefully(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("transient network error")
+		},
+	}
+	eng := depTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 978,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{
+			{Number: 976, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked: a failed live re-read must fall back to the cached (open) list, not clear the label")
+	}
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no label removal when live re-read fails, got %v", client.removeLabelCalls)
+	}
+}
+
+// TestCheckDependencies_FirstTimeBlock_NoLiveReadAttempted verifies that the
+// live re-read only fires on the recheck path (item already fabrik:blocked),
+// not when an item is being blocked for the first time — first-time BlockedBy
+// data always comes from a fresh deep-fetch, so a live re-read there would be
+// a wasted API call.
+func TestCheckDependencies_FirstTimeBlock_NoLiveReadAttempted(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchCalls++
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 979,
+		Repo:   "owner/repo",
+		// No fabrik:blocked label yet — this is a first-time block.
+		BlockedBy: []gh.Dependency{
+			{Number: 976, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if !blocked {
+		t.Error("expected blocked on first-time block with an open dependency")
+	}
+	if fetchCalls != 0 {
+		t.Errorf("expected no live re-read on first-time block, got %d calls", fetchCalls)
+	}
+}

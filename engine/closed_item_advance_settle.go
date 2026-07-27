@@ -79,7 +79,8 @@ func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.Project
 		return
 	}
 	if c := e.cache(); c != nil {
-		c.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), cleanupName)
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), cleanupName)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)

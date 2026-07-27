@@ -450,6 +450,145 @@ func TestAdvanceToNextStage_WritesThrough_Cache(t *testing.T) {
 	}
 }
 
+// TestAdvanceToNextStage_EmptyItemRepo_CacheWriteThroughSucceeds is a regression
+// test for issue #957's cache-key sweep: the Store is populated (via Reconcile/
+// BootstrapFromProbe) under the resolved "owner/repo" key, but a caller's local
+// gh.ProjectItem can have an empty Repo field (single-repo default setups never
+// populate it on some code paths). Before the fix, advanceToNextStage's write-
+// through used boardcache.ItemKey(item.Repo, item.Number) — with item.Repo=="",
+// that resolves to a different, non-existent key ("#N") than the one the Store
+// actually holds ("owner/repo#N"), so UpdateItemStatus silently no-ops via the
+// phantom-key guard (no error, no log) until the next Reconcile repairs it.
+func TestAdvanceToNextStage_EmptyItemRepo_CacheWriteThroughSucceeds(t *testing.T) {
+	const (
+		repo      = "owner/repo"
+		issueNum  = 43
+		itemID    = "PVTI_43"
+		projectID = "PID_1"
+	)
+
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(projectID, itemID, fieldID, optionID string) error {
+			return nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(t, client, stgs) // cfg.Owner="owner", cfg.Repo="repo"
+
+	// The Store is bootstrapped with the item keyed under the resolved "owner/repo"
+	// form, mirroring how a real deep-fetch/Reconcile populates it.
+	cache := boardcache.NewCacheImpl(boardcache.NewGitHubAdapter(client), eng.store, func(format string, args ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: projectID,
+		Items: []gh.ProjectItem{
+			{
+				ID:     "I_43",
+				ItemID: itemID,
+				Repo:   repo,
+				Number: issueNum,
+				Status: "Research",
+			},
+		},
+	})
+	eng.readClient = cache
+
+	board := &gh.ProjectBoard{ProjectID: projectID}
+	// The item handed to advanceToNextStage has an empty Repo field — the
+	// mismatch this test exists to catch.
+	item := gh.ProjectItem{
+		ID:     "I_43",
+		ItemID: itemID,
+		Repo:   "",
+		Number: issueNum,
+		Status: "Research",
+	}
+	currentStage := stgs[0] // Research
+
+	if err := eng.advanceToNextStage(board, item, currentStage); err != nil {
+		t.Fatalf("advanceToNextStage: %v", err)
+	}
+
+	gotItems, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var found *gh.ProjectItem
+	for i := range gotItems.Items {
+		if gotItems.Items[i].Number == issueNum {
+			found = &gotItems.Items[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("item not found in cache after advanceToNextStage")
+	}
+	if found.Status != "Plan" {
+		t.Errorf("cache Status = %q after advanceToNextStage with item.Repo=\"\", want %q "+
+			"(write-through must not silently drop the update when item.Repo is empty)", found.Status, "Plan")
+	}
+}
+
+// TestHandleStageComplete_EmptyItemRepo_CacheWriteThroughSucceeds is a regression
+// test for issue #957's cache-key sweep, covering the ApplyLabelAdded write-through
+// for the stage completion label rather than advanceToNextStage's UpdateItemStatus.
+func TestHandleStageComplete_EmptyItemRepo_CacheWriteThroughSucceeds(t *testing.T) {
+	const (
+		repo     = "owner/repo"
+		issueNum = 44
+		itemID   = "PVTI_44"
+	)
+
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(t, client, stgs) // cfg.Owner="owner", cfg.Repo="repo"
+
+	cache := boardcache.NewCacheImpl(boardcache.NewGitHubAdapter(client), eng.store, func(format string, args ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				ID:     "I_44",
+				ItemID: itemID,
+				Repo:   repo,
+				Number: issueNum,
+				Status: "Research",
+			},
+		},
+	})
+	eng.readClient = cache
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		ID:     "I_44",
+		ItemID: itemID,
+		Repo:   "",
+		Number: issueNum,
+		Status: "Research",
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(context.Background(), board, item, stage)
+
+	gotItems, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var found *gh.ProjectItem
+	for i := range gotItems.Items {
+		if gotItems.Items[i].Number == issueNum {
+			found = &gotItems.Items[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("item not found in cache after handleStageComplete")
+	}
+	wantLabel := "stage:Research:complete"
+	if !hasLabel(found.Labels, wantLabel) {
+		t.Errorf("cache Labels = %v after handleStageComplete with item.Repo=\"\", want to contain %q "+
+			"(write-through must not silently drop the label when item.Repo is empty)", found.Labels, wantLabel)
+	}
+}
+
 // TestAttemptMergeOnValidate_EnqueueOnYoloWithQueueEnabled verifies that when
 // IsMergeQueueEnabled is true and MergeQueue != "off", EnqueuePullRequest is called,
 // MergePR is not called, fabrik:auto-merge-enabled is applied, and (true, nil) is returned.
