@@ -6025,27 +6025,20 @@ Two consequences follow, and both routinely look like defects to someone reading
 
 Conversely, a successor that *announces* the situation (e.g. "found the implementation already complete from a prior interrupted session") is accurately describing its own resumed state.
 
-**Failure modes — the session ID is not always honoured.** `buildClaudeArgs` reads the session file inline (`engine/claude.go:480-484`):
+**Failure modes — the session ID is not always honoured, but the fallback is now logged.** Before building args, `InvokeClaude` and `InvokeClaudeForComments` each call `resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, resume)` (`engine/claude.go`), which reads and classifies the session file via `classifySessionFile` — trimming **before** checking for emptiness, so whitespace-only content is never mistaken for a usable ID. `buildClaudeArgs` itself is a pure formatter: it receives the already-resolved `resumeSessionID string` and appends `--resume <id>` only when it's non-empty.
 
-```go
-if resume {
-    if sessionID, err := os.ReadFile(sessFilePath); err == nil && len(sessionID) > 0 {
-        args = append(args, "--resume", strings.TrimSpace(string(sessionID)))
-    }
-}
-```
+`classifySessionFile` produces one of four outcomes:
 
-Note the length check runs on the **untrimmed** bytes, which produces three distinct outcomes:
+| Outcome | Condition | Behaviour |
+|---|---|---|
+| `resumeFound` | Trimmed content is non-empty | `--resume <id>` appended; **no log output** (the healthy path stays silent) |
+| `resumeAbsent` | Session file does not exist (`os.IsNotExist`) | `--resume` omitted → fresh session; warning logged naming the issue, stage, and path |
+| `resumeUnreadable` | Session file exists but `os.ReadFile` errors for another reason (e.g. it's a directory) | `--resume` omitted → fresh session; warning logged, including the underlying error |
+| `resumeBlank` | File reads successfully but its trimmed content is empty (zero bytes **or** whitespace-only) | `--resume` omitted → fresh session; warning logged |
 
-| Session file | Behaviour |
-|---|---|
-| Missing or unreadable | `--resume` omitted → **fresh session** against the predecessor's worktree |
-| Zero bytes | `--resume` omitted → **fresh session** |
-| Whitespace only (e.g. a stray newline) | `len > 0` passes, then `TrimSpace` yields `""` → **`--resume` appended with an empty value** |
+Unlike the earlier untrimmed-length-check bug, a whitespace-only file can no longer produce `--resume ""` — it is folded into `resumeBlank` and treated identically to a zero-byte file. Both `InvokeClaude` and `InvokeClaudeForComments` go through the same `resolveResumeSessionID` call, so neither call site can silently regress independently.
 
-None of these are detected or logged. The first two are the only cases where a retry genuinely cannot know what its predecessor did — so when diagnosing a suspect retry, confirm the session file was present and non-empty before concluding the output was unreliable.
-
-This inline read is also **not** the same as `engine.ReadSessionID` (`engine/claude.go:286-302`), which trims before returning and so treats a whitespace-only file as absent. `cmd/resume.go` uses `ReadSessionID`; the invocation path does not. Tracked in #1117.
+`engine.ReadSessionID` (`engine/claude.go`, used by `cmd/resume.go`) now shares the same `classifySessionFile` classifier internally (discarding the status), so it and the invocation path agree on what counts as a usable session ID.
 
 #### Dead-session detection and self-heal
 
