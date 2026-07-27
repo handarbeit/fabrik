@@ -1491,7 +1491,7 @@ func buildAwaitingInputComment(user, stageName, summary string) string {
 		fmt.Fprintf(&b, "🏭 **Fabrik** — awaiting your input on **%s**.\n\n", stageName)
 	}
 	if summary != "" {
-		for _, line := range strings.Split(strings.TrimSpace(summary), "\n") {
+		for _, line := range strings.Split(strings.TrimSpace(neutralizeBotMentions(summary)), "\n") {
 			b.WriteString("> " + line + "\n")
 		}
 		b.WriteString("\n")

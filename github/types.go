@@ -63,6 +63,15 @@ func isBotLogin(login string) bool {
 	if lower == "dependabot" || lower == "gemini-code-assist" {
 		return true
 	}
+	// coderabbitai: like dependabot/gemini-code-assist above, the GitHub App's
+	// API login carries the "[bot]" suffix (already matched above) but its
+	// @-mention surface is the bare form — GitHub renders and users type
+	// "@coderabbitai", never "@coderabbitai[bot]". Without this literal,
+	// IsBotLogin("coderabbitai") is false, so a mention-neutralization check
+	// against the bare mention text would silently fail to recognize it (#1141).
+	if lower == "coderabbitai" {
+		return true
+	}
 	return false
 }
 
