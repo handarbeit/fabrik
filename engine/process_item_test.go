@@ -1585,3 +1585,664 @@ func TestItemMayNeedWork_CleanupStage_NoWM(t *testing.T) {
 		t.Error("itemMayNeedWork should return false when no WorktreeManager is registered")
 	}
 }
+
+// stallDetectionStages returns a single-stage config with an explicit MaxTurns,
+// required for the #1146 capped/declining stall signal — testStages()'s stages
+// default to MaxTurns 0, which always reads as "never capped".
+func stallDetectionStages(maxTurns int) []*stages.Stage {
+	return []*stages.Stage{
+		{
+			Name:       "Research",
+			Order:      1,
+			Prompt:     "Do research",
+			MaxTurns:   maxTurns,
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+}
+
+// TestProcessItem_StallDetection_ArmsCorrectiveHintOnCappedThenDeclining reproduces
+// #816's shape: a turn-capped attempt followed by a strictly-declining, still-incomplete
+// attempt. The engine must arm a corrective hint that is injected into the very next
+// invocation's InvokeOptions — and only that one.
+func TestProcessItem_StallDetection_ArmsCorrectiveHintOnCappedThenDeclining(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12, 3} // capped, declining, declining again
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5, // enough headroom to observe all three calls without escalation cutting the sequence short
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 20, Title: "Stall detection test", Status: "Research", ItemID: "PVTI_20"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[0].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 1 (turn-capped, first attempt): CorrectiveHint = %q, want empty", got)
+	}
+	if got := claude.calls[1].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 2 (declining, arms hint for next call): CorrectiveHint = %q, want empty", got)
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("call 3: CorrectiveHint = empty, want the armed corrective hint (capped-then-declining pattern from calls 1-2)")
+	}
+
+	foundStallComment := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			foundStallComment = true
+		}
+	}
+	if !foundStallComment {
+		t.Error("expected a stall-detection comment to be posted after call 2")
+	}
+}
+
+// TestProcessItem_StallDetection_NoArmWithoutPriorCap verifies the false-positive
+// guard: a declining turn count alone, without a turn-capped predecessor, must never
+// arm a corrective hint. A shrinking retry can simply mean less work remained.
+func TestProcessItem_StallDetection_NoArmWithoutPriorCap(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{20, 10, 5} // declining, but never hit the 50-turn cap
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 21, Title: "No false-positive test", Status: "Research", ItemID: "PVTI_21"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	for i, call := range claude.calls {
+		if call.opts.CorrectiveHint != "" {
+			t.Errorf("call %d: CorrectiveHint = %q, want empty (no turn-capped predecessor)", i+1, call.opts.CorrectiveHint)
+		}
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment without a turn-capped predecessor")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_ClearedOnStageSuccess verifies that once a stage
+// completes, the turn-history/armed-hint state that fed detection is cleared —
+// so a later, unrelated incomplete run of the same stage (e.g. after fabrik:revalidate)
+// does not inherit a stale hint from a long-past episode.
+func TestProcessItem_StallDetection_ClearedOnStageSuccess(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Call 1: turn-capped. Call 2: declining — arms the hint. Call 3: completes the stage.
+	callTurns := []int{50, 12}
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			if callIdx >= len(callTurns) {
+				return "done", true, TokenUsage{TurnsUsed: 8}, nil
+			}
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 22, Title: "Cleared on success test", Status: "Research", ItemID: "PVTI_22"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	// Precondition: call 3 did receive the armed hint (proves arming happened).
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Fatal("precondition failed: call 3 should have received the armed corrective hint")
+	}
+
+	snap, err := eng.store.Get("owner/repo", 22)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("StallHintPending(Research) should be cleared after the stage completed")
+	}
+	if snap.LastTurnsCapped("Research") {
+		t.Error("LastTurnsCapped(Research) should be cleared after the stage completed")
+	}
+	if snap.LastTurnsUsed("Research") != 0 {
+		t.Errorf("LastTurnsUsed(Research) = %d, want 0 after StageRetryCleared", snap.LastTurnsUsed("Research"))
+	}
+}
+
+// TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension is a regression
+// guard for an interaction bug found in review: runInvocationWithExtension used to
+// build InvokeOptions (consuming any armed stall hint via consumeStallHint) BEFORE
+// checking the account-wide Claude usage-limit suspension gate. If the very next
+// dispatch after a stall was detected happened to land while dispatch was suspended,
+// the armed hint was destructively consumed and thrown away without ever reaching a
+// real Claude invocation — silently defeating the one-shot corrective re-invocation
+// for that stall episode. The suspension check must run first, so a gated dispatch
+// leaves the hint pending for the next dispatch that actually reaches Claude.
+func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12, 8} // capped, declining (arms hint), then the hinted retry
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 23, Title: "Hint survives suspension test", Status: "Research", ItemID: "PVTI_23"}
+
+	// Calls 1-2: capped then declining — arms the hint for the stage's next invocation.
+	for i := 0; i < 2; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+	snap, err := eng.store.Get("owner/repo", 23)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.StallHintPending("Research") {
+		t.Fatal("precondition failed: expected StallHintPending after capped-then-declining sequence")
+	}
+
+	// Activate the account-wide suspension before the 3rd dispatch — this dispatch
+	// must be gated before ever reaching Claude, and must NOT consume the hint.
+	eng.activateClaudeSuspension(0, "", time.Now())
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (suspended call): %v", err)
+	}
+	if len(claude.calls) != 2 {
+		t.Fatalf("expected the suspended dispatch to skip invoking Claude entirely, got %d total calls", len(claude.calls))
+	}
+	snap, err = eng.store.Get("owner/repo", 23)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.StallHintPending("Research") {
+		t.Error("StallHintPending(Research) should survive a dispatch gated by the usage-limit suspension")
+	}
+
+	// Clear the suspension and dispatch again — this is the first invocation that
+	// actually reaches Claude since the hint was armed, so it must carry the hint.
+	eng.clearClaudeSuspension("test")
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (post-suspension call): %v", err)
+	}
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected exactly 1 additional Claude invocation after clearing suspension, got %d total calls", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("expected the corrective hint to survive the suspended dispatch and reach the first real invocation afterward")
+	}
+}
+
+// TestDetectAndArmStallHint_NoArmWhenCurrentAttemptAlsoCapped is a regression guard
+// for a false-positive found in review: the progress-based turn-extension loop
+// (runInvocationWithExtension) can widen the effective budget on one dispatch (e.g.
+// to 2x/3x stage.MaxTurns) without that widening persisting to the next, separate
+// dispatch. So a later, separate dispatch can be turn-capped again at a *lower*
+// absolute TurnsUsed than the previous capped attempt purely because its own budget
+// reset lower — not because it is a declining, stalled retry. Arming must require
+// the current attempt to be uncapped; comparing raw TurnsUsed against the previous
+// attempt's alone (ignoring the current attempt's own capped status) would
+// misclassify this as a stall.
+func TestDetectAndArmStallHint_NoArmWhenCurrentAttemptAlsoCapped(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 30, Title: "capped-then-capped", Status: "Research", ItemID: "PVTI_30"}
+	stage := eng.cfg.Stages[0]
+	repoStr := "owner/repo"
+
+	// First attempt: capped at 50/50 (e.g. a widened 2x/3x extension-loop budget).
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, true)
+	// Second, separate dispatch: also capped, but at a smaller absolute budget (its own
+	// extension loop never widened past 1x) — TurnsUsed (20) < prevTurns (50), but this
+	// attempt is itself capped, so it must not be read as a declining, stalled retry.
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 20, MaxTurns: 20}, true)
+
+	snap, err := eng.store.Get(repoStr, item.Number)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending(stage.Name) {
+		t.Error("must not arm a corrective hint when the current attempt is itself turn-capped, even though turns declined")
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment when the current attempt is also turn-capped")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_ArmsUnderUnlimitedRetries verifies that stall
+// detection/arming runs even when MaxRetries=0 ("unlimited retries") — a regression
+// guard found in review: detectAndArmStallHint used to be called only inside the
+// `claudeRan && e.cfg.MaxRetries > 0` branch, so a stage configured for unlimited
+// retries got none of this mitigation and would grind an identical stall forever.
+// Detection must be unconditional on claudeRan; only the surrounding retry-count/
+// escalation bookkeeping is gated on MaxRetries > 0.
+func TestProcessItem_StallDetection_ArmsUnderUnlimitedRetries(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12, 3} // capped, declining, declining again
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 0, // unlimited
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 24, Title: "Unlimited retries stall test", Status: "Research", ItemID: "PVTI_24"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("expected the armed corrective hint on call 3 even with MaxRetries=0 (unlimited retries)")
+	}
+
+	// Retry-count bookkeeping (Attempts) must still stay at 0 — MaxRetries=0 exempts
+	// the escalation path, but not stall detection.
+	snap, err := eng.store.Get("owner/repo", 24)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.Attempts("Research") != 0 {
+		t.Errorf("expected Attempts=0 when MaxRetries=0, got %d", snap.Attempts("Research"))
+	}
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			t.Error("should not add fabrik:paused when MaxRetries=0")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_SkipsArmingOnEscalatingAttempt is a regression
+// guard for a bug found in review: detectAndArmStallHint used to run before the
+// count >= MaxRetries escalation check, so a capped-then-declining pattern that
+// lands exactly on the attempt exhausting MaxRetries would arm a hint and post a
+// comment promising "the next invocation will receive a corrective hint" — but the
+// issue is paused immediately after, and a human's later clearFailedStage() applies
+// StageRetryCleared, which wipes the pending hint before any further invocation
+// happens. The promise would never be kept. Arming must be skipped when this
+// attempt is the one that triggers escalation.
+func TestProcessItem_StallDetection_SkipsArmingOnEscalatingAttempt(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callTurns := []int{50, 12} // capped, then declining — and also the final retry
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			turns := callTurns[callIdx]
+			callIdx++
+			return "partial output", false, TokenUsage{TurnsUsed: turns}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 2, // attempt 2 (the declining one) is also the escalating attempt
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 25, Title: "Escalating attempt stall test", Status: "Research", ItemID: "PVTI_25"}
+
+	for i := 0; i < 2; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 2 {
+		t.Fatalf("expected 2 Claude invocations, got %d", len(claude.calls))
+	}
+
+	escalated := false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			escalated = true
+		}
+	}
+	if !escalated {
+		t.Fatal("precondition failed: expected escalation (fabrik:paused) on the 2nd attempt")
+	}
+
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("must not post a stall-detected comment promising a next invocation when this attempt is the one being escalated")
+		}
+	}
+
+	snap, err := eng.store.Get("owner/repo", 25)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("must not arm a corrective hint on the attempt that triggers escalation — it will never be delivered")
+	}
+}
+
+// TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns verifies
+// that a generic (non-turn-limit) error must not feed the declining-turns stall
+// heuristic. Found via an external review (relayed on issue #1146 since Fabrik
+// only consumes inline PR review-thread comments, not review bodies — see #1189):
+// claudeRan is true for most invocation errors (network blip, git-push failure,
+// malformed CLI output), so without this guard, a genuinely-erroring attempt whose
+// partial usage.TurnsUsed happens to be smaller than a prior turn-capped attempt's
+// would arm a corrective hint and post a confident "possible stall detected"
+// misdiagnosis for what was actually an unrelated crash.
+func TestProcessItem_StallDetection_NoArmOnGenericErrorWithDecliningTurns(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callIdx++
+			if callIdx == 1 {
+				// Attempt 1: turn-capped, clean stop (err == nil).
+				return "partial output", false, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, nil
+			}
+			// Attempt 2: a generic error (e.g. transient network failure) that happens to
+			// have parsed a smaller, non-zero partial turn count — NOT a clean stop, and
+			// NOT a *claudeTurnLimitError, so this must not be read as a declining retry.
+			return "partial output", false, TokenUsage{TurnsUsed: 12, MaxTurns: 50}, fmt.Errorf("transient network failure")
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 26, Title: "Generic error stall false-positive test", Status: "Research", ItemID: "PVTI_26"}
+
+	for i := 0; i < 2; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 2 {
+		t.Fatalf("expected 2 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[1].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 2 (generic error, declining turns): CorrectiveHint = %q, want empty", got)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 26)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("must not arm a corrective hint when the declining attempt errored out rather than stopping cleanly")
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment when the declining attempt was a generic error, not a clean stop")
+		}
+	}
+}
+
+// TestProcessItem_StallDetection_NoArmWhenGenericErrorInterveningBetweenCleanAttempts
+// covers the case the sibling test above does not: what the *next* clean attempt sees
+// after a generic error, not just whether the erroring attempt itself arms. Found via
+// external review (relayed on issue #1146): before this fix, StageTurnUsageRecorded was
+// only applied inside detectAndArmStallHint, which the (err == nil || turnLimited) call
+// site guard skipped entirely for a generic error — so an errored attempt was invisible
+// to the trend, and LastTurnsUsed/LastTurnsCapped still described the last *clean*
+// attempt. A later clean attempt would then wrongly compare against that non-consecutive
+// predecessor across the gap: attempt 1 capped 50/50, attempt 2 a generic error (turns
+// irrelevant to the fix — the chain-break comes from Capped=false, not from the value),
+// attempt 3 clean-incomplete at 10 turns — 10 < 50 looks like a decline, but the two
+// attempts being compared never actually stopped cleanly back-to-back. This test asserts
+// attempt 3 must not arm: the intervening error attempt must invalidate the "previous
+// capped" precondition, not merely fail to satisfy it itself.
+func TestProcessItem_StallDetection_NoArmWhenGenericErrorInterveningBetweenCleanAttempts(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	callIdx := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callIdx++
+			switch callIdx {
+			case 1:
+				// Attempt 1: turn-capped, clean stop (err == nil).
+				return "partial output", false, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, nil
+			case 2:
+				// Attempt 2: a generic error — not a clean stop, and not a
+				// *claudeTurnLimitError — breaking the consecutive-clean-attempts chain.
+				return "partial output", false, TokenUsage{TurnsUsed: 30, MaxTurns: 50}, fmt.Errorf("transient network failure")
+			default:
+				// Attempt 3: clean stop again, fewer turns than attempt 1 — but attempt 1
+				// is no longer the immediate predecessor, so this must not arm.
+				return "partial output", false, TokenUsage{TurnsUsed: 10, MaxTurns: 50}, nil
+			}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(50),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 27, Title: "Generic error breaks the capped-chain test", Status: "Research", ItemID: "PVTI_27"}
+
+	for i := 0; i < 3; i++ {
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (call %d): %v", i+1, err)
+		}
+	}
+
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 3 (clean, declining relative to the non-consecutive capped attempt 1): CorrectiveHint = %q, want empty", got)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 27)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.StallHintPending("Research") {
+		t.Error("must not arm a corrective hint when a generic error broke the chain between the capped attempt and this one")
+	}
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			t.Error("unexpected stall-detection comment when a generic error intervened between the capped attempt and this one")
+		}
+	}
+}

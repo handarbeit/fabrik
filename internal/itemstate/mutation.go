@@ -736,6 +736,45 @@ type LinkageHealAttempted struct {
 func (LinkageHealAttempted) isMutation()       {}
 func (m LinkageHealAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// StageTurnUsageRecorded records the TurnsUsed/capped status of the invocation that
+// just finalized as incomplete for a stage (#1146). Applied once per incomplete
+// invocation, always overwriting the prior value — this is what makes stall
+// detection self-limiting: the very attempt that triggers detection (a decline) is
+// itself uncapped, so it clears the precondition for a subsequent re-arm.
+type StageTurnUsageRecorded struct {
+	Repo      string
+	Number    int
+	StageName string
+	TurnsUsed int
+	Capped    bool
+}
+
+func (StageTurnUsageRecorded) isMutation()       {}
+func (m StageTurnUsageRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// StallHintArmed records that a stall was detected for a stage (a turn-capped
+// attempt followed by an incomplete attempt using strictly fewer turns) and the
+// next invocation of that stage should receive a corrective hint (#1146).
+type StallHintArmed struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (StallHintArmed) isMutation()       {}
+func (m StallHintArmed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// StallHintConsumed clears a pending stall hint once it has been injected into an
+// invocation's prompt (#1146), so the hint fires exactly once per detected episode.
+type StallHintConsumed struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (StallHintConsumed) isMutation()       {}
+func (m StallHintConsumed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CommentBreakerInvocationRecorded appends a timestamp (and records the
 // triggering comment's author) to ItemState.CommentBreaker for the
 // runaway-loop circuit breaker (#1089). Applied once per comment-processing

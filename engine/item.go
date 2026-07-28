@@ -923,6 +923,17 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 // reports how many budget multiples were ultimately used, so the caller can
 // compute a cumulative-budget stats footer.
 func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, baseBranch, workDir string, resume bool) (output string, completed bool, usage TokenUsage, totalMultiple int, err error) {
+	// Check the account-wide usage-limit suspension gate before building InvokeOptions
+	// or consuming any armed stall hint (#1146) — consumeStallHint destructively clears
+	// StallHintPending, so it must not run on a dispatch that will never actually invoke
+	// Claude. Otherwise a detected stall's one-shot corrective hint would be silently
+	// discarded here and never reach any invocation at all.
+	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
+		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
+		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+		return output, completed, usage, totalMultiple, err
+	}
+
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
@@ -953,6 +964,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigIntGrace:    sigIntGrace,
 		SigTermGrace:   sigTermGrace,
 		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+		CorrectiveHint: e.consumeStallHint(repoStr, item.Number, stage.Name),
 	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
@@ -969,12 +981,6 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		totalMultiple = 2
 	}
 	baseline := snapshotBaseline(stage, item, workDir)
-
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
-		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
-		return output, completed, usage, totalMultiple, err
-	}
 
 	currentBudget := firstBudget
 	for {
@@ -1390,6 +1396,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		// Escalation is decided before stall-hint arming (see below) so arming can be
+		// skipped on the attempt that triggers it.
+		willEscalate := false
 		if claudeRan && e.cfg.MaxRetries > 0 {
 			e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 			var count int
@@ -1406,12 +1415,127 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 				)
 				e.postItemComment(item, warnComment, true)
 			}
-			if count >= e.cfg.MaxRetries {
-				e.escalateFailedStage(item, stage, degenerateReason)
-				releaseLock() // permanently giving up — release the lock
-			}
+			willEscalate = count >= e.cfg.MaxRetries
+		}
+		// Stall detection/recording is independent of MaxRetries: max_retries: 0 is a
+		// first-class "unlimited retries" config, not an edge case, and is exactly the
+		// setting where a stalled stage would otherwise grind identical retries forever
+		// with no mitigation at all. Only escalation (immediately above) needs the
+		// MaxRetries > 0 guard. Arming is skipped when this attempt is about to be
+		// escalated: detectAndArmStallHint's comment promises the hint will reach "the
+		// next invocation," but an escalated issue pauses immediately after, and a
+		// human's later clearFailedStage() applies StageRetryCleared, which wipes any
+		// pending hint before any further invocation happens — the promise would go
+		// unfulfilled and the state would exist only to be thrown away.
+		//
+		// clean (err == nil || turnLimited) is passed through rather than gating the call
+		// itself: the declining-turns heuristic only means what it claims when both
+		// attempts being *compared* stopped cleanly — genuinely ran out of runway rather
+		// than erroring out partway through. But recording must still happen for a
+		// non-clean attempt (network blip, git-push failure, malformed CLI output) —
+		// otherwise its predecessor's turn-usage/capped state survives untouched, and a
+		// later clean attempt would wrongly compare against a non-consecutive prior
+		// clean attempt across the gap, misattributing an intervening crash as part of a
+		// declining-turns stall (see adrs/1146-*.md "Consequences" for the incident that
+		// prompted this). detectAndArmStallHint always records this attempt's own turn
+		// usage with Capped=false when !clean, which invalidates the "previous capped"
+		// precondition for the very next comparison — arming itself still only ever
+		// considers a clean current attempt. clean is not simply err == nil: a turn-cap
+		// exit is itself reported as a non-nil *claudeTurnLimitError (see claude.go /
+		// ADR-1178), which is exactly the shape this feature must still classify as a
+		// clean, capped stop. turnLimited (already computed above for the
+		// InvocationRecorded write) is reused so both attempt-classification paths agree
+		// on what counts as clean.
+		if claudeRan && !willEscalate {
+			e.detectAndArmStallHint(item, stage, repoStr, usage, err == nil || turnLimited)
+		}
+		if willEscalate {
+			e.escalateFailedStage(item, stage, degenerateReason)
+			releaseLock() // permanently giving up — release the lock
 		}
 	}
+}
+
+// detectAndArmStallHint compares this incomplete invocation's turn usage against
+// the previous incomplete attempt's, recording the trend for the next comparison
+// and arming a one-shot corrective hint when a stall is detected (#1146). Called
+// whenever claudeRan, independent of MaxRetries — max_retries: 0 ("unlimited
+// retries") must still get the detection/hint mitigation; only the surrounding
+// retry-count/escalation bookkeeping needs the MaxRetries > 0 guard.
+//
+// clean reports whether this attempt stopped cleanly (err == nil or a
+// *claudeTurnLimitError — see the call site) rather than erroring out partway
+// through (network blip, git-push failure, malformed CLI output). Recording
+// (StageTurnUsageRecorded) always happens, clean or not, so that a non-clean
+// attempt is never silently invisible to the trend: it is recorded with
+// Capped=false regardless of its actual turn count, which invalidates the
+// "previous capped" precondition for the next comparison. Without this, a
+// generic-error attempt between two clean ones would leave the last clean
+// attempt's turns/capped state untouched, and a later clean attempt would
+// wrongly compare against that non-consecutive predecessor across the gap —
+// misattributing an intervening crash as part of a declining-turns stall. Arming
+// itself is skipped entirely when !clean: an errored attempt cannot be the
+// "declining, no completion" half of the pattern this feature targets.
+//
+// The signature (for a clean attempt): a turn-capped predecessor (TurnsUsed >=
+// MaxTurns, did not complete) followed by an incomplete, NOT-capped attempt using
+// strictly fewer turns. A genuinely progressing retry does not shrink like that —
+// remaining work only running out of turns faster than a fuller attempt is a
+// strong indicator the worker re-derived the same stall (e.g. backgrounded a long
+// command and waited for a notification that never arrives) rather than making
+// less progress toward completion. The current attempt must NOT itself be capped:
+// the pre-existing progress-based turn-extension loop (runInvocationWithExtension)
+// can widen the effective budget on one dispatch (e.g. to 2x/3x stage.MaxTurns)
+// without that widening persisting to the next, separate dispatch — so two
+// consecutive capped attempts can show a smaller absolute TurnsUsed on the second
+// purely because its budget reset lower, not because it "declined" in the stalled
+// sense this pattern is meant to catch.
+//
+// Self-limiting to a single corrective hint per episode: StageTurnUsageRecorded
+// always overwrites LastTurnsCapped with this attempt's own capped status, and
+// arming requires the current attempt to be uncapped — so the precondition for a
+// re-arm is cleared immediately, without needing a separate one-shot guard.
+func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage, repoStr string, usage TokenUsage, clean bool) {
+	var prevTurns int
+	var prevCapped bool
+	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
+		prevTurns = snap.LastTurnsUsed(stage.Name)
+		prevCapped = snap.LastTurnsCapped(stage.Name)
+	}
+
+	capped := clean && usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns
+	e.store.Apply(itemstate.StageTurnUsageRecorded{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		TurnsUsed: usage.TurnsUsed,
+		Capped:    capped,
+	})
+
+	if !clean || !prevCapped || capped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
+		return
+	}
+
+	e.store.Apply(itemstate.StallHintArmed{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.logf(item.Number, "stall", "detected likely stall on stage %q (turns %d capped -> %d, declining) — arming corrective hint for next attempt\n", stage.Name, prevTurns, usage.TurnsUsed)
+	stallComment := fmt.Sprintf(
+		"🏭 **Fabrik — possible stall detected**\n\nStage **%s** hit its turn limit (%d turns) without completing, and the following attempt used only %d turns without completing either. This pattern often indicates the worker backgrounded a long-running command and stalled waiting for a completion notification that never arrives in this headless environment. The next invocation will receive a corrective hint to run any long-running command in the foreground instead.",
+		stage.Name, prevTurns, usage.TurnsUsed,
+	)
+	e.postItemComment(item, stallComment, true)
+}
+
+// consumeStallHint returns the stall corrective hint text if one is armed for this
+// stage (see detectAndArmStallHint), consuming it so it is injected exactly once
+// per detected episode (#1146). Returns "" when no hint is pending or the store
+// read fails.
+func (e *Engine) consumeStallHint(repoStr string, issueNumber int, stageName string) string {
+	snap, err := e.store.Get(repoStr, issueNumber)
+	if err != nil || !snap.StallHintPending(stageName) {
+		return ""
+	}
+	e.store.Apply(itemstate.StallHintConsumed{Repo: repoStr, Number: issueNumber, StageName: stageName})
+	return stallCorrectiveHintText
 }
 
 // escalatePRCreationFailure is called when create_draft_pr: true and ensureDraftPR

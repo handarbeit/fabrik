@@ -481,7 +481,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	sessFilePath := filepath.Join(sessDir, sanitizeStageName(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
-	prompt := buildPrompt(stage, issue, newComments, opts.BaseBranch)
+	prompt := buildPrompt(stage, issue, newComments, opts.BaseBranch, opts.CorrectiveHint)
 	effectiveBudget := stage.MaxTurns
 	if opts.MaxTurnsOverride > 0 {
 		effectiveBudget = opts.MaxTurnsOverride
@@ -988,8 +988,21 @@ func checkCompletion(stage *stages.Stage, output string) bool {
 	}
 }
 
-func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, baseBranch string) string {
+// stallCorrectiveHintText is injected into the prompt (via buildPrompt) when the
+// engine detects a stall on this stage's previous incomplete attempt — a
+// turn-capped run followed by an incomplete run using strictly fewer turns,
+// which does not happen for a genuinely-progressing retry (#1146). It is
+// deliberately hedged: detection is a heuristic, not a confirmed diagnosis, so
+// the hint must never assert the cause with certainty.
+const stallCorrectiveHintText = `**Note from Fabrik:** the previous attempt at this stage hit its turn limit without completing, and the retry after it used noticeably fewer turns without completing either — a pattern consistent with a stall, most often caused by backgrounding a long-running command (e.g. a dev server, build, or test run) and then waiting for a completion notification that never arrives in this headless environment. If that's what happened, run any long-running command in the foreground with an explicit timeout instead of backgrounding it. If something else caused the previous attempt to stop short, disregard this note and continue as planned.`
+
+func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, baseBranch, correctiveHint string) string {
 	var b strings.Builder
+
+	if correctiveHint != "" {
+		b.WriteString(correctiveHint)
+		b.WriteString("\n\n---\n\n")
+	}
 
 	if stage.Skill != "" {
 		b.WriteString(fmt.Sprintf("You are operating as the Fabrik %s agent for issue #%d.\n", stage.Name, issue.Number))
