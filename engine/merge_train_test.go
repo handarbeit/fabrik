@@ -3563,3 +3563,67 @@ func TestMergeTrainWorker_RegenerationFailureEjectsMember(t *testing.T) {
 		t.Errorf("expected a diagnosable regeneration-failure reason in the ejection comment, got: %s", ejectionBody)
 	}
 }
+
+// TestMergeTrainWorker_ClaudePrematureCommitInMixedModeEjectsMember guards against the
+// compliance risk flagged in ADR-1235: in the mixed case, Claude is instructed to leave
+// the generated path untouched and not commit, but nothing stops it from ignoring that
+// (e.g. running `git add -A && git commit` out of habit). If it does, the generated
+// path's conflict markers get committed as "resolved" content, and regenerateAndCommit
+// must detect that its own regenerated content is left staged but uncommitted afterward
+// rather than silently reporting success.
+func TestMergeTrainWorker_ClaudePrematureCommitInMixedModeEjectsMember(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", map[string]string{
+		"counter.txt":   "counter-from-1\n",
+		"generated.txt": "gen-from-1\n",
+	})
+	sha2 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", map[string]string{
+		"counter.txt":   "counter-from-2\n",
+		"generated.txt": "gen-from-2\n",
+	})
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Violates the mixed-mode instructions: resolves counter.txt correctly, but
+			// then stages *everything* (including the still-conflicted generated.txt)
+			// and commits — exactly the compliance failure ADR-1235 flags as a risk.
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte("counter-from-1\ncounter-from-2\n"), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved counter.txt: %w", err)
+			}
+			mustGit(t, workDir, "add", "-A")
+			mustGit(t, workDir, "commit", "--no-edit", "-m", "premature commit despite instructions")
+			return "resolved and committed (violating instructions)", true, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "printf 'gen-regenerated\\n' > generated.txt"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "premature-commit-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 1 || survivors[0].item.Number != 1 {
+		t.Fatalf("expected only member #1 to survive (member #2 ejected for the premature commit), got %+v", survivors)
+	}
+}

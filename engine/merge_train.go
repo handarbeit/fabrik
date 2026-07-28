@@ -1089,6 +1089,19 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}
+	} else {
+		// MERGE_HEAD is already gone. In the mixed case (FR-5) this should only happen
+		// if Claude committed despite being instructed not to — the regenerated content
+		// just staged above would then sit uncommitted on top of that premature commit.
+		// Guard explicitly rather than trusting compliance: fail closed instead of
+		// silently returning success with unstaged-vs-HEAD content left behind.
+		diffCachedCmd := exec.Command("git", "diff", "--cached", "--quiet")
+		diffCachedCmd.Dir = wtDir
+		if diffErr := diffCachedCmd.Run(); diffErr != nil {
+			reason := "merge was already committed before regeneration finished, leaving regenerated content staged but uncommitted (likely Claude committed despite mixed-mode instructions not to)"
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
+		}
 	}
 
 	return true, ""
