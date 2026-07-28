@@ -44,6 +44,12 @@ There's a companion Claude Code plugin (the "Fabrik PM plugin") that needs no bi
 
 Yes — that's the point. Every stage is a YAML file plus a markdown "skill," so you can rewrite any stage's prompt, model, tools, and gates, or add entirely new stages to the flow.
 
+### How do I control which Claude model each stage uses?
+
+Set `model:` in a stage's YAML (e.g. `model: sonnet`) to fix the model for that stage, or drop a `model:<name>` label on an issue (e.g. `model:opus`) to override every stage for that one issue. Precedence is label > stage YAML > Claude Code's own default. There's no repo-wide default model setting — it's per stage and per issue.
+
+Worth knowing: Fabrik doesn't interpret the model name at all. Whatever you write — `sonnet`, `opus`, or a full model ID like `claude-sonnet-5` — is passed straight through to `claude --model`, and **Claude Code** resolves the alias. So `sonnet` means whatever your installed Claude Code CLI version maps it to, and it can shift when you upgrade the Claude Code CLI. There's no validation on Fabrik's side either — a typo just fails at the Claude call. If you want a model pinned regardless of Claude Code CLI aliasing, use its full model ID as the stage or label value.
+
 ### Does the resulting code come with tests and docs?
 
 Tests, yes — the default Implement stage treats them as non-optional, written alongside the code. Docs get updated where it makes sense. Anything more specific — ADRs, changelog discipline, a docs-sync step — you bake in by editing the skills, which is how Fabrik's own repo enforces its conventions.
