@@ -290,6 +290,23 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// every poll while fabrik:auto-merge-enabled is absent, so once the
 	// thread is resolved by the review-reinvoke loop (§2.9), the very next
 	// poll re-enters here and proceeds — no separate retry plumbing needed.
+	//
+	// Freshness note: at the primary call site (handleStageComplete, invoked
+	// synchronously right after a Claude invocation completes), item is the
+	// same pre-invocation snapshot Path 1 already treats as stale everywhere
+	// else in this function (see the wait_for_reviews comment below) — it can
+	// be tens of minutes old by the time a long Validate run finishes, not
+	// just a few seconds. A thread posted during that run is invisible to
+	// this check. This is deliberately not solved by re-fetching here (that
+	// would re-add the per-stage-completion GraphQL round-trip Path 1 exists
+	// to avoid); instead it is closed by guard 2 on the very next poll — by
+	// then fabrik:auto-merge-enabled is set, poll.go's deep-fetch has
+	// refreshed the item, and handleReviewGate's guard 2 disables auto-merge
+	// before GitHub can act on it. The exposure this leaves is the same
+	// PollSeconds-bounded residual race already accepted for guard 2's
+	// convergence-window disable, not a new unbounded gap. poll.go's Phase 2
+	// Validate retry (the other caller of this function) always sees
+	// deep-fetched, fresh data, so it is not subject to this note.
 	if blocking := e.currentHeadReviewThreadComments(item); len(blocking) > 0 {
 		e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s\n",
 			len(blocking), item.LinkedPRHeadSHA)
