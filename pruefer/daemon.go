@@ -37,7 +37,12 @@ type RateLimitReporter interface {
 // board/stage concept: each cycle just lists open PRs per watched repo and
 // hands them to ReviewPR, which does its own eligibility filtering.
 type Daemon struct {
-	Client   GitHubLister
+	// Clients maps each watched-repo owner to the GitHubLister whose token
+	// is scoped to that owner's App installation — installation tokens are
+	// strictly owner-scoped, so using the wrong one is a 403, not a soft
+	// failure (see AuthSet/BootstrapMulti in auth.go). Every owner present
+	// in Config.WatchedRepos must have an entry.
+	Clients  map[string]GitHubLister
 	Claude   ClaudeInvoker
 	Clone    CloneFunc
 	Config   Config
@@ -139,9 +144,18 @@ func (d *Daemon) poll(ctx context.Context) {
 			logf(0, "warn", "skipping malformed watched repo %q (want owner/repo)\n", repoSpec)
 			continue
 		}
+		client, ok := d.Clients[owner]
+		if !ok {
+			// Should not happen: BootstrapMulti validates every watched
+			// owner has a resolved installation before the daemon starts.
+			// Defensive skip rather than a nil-pointer panic if it ever
+			// does (e.g. a hand-built Daemon in a future caller).
+			logf(0, "warn", "no client for owner %q (repo %s) — skipping this repo this cycle\n", owner, repoSpec)
+			continue
+		}
 		repoName := owner + "/" + repo
 		pollAt := time.Now()
-		prs, err := d.Client.ListOpenPRs(owner, repo)
+		prs, err := client.ListOpenPRs(owner, repo)
 		if err != nil {
 			logf(0, "warn", "listing open PRs for %s/%s: %v — skipping this repo this cycle\n", owner, repo, err)
 			d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, Err: err.Error()})
@@ -162,7 +176,7 @@ func (d *Daemon) poll(ctx context.Context) {
 				defer func() { <-sem }()
 				startedAt := time.Now()
 				d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
-				outcome := ReviewPR(ctx, d.Client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
+				outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
 				if outcome.Err != nil {
 					logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
 				}
@@ -181,9 +195,15 @@ func (d *Daemon) poll(ctx context.Context) {
 	}
 	wg.Wait()
 
-	if reporter, ok := d.Client.(RateLimitReporter); ok {
-		rest, _ := reporter.RateLimitStats()
-		d.emit(ptui.RateLimitSnapshotEvent{Stats: rest})
+	for _, owner := range distinctOwners(d.Config.WatchedRepos) {
+		client, ok := d.Clients[owner]
+		if !ok {
+			continue
+		}
+		if reporter, ok := client.(RateLimitReporter); ok {
+			rest, _ := reporter.RateLimitStats()
+			d.emit(ptui.RateLimitSnapshotEvent{Owner: owner, Stats: rest})
+		}
 	}
 }
 
