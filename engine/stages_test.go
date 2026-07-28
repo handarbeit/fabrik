@@ -1042,10 +1042,56 @@ func TestAttemptMergeOnValidate_ReviewGate_FetchErrorBlocks(t *testing.T) {
 	}
 }
 
-// TestAttemptMergeOnValidate_ReviewGate_NoPRDoesNotBlock verifies that an
-// unresolvable PR number does not strand the item: no PR means no reviewer
+// TestAttemptMergeOnValidate_ReviewGate_LinkedPRFetchErrorBlocks pins the
+// distinction between "no PR" and "could not read the PR". On a base:<branch>
+// repo LinkedPRNumber is always 0, so FetchLinkedPR is the gate's only PR-resolution
+// route — treating a transient failure there as "nothing to gate on" would land the
+// item with the gate never evaluated at all, which is the exact FR-1 failure this
+// issue is about.
+func TestAttemptMergeOnValidate_ReviewGate_LinkedPRFetchErrorBlocks(t *testing.T) {
+	waitTrue := true
+	var reviewFetches int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("boom")
+		},
+		// Would report a clear gate if it were ever consulted — it must not be,
+		// since there is no PR number to key it on.
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewFetches++
+			return []gh.PRReview{{State: "APPROVED"}}, nil
+		},
+	}
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Labels: []string{"base:dev"}}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("expected (false, nil) on a linked-PR fetch error, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the linked PR could not be read")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("item must not advance while review state is unknown, got %d status update(s)",
+			len(client.updateStatusCalls))
+	}
+	if reviewFetches != 0 {
+		t.Errorf("review state must not be fetched without a resolved PR number, got %d call(s)", reviewFetches)
+	}
+	if !hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("expected fabrik:awaiting-review to be applied so the review timeout can anchor")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_NoPRDoesNotBlock verifies that a
+// definitively absent PR does not strand the item: no PR means no reviewer
 // requests, so the landing proceeds (handleBrokenReviewLinkage owns the
-// broken-linkage pause).
+// broken-linkage pause). Contrast with the fetch-error case above.
 func TestAttemptMergeOnValidate_ReviewGate_NoPRDoesNotBlock(t *testing.T) {
 	waitTrue := true
 	client := &mockGitHubClient{

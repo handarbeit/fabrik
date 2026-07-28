@@ -73,14 +73,20 @@ Supporting choices:
   Gating on the opt-in first means stages that don't use the gate make zero extra API
   calls, and the `merge_train: on` path does not acquire a mandatory PR fetch it never
   had.
-- **Unresolvable PR number ⇒ do not block.** No PR means no reviewer requests, so FR-1
-  is vacuously satisfied. Blocking would strand items and duplicate
-  `handleBrokenReviewLinkage`, which already owns the broken-linkage pause.
+- **Absent PR ⇒ do not block; unreadable PR ⇒ block.** No PR means no reviewer requests,
+  so FR-1 is vacuously satisfied and blocking would strand items and duplicate
+  `handleBrokenReviewLinkage`, which already owns the broken-linkage pause. But a
+  `FetchLinkedPR` *error* is unknown state, not an absent PR: on a `base:<branch>` repo
+  that fallback is the only PR-resolution route, so letting a transient failure through
+  would land the item with the gate never evaluated at all — the exact FR-1 failure this
+  ADR exists to close.
 - **Fetch error ⇒ block conservatively, discarding *both* slices.** Trusting whichever
   call succeeded risks a false `len(outstanding) == 0 && hasReviews` read that clears
   the gate on unknown state. Mirrors `checkReviewGate`'s existing `base:<branch>`
-  fallback. Bounded by the `fabrik:awaiting-review` timeout, so a sustained outage
-  pauses for a human rather than hanging.
+  fallback. Every block path routes through one exit (`holdLandingForReview`) so none
+  can forget the label, and is bounded by the `fabrik:awaiting-review` timeout — the
+  label it applies is the `FetchLabelAppliedAt` anchor `checkReviewGate` reads — so a
+  sustained outage pauses for a human rather than hanging.
 - **Reuse `reviewGateOutstanding` and its exact clearing condition.** The landing gate
   and the catch-up gate cannot disagree on "outstanding" because both call the same
   pure function.

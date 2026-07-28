@@ -304,12 +304,13 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 // present on the next poll, so handleReviewGate claims the item with
 // hasComplete == true and checkReviewGate owns all escalation from there.
 //
-// Returns false (landing may proceed) when the gate is not opted in, when no PR
-// number can be resolved (no PR means no reviewer requests; handleBrokenReviewLinkage
+// Returns false (landing may proceed) when the gate is not opted in, when the item
+// demonstrably has no PR (no PR means no reviewer requests; handleBrokenReviewLinkage
 // owns the broken-linkage pause), or when the gate has cleared. Returns true (and
-// idempotently applies fabrik:awaiting-review) otherwise, including on a review-fetch
+// idempotently applies fabrik:awaiting-review) otherwise, including on any fetch
 // error — blocking conservatively on unknown state, mirroring checkReviewGate's
-// base:<branch> fallback.
+// base:<branch> fallback. "No PR" and "could not read the PR" are deliberately
+// distinguished: only the former is a safe reason to let a landing through.
 func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stage, owner, repo string) bool {
 	// Gate is opt-in — only active when wait_for_reviews: true. Checked before any
 	// PR resolution so stages that don't use the gate pay zero extra API calls.
@@ -323,8 +324,15 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		// empty, so LinkedPRNumber is always 0 there — resolve via REST instead.
 		pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 		if err != nil {
+			// Conservative, for the same reason as the review-fetch failure below:
+			// an unreadable PR is unknown state, not "no PR". On a base:<branch>
+			// repo this fallback is the ONLY PR-resolution route, so treating a
+			// transient error as "nothing to gate on" would land the item with the
+			// gate never evaluated at all. checkReviewGate blocks here too (via
+			// handleBrokenReviewLinkage returning prNumber 0, leaving the item's
+			// structurally-empty review fields to fail the clearing condition).
 			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchLinkedPR failed: %v\n", err)
-			return false
+			return e.holdLandingForReview(item, "holding landing decision — linked PR unreadable, review state unknown\n")
 		}
 		if pr == nil || pr.Number == 0 {
 			return false
@@ -355,12 +363,20 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	}
 
 	if len(outstanding) > 0 {
-		e.logf(item.Number, "awaiting-review", "holding landing decision on PR #%d — waiting for reviewers: %s\n",
+		return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for reviewers: %s\n",
 			prNumber, strings.Join(outstanding, ", "))
-	} else {
-		e.logf(item.Number, "awaiting-review", "holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
 	}
+	return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
+}
 
+// holdLandingForReview is reviewGateBlocksLanding's single blocking exit: it logs
+// why the landing is being held, applies fabrik:awaiting-review idempotently (the
+// label is also the anchor checkReviewGate's timeout reads via FetchLabelAppliedAt,
+// so a persistently unreadable PR eventually pauses for a human rather than
+// hanging), and reports true. Every block path routes through here so no future
+// one forgets the label.
+func (e *Engine) holdLandingForReview(item gh.ProjectItem, format string, args ...any) bool {
+	e.logf(item.Number, "awaiting-review", format, args...)
 	if !hasLabel(item.Labels, "fabrik:awaiting-review") {
 		e.applyLabelAdd(item, "fabrik:awaiting-review", true)
 	}
