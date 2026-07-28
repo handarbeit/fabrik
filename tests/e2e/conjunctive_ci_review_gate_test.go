@@ -180,7 +180,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 		labels, err := tryIssueLabels(env, env.RepoAlpha, num)
 		if err != nil {
 			t.Logf("transient error fetching labels during R1 withheld window: %v (retrying)", err)
-			time.Sleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		r1Checked = true
@@ -190,7 +190,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 					env.RepoAlpha, num)
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	if !r1Checked {
 		t.Fatalf("failed to fetch labels at least once during the R1 withheld window on %s#%d", env.RepoAlpha, num)
@@ -233,7 +233,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 		state, err := tryIssueState(env, env.RepoAlpha, num)
 		if err != nil {
 			t.Logf("transient error fetching issue state during R4 withheld window: %v (retrying)", err)
-			time.Sleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		r4Checked = true
@@ -254,7 +254,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 				}
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	if !r4Checked {
 		t.Fatalf("failed to fetch issue state at least once during the R4 withheld window on %s#%d", env.RepoAlpha, num)

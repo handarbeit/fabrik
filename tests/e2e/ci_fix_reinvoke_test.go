@@ -80,7 +80,7 @@ func TestCIFixReinvoke(t *testing.T) {
 		labels, err := tryIssueLabels(env, env.RepoAlpha, num)
 		if err != nil {
 			t.Logf("transient error fetching labels during withheld window: %v (retrying)", err)
-			time.Sleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		for _, l := range labels {
@@ -89,7 +89,7 @@ func TestCIFixReinvoke(t *testing.T) {
 					env.RepoAlpha, num)
 			}
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Logf("withheld window passed: CI gate held for 2 minutes on %s#%d", env.RepoAlpha, num)
 
@@ -217,7 +217,7 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 		if found {
 			break
 		}
-		time.Sleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	if !found {
 		t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes", env.RepoAlpha, num)

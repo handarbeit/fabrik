@@ -218,6 +218,35 @@ func pollSleep(base time.Duration) {
 	time.Sleep(d)
 }
 
+// defaultPollBase is the steady-state interval for the issue/PR wait-helpers.
+//
+// Once the board reads moved to direct GraphQL (~1 point each), the suite's
+// residual rate-limit cost is dominated by these helpers: `gh issue view --json`
+// and `gh pr list --json` are also GraphQL, ~1 point per call, and a dozen
+// parallel scenarios each hold one or two waits open continuously. Measured over
+// the 2026-07-28 run that is ~4,860 points/hour against a 5,000/hour budget —
+// inside the ceiling, but with no useful margin.
+//
+// Halving the call rate halves that residual. The cost is up to one extra
+// interval of detection latency per wait, which is negligible against scenarios
+// that run 3-25 minutes. Board-status polling (WaitForProjectStatus) stays at
+// 10s: it is now ~1 point per call and is the helper most often on the critical
+// path between an engine action and the next assertion.
+//
+// Override with E2E_POLL_INTERVAL (any time.ParseDuration value) to tune without
+// a code change — e.g. E2E_POLL_INTERVAL=15s to restore the old cadence when
+// running a single scenario in isolation, where budget is not a constraint.
+const defaultPollBase = 30 * time.Second
+
+func pollBase() time.Duration {
+	if s := os.Getenv("E2E_POLL_INTERVAL"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultPollBase
+}
+
 // WaitForProjectStatus polls the project board until the item for issueNumber
 // reports Status == columnName, or fails after timeout. Use this after
 // SetIssueStatus when a subsequent action (e.g. an external PR merge that
@@ -228,26 +257,11 @@ func WaitForProjectStatus(t *testing.T, env *Env, repo string, issueNumber int, 
 	deadline := time.Now().Add(timeout)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := ghOutput(env, "project", "item-list", fmt.Sprint(env.ProjectNumber),
-			"--owner", env.ProjectOwner, "--format", "json", "--limit", "200")
-		if err == nil {
-			var wrapped struct {
-				Items []struct {
-					Status  string `json:"status"`
-					Content struct {
-						Number     int    `json:"number"`
-						Repository string `json:"repository"`
-					} `json:"content"`
-				} `json:"items"`
-			}
-			if json.Unmarshal([]byte(out), &wrapped) == nil {
-				for _, it := range wrapped.Items {
-					if it.Content.Number == issueNumber && strings.EqualFold(it.Content.Repository, repo) {
-						last = it.Status
-						if it.Status == columnName {
-							return
-						}
-					}
+		if items, err := fetchBoardItems(env); err == nil {
+			if it, ok := findBoardItem(items, repo, issueNumber); ok {
+				last = it.Status
+				if it.Status == columnName {
+					return
 				}
 			}
 		}
@@ -266,7 +280,7 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 		labels, err := tryIssueLabels(env, repo, issueNumber)
 		if err != nil {
 			t.Logf("WaitForIssueLabel: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		for _, l := range labels {
@@ -274,7 +288,7 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 				return
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	last, _ := tryIssueLabels(env, repo, issueNumber)
 	t.Fatalf("timed out waiting for label %q on %s#%d (had: %v)", label, repo, issueNumber, last)
@@ -332,7 +346,7 @@ func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, ti
 		} else if state == "CLOSED" {
 			return
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	state, _ := tryIssueState(env, repo, issueNumber)
 	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
@@ -347,7 +361,7 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		labels, err := tryIssueLabels(env, repo, issueNumber)
 		if err != nil {
 			t.Logf("WaitForLabelAbsent: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		present := false
@@ -360,7 +374,7 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		if !present {
 			return
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for label %q to disappear from %s#%d", label, repo, issueNumber)
 }
@@ -487,7 +501,7 @@ func WaitForLinkedPR(t *testing.T, env *Env, repo string, issueNum int, timeout 
 				}
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for an open PR with head=%s in %s", branch, repo)
 	return 0
@@ -580,7 +594,7 @@ func WaitForChildIssueInRepo(t *testing.T, env *Env, childRepo string, since tim
 				return nums[0]
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for a child sub-issue in %s (since %s)", childRepo, sinceStr)
 	return 0
@@ -802,49 +816,237 @@ func parseIssueNumberFromURL(url string) int {
 	return n
 }
 
+// --- project board reads -------------------------------------------------
+//
+// These go through hand-written GraphQL rather than the `gh project`
+// subcommands, because `gh project item-list` and `gh project field-list`
+// resolve field values with a follow-up query per item. Their rate-limit cost
+// therefore scales with the requested item limit rather than with the data
+// actually needed. Measured against the live test board on 2026-07-28, over a
+// 5,000 points/hour GraphQL budget:
+//
+//	gh project item-list --limit 200   ~101 points
+//	gh project field-list              ~106 points
+//	the equivalent queries below         ~2 points
+//
+// The wait-helpers poll every 10-15s, so at ~101 points a call a single
+// scenario polling continuously cost ~24,000 points/hour — 4.8x the entire
+// hourly budget on its own. A full E2E_PARALLEL=4 run exhausted the bed
+// token's GraphQL budget in about 14 minutes, after which every remaining
+// scenario failed on `gh` exit 1 (the failures look like engine regressions
+// but are not). At ~2 points a call the same run costs ~1,900 points/hour and
+// fits comfortably.
+//
+// So: do not "simplify" these back into `gh project` subcommands, and do not
+// try to buy headroom by lengthening the poll intervals instead — at the old
+// cost even a fully serial suite does not fit.
+//
+// Both queries select the project through repositoryOwner with inline
+// fragments on Organization and User, so they work whether the test project is
+// owned by an org (the current bed, owner_type: organization) or by a user.
+
+// Both queries select `id` on projectV2 purely so the caller can tell a
+// resolved-but-empty project from one that did not resolve at all. GitHub
+// returns `projectV2: null` with NO top-level error for a valid owner and a
+// wrong or stale project number, so `gh` exits 0 and an unguarded caller reads
+// the result as "the board is empty".
+//
+// That distinction has to be drawn on the project node, not on the item count:
+// an empty board is a legitimate, routine state — scripts/e2e/reset.sh drains
+// every item as the first step of a clean run. Erroring on "no items" would
+// make the harness fail spuriously against a freshly reset bed.
+const boardItemsQuery = `
+query($login:String!,$num:Int!,$after:String){
+  repositoryOwner(login:$login){
+    ... on Organization{ projectV2(number:$num){ id items(first:100, after:$after){
+      pageInfo{hasNextPage endCursor}
+      nodes{ content{... on Issue{number repository{nameWithOwner}}}
+             fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}} } } } }
+    ... on User{ projectV2(number:$num){ id items(first:100, after:$after){
+      pageInfo{hasNextPage endCursor}
+      nodes{ content{... on Issue{number repository{nameWithOwner}}}
+             fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}} } } } }
+  }
+}`
+
+// fields(first:50) is not paginated: a project with more than 50 custom fields
+// would be pathological, and a page-through loop here would cost a round trip on
+// every scenario's setup for a case that does not occur. pageInfo is selected so
+// that if Status ever does fall outside the page, the error says so explicitly
+// rather than claiming the field does not exist.
+const statusFieldQuery = `
+query($login:String!,$num:Int!){
+  repositoryOwner(login:$login){
+    ... on Organization{ projectV2(number:$num){ id
+      fields(first:50){pageInfo{hasNextPage} nodes{... on ProjectV2SingleSelectField{id name options{id name}}}} } }
+    ... on User{ projectV2(number:$num){ id
+      fields(first:50){pageInfo{hasNextPage} nodes{... on ProjectV2SingleSelectField{id name options{id name}}}} } }
+  }
+}`
+
+// boardItem is one issue on the project board, reduced to the fields the
+// wait-helpers assert on. Repo is in "owner/repo" form.
+type boardItem struct {
+	Repo   string
+	Number int
+	Status string
+}
+
+// fetchBoardItems returns every issue item on the test board with its Status
+// column, following pagination. Items whose content is not an issue (draft
+// cards, PRs) are skipped. Note that an *archived* item drops off the board
+// entirely and so is absent here — see WaitForMemberLanded for why that
+// matters.
+func fetchBoardItems(env *Env) ([]boardItem, error) {
+	var items []boardItem
+	after := ""
+	// The board is small (tens of items); the bound is a runaway guard, not a
+	// real limit — 20 pages is 2,000 items.
+	for page := 0; page < 20; page++ {
+		args := []string{"api", "graphql", "-f", "query=" + boardItemsQuery,
+			"-f", "login=" + env.ProjectOwner, "-F", fmt.Sprintf("num=%d", env.ProjectNumber)}
+		if after != "" {
+			args = append(args, "-f", "after="+after)
+		}
+		out, err := ghOutput(env, args...)
+		if err != nil {
+			return nil, fmt.Errorf("project board query: %w\n%s", err, out)
+		}
+		var resp struct {
+			Data struct {
+				RepositoryOwner struct {
+					ProjectV2 struct {
+						ID    string `json:"id"`
+						Items struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								Content struct {
+									Number     int `json:"number"`
+									Repository struct {
+										NameWithOwner string `json:"nameWithOwner"`
+									} `json:"repository"`
+								} `json:"content"`
+								FieldValueByName struct {
+									Name string `json:"name"`
+								} `json:"fieldValueByName"`
+							} `json:"nodes"`
+						} `json:"items"`
+					} `json:"projectV2"`
+				} `json:"repositoryOwner"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			return nil, fmt.Errorf("parse project board query: %w\n%s", err, out)
+		}
+		if resp.Data.RepositoryOwner.ProjectV2.ID == "" {
+			return nil, fmt.Errorf("project %s/#%d not found or not visible to this token "+
+				"(GitHub returns projectV2:null without a top-level error for a wrong project number)\n%s",
+				env.ProjectOwner, env.ProjectNumber, out)
+		}
+		batch := resp.Data.RepositoryOwner.ProjectV2.Items
+		for _, n := range batch.Nodes {
+			if n.Content.Number == 0 {
+				continue
+			}
+			items = append(items, boardItem{
+				Repo:   n.Content.Repository.NameWithOwner,
+				Number: n.Content.Number,
+				Status: n.FieldValueByName.Name,
+			})
+		}
+		if !batch.PageInfo.HasNextPage {
+			return items, nil
+		}
+		after = batch.PageInfo.EndCursor
+	}
+	return items, nil
+}
+
+// findBoardItem returns the board item for repo#issueNumber and whether it was
+// found. Repo comparison is case-insensitive, matching GitHub's own handling.
+func findBoardItem(items []boardItem, repo string, issueNumber int) (boardItem, bool) {
+	for _, it := range items {
+		if it.Number == issueNumber && strings.EqualFold(it.Repo, repo) {
+			return it, true
+		}
+	}
+	return boardItem{}, false
+}
+
+// statusOption is one selectable column of the board's Status field.
+type statusOption struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// statusField carries the IDs `gh project item-edit` needs to move an item,
+// plus the full set of Status columns.
+type statusField struct {
+	ProjectID string
+	FieldID   string
+	Options   []statusOption
+}
+
+// fetchStatusField resolves the project's node ID and its Status single-select
+// field in one query, replacing a `gh project view` + `gh project field-list`
+// pair.
+func fetchStatusField(env *Env) (statusField, error) {
+	out, err := ghOutput(env, "api", "graphql", "-f", "query="+statusFieldQuery,
+		"-f", "login="+env.ProjectOwner, "-F", fmt.Sprintf("num=%d", env.ProjectNumber))
+	if err != nil {
+		return statusField{}, fmt.Errorf("status field query: %w\n%s", err, out)
+	}
+	var resp struct {
+		Data struct {
+			RepositoryOwner struct {
+				ProjectV2 struct {
+					ID     string `json:"id"`
+					Fields struct {
+						PageInfo struct {
+							HasNextPage bool `json:"hasNextPage"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							ID      string         `json:"id"`
+							Name    string         `json:"name"`
+							Options []statusOption `json:"options"`
+						} `json:"nodes"`
+					} `json:"fields"`
+				} `json:"projectV2"`
+			} `json:"repositoryOwner"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return statusField{}, fmt.Errorf("parse status field query: %w\n%s", err, out)
+	}
+	p := resp.Data.RepositoryOwner.ProjectV2
+	if p.ID == "" {
+		return statusField{}, fmt.Errorf("project %s/#%d not found or not visible to this token\n%s",
+			env.ProjectOwner, env.ProjectNumber, out)
+	}
+	for _, f := range p.Fields.Nodes {
+		if f.Name == "Status" {
+			return statusField{ProjectID: p.ID, FieldID: f.ID, Options: f.Options}, nil
+		}
+	}
+	if p.Fields.PageInfo.HasNextPage {
+		return statusField{}, fmt.Errorf("project %s/#%d has no Status field among its first 50 fields, "+
+			"and it has more — the query needs pagination", env.ProjectOwner, env.ProjectNumber)
+	}
+	return statusField{}, fmt.Errorf("project %s/#%d has no Status field", env.ProjectOwner, env.ProjectNumber)
+}
+
 func resolveStatusOption(t *testing.T, env *Env, columnName string) (projectID, statusFieldID, optionID string) {
 	t.Helper()
-	type field struct {
-		ID      string `json:"id"`
-		Name    string `json:"name"`
-		Options []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"options"`
-	}
-	type projectView struct {
-		ID string `json:"id"`
-	}
-
-	pv, err := ghOutput(env, "project", "view", fmt.Sprint(env.ProjectNumber),
-		"--owner", env.ProjectOwner, "--format", "json")
+	sf, err := fetchStatusField(env)
 	if err != nil {
-		t.Fatalf("project view: %v", err)
+		t.Fatalf("resolve Status field: %v", err)
 	}
-	var pj projectView
-	if err := json.Unmarshal([]byte(pv), &pj); err != nil {
-		t.Fatalf("parse project view: %v", err)
-	}
-
-	fl, err := ghOutput(env, "project", "field-list", fmt.Sprint(env.ProjectNumber),
-		"--owner", env.ProjectOwner, "--format", "json")
-	if err != nil {
-		t.Fatalf("project field-list: %v", err)
-	}
-	var wrapped struct {
-		Fields []field `json:"fields"`
-	}
-	if err := json.Unmarshal([]byte(fl), &wrapped); err != nil {
-		t.Fatalf("parse field-list: %v", err)
-	}
-	for _, f := range wrapped.Fields {
-		if f.Name != "Status" {
-			continue
-		}
-		for _, o := range f.Options {
-			if o.Name == columnName {
-				return pj.ID, f.ID, o.ID
-			}
+	for _, o := range sf.Options {
+		if o.Name == columnName {
+			return sf.ProjectID, sf.FieldID, o.ID
 		}
 	}
 	t.Fatalf("could not resolve Status option %q", columnName)
@@ -904,7 +1106,7 @@ func LinkedPRNumber(t *testing.T, env *Env, repo string, issueNumber int) int {
 		if err == nil && n > 0 {
 			return n
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for linked PR on %s#%d", repo, issueNumber)
 	return 0
@@ -939,7 +1141,7 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 		bodies, err := tryPRComments(env, repo, prNumber)
 		if err != nil {
 			t.Logf("WaitForPRCommentContaining: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		for _, b := range bodies {
@@ -947,7 +1149,7 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 				return
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for PR comment containing %q on %s#%d", substring, repo, prNumber)
 }
@@ -1038,7 +1240,7 @@ func WaitForCheckConclusion(t *testing.T, env *Env, repo string, prNumber int, c
 				return
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for check %q to reach conclusion %q on %s#%d (last observed %q)",
 		checkName, want, repo, prNumber, last)
@@ -1334,14 +1536,14 @@ func WaitForPRCommentReaction(t *testing.T, env *Env, repo string, prNumber int,
 			"--jq", filter)
 		if err != nil {
 			t.Logf("WaitForPRCommentReaction: transient error on %s PR #%d: %v (will retry)", repo, prNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		count, parseErr := strconv.Atoi(strings.TrimSpace(out))
 		if parseErr == nil && count > 0 {
 			return
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for %q reaction on comment containing %q on %s PR #%d",
 		reactionContent, commentSubstring, repo, prNumber)

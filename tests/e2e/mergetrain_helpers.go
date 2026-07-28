@@ -25,22 +25,20 @@ func requireTrainBed(t *testing.T, env *Env) {
 	// Retry on transient errors (e.g. GraphQL rate-limit exhaustion — gh project runs
 	// on GraphQL). A persistent read failure FAILS the test rather than silently
 	// skipping, so a rate-limited run does not masquerade as "bed not set up".
-	var out string
 	var err error
 	for attempt := 0; attempt < 6; attempt++ {
-		out, err = ghOutput(env, "project", "field-list", fmt.Sprint(env.ProjectNumber),
-			"--owner", env.ProjectOwner, "--format", "json",
-			"--jq", `.fields[] | select(.name=="Status") | .options[]?.name`)
+		var sf statusField
+		sf, err = fetchStatusField(env)
 		if err == nil {
-			for _, line := range strings.Split(out, "\n") {
-				if strings.TrimSpace(line) == "Queued" {
+			for _, o := range sf.Options {
+				if strings.TrimSpace(o.Name) == "Queued" {
 					return
 				}
 			}
 			t.Skipf("test board %s/#%d has no Queued column — merge-train bed not set up (see tests/e2e/README.md)",
 				env.ProjectOwner, env.ProjectNumber)
 		}
-		t.Logf("requireTrainBed: transient board-read error (attempt %d/6): %v\n%s", attempt+1, err, out)
+		t.Logf("requireTrainBed: transient board-read error (attempt %d/6): %v", attempt+1, err)
 		time.Sleep(20 * time.Second)
 	}
 	t.Fatalf("could not read board columns after 6 attempts (last: %v) — GraphQL rate limit or API issue, not a skip condition", err)
@@ -171,14 +169,16 @@ func WaitForIntegrationPR(t *testing.T, env *Env, repo string, timeout time.Dura
 // item is not found on the board.
 func projectStatus(t *testing.T, env *Env, repo string, issueNumber int) string {
 	t.Helper()
-	out, err := ghOutput(env, "project", "item-list", fmt.Sprint(env.ProjectNumber),
-		"--owner", env.ProjectOwner, "--format", "json", "--limit", "200",
-		"--jq", fmt.Sprintf(`.items[] | select(.content.number==%d and (.content.repository|ascii_downcase)==("%s"|ascii_downcase)) | .status`, issueNumber, repo))
+	items, err := fetchBoardItems(env)
 	if err != nil {
-		t.Logf("projectStatus: gh error for %s#%d: %v", repo, issueNumber, err)
+		t.Logf("projectStatus: board query error for %s#%d: %v", repo, issueNumber, err)
 		return ""
 	}
-	return strings.TrimSpace(lastNonEmpty(out))
+	it, ok := findBoardItem(items, repo, issueNumber)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(it.Status)
 }
 
 // WaitForMemberLanded polls until a landed member reaches the durable landing
