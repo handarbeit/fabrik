@@ -535,6 +535,19 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		if out, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
 			e.logf(member.item.Number, "merge-train", "warn: could not reset trial worktree to pre-merge state after ejecting #%d: %s\n", member.item.Number, strings.TrimSpace(string(out)))
 		}
+		// `git reset --hard` only rewinds tracked content — it does not remove untracked
+		// files a conflict-resolution attempt (Claude, or a regeneration command) may have
+		// left behind. A stray untracked file surviving here would make the next member's
+		// `git merge` fail with git's own "untracked working tree file would be
+		// overwritten by merge" error — which has no MERGE_HEAD and no unmerged paths, so
+		// resolveTrainConflict would misclassify it as a plain conflict and dispatch Claude
+		// against a worktree with nothing to resolve. `-fd` removes untracked files and
+		// directories but leaves ignored files alone, matching the scope of this cleanup.
+		cleanCmd := exec.Command("git", "clean", "-fd")
+		cleanCmd.Dir = wtDir
+		if out, cleanErr := cleanCmd.CombinedOutput(); cleanErr != nil {
+			e.logf(member.item.Number, "merge-train", "warn: could not remove untracked files from trial worktree after ejecting #%d: %s\n", member.item.Number, strings.TrimSpace(string(out)))
+		}
 		e.logf(member.item.Number, "merge-train", "cannot resolve conflict for #%d — ejecting\n", member.item.Number)
 		if reason == "" {
 			reason = fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA)

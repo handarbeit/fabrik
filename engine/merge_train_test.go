@@ -3805,6 +3805,79 @@ func TestMergeTrainWorker_EjectionAfterPrematureCommitDoesNotContaminateLaterMem
 	}
 }
 
+// TestMergeTrainWorker_UntrackedFileLeftByEjectedMemberDoesNotBlockNextMerge guards
+// against a narrower gap than the premature-commit contamination case above: `git reset
+// --hard preMergeHEAD` only rewinds tracked content — it does not remove untracked files
+// a failed conflict-resolution attempt may have left behind in wtDir. Before this fix, a
+// stray untracked file surviving an ejection would make the next member's `git merge`
+// fail with git's own "untracked working tree file would be overwritten by merge" error
+// instead of merging cleanly — and since that failure has no MERGE_HEAD and no unmerged
+// paths, resolveTrainConflict would misclassify it as a conflict with nothing generated
+// involved and dispatch Claude against a worktree with no conflict markers to resolve.
+func TestMergeTrainWorker_UntrackedFileLeftByEjectedMemberDoesNotBlockNextMerge(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Members 1 and 2 both modify counter.txt — member 1 merges cleanly, member 2 conflicts
+	// and is ejected (Claude fails to resolve).
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "counter.txt", "branch1-value\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
+	// Member 3 is independent of the conflict and adds a *new tracked* file at the same
+	// path member #2's Claude session leaves *untracked* below — this is the merge that
+	// would fail pre-fix.
+	sha3 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-3", "stray.txt", "from-3\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			if issue.Number != 2 {
+				t.Fatalf("expected Claude only invoked for member #2's conflict, got #%d — member #3 should merge cleanly without any conflict resolution", issue.Number)
+			}
+			// Leaves a stray untracked file, then fails to resolve the conflict —
+			// simulates a scratch file left behind by an unsuccessful resolution attempt.
+			if err := os.WriteFile(filepath.Join(workDir, "stray.txt"), []byte("leftover\n"), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write stray.txt: %w", err)
+			}
+			return "unable to resolve", false, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+		{item: makeTrainItem(3, "Issue 3"), prNum: 12, headSHA: sha3},
+	}
+	const trialName = "untracked-cleanup-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 2 || survivors[0].item.Number != 1 || survivors[1].item.Number != 3 {
+		t.Fatalf("expected members #1 and #3 to survive (#2 ejected), got %+v", survivors)
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+	gotStray, err := os.ReadFile(filepath.Join(wtDir, "stray.txt"))
+	if err != nil {
+		t.Fatalf("reading stray.txt: %v", err)
+	}
+	if string(gotStray) != "from-3\n" {
+		t.Errorf("stray.txt content = %q, want %q (member #3's tracked file must win over member #2's untracked leftover)", gotStray, "from-3\n")
+	}
+}
+
 // TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember closes a blind spot
 // in the premature-commit guard: if Claude's non-compliant commit happens to write
 // byte-identical content to what the declared regeneration command would produce, a
