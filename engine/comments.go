@@ -105,6 +105,44 @@ func isBotServiceNotice(c gh.Comment) bool {
 	return false
 }
 
+// nonActionableReviewBodyPhrases are exact-match (after trimming whitespace
+// and lower-casing), not substring, non-actionable review-body verdicts — a
+// pure approval with no accompanying findings. Deliberately exact-match: a
+// substring scan risks dropping a real finding in a body that happens to
+// open with "LGTM" before diving into actual feedback, which is precisely
+// the failure mode issue #1205 exists to fix (see isNonActionableReviewBody).
+var nonActionableReviewBodyPhrases = []string{
+	"lgtm",
+	"lgtm!",
+	"looks good",
+	"looks good!",
+	"looks good to me",
+	"looks good to me!",
+	"approved",
+	"👍",
+}
+
+// isNonActionableReviewBody reports whether body is a pure approval/no-op
+// verdict not worth waking a worker for — an empty/whitespace-only body, or
+// an exact match (case-insensitive, trimmed) of a short curated approval
+// phrase. This is the mechanical, content-based half of the engine/skill
+// split from issue #1205: it does not attempt to decide whether a body
+// restates an inline comment or adds something new — that judgment belongs
+// to the comment-processing skill, which sees both.
+func isNonActionableReviewBody(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	for _, phrase := range nonActionableReviewBodyPhrases {
+		if lower == phrase {
+			return true
+		}
+	}
+	return false
+}
+
 // filterHuman filters a comment slice down to comments authored by a human —
 // excluding bot logins (gh.IsBotLogin) and comments with no resolvable author
 // (fail closed: an unattributed author, e.g. a deleted GitHub account, is
@@ -151,32 +189,35 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		return nil
 	}
 
-	// Merge any unresolved PR review thread comments into the working slice.
-	// This ensures that when a user nudge arrives (e.g. "please address Copilot
-	// feedback"), the review thread comments are processed alongside the
-	// conversation comment without requiring a separate dispatchReviewReinvoke
-	// cycle. For non-PR-backed items LinkedPRReviewThreadComments is empty, so
-	// this is a no-op. For dispatchReviewReinvoke call sites the synthetic
-	// comments were already filtered by buildReviewThreadComments, so the merge
-	// adds nothing (ID dedup prevents duplicates).
-	if len(item.LinkedPRReviewThreadComments) > 0 {
+	// Merge any unresolved PR review thread comments and review bodies into the
+	// working slice. This ensures that when a user nudge arrives (e.g. "please
+	// address Copilot feedback"), outstanding review feedback on both surfaces
+	// is processed alongside the conversation comment without requiring a
+	// separate dispatchReviewReinvoke cycle. For non-PR-backed items both
+	// sources are empty, so this is a no-op. For dispatchReviewReinvoke call
+	// sites the synthetic comments were already filtered by
+	// buildReviewThreadComments/buildReviewBodyComments, so the merge adds
+	// nothing (ID dedup prevents duplicates). Calls the same builders used by
+	// the review-reinvoke dispatch path directly (#1205) rather than
+	// duplicating their filter logic inline.
+	if len(item.LinkedPRReviewThreadComments) > 0 || len(item.LinkedPRReviews) > 0 {
 		existingIDs := make(map[string]bool, len(comments))
 		for _, c := range comments {
 			existingIDs[c.ID] = true
 		}
-		repoStr := itemOwnerRepoString(item, e.defaultRepo())
-		snap, _ := e.store.Get(repoStr, item.Number)
-		for _, c := range item.LinkedPRReviewThreadComments {
+		for _, c := range e.buildReviewThreadComments(item) {
 			if existingIDs[c.ID] {
 				continue
 			}
-			if c.HasReaction("ROCKET") {
-				continue
-			}
-			if !snap.CommentProcessed(c.ID).IsZero() {
+			comments = append(comments, c)
+			existingIDs[c.ID] = true
+		}
+		for _, c := range e.buildReviewBodyComments(item) {
+			if existingIDs[c.ID] {
 				continue
 			}
 			comments = append(comments, c)
+			existingIDs[c.ID] = true
 		}
 	}
 
@@ -365,6 +406,16 @@ func lastCommentAuthor(comments []gh.Comment) string {
 // (inline) comments use a different REST endpoint than issue comments.
 func (e *Engine) acknowledgeComments(owner, repo string, itemNumber int, comments []gh.Comment) {
 	for _, c := range comments {
+		if c.ReviewID != "" {
+			// Review bodies have no REST reactions endpoint at all — reacted via
+			// GraphQL addReaction keyed on the review's node ID (c.ReviewID), not
+			// DatabaseID, so this branch must run before the DatabaseID==0 guard
+			// below (a review's DatabaseID is unrelated to its reactability here).
+			if err := e.client.AddReviewReaction(c.ReviewID, "eyes"); err != nil {
+				e.logf(itemNumber, "warn", "could not add 👀 to review %s: %v\n", c.ReviewID, err)
+			}
+			continue
+		}
 		if c.DatabaseID == 0 {
 			e.logf(itemNumber, "debug", "skipping 👀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
 			continue
@@ -533,7 +584,7 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 			e.logf(item.Number, "warn", "review reinvoke: could not find PR for issue: %v\n", prErr)
 		} else if prNumber > 0 {
 			threads := buildThreadEntries(comments)
-			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments))
+			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, countReviewBodies(comments), len(comments))
 			// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
 			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
@@ -561,6 +612,15 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 
 	resolvedThreads := make(map[string]bool)
 	for _, c := range comments {
+		if c.ReviewID != "" {
+			// See the matching branch in acknowledgeComments: review bodies react
+			// via GraphQL addReaction keyed on ReviewID, ahead of the DatabaseID
+			// guard below.
+			if err := e.client.AddReviewReaction(c.ReviewID, "rocket"); err != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to review %s: %v\n", c.ReviewID, err)
+			}
+			continue
+		}
 		if c.DatabaseID == 0 {
 			e.logf(item.Number, "debug", "skipping 🚀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
 			continue
@@ -611,14 +671,17 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 }
 
 // isReviewReinvoke reports whether this processComments invocation originated
-// from a review-reinvoke dispatch (i.e., all comments are PR inline review
-// thread comments). Returns false for an empty slice.
+// from a review-reinvoke dispatch (i.e., every comment is either a PR inline
+// review thread comment or a PR review body — #1205 extends this from
+// thread-only to either review surface, since a review-reinvoke batch can now
+// mix both, or be sourced purely from bodies). Returns false for an empty
+// slice, and false for any batch containing a plain (non-review) comment.
 func isReviewReinvoke(comments []gh.Comment) bool {
 	if len(comments) == 0 {
 		return false
 	}
 	for _, c := range comments {
-		if c.ReviewThreadID == "" {
+		if c.ReviewThreadID == "" && c.ReviewID == "" {
 			return false
 		}
 	}

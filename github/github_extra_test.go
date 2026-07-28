@@ -46,6 +46,60 @@ func TestAddCommentReaction_Error(t *testing.T) {
 	}
 }
 
+func TestAddReviewReaction_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/graphql") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var body struct {
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if !strings.Contains(body.Query, "addReaction") {
+			t.Errorf("query does not contain addReaction mutation: %s", body.Query)
+		}
+		if body.Variables["subjectId"] != "PRR_kwDO1" {
+			t.Errorf("subjectId = %v, want PRR_kwDO1", body.Variables["subjectId"])
+		}
+		// content is uppercased to the GraphQL ReactionContent enum — callers pass
+		// the same lowercase convention as AddCommentReaction/AddPRReviewCommentReaction.
+		if body.Variables["content"] != "ROCKET" {
+			t.Errorf("content = %v, want ROCKET", body.Variables["content"])
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"addReaction": map[string]interface{}{
+					"reaction": map[string]interface{}{"content": "ROCKET"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.AddReviewReaction("PRR_kwDO1", "rocket"); err != nil {
+		t.Fatalf("AddReviewReaction: %v", err)
+	}
+}
+
+func TestAddReviewReaction_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`{"message":"internal error"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.AddReviewReaction("PRR_kwDO1", "eyes"); err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
+
 func TestUpdateIssueBody_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {

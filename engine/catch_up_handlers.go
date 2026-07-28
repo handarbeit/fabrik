@@ -87,8 +87,12 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// Gate cleared naturally — if reviews with actionable body text were
 	// submitted, re-invoke the stage agent to address the feedback before
 	// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
-	// have nothing to address; fall through to Phase 2.
-	if syntheticComments := e.buildReviewThreadComments(pctx.item); len(syntheticComments) > 0 {
+	// have nothing to address; fall through to Phase 2. Combines both review
+	// surfaces (#1205): inline thread comments and top-level review bodies —
+	// either alone is enough to justify a reinvoke.
+	hasThreadComments := len(e.buildReviewThreadComments(pctx.item)) > 0
+	hasBodyComments := len(e.buildReviewBodyComments(pctx.item)) > 0
+	if hasThreadComments || hasBodyComments {
 		// Guard: if a goroutine from a previous poll cycle is still running
 		// dispatchReviewReinvoke for this item, skip the entire reinvoke path —
 		// including cycle-limit checks — to avoid pausing an item while valid

@@ -117,7 +117,8 @@ func (m *testGitHubUpgradeClient) AddBlockedByIssue(issueNodeID, blockerNodeID s
 func (m *testGitHubUpgradeClient) AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
 	return nil
 }
-func (m *testGitHubUpgradeClient) ResolveReviewThread(threadID string) error { return nil }
+func (m *testGitHubUpgradeClient) AddReviewReaction(reviewID, content string) error { return nil }
+func (m *testGitHubUpgradeClient) ResolveReviewThread(threadID string) error        { return nil }
 func (m *testGitHubUpgradeClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 	return time.Time{}, nil
 }

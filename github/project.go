@@ -694,11 +694,18 @@ query($id: ID!) {
             }
           }
           latestReviews(first: 10) {
+            pageInfo { hasNextPage }
             nodes {
+              id
               databaseId
               author { login }
               state
               body
+              submittedAt
+              reactionGroups {
+                content
+                reactors { totalCount }
+              }
             }
           }
           reviewThreads(first: 50) {
@@ -821,13 +828,24 @@ type fetchItemDetailsNode struct {
 				} `json:"nodes"`
 			} `json:"reviewRequests"`
 			LatestReviews struct {
+				PageInfo struct {
+					HasNextPage bool `json:"hasNextPage"`
+				} `json:"pageInfo"`
 				Nodes []struct {
-					DatabaseID int `json:"databaseId"`
+					ID         string `json:"id"`
+					DatabaseID int    `json:"databaseId"`
 					Author     *struct {
 						Login string `json:"login"`
 					} `json:"author"`
-					State string `json:"state"`
-					Body  string `json:"body"`
+					State          string `json:"state"`
+					Body           string `json:"body"`
+					SubmittedAt    string `json:"submittedAt"`
+					ReactionGroups []struct {
+						Content  string `json:"content"`
+						Reactors struct {
+							TotalCount int `json:"totalCount"`
+						} `json:"reactors"`
+					} `json:"reactionGroups"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {
@@ -1009,14 +1027,28 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 				item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login, IsBot: isBot})
 			}
 		}
+		if pr.LatestReviews.PageInfo.HasNextPage {
+			fmt.Printf("[deep-fetch] #%d: latestReviews has more than 10 entries; only first 10 are used — a review beyond the first 10 (and any body-only finding it carries) will not be processed\n", item.Number)
+		}
 		for _, rev := range pr.LatestReviews.Nodes {
 			if rev.Author != nil && rev.Author.Login != "" {
-				item.LinkedPRReviews = append(item.LinkedPRReviews, PRReview{
+				review := PRReview{
+					ID:         rev.ID,
 					Author:     rev.Author.Login,
 					State:      rev.State,
 					Body:       rev.Body,
 					DatabaseID: rev.DatabaseID,
-				})
+				}
+				if t, err := parseTime(rev.SubmittedAt); err == nil {
+					review.CreatedAt = t
+				}
+				for _, rg := range rev.ReactionGroups {
+					review.Reactions = append(review.Reactions, ReactionGroup{
+						Content: rg.Content,
+						Count:   rg.Reactors.TotalCount,
+					})
+				}
+				item.LinkedPRReviews = append(item.LinkedPRReviews, review)
 			}
 		}
 		for _, thread := range pr.ReviewThreads.Nodes {

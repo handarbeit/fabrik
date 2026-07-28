@@ -18,15 +18,15 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	fetchItemDetailsCount     int
-	fetchCheckRunsCount       int
-	fetchLinkedPRCount        int
-	fetchLabelsCount          int
-	fetchPRClosingIssuesCount int
-	fetchPRReviewsCount       int
+	fetchItemDetailsCount      int
+	fetchCheckRunsCount        int
+	fetchLinkedPRCount         int
+	fetchLabelsCount           int
+	fetchPRClosingIssuesCount  int
+	fetchPRReviewsCount        int
 	fetchPRReviewRequestsCount int
-	fetchPRsForSHACount       int
-	fetchProjectItemCount     int
+	fetchPRsForSHACount        int
+	fetchProjectItemCount      int
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
@@ -36,11 +36,11 @@ type mockClient struct {
 	projectBoardErr    error // returned by FetchProjectBoard when non-nil
 	projectItemResult  *gh.ProjectItem
 
-	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRClosingIssuesFn  func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRReviewsFn        func(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	fetchPRReviewRequestsFn func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
-	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
-	fetchProjectItemFn     func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
+	fetchPRsForSHAFn        func(owner, repo, sha string) ([]int, error)
+	fetchProjectItemFn      func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -736,6 +736,142 @@ func TestDeltaPullRequestReviewSubmittedUpsert(t *testing.T) {
 	}
 	if len(reviews) > 0 && reviews[0].State != "APPROVED" {
 		t.Errorf("expected APPROVED state after upsert, got %q", reviews[0].State)
+	}
+}
+
+func TestDeltaPullRequestReviewSubmitted_PopulatesNodeIDAndCreatedAt(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	p := pullRequestReviewPayload{Action: "submitted"}
+	p.Repository.FullName = "owner/repo"
+	p.PullRequest.Number = 42
+	p.Review.DatabaseID = 1001
+	p.Review.NodeID = "PRR_kwDO1"
+	p.Review.State = "approved"
+	p.Review.User.Login = "alice"
+	p.Review.SubmittedAt = "2026-01-01T00:00:00Z"
+	payload, _ := json.Marshal(p)
+
+	c.ApplyDelta("pull_request_review", payload)
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Fatalf("expected 1 review, got %+v", s.LinkedPR)
+	}
+	review := s.LinkedPR.Reviews[0]
+	if review.ID != "PRR_kwDO1" {
+		t.Errorf("review.ID = %q, want PRR_kwDO1", review.ID)
+	}
+	if review.CreatedAt.IsZero() {
+		t.Error("review.CreatedAt not populated from submitted_at")
+	}
+}
+
+// TestDeltaPullRequestReviewEdited_PreservesReactions is a regression guard
+// for issue #1205: the pull_request_review webhook payload carries no
+// reactions summary (unlike issue_comment), but PRReviewSubmitted upserts by
+// DatabaseID, wholesale replacing the prior review entry. Without explicit
+// preservation, an "edited" webhook arriving after a GraphQL deep fetch
+// recorded a ROCKET watermark on a review body would silently wipe that
+// watermark, causing the review body to look unprocessed again and re-admit
+// for processing until the next deep fetch happens to run.
+func TestDeltaPullRequestReviewEdited_PreservesReactions(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	// Simulate a prior GraphQL deep fetch that recorded a ROCKET watermark
+	// (i.e., Fabrik already processed this review's body).
+	c.store.Apply(itemstate.PRReviewSubmitted{
+		Repo:   "owner/repo",
+		Number: 1,
+		Review: gh.PRReview{
+			ID:         "PRR_kwDO1",
+			Author:     "alice",
+			State:      "COMMENTED",
+			Body:       "some finding",
+			DatabaseID: 1001,
+			Reactions:  []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+		},
+	})
+
+	// An "edited" webhook arrives — carries no reactions field at all, as real
+	// GitHub payloads for this event never do.
+	p := pullRequestReviewPayload{Action: "edited"}
+	p.Repository.FullName = "owner/repo"
+	p.PullRequest.Number = 42
+	p.Review.DatabaseID = 1001
+	p.Review.NodeID = "PRR_kwDO1"
+	p.Review.State = "commented"
+	p.Review.User.Login = "alice"
+	p.Review.Body = "some finding (edited)"
+	payload, _ := json.Marshal(p)
+
+	c.ApplyDelta("pull_request_review", payload)
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Fatalf("expected 1 review, got %+v", s.LinkedPR)
+	}
+	review := s.LinkedPR.Reviews[0]
+	if review.Body != "some finding (edited)" {
+		t.Errorf("review.Body = %q, want the edited body (edit itself should still apply)", review.Body)
+	}
+	hasRocket := false
+	for _, r := range review.Reactions {
+		if r.Content == "ROCKET" && r.Count > 0 {
+			hasRocket = true
+		}
+	}
+	if !hasRocket {
+		t.Errorf("review.Reactions = %+v, want ROCKET preserved across the edit", review.Reactions)
+	}
+}
+
+// TestDeltaPullRequestReviewEdited_PreservesCreatedAtOnUnparseableSubmittedAt
+// is a regression guard, mirroring TestDeltaPullRequestReviewEdited_PreservesReactions:
+// an "edited" webhook delivery with an empty/unparseable submitted_at must not
+// regress a previously deep-fetched CreatedAt to the Go zero value — that zero
+// value would otherwise render as "0001-01-01 00:00" in the review-body prompt
+// header (engine/claude.go) on the next reinvoke.
+func TestDeltaPullRequestReviewEdited_PreservesCreatedAtOnUnparseableSubmittedAt(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	original := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c.store.Apply(itemstate.PRReviewSubmitted{
+		Repo:   "owner/repo",
+		Number: 1,
+		Review: gh.PRReview{
+			ID:         "PRR_kwDO1",
+			Author:     "alice",
+			State:      "COMMENTED",
+			Body:       "some finding",
+			DatabaseID: 1001,
+			CreatedAt:  original,
+		},
+	})
+
+	// An "edited" webhook arrives with no submitted_at field set at all.
+	p := pullRequestReviewPayload{Action: "edited"}
+	p.Repository.FullName = "owner/repo"
+	p.PullRequest.Number = 42
+	p.Review.DatabaseID = 1001
+	p.Review.NodeID = "PRR_kwDO1"
+	p.Review.State = "commented"
+	p.Review.User.Login = "alice"
+	p.Review.Body = "some finding (edited)"
+	payload, _ := json.Marshal(p)
+
+	c.ApplyDelta("pull_request_review", payload)
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Fatalf("expected 1 review, got %+v", s.LinkedPR)
+	}
+	review := s.LinkedPR.Reviews[0]
+	if !review.CreatedAt.Equal(original) {
+		t.Errorf("review.CreatedAt = %v, want preserved original %v", review.CreatedAt, original)
 	}
 }
 

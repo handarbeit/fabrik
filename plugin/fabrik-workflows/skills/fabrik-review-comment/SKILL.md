@@ -46,6 +46,24 @@ When you encounter a review thread comment:
 
 Comments without `**File:**` / `**Diff context:**` headers are regular PR body or issue comments; handle them as before.
 
+## PR Review Body Comments
+
+Some comments are the **top-level body of a PR review** — a reviewer's summary text, distinct from any inline comments on the same review. These are formatted with a `[Review: ...]` tag instead of `[Thread: ...]`, and no file/line/diff-context block (a review body isn't anchored to a location):
+
+```
+**@pruefer-bot** (2026-01-15 10:30) [COMMENTED] [Review: PRR_xyz789]
+Additional feedback — could not anchor to diff:
+- `engine/foo.go` has a similar issue at a line outside this PR's diff hunk.
+```
+
+**A review's body and its own inline thread comments commonly overlap — this is expected and normal, not an error.** A reviewer's body often summarizes or restates what it also said inline. When you see both:
+
+- **A body finding that restates an inline comment is the same finding.** Fix it once. Do not treat the body mention as a second, separate task.
+- **A body finding with no inline counterpart is additional feedback** — commonly a finding the reviewer couldn't anchor to a specific file/line in the diff (e.g. it's about a file the PR doesn't touch, or a line outside the diff hunk). This must be addressed like any other finding, not skipped as "already covered by the inline comments."
+- When in doubt whether a body item duplicates an inline one, re-read both — a review's `[Review: <id>]` tag and its inline `[Thread: ...]` comments came from the same review, so cross-check content, not just the tag.
+
+Address the union of both without doing the same fix twice.
+
 ## What You Do
 
 ### Act on the user's decision

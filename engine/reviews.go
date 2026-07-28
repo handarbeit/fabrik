@@ -421,10 +421,9 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 // GitHub comments with real DatabaseIDs, so the 👀/🚀 reaction-based dedup
 // mechanism works normally and each thread comment only triggers processing once.
 //
-// The top-level review body (if any) is not included — only thread comments,
-// which are what reviewers use to flag specific code issues. Reviews that
-// submit only a top-level body with no inline comments (e.g., bare APPROVED)
-// have nothing actionable to address.
+// The top-level review body (if any) is not included — see
+// buildReviewBodyComments for that surface, sourced from item.LinkedPRReviews
+// and merged in by this function's callers (issue #1205).
 //
 // The store's ProcessedComments map is checked as defense-in-depth for
 // within-session races: if a comment was processed this session but the ROCKET
@@ -438,6 +437,75 @@ func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
 			continue
 		}
 		if !snap.CommentProcessed(c.ID).IsZero() {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// buildReviewBodyComments returns synthetic gh.Comment entries for PR review
+// bodies that have not yet been addressed: non-empty, non-DISMISSED, not
+// already ROCKET-reacted, not already in the in-memory processed set, and
+// not classified as a non-actionable bot notice or bare approval verdict.
+//
+// Mirrors buildReviewThreadComments but sources from item.LinkedPRReviews
+// (top-level review bodies) rather than LinkedPRReviewThreadComments (inline
+// per-line comments) — the gap issue #1205 exists to close. Each review's
+// body becomes exactly one synthetic gh.Comment, discriminated by ReviewID
+// (the review's GraphQL node ID) rather than ReviewThreadID/Path.
+//
+// Out of scope for base:<branch> repos: closedByPullRequestsReferences (and
+// therefore latestReviews) is structurally empty there, so
+// item.LinkedPRReviews is already always empty for such repos — this
+// function needs no special-casing to inherit that carve-out.
+func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
+	out := make([]gh.Comment, 0, len(item.LinkedPRReviews))
+	for _, r := range item.LinkedPRReviews {
+		if r.ID == "" {
+			// No GraphQL node ID to watermark against via AddReviewReaction —
+			// can't safely admit (e.g. a REST-sourced review on a
+			// base:<branch> repo, which never populates LinkedPRReviews at
+			// all, or stale pre-#1205 in-memory state).
+			continue
+		}
+		if r.State == "DISMISSED" {
+			continue
+		}
+		hasRocket := false
+		for _, react := range r.Reactions {
+			if react.Content == "ROCKET" && react.Count > 0 {
+				hasRocket = true
+				break
+			}
+		}
+		if hasRocket {
+			continue
+		}
+		if !snap.CommentProcessed(r.ID).IsZero() {
+			continue
+		}
+		c := gh.Comment{
+			ID: r.ID,
+			// DatabaseID deliberately left zero: r.DatabaseID is the review's
+			// own REST id, a different resource than a comment's REST id, and
+			// the two existing DatabaseID-keyed reaction endpoints
+			// (AddCommentReaction/AddPRReviewCommentReaction) must never be
+			// called with it. Every current call site checks ReviewID != ""
+			// before reaching a DatabaseID branch, but leaving this zero makes
+			// any future DatabaseID-keyed code path that forgets that check
+			// fail loudly via the existing DatabaseID == 0 guards, instead of
+			// silently hitting the wrong GitHub resource.
+			Author:      r.Author,
+			Body:        r.Body,
+			CreatedAt:   r.CreatedAt,
+			Reactions:   r.Reactions,
+			ReviewID:    r.ID,
+			ReviewState: r.State,
+		}
+		if isBotServiceNotice(c) || isNonActionableReviewBody(r.Body) {
 			continue
 		}
 		out = append(out, c)
@@ -531,13 +599,14 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
 		// precheck runs synchronously before WorkerEntered/goroutine dispatch —
-		// buildReviewThreadComments needs no workDir, so there's no reason to
-		// incur ensureRepoReady/WorkerEntered churn for a same-poll no-op.
+		// buildReviewThreadComments/buildReviewBodyComments need no workDir, so
+		// there's no reason to incur ensureRepoReady/WorkerEntered churn for a
+		// same-poll no-op.
 		precheck: func() bool {
-			return len(e.buildReviewThreadComments(item)) > 0
+			return len(e.buildReviewThreadComments(item)) > 0 || len(e.buildReviewBodyComments(item)) > 0
 		},
 		build: func(workDir string) []gh.Comment {
-			return e.buildReviewThreadComments(item)
+			return append(e.buildReviewThreadComments(item), e.buildReviewBodyComments(item)...)
 		},
 	})
 }
