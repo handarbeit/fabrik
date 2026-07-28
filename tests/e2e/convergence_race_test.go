@@ -34,11 +34,27 @@ import (
 //     re-enables; the slow-gate runs again; the second PR merges; the issue
 //     closes.
 //
+// The above (steps 3-7) is the train mode "off" contract. Under train mode
+// "on" (ADR-059), Validate completion for a yolo item diverts to
+// advanceToQueued before the fabrik:auto-merge-enabled label site is ever
+// reached (engine/merge_gate.go:230 — by design, non-queue repos never get
+// that label under the train), so the two conflicting PRs never race a
+// native GitHub auto-merge. Instead both members land via the train's own
+// batch/singleton landing path, and any textual conflict between them is
+// resolved inline while assembling the trial branch (ADR-059 D3) rather
+// than via a rebase-reinvoke. The pass criteria under "on" is therefore
+// evidence that the train's own contention path doesn't stall — both
+// issues still land within budget, neither ends fabrik:paused, and
+// fabrik:auto-merge-enabled is never applied — not a literal rebase-
+// reinvoke assertion.
+//
 // Pass criteria:
 //   - Both issues close within the wall-clock budget.
-//   - Both had fabrik:auto-merge-enabled applied (FR-004).
+//   - Train mode "off": both had fabrik:auto-merge-enabled applied (FR-004).
+//     Train mode "on": fabrik:auto-merge-enabled is never applied to either
+//     (merge_gate.go:230).
 //   - Neither ends in fabrik:paused (FR-013 was NOT triggered — convergence
-//     succeeded within budget).
+//     succeeded within budget). True in both modes.
 //
 // This is the regression test for the production failure on
 // example-org/example-repo#82 (spurious "CI fix cycle limit reached" on a
@@ -51,6 +67,9 @@ func TestConvergenceRace(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
+
+	trainMode := resolveTrainMode(t, env)
+	t.Logf("bed train mode: %s", trainMode)
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 
@@ -100,11 +119,28 @@ func TestConvergenceRace(t *testing.T) {
 	}
 	closeWg.Wait()
 
-	// Both PRs must have gone through the GitHub native auto-merge path.
-	for _, num := range nums {
-		AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:auto-merge-enabled")
-	}
-	t.Logf("both issues had fabrik:auto-merge-enabled applied — FR-004 verified for both")
+	// The fabrik:auto-merge-enabled contract diverges by mode: under "off",
+	// attemptMergeOnValidate enables GitHub's native auto-merge and applies
+	// the label to both PRs (FR-004). Under "on", the same Validate
+	// completion diverts to advanceToQueued before that label site is ever
+	// reached, and the non-queue-repo path in merge_gate.go never applies it,
+	// by design (engine/merge_gate.go:230) — see TestYoloAutoMergeLabel for
+	// the reference pattern this mirrors.
+	t.Run(fmt.Sprintf("train-mode=%s", trainMode), func(t *testing.T) {
+		if trainMode == "on" {
+			for _, num := range nums {
+				AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:auto-merge-enabled")
+			}
+			t.Logf("fabrik:auto-merge-enabled was never applied to either issue — train-on contract verified " +
+				"(the conflicting pair resolved via the train's own inline trial-branch conflict resolution, " +
+				"ADR-059 D3, rather than a native auto-merge rebase-reinvoke)")
+			return
+		}
+		for _, num := range nums {
+			AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:auto-merge-enabled")
+		}
+		t.Logf("both issues had fabrik:auto-merge-enabled applied — FR-004 verified for both")
+	})
 
 	// Neither issue should have ended in fabrik:paused — that would mean
 	// either the convergence budget exhausted (FR-013) OR a legacy cycle
