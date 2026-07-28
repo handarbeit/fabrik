@@ -55,6 +55,7 @@ CI's `docs-drift` workflow (`.github/workflows/docs-drift.yml`) runs the regen a
 - `.fabrik/stages/` — Live stage configs for this project (tracked in git)
 - `boardcache/boardcache.go` — `ReadClient` interface (9-method read-only subset of `GitHubClient`), `GitHubAdapter` (pass-through), `CacheImpl` (in-memory cache with delta, reconcile, pause/resume)
 - `boardcache/delta.go` — Typed webhook delta functions: apply `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, and `projects_v2_item` payloads as state mutations
+- `internal/selfupgrade/` — Generic binary self-management (version comparison, release-asset download, dev-build rebuild, re-exec — no checksum/signature verification of downloaded assets, only an HTTP status check and, on darwin, an ad-hoc re-sign), shared by both `engine` and (in a follow-up) Pruefer without either importing the other. Callers supply their own identity (binary name, owner/repo, version, log function) and optional hooks (`PostBuildHook`, `StatusFn`/`StatusClearFn`); nothing here hardcodes `fabrik`. See ADR-1196.
 
 > **Editing built-in skills**: modify `plugin/fabrik-workflows/skills/<name>/SKILL.md` — the embedded source baked into the binary. `.fabrik/plugin/` is the local deployed copy written by `fabrik init` and refreshed by `fabrik upgrade`; it is not tracked in git and edits there will be silently overwritten on the next refresh.
 

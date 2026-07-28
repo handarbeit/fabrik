@@ -12,14 +12,23 @@ import (
 	"strings"
 
 	"github.com/handarbeit/fabrik/config"
-	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
+)
+
+// upgradeFabrikOwner and upgradeFabrikRepo are the canonical owner/repo for
+// fabrik itself, mirroring engine's fabrikOwner/fabrikRepo consts
+// (engine/upgrade.go) — duplicated here rather than shared, since cmd no
+// longer imports engine for the upgrade path.
+const (
+	upgradeFabrikOwner = "handarbeit"
+	upgradeFabrikRepo  = "fabrik"
 )
 
 // upgradeGitHubClient is the GitHub client used by runUpgrade. It can be
 // replaced in tests to avoid real network calls.
-var upgradeGitHubClient engine.GitHubClient
+var upgradeGitHubClient selfupgrade.ReleaseFetcher
 
 // upgradeReconcilePrompt is the text printed by --reconcile or the TUI [1] option.
 const upgradeReconcilePrompt = "In .fabrik/plugin/, compare the on-disk plugin files against the embedded source at plugin/fabrik-workflows/ in the fabrik repo. Help me reconcile my local customizations with the new embedded version. Preserve my customizations where they don't conflict with the new behavior; flag conflicts for review."
@@ -63,8 +72,16 @@ func runUpgrade(args []string) error {
 		if client == nil {
 			client = gh.NewClient(token)
 		}
-		if err := engine.PerformReleaseUpgrade(client, Version, token, nil, func(format string, args ...any) {
-			fmt.Printf(format, args...)
+		if err := selfupgrade.PerformReleaseUpgrade(selfupgrade.ReleaseConfig{
+			Client:     client,
+			Owner:      upgradeFabrikOwner,
+			Repo:       upgradeFabrikRepo,
+			BinaryName: "fabrik",
+			Version:    Version,
+			Token:      token,
+			Logf: func(format string, args ...any) {
+				fmt.Printf(format, args...)
+			},
 		}); err != nil {
 			return fmt.Errorf("release upgrade: %w", err)
 		}
