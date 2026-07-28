@@ -12,9 +12,10 @@ import (
 // poll-merge loop with GitHub's native auto-merge for yolo issues — and, per
 // #980, for the ADR-059 merge-train's own yolo landing contract.
 //
-// The test auto-detects the bed's configured FABRIK_MERGE_TRAIN mode (via the
-// bed's .env file) and asserts whichever contract that mode implies, since
-// the two are mutually exclusive at the engine level (attemptMergeOnValidate
+// The test resolves the suite's merge-train mode (resolveTrainMode —
+// E2E_TRAIN_MODE if set, else the bed's .env file) and asserts whichever
+// contract that mode implies, since the two are mutually exclusive at the
+// engine level (attemptMergeOnValidate
 // diverts every yolo Validate completion straight to advanceToQueued before
 // the fabrik:auto-merge-enabled label site is ever reached when the train is
 // on):
@@ -51,7 +52,7 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	trainMode := readEnvFileMergeTrainMode(t, env)
+	trainMode := resolveTrainMode(t, env)
 	t.Logf("bed train mode: %s", trainMode)
 
 	stamp := time.Now().UTC().Format("20060102-150405")

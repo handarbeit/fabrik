@@ -1317,10 +1317,97 @@ func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
 	return n
 }
 
+// writeEnvFileValue replaces (or appends) a KEY=value line in a .env-style
+// file, preserving unrelated lines, blank lines, and comments as-is. Creates
+// the file if it doesn't exist yet. Unlike readEnvFileValue, this does a
+// literal "key=" line match rather than trimming/quote-stripping the value —
+// it owns line construction on the write side, so there's nothing to strip.
+func writeEnvFileValue(path, key, value string) error {
+	var lines []string
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		lines = strings.Split(string(data), "\n")
+		// strings.Split on a trailing newline yields a spurious final empty
+		// element; drop it so re-joining doesn't accumulate blank lines.
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	case os.IsNotExist(err):
+		// No file yet — start from an empty line set.
+	default:
+		return err
+	}
+
+	newLine := key + "=" + value
+	replaced := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == key {
+			lines[i] = newLine
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lines = append(lines, newLine)
+	}
+
+	// 0o600: .env files carry secrets (FABRIK_TOKEN). Only applies if the file
+	// doesn't already exist — os.WriteFile does not chmod an existing file.
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+}
+
+// normalizeTrainMode validates and lowercases a mode string, accepting only
+// an exact case-insensitive "on" or "off" (surrounding whitespace tolerated).
+// Pulled out of resolveTrainMode as a pure function so its validation logic
+// is unit-testable without a *testing.T (a t.Fatalf-driven parent test
+// can't distinguish "the fatal path fired as designed" from "the test
+// itself failed" — Go propagates a failed subtest's failure to its parent).
+func normalizeTrainMode(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "on":
+		return "on", nil
+	case "off":
+		return "off", nil
+	default:
+		return "", fmt.Errorf("invalid mode %q (must be on or off)", v)
+	}
+}
+
+// resolveTrainMode determines the e2e suite's merge-train mode for the
+// current process. E2E_TRAIN_MODE (set by scripts/e2e/run.sh's two-mode
+// validation gate — see TestSwitchTrainMode) takes precedence when set,
+// satisfying FR-2: mode must be explicit and legible at the suite level, not
+// an ambient property of the bed's .env that a reader has to go look up. An
+// explicit-but-invalid E2E_TRAIN_MODE is a hard t.Fatalf — unlike the lenient
+// .env fallback below, a wrong explicit signal should be loud, not silently
+// defaulted.
+//
+// When E2E_TRAIN_MODE is unset (ad-hoc/manual bed usage — running go test
+// directly against a bed someone configured by hand), falls back to
+// readEnvFileMergeTrainMode's lenient read of the bed's own .env file.
+func resolveTrainMode(t *testing.T, env *Env) string {
+	t.Helper()
+	if v := os.Getenv("E2E_TRAIN_MODE"); v != "" {
+		mode, err := normalizeTrainMode(v)
+		if err != nil {
+			t.Fatalf("E2E_TRAIN_MODE=%q is invalid (must be on or off)", v)
+		}
+		return mode
+	}
+	return readEnvFileMergeTrainMode(t, env)
+}
+
 // readEnvFileMergeTrainMode reads FABRIK_MERGE_TRAIN from the test bed's .env
 // file, normalizing exactly like cmd/root.go's mergeTrainMode: missing/empty
 // or unrecognized values default to "off" (logged via t.Logf, not stderr),
-// and only an exact case-insensitive "on" returns "on".
+// and only an exact case-insensitive "on" returns "on". This is the fallback
+// path behind resolveTrainMode, used when E2E_TRAIN_MODE is unset.
 func readEnvFileMergeTrainMode(t *testing.T, env *Env) string {
 	t.Helper()
 	envFile := filepath.Join(env.FabrikTestDir, ".env")

@@ -17,11 +17,24 @@ import (
 // every item in Queued"), so an externally-placed Queued item with a linked PR is
 // a valid member — which is exactly what these helpers construct.
 
-// requireTrainBed skips the test unless the test board has a "Queued" column —
-// the one-time operator setup the merge train needs (ADR-059 D1). Keeps train
-// scenarios from failing on a bed that predates the train rollout.
+// requireTrainBed skips the test unless (a) the suite is running in train
+// mode "on" and (b) the test board has a "Queued" column — the one-time
+// operator setup the merge train needs (ADR-059 D1).
+//
+// The mode check comes first and matters on its own: these scenarios place
+// issues directly in Queued (QueueMember), a pure GitHub/board operation
+// that succeeds regardless of mode. But under merge_train: off, nothing
+// ever drains Queued — HoldingStage items are never individually dispatched,
+// and handleMergeTrainBatch (the batch drain) only runs when
+// e.cfg.MergeTrain == "on" (engine/poll.go). Without this check, running
+// these scenarios during an off-mode run would place members that are never
+// landed, and every wait helper below would burn its full 10-50 min timeout
+// as a false failure instead of skipping cleanly.
 func requireTrainBed(t *testing.T, env *Env) {
 	t.Helper()
+	if resolveTrainMode(t, env) != "on" {
+		t.Skip("merge-train scenario requires train mode \"on\" — skipping under train mode \"off\"")
+	}
 	// Retry on transient errors (e.g. GraphQL rate-limit exhaustion — gh project runs
 	// on GraphQL). A persistent read failure FAILS the test rather than silently
 	// skipping, so a rate-limited run does not masquerade as "bed not set up".
