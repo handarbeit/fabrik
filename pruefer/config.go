@@ -55,8 +55,12 @@ type Config struct {
 
 	AppID             int64
 	AppPrivateKeyPath string
-	// AppInstallationID pins Pruefer to a single installation. Zero means
-	// auto-discover every installation of the App (see pruefer/auth.go).
+	// AppInstallationID is a legacy pin/escape hatch: when set (non-zero),
+	// Pruefer skips owner-derived discovery entirely and routes every
+	// watched repo, regardless of owner, through this one installation's
+	// token — preserving pre-multi-installation behavior exactly. Zero (the
+	// default) means resolve one installation per distinct owner present in
+	// WatchedRepos instead (see BootstrapMulti in pruefer/auth.go).
 	AppInstallationID int64
 }
 
