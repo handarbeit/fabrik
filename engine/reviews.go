@@ -488,8 +488,16 @@ func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
 			continue
 		}
 		c := gh.Comment{
-			ID:          r.ID,
-			DatabaseID:  r.DatabaseID,
+			ID: r.ID,
+			// DatabaseID deliberately left zero: r.DatabaseID is the review's
+			// own REST id, a different resource than a comment's REST id, and
+			// the two existing DatabaseID-keyed reaction endpoints
+			// (AddCommentReaction/AddPRReviewCommentReaction) must never be
+			// called with it. Every current call site checks ReviewID != ""
+			// before reaching a DatabaseID branch, but leaving this zero makes
+			// any future DatabaseID-keyed code path that forgets that check
+			// fail loudly via the existing DatabaseID == 0 guards, instead of
+			// silently hitting the wrong GitHub resource.
 			Author:      r.Author,
 			Body:        r.Body,
 			CreatedAt:   r.CreatedAt,

@@ -679,14 +679,19 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 }
 
-// preserveReviewReactions copies the Reactions field from any existing
-// stored review with the same DatabaseID into review, in place. The
-// pull_request_review webhook payload carries no reactions summary (unlike
-// issue_comment), and PRReviewSubmitted upserts by DatabaseID, wholesale
-// replacing the prior entry — so applying a webhook-sourced review naively
-// would silently erase a ROCKET watermark recorded by the last GraphQL deep
-// fetch until the next one runs. Must be called before the PRReviewSubmitted
-// mutation. review.DatabaseID == 0 (unavailable) is a no-op.
+// preserveReviewReactions copies the Reactions field, and the CreatedAt field
+// when the incoming review has none (an unparseable or empty submitted_at),
+// from any existing stored review with the same DatabaseID into review, in
+// place. The pull_request_review webhook payload carries no reactions
+// summary (unlike issue_comment), and PRReviewSubmitted upserts by
+// DatabaseID, wholesale replacing the prior entry — so applying a
+// webhook-sourced review naively would silently erase a ROCKET watermark
+// recorded by the last GraphQL deep fetch until the next one runs. The same
+// wholesale-replace risk applies to CreatedAt: a delivery with an
+// empty/unparseable submitted_at would otherwise regress a previously
+// deep-fetched CreatedAt to the zero value. Must be called before the
+// PRReviewSubmitted mutation. review.DatabaseID == 0 (unavailable) is a
+// no-op.
 func (c *CacheImpl) preserveReviewReactions(repo string, number int, review *gh.PRReview) {
 	if review.DatabaseID == 0 {
 		return
@@ -702,6 +707,9 @@ func (c *CacheImpl) preserveReviewReactions(repo string, number int, review *gh.
 	for _, r := range lpr.Reviews {
 		if r.DatabaseID == review.DatabaseID {
 			review.Reactions = r.Reactions
+			if review.CreatedAt.IsZero() {
+				review.CreatedAt = r.CreatedAt
+			}
 			return
 		}
 	}

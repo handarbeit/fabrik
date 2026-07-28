@@ -258,7 +258,17 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 	}{
 		{ID: "PRR_1", DatabaseID: 1, Author: &struct {
 			Login string `json:"login"`
-		}{Login: "carol"}, State: "APPROVED", Body: "lgtm", SubmittedAt: "2026-01-01T00:00:00Z"},
+		}{Login: "carol"}, State: "APPROVED", Body: "lgtm", SubmittedAt: "2026-01-01T00:00:00Z",
+			ReactionGroups: []struct {
+				Content  string `json:"content"`
+				Reactors struct {
+					TotalCount int `json:"totalCount"`
+				} `json:"reactors"`
+			}{
+				{Content: "ROCKET", Reactors: struct {
+					TotalCount int `json:"totalCount"`
+				}{TotalCount: 1}},
+			}},
 	}
 	node.LinkedPRs.Nodes = []struct {
 		ID                  string               `json:"id"`
@@ -332,5 +342,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 	}
 	if item.LinkedPRReviews[0].CreatedAt.IsZero() {
 		t.Errorf("LinkedPRReviews[0].CreatedAt not populated")
+	}
+	reactions := item.LinkedPRReviews[0].Reactions
+	if len(reactions) != 1 || reactions[0].Content != "ROCKET" || reactions[0].Count != 1 {
+		t.Errorf("LinkedPRReviews[0].Reactions = %+v, want [{ROCKET 1}]", reactions)
 	}
 }

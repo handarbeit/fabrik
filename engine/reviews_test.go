@@ -419,6 +419,88 @@ func TestBuildReviewThreadComments_RocketReactionSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestBuildReviewBodyComments_FilterPermutations exercises each exclusion
+// branch of buildReviewBodyComments individually — DISMISSED state, an
+// existing ROCKET reaction, an in-memory CommentProcessed entry, a missing
+// GraphQL node ID, isBotServiceNotice classification, and
+// isNonActionableReviewBody classification — plus the admit-one-clean-review
+// path, in a single table so a regression in any one filter (e.g.
+// accidentally admitting a DISMISSED review, or re-admitting an
+// already-ROCKET-reacted one) is caught directly rather than only indirectly
+// through the loop-safety/gate-dispatch tests.
+func TestBuildReviewBodyComments_FilterPermutations(t *testing.T) {
+	tests := []struct {
+		name         string
+		review       gh.PRReview
+		preProcess   bool // pre-populate CommentProcessed for the review's ID
+		wantAdmitted bool
+	}{
+		{
+			name:         "clean actionable review is admitted",
+			review:       gh.PRReview{ID: "PRR_clean", Author: "human", State: "COMMENTED", Body: "This function never checks for nil before dereferencing it."},
+			wantAdmitted: true,
+		},
+		{
+			name:         "missing node ID is excluded",
+			review:       gh.PRReview{ID: "", DatabaseID: 1, Author: "human", State: "COMMENTED", Body: "A real finding here."},
+			wantAdmitted: false,
+		},
+		{
+			name:         "DISMISSED review is excluded",
+			review:       gh.PRReview{ID: "PRR_dismissed", Author: "human", State: "DISMISSED", Body: "A real finding here."},
+			wantAdmitted: false,
+		},
+		{
+			name:         "already ROCKET-reacted review is excluded",
+			review:       gh.PRReview{ID: "PRR_reacted", Author: "human", State: "COMMENTED", Body: "A real finding here.", Reactions: []gh.ReactionGroup{{Content: "ROCKET", Count: 1}}},
+			wantAdmitted: false,
+		},
+		{
+			name:         "already CommentProcessed review is excluded",
+			review:       gh.PRReview{ID: "PRR_processed", Author: "human", State: "COMMENTED", Body: "A real finding here."},
+			preProcess:   true,
+			wantAdmitted: false,
+		},
+		{
+			name:         "bot service-notice body is excluded",
+			review:       gh.PRReview{ID: "PRR_notice", Author: "gemini-code-assist", State: "COMMENTED", Body: "You have reached your daily quota limit for this repository."},
+			wantAdmitted: false,
+		},
+		{
+			name:         "non-actionable approval-only body is excluded",
+			review:       gh.PRReview{ID: "PRR_lgtm", Author: "human", State: "APPROVED", Body: "LGTM"},
+			wantAdmitted: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockGitHubClient{}
+			eng := reviewTestEngine(t, client)
+			item := gh.ProjectItem{
+				Number:          10,
+				Repo:            "owner/repo",
+				LinkedPRReviews: []gh.PRReview{tt.review},
+			}
+			if tt.preProcess {
+				eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 10, CommentID: tt.review.ID, At: time.Now()})
+			}
+
+			comments := eng.buildReviewBodyComments(item)
+
+			if tt.wantAdmitted {
+				if len(comments) != 1 {
+					t.Fatalf("expected 1 comment admitted, got %d: %+v", len(comments), comments)
+				}
+				if comments[0].ReviewID != tt.review.ID {
+					t.Errorf("comments[0].ReviewID = %q, want %q", comments[0].ReviewID, tt.review.ID)
+				}
+			} else if len(comments) != 0 {
+				t.Errorf("expected review excluded, got %d comment(s): %+v", len(comments), comments)
+			}
+		})
+	}
+}
+
 // (f3) catch-up loop skips dispatchReviewReinvoke when a goroutine is already
 // in-flight for the item, and does NOT increment ReviewCycles.
 func TestCatchUpLoop_InFlightGuard(t *testing.T) {

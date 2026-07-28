@@ -18,15 +18,15 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	fetchItemDetailsCount     int
-	fetchCheckRunsCount       int
-	fetchLinkedPRCount        int
-	fetchLabelsCount          int
-	fetchPRClosingIssuesCount int
-	fetchPRReviewsCount       int
+	fetchItemDetailsCount      int
+	fetchCheckRunsCount        int
+	fetchLinkedPRCount         int
+	fetchLabelsCount           int
+	fetchPRClosingIssuesCount  int
+	fetchPRReviewsCount        int
 	fetchPRReviewRequestsCount int
-	fetchPRsForSHACount       int
-	fetchProjectItemCount     int
+	fetchPRsForSHACount        int
+	fetchProjectItemCount      int
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
@@ -36,11 +36,11 @@ type mockClient struct {
 	projectBoardErr    error // returned by FetchProjectBoard when non-nil
 	projectItemResult  *gh.ProjectItem
 
-	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRClosingIssuesFn  func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRReviewsFn        func(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	fetchPRReviewRequestsFn func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
-	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
-	fetchProjectItemFn     func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
+	fetchPRsForSHAFn        func(owner, repo, sha string) ([]int, error)
+	fetchProjectItemFn      func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -825,6 +825,53 @@ func TestDeltaPullRequestReviewEdited_PreservesReactions(t *testing.T) {
 	}
 	if !hasRocket {
 		t.Errorf("review.Reactions = %+v, want ROCKET preserved across the edit", review.Reactions)
+	}
+}
+
+// TestDeltaPullRequestReviewEdited_PreservesCreatedAtOnUnparseableSubmittedAt
+// is a regression guard, mirroring TestDeltaPullRequestReviewEdited_PreservesReactions:
+// an "edited" webhook delivery with an empty/unparseable submitted_at must not
+// regress a previously deep-fetched CreatedAt to the Go zero value — that zero
+// value would otherwise render as "0001-01-01 00:00" in the review-body prompt
+// header (engine/claude.go) on the next reinvoke.
+func TestDeltaPullRequestReviewEdited_PreservesCreatedAtOnUnparseableSubmittedAt(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	original := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c.store.Apply(itemstate.PRReviewSubmitted{
+		Repo:   "owner/repo",
+		Number: 1,
+		Review: gh.PRReview{
+			ID:         "PRR_kwDO1",
+			Author:     "alice",
+			State:      "COMMENTED",
+			Body:       "some finding",
+			DatabaseID: 1001,
+			CreatedAt:  original,
+		},
+	})
+
+	// An "edited" webhook arrives with no submitted_at field set at all.
+	p := pullRequestReviewPayload{Action: "edited"}
+	p.Repository.FullName = "owner/repo"
+	p.PullRequest.Number = 42
+	p.Review.DatabaseID = 1001
+	p.Review.NodeID = "PRR_kwDO1"
+	p.Review.State = "commented"
+	p.Review.User.Login = "alice"
+	p.Review.Body = "some finding (edited)"
+	payload, _ := json.Marshal(p)
+
+	c.ApplyDelta("pull_request_review", payload)
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Fatalf("expected 1 review, got %+v", s.LinkedPR)
+	}
+	review := s.LinkedPR.Reviews[0]
+	if !review.CreatedAt.Equal(original) {
+		t.Errorf("review.CreatedAt = %v, want preserved original %v", review.CreatedAt, original)
 	}
 }
 
