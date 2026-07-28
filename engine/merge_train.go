@@ -517,10 +517,24 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 			return nil, "", fmt.Errorf("resolving conflict for #%d: %w", member.item.Number, resolveErr)
 		}
 
-		// Unresolvable (or regeneration failed, FR-4) — abort merge and eject.
+		// Unresolvable (or regeneration failed, FR-4) — restore wtDir to its pre-merge
+		// state and eject. `git merge --abort` alone is insufficient here: resolution
+		// can fail *after* a commit already landed on wtDir (e.g. regenerateAndCommit's
+		// premature-commit guard trips because Claude committed despite mixed-mode
+		// instructions not to) — at that point MERGE_HEAD is already gone, so `git merge
+		// --abort` is a silent no-op and would leave that bad commit as wtDir's HEAD,
+		// contaminating every subsequent member's merge and the pushed trial branch.
+		// Hard-reset to the captured preMergeHEAD unconditionally so the worktree is
+		// clean regardless of how far resolution got before failing; this is a no-op
+		// when `git merge --abort` already fully reverted things.
 		abortCmd := exec.Command("git", "merge", "--abort")
 		abortCmd.Dir = wtDir
-		abortCmd.CombinedOutput() // best-effort
+		abortCmd.CombinedOutput() // best-effort; the reset below is the authoritative cleanup
+		resetCmd := exec.Command("git", "reset", "--hard", preMergeHEAD)
+		resetCmd.Dir = wtDir
+		if out, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+			e.logf(member.item.Number, "merge-train", "warn: could not reset trial worktree to pre-merge state after ejecting #%d: %s\n", member.item.Number, strings.TrimSpace(string(out)))
+		}
 		e.logf(member.item.Number, "merge-train", "cannot resolve conflict for #%d — ejecting\n", member.item.Number)
 		if reason == "" {
 			reason = fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA)

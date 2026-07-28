@@ -3679,3 +3679,128 @@ func TestMergeTrainWorker_ClaudeAbortMasqueradesAsResolved(t *testing.T) {
 		t.Fatalf("expected only member #1 to survive (member #2's abort must not count as resolved), got %+v", survivors)
 	}
 }
+
+// TestMergeTrainWorker_EjectionAfterPrematureCommitDoesNotContaminateLaterMembers guards
+// against a poisoned wtDir HEAD surviving an ejection. When regenerateAndCommit's
+// premature-commit guard trips (Claude committed despite mixed-mode instructions not
+// to), the ejection path's `git merge --abort` is a silent no-op — MERGE_HEAD is already
+// gone by then — so without an explicit reset to the pre-merge SHA, the ejected member's
+// bad commit (containing literal, unresolved conflict-marker text for the generated
+// path) would remain as wtDir's HEAD and contaminate every later member's merge. This
+// exercises a 3-member batch with the poisoned member in the middle, so a subsequent
+// member's merge is actually attempted on top of the (correctly cleaned) worktree.
+func TestMergeTrainWorker_EjectionAfterPrematureCommitDoesNotContaminateLaterMembers(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Member 1: clean merge, establishes counter.txt / generated.txt at known content.
+	sha1 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", map[string]string{
+		"counter.txt":   "counter-from-1\n",
+		"generated.txt": "gen-from-1\n",
+	})
+	// Member 2: conflicts with member 1 on both counter.txt (non-generated) and
+	// generated.txt (declared generated) — the mixed case. Its mock Claude invocation
+	// violates the "don't commit" instruction, poisoning wtDir's HEAD if not cleaned up.
+	sha2 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", map[string]string{
+		"counter.txt":   "counter-from-2\n",
+		"generated.txt": "gen-from-2\n",
+	})
+	// Member 3: independent of both — touches only unrelated.txt, based on main. Merges
+	// cleanly against member 1's state IFF wtDir was actually reset after member 2's
+	// ejection; if member 2's poisoned commit or dirty index survived, this merge either
+	// fails outright or silently carries that contamination forward.
+	sha3 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-3", "unrelated.txt", "from-3\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			if issue.Number != 2 {
+				t.Fatalf("expected Claude only invoked for member #2's mixed conflict, got #%d", issue.Number)
+			}
+			// Violates the mixed-mode instructions: resolves counter.txt correctly, but
+			// then stages *everything* (including the still-conflicted generated.txt)
+			// and commits — the exact compliance failure this test guards against.
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte("counter-from-1\ncounter-from-2\n"), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved counter.txt: %w", err)
+			}
+			mustGit(t, workDir, "add", "-A")
+			mustGit(t, workDir, "commit", "--no-edit", "-m", "premature commit despite instructions")
+			return "resolved and committed (violating instructions)", true, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "printf 'gen-regenerated\\n' > generated.txt"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+		{item: makeTrainItem(3, "Issue 3"), prNum: 12, headSHA: sha3},
+	}
+	const trialName = "ejection-no-contamination-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 2 || survivors[0].item.Number != 1 || survivors[1].item.Number != 3 {
+		t.Fatalf("expected members #1 and #3 to survive (#2 ejected), got %+v", survivors)
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+
+	// The worktree must be fully clean — no leftover staged/unmerged state from #2.
+	if remaining, err := unmergedPaths(wtDir); err != nil {
+		t.Fatalf("unmergedPaths: %v", err)
+	} else if len(remaining) != 0 {
+		t.Errorf("expected no remaining unmerged paths after ejection+cleanup, got %v", remaining)
+	}
+	diffCachedCmd := exec.Command("git", "diff", "--cached", "--quiet")
+	diffCachedCmd.Dir = wtDir
+	if err := diffCachedCmd.Run(); err != nil {
+		t.Error("expected a clean index after ejection+cleanup, but staged changes remain")
+	}
+
+	// counter.txt and generated.txt must reflect only member #1's contribution — no
+	// trace of member #2's conflict-marker content or premature commit.
+	gotCounter, err := os.ReadFile(filepath.Join(wtDir, "counter.txt"))
+	if err != nil {
+		t.Fatalf("reading counter.txt: %v", err)
+	}
+	if string(gotCounter) != "counter-from-1\n" {
+		t.Errorf("counter.txt content = %q, want %q (member #2's contribution must not survive ejection)", gotCounter, "counter-from-1\n")
+	}
+	gotGenerated, err := os.ReadFile(filepath.Join(wtDir, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading generated.txt: %v", err)
+	}
+	if string(gotGenerated) != "gen-from-1\n" {
+		t.Errorf("generated.txt content = %q, want %q (member #2's poisoned commit must not survive ejection)", gotGenerated, "gen-from-1\n")
+	}
+
+	// Member #3's contribution must have landed cleanly on top of the reset state.
+	gotUnrelated, err := os.ReadFile(filepath.Join(wtDir, "unrelated.txt"))
+	if err != nil {
+		t.Fatalf("reading unrelated.txt: %v", err)
+	}
+	if string(gotUnrelated) != "from-3\n" {
+		t.Errorf("unrelated.txt content = %q, want %q", gotUnrelated, "from-3\n")
+	}
+
+	// No trace of member #2's premature commit message anywhere in wtDir's history.
+	logOut := gitOutputDir(t, wtDir, "log", "--all", "--oneline")
+	if strings.Contains(logOut, "premature commit despite instructions") {
+		t.Error("expected member #2's premature commit to be unreachable from wtDir's HEAD after ejection")
+	}
+}
