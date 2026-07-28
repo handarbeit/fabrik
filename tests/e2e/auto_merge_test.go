@@ -52,7 +52,7 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	trainMode := readEnvFileMergeTrainMode(t, env)
+	trainMode := resolveTrainMode(t, env)
 	t.Logf("bed train mode: %s", trainMode)
 
 	stamp := time.Now().UTC().Format("20060102-150405")
