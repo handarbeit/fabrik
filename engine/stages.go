@@ -240,10 +240,16 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 // attemptMergeOnValidate enables GitHub native auto-merge for the linked PR
 // of a yolo issue at Validate completion. Returns (true, nil) when auto-merge
 // was enabled (or is already enabled as an idempotency guard), (false, nil)
-// when no action is needed (cruise label, no linked PR), and (false, err) on
-// failure. The fabrik:auto-merge-enabled label serves as both the idempotency
-// guard and the budget-start anchor read by checkAutoMergeConvergence.
-func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, _ *stages.Stage) (bool, error) {
+// when no action is needed (cruise label, review gate blocking, no linked PR),
+// and (false, err) on failure. The fabrik:auto-merge-enabled label serves as
+// both the idempotency guard and the budget-start anchor read by
+// checkAutoMergeConvergence.
+//
+// This function is the single landing-decision owner for both merge_train modes
+// (ADR-058/ADR-059 "invoke, don't relocate"), which is why the wait_for_reviews
+// gate is enforced here rather than at either call site — see
+// reviewGateBlocksLanding and ADR-1216.
+func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (bool, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// cruise > yolo: when cruise is present, auto-merge is suppressed regardless of yolo.
@@ -255,6 +261,15 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// Idempotency: auto-merge was already enabled on a prior run.
 	if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 		return true, nil
+	}
+
+	// Review gate (#1216): a wait_for_reviews stage must not reach any landing
+	// action while reviewer requests are outstanding. Sits ahead of the
+	// merge_train fork so both modes are gated identically (FR-3), and re-reads
+	// review state live so a reviewer requested during the CI-await window still
+	// blocks (FR-2).
+	if e.reviewGateBlocksLanding(item, stage, owner, repo) {
+		return false, nil
 	}
 
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.

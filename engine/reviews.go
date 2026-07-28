@@ -277,6 +277,96 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 	return outstanding, hasReviews
 }
 
+// reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
+// whether a wait_for_reviews stage must be held back from its landing decision
+// (auto-merge enable, enqueue, direct merge, or advance-to-Queued) because reviewer
+// requests are still outstanding.
+//
+// Why this exists separately from checkReviewGate: the catch-up loop's
+// handleReviewGate deliberately no-ops while !pctx.hasComplete (#617), and
+// pctx.hasComplete is frozen before the Phase 1 handler chain runs. Because
+// reviewGate is ordered ahead of mergeAndCIGates, there is no poll pass in which
+// the gate can arm after CI clears and before Phase 2 calls attemptMergeOnValidate
+// in that same iteration. Enforcing here — at the single landing-decision choke
+// point for both merge_train modes — closes that hole, and also covers the
+// wait_for_ci-independent case where handleStageComplete merges before its own
+// fabrik:awaiting-review seeding ever runs.
+//
+// Review state is always re-fetched live rather than read from
+// item.LinkedPRReviewRequests/LinkedPRReviews: the two callers of
+// attemptMergeOnValidate have different freshness guarantees (handleStageComplete's
+// item is the pre-stage snapshot, stale by design because reviewer assignment
+// happens inside MarkPRReady), and FR-2 requires the gate to see a reviewer
+// requested during the CI-await window.
+//
+// This check only blocks and labels. It deliberately does not duplicate the
+// bot-escalation ladder or the wait timeout — once it blocks, stage:X:complete is
+// present on the next poll, so handleReviewGate claims the item with
+// hasComplete == true and checkReviewGate owns all escalation from there.
+//
+// Returns false (landing may proceed) when the gate is not opted in, when no PR
+// number can be resolved (no PR means no reviewer requests; handleBrokenReviewLinkage
+// owns the broken-linkage pause), or when the gate has cleared. Returns true (and
+// idempotently applies fabrik:awaiting-review) otherwise, including on a review-fetch
+// error — blocking conservatively on unknown state, mirroring checkReviewGate's
+// base:<branch> fallback.
+func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stage, owner, repo string) bool {
+	// Gate is opt-in — only active when wait_for_reviews: true. Checked before any
+	// PR resolution so stages that don't use the gate pay zero extra API calls.
+	if stage == nil || stage.WaitForReviews == nil || !*stage.WaitForReviews {
+		return false
+	}
+
+	prNumber := item.LinkedPRNumber
+	if prNumber == 0 {
+		// On a base:<branch> repo closedByPullRequestsReferences is structurally
+		// empty, so LinkedPRNumber is always 0 there — resolve via REST instead.
+		pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+		if err != nil {
+			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchLinkedPR failed: %v\n", err)
+			return false
+		}
+		if pr == nil || pr.Number == 0 {
+			return false
+		}
+		prNumber = pr.Number
+	}
+
+	reviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
+	requests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
+	if reviewsErr != nil || requestsErr != nil {
+		// Conservative: treat a partial failure as no-data rather than trusting
+		// whichever call succeeded — a false len(outstanding)==0 read could clear
+		// the gate while real outstanding reviewers are unknown.
+		if reviewsErr != nil {
+			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviews failed: %v\n", reviewsErr)
+		}
+		if requestsErr != nil {
+			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewRequests failed: %v\n", requestsErr)
+		}
+		reviews, requests = nil, nil
+	}
+
+	// Same clearing condition as checkReviewGate, via the same shared pure
+	// function, so the two gate sites can never disagree on "outstanding".
+	outstanding, hasReviews := reviewGateOutstanding(requests, reviews)
+	if len(outstanding) == 0 && hasReviews {
+		return false
+	}
+
+	if len(outstanding) > 0 {
+		e.logf(item.Number, "awaiting-review", "holding landing decision on PR #%d — waiting for reviewers: %s\n",
+			prNumber, strings.Join(outstanding, ", "))
+	} else {
+		e.logf(item.Number, "awaiting-review", "holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
+	}
+
+	if !hasLabel(item.Labels, "fabrik:awaiting-review") {
+		e.applyLabelAdd(item, "fabrik:awaiting-review", true)
+	}
+	return true
+}
+
 // reviewGateAllBots reports whether every outstanding requested reviewer is a
 // bot (false when there are no outstanding reviewers at all).
 func reviewGateAllBots(reviewRequests []gh.ReviewRequest, outstanding []string) bool {
