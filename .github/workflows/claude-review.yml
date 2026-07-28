@@ -1,18 +1,30 @@
 name: Claude PR Review
 
-# Test-repo bot reviewer. Replaces Gemini on the fabrik-test-* repos so e2e
-# review-gate scenarios get a bot review without draining the shared handarbeit
-# Gemini quota. Submits a FORMAL review (not an issue comment) so it lands in the
-# PR's reviews array — the signal Fabrik's checkReviewGate waits on (engine/reviews.go).
+# Bot reviewer providing an independent second opinion alongside CodeRabbit.
+# Submits a FORMAL review (not an issue comment) so it lands in the PR's reviews
+# array — the signal Fabrik's checkReviewGate waits on (engine/reviews.go).
+#
+# Model is pinned to Sonnet 5 deliberately. Left unpinned, claude-code-action@v1
+# defaults to an unusable/expensive id (observed: claude-opus-5[1m]) and every
+# review fails with is_error:true. Sonnet 5 is near-Opus quality on code review
+# at a fraction of the cost. Re-pin to claude-opus-5 for a one-off deep pass via
+# workflow_dispatch if a change warrants it.
+#
+# 'synchronize' is intentionally NOT a trigger: these repos are Fabrik-driven,
+# and Fabrik auto-fixes review findings and pushes, which would re-trigger a
+# review → more findings → another fix — an unbounded loop (handarbeit/fabrik
+# #1078: 18 reviews before the cycle cap tripped). Review once when the PR is
+# ready; use workflow_dispatch to re-review a specific PR on demand.
 
 on:
-  # NOTE: 'synchronize' is deliberately excluded. Fabrik auto-fixes review
-  # findings and pushes, which would re-trigger a review, which finds more,
-  # which triggers another fix — an unbounded review/fix loop (observed on
-  # handarbeit/fabrik#1078: 18 reviews before FABRIK_MAX_REVIEW_CYCLES tripped).
-  # Review once when the PR is ready; a human merges.
   pull_request:
     types: [opened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,36 +32,60 @@ permissions:
   id-token: write        # required by claude-code-action (OIDC)
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ inputs.pr || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   review:
     runs-on: ubuntu-latest
     # Skip drafts — the gate only engages after Fabrik marks the PR ready.
-    if: github.event.pull_request.draft == false
+    # workflow_dispatch is always explicit, so it bypasses the draft check.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     steps:
+      # Resolve PR number and base branch from either trigger. On workflow_dispatch
+      # the github.event.pull_request context is empty, so query the API instead.
+      - name: Resolve PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          num="${{ inputs.pr || github.event.pull_request.number }}"
+          base=$(gh pr view "$num" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+          echo "number=$num" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
+          # Check out the PR head explicitly so the same steps work for both
+          # triggers; on workflow_dispatch the default ref is the base branch.
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
           fetch-depth: 0
+
+      # A ref-specific checkout does not guarantee origin/<base> exists locally,
+      # and the review prompt diffs against it.
+      - name: Fetch base branch
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${{ steps.pr.outputs.base }}:refs/remotes/origin/${{ steps.pr.outputs.base }}"
 
       - name: Claude review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
-            Review the diff for PR #${{ github.event.pull_request.number }}
-            (`git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`).
-            Flag correctness bugs, missing tests, and obvious risks. Be concise.
+            Review the diff for PR #${{ steps.pr.outputs.number }}
+            (`git diff origin/${{ steps.pr.outputs.base }}...HEAD`).
+            Flag correctness bugs, missing tests, and obvious risks.
+
+            Report every issue you find, including ones you are uncertain about or
+            consider low-severity — a human filters afterwards. Label each finding
+            with a severity and your confidence rather than omitting it. Keep the
+            prose per finding tight; do not trade coverage for brevity.
+
             Then submit a FORMAL pull-request review (not an issue comment) with:
-              gh pr review ${{ github.event.pull_request.number }} --comment --body-file <your-findings-file>
+              gh pr review ${{ steps.pr.outputs.number }} --comment --body-file <your-findings-file>
             Add inline comments for specific line-level issues where useful.
-          # Pin the model explicitly. Without --model, claude-code-action@v1
-          # picks its own default, which drifted to an unusable id
-          # (claude-opus-5[1m]) and made every review run fail with
-          # is_error:true after 1 turn — the safety-net step below then posted a
-          # useless "no blocking issues" stub. Sonnet is the intended reviewer
-          # (capable for diff review, far cheaper than Opus per-PR).
           claude_args: "--model claude-sonnet-5 --allowedTools Bash(git:*),Bash(gh:*),Read,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -58,7 +94,7 @@ jobs:
       # (show_full_output: false) for security, writing it to a temp file that is
       # otherwise lost when the runner is torn down. Uploading it as an
       # access-controlled artifact lets us read the real error behind an
-      # is_error:true failure without exposing it in the (public) run logs.
+      # is_error:true failure without exposing it in the run logs.
       - name: Upload Claude execution log
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,22 +104,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # Fallback: if the agent produced no formal review (it errored, was
-      # skipped, or didn't post), surface that HONESTLY — never claim "no
-      # issues", since a false all-clear is worse than a visible failure (a
-      # failed review previously masqueraded as a clean one). Still posts a
-      # formal review so Fabrik's review gate (engine/reviews.go) clears rather
-      # than hanging.
+      # Fallback: if the agent produced no formal review (it errored, was skipped,
+      # or didn't post), surface that HONESTLY — never claim "no issues", since a
+      # false all-clear is worse than a visible failure. Still posts a formal
+      # review so Fabrik's review gate (engine/reviews.go) clears rather than hangs.
       - name: Report if no review was posted
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ steps.pr.outputs.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -m
           count=$(gh pr view "$PR" --json reviews \
             --jq '[.reviews[] | select(.author.login=="github-actions" or (.author.login|startswith("claude")))] | length')
           if [ "${count:-0}" -eq 0 ]; then
-            gh pr review "$PR" --comment --body "⚠️ **Claude review did not post a formal review.** The review step errored or was skipped (note: PRs that modify this workflow file are skipped by \`claude-code-action\`'s security guard — this resolves once merged). **This is NOT a clean bill of health.** Logs: ${RUN_URL}"
+            gh pr review "$PR" --comment --body "⚠️ **Claude review did not post a formal review.** The review step errored or was skipped. **This is NOT a clean bill of health** — check the run logs: ${RUN_URL}"
           fi
