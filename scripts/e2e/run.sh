@@ -32,6 +32,13 @@
 #   #1219 for the budget headroom this assumes; merge it before attempting
 #   a full two-mode run.
 #
+#   Failure mode: this script runs under set -e, so if the "off" leg fails
+#   (switch step or suite), the script aborts immediately and the "on" leg
+#   never runs — the shared bed is left running in FABRIK_MERGE_TRAIN=off,
+#   NOT restored to whatever mode it was in before this invocation started.
+#   If you hit a failure here, check/reset the bed's .env mode before
+#   assuming it's still in its prior state.
+#
 # Parallelism cap (E2E_PARALLEL, default 4): 16 of the 17 e2e tests are
 # t.Parallel(), but they all drive ONE shared Fabrik bed (5 workers by default)
 # against ONE shared board + API budget. Go's default -parallel is GOMAXPROCS
