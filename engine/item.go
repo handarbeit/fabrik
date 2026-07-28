@@ -167,13 +167,30 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// items would be permanently skipped if subject to the cache. The cost is
 	// minimal: a local Stat call, no GraphQL impact. Once cleanup runs and
 	// removes the worktree, subsequent polls see no worktree and return false.
+	//
+	// A closed, non-PR item can also reach a cleanup stage with no worktree at
+	// all — settleClosedItemsToDone (ADR-064) advances closed items straight to
+	// Done without ever creating one. Admit those too (until labelled complete)
+	// so handleCleanupStage still applies the completion label; otherwise the
+	// item is stranded, un-labelled and un-archivable, forever (#1224). PR items
+	// are excluded — handleCleanupStage's worktree removal already special-cases
+	// !item.IsPR, and PR-item admission is a separate, deferred concern.
 	if stage.CleanupWorktree {
-		return e.worktreeExistsForItem(item)
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		if hasLabel(item.Labels, completeLabel) {
+			return false
+		}
+		if e.worktreeExistsForItem(item) {
+			return true
+		}
+		return item.IsClosed && !item.IsPR
 	}
 
-	// Don't check labels or blockedBy here — those require full label data which
-	// is only available after deep fetch. Label/lock/dep-gate checks are in
-	// itemNeedsWork, which runs after FetchItemDetails populates the full label set.
+	// Don't check blockedBy here — that requires full label/dependency data which
+	// is only available after deep fetch. Labels ARE available shallowly (the
+	// board query fetches labels(first:30) per item), as used above and in the
+	// CleanupWorktree branch. Lock/dep-gate checks are in itemNeedsWork, which
+	// runs after FetchItemDetails populates the full comment/blockedBy data.
 	// The "has this item changed since last poll?" gate was previously implemented
 	// here via seenUpdatedAt. It is now handled by the mayNeedWork pre-filter in
 	// poll.go (see poll() function), which is populated by Store observers.
@@ -244,7 +261,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		if hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 			return false
 		}
-		return e.worktreeExistsForItem(item)
+		return e.worktreeExistsForItem(item) || (item.IsClosed && !item.IsPR)
 	}
 
 	// Awaiting-input items (paused + awaiting-input) bypass the paused guard but

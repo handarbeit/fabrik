@@ -570,8 +570,11 @@ func TestItemMayNeedWork_ClosedIssue_CleanupStage(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree verifies that a closed
-// issue in a cleanup stage is skipped when no worktree directory exists.
+// TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree verifies that a closed,
+// non-PR issue in a cleanup stage without a worktree and without the completion
+// label IS admitted — settleClosedItemsToDone (ADR-064) can land a closed item at
+// Done with no worktree ever having existed, and itemMayNeedWork must admit it so
+// handleCleanupStage can apply the completion label (#1224 FR-1/FR-2).
 func TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree(t *testing.T) {
 	rootDir := t.TempDir()
 	wm := NewWorktreeManager(rootDir)
@@ -594,8 +597,102 @@ func TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree(t *testing.T) {
 		Status:   "Done",
 		IsClosed: true,
 	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("closed, non-PR issue in cleanup stage without worktree or complete label should need work")
+	}
+}
+
+// TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree_Complete verifies that
+// once the completion label is present, a worktree-less closed item settles into
+// a low-cost terminal state and is no longer admitted (#1224 FR-3).
+func TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree_Complete(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: true,
+		Labels:   []string{"stage:Done:complete"},
+	}
 	if eng.itemMayNeedWork(item) {
-		t.Error("closed issue in cleanup stage without worktree should not need work")
+		t.Error("closed issue in cleanup stage with complete label should not need work")
+	}
+}
+
+// TestItemMayNeedWork_ClosedPR_CleanupStage_NoWorktree verifies that a closed PR
+// item in a cleanup stage without a worktree is NOT admitted — PR-item cleanup
+// admission is explicitly out of scope for #1224 (handleCleanupStage already
+// special-cases !item.IsPR for worktree removal, but widening admission to PR
+// items is deferred).
+func TestItemMayNeedWork_ClosedPR_CleanupStage_NoWorktree(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: true,
+		IsPR:     true,
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("closed PR in cleanup stage without worktree should not need work (out of scope for #1224)")
+	}
+}
+
+// TestItemMayNeedWork_OpenIssue_CleanupStage_NoWorktree is a regression guard:
+// an open (not closed) issue in a cleanup stage without a worktree must still be
+// skipped — the #1224 widening is scoped strictly to closed, non-PR items.
+func TestItemMayNeedWork_OpenIssue_CleanupStage_NoWorktree(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: false,
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("open issue in cleanup stage without worktree should not need work")
 	}
 }
 
@@ -659,6 +756,69 @@ func TestItemNeedsWork_ClosedIssue_CleanupStage_Complete(t *testing.T) {
 	}
 	if eng.itemNeedsWork(item) {
 		t.Error("closed issue in cleanup stage with complete label should not need work")
+	}
+}
+
+// TestItemNeedsWork_ClosedIssue_CleanupStage_NoWorktree verifies that a closed,
+// non-PR issue in a cleanup stage with NO worktree and no completion label is
+// still admitted by itemNeedsWork — the worktree-less analogue of
+// TestItemNeedsWork_ClosedIssue_CleanupStage above (#1224 FR-1/FR-2).
+func TestItemNeedsWork_ClosedIssue_CleanupStage_NoWorktree(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: true,
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("closed, non-PR issue in cleanup stage without worktree or complete label should need work")
+	}
+}
+
+// TestItemNeedsWork_ClosedPR_CleanupStage_NoWorktree verifies that a closed PR
+// item in a cleanup stage without a worktree is NOT admitted by itemNeedsWork —
+// mirrors TestItemMayNeedWork_ClosedPR_CleanupStage_NoWorktree; PR-item cleanup
+// admission stays out of scope for #1224.
+func TestItemNeedsWork_ClosedPR_CleanupStage_NoWorktree(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: true,
+		IsPR:     true,
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("closed PR in cleanup stage without worktree should not need work (out of scope for #1224)")
 	}
 }
 
