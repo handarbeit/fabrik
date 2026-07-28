@@ -1081,6 +1081,7 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1110,6 +1111,9 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 	// In-flight entry must still be cleared despite the fatal error (ADR-067).
 	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after fatal assembly error")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness to be cleared after fatal assembly error")
 	}
 }
 
@@ -1147,6 +1151,7 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1162,6 +1167,9 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 	// In-flight entry must be cleared (FR-6: no silent abandonment).
 	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after zero-survivor batch")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness to be cleared after zero-survivor batch")
 	}
 }
 
@@ -1281,6 +1289,7 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
 
 	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", batch)
 	if ok {
@@ -1289,6 +1298,9 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 
 	if _, found := eng.mergeTrainInFlight.Load("owner/repo"); found {
 		t.Error("expected mergeTrainInFlight cleared by prepareTrainWorker's own-failure defer")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness cleared by prepareTrainWorker's own-failure defer")
 	}
 
 	// The semaphore must be released too: acquiring MaxConcurrent slots must succeed

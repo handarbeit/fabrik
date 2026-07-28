@@ -2695,6 +2695,11 @@ func TestHandleMergeTrainBatch_NonQueueRepo_DispatchesTrain(t *testing.T) {
 	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); !ok {
 		t.Error("non-queue repo must dispatch an internal train worker (mergeTrainInFlight entry expected)")
 	}
+	// The single-authority liveness registry (FR-2) must also see the worker as
+	// in-flight — this is what the auto-upgrade idle guard actually reads.
+	if !eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("non-queue repo must register repo-worker liveness in the Store (RepoWorkerActive expected true)")
+	}
 	if len(client.enqueuePullRequestCalls) != 0 {
 		t.Errorf("non-queue repo must NOT call EnqueuePullRequest, got %d", len(client.enqueuePullRequestCalls))
 	}
