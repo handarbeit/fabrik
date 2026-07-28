@@ -369,6 +369,26 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		// be queued. Fall back to a direct merge call. If that also fails (e.g. DIRTY),
 		// surface the MergePR error so existing rebase/CI-fix gates can act on it.
 		e.logf(item.Number, "info", "PR #%d: enable auto-merge failed (%v) — falling back to direct merge\n", pr.Number, err)
+
+		// #1207 guard 1 supplement: this direct-merge fallback is the one place
+		// in this function where "proceed now" and "no more guards will ever
+		// run" happen at the same instant. Everywhere else in this function,
+		// a miss on guard 1's stale item snapshot (see the freshness note
+		// above) is closed by guard 2 on the next poll, because enabling
+		// auto-merge/enqueuing opens a convergence window that guard 2
+		// monitors. MergePR below merges synchronously — there is no window,
+		// no next poll, nothing for guard 2 to catch. So re-check live,
+		// immediately before the point of no return, instead of trusting the
+		// stale snapshot guard 1 already checked.
+		fresh := item
+		if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+			return false, false, fmt.Errorf("direct-merge fallback: live re-read of review threads for PR #%d: %w", pr.Number, ferr)
+		}
+		if blocking := e.currentHeadReviewThreadComments(fresh); len(blocking) > 0 {
+			e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s (direct-merge fallback)\n",
+				len(blocking), fresh.LinkedPRHeadSHA)
+			return false, true, nil
+		}
 		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
 			return false, false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
 		}

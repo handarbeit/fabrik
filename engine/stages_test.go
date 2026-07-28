@@ -353,6 +353,124 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenUnstable(t *testing.T)
 	}
 }
 
+// TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckDefers verifies the
+// fix for Pruefer's #1207 finding: the direct-merge fallback (taken when
+// EnablePullRequestAutoMerge fails for a reason other than
+// ErrAutoMergeNotEnabled, e.g. the PR is already CLEAN) merges synchronously
+// with no convergence window for guard 2 to ever run. If a live re-read
+// immediately before MergePR reveals an unresolved current-head thread that
+// wasn't in guard 1's earlier (possibly stale) item snapshot, the function
+// must defer instead of merging.
+func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckDefers(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRHeadSHA = "sha42"
+			item.LinkedPRReviewThreadComments = []gh.Comment{
+				{ID: "PRRC_9", DatabaseID: 109, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_9", IsOutdated: false},
+			}
+			return nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the live re-read finds an unresolved current-head thread")
+	}
+	if !deferred {
+		t.Error("expected deferred=true when the live re-read finds an unresolved current-head thread")
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called when the live re-read finds a blocking thread, got %d call(s)", len(client.mergePRCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be applied when deferred")
+		}
+	}
+}
+
+// TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckStaleSHAProceeds
+// verifies that a thread GitHub marks isOutdated (superseded by a later push)
+// found by the live re-read does not block the direct-merge fallback.
+func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckStaleSHAProceeds(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRHeadSHA = "sha42"
+			item.LinkedPRReviewThreadComments = []gh.Comment{
+				{ID: "PRRC_9", DatabaseID: 109, Author: "pruefer", Body: "stale finding", ReviewThreadID: "RT_9", IsOutdated: true},
+			}
+			return nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Error("expected enabled=true when the only live-read thread is outdated (stale SHA)")
+	}
+	if deferred {
+		t.Error("expected deferred=false when the only live-read thread is outdated (stale SHA)")
+	}
+	if len(client.mergePRCalls) != 1 {
+		t.Errorf("expected MergePR called once, got %d call(s)", len(client.mergePRCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckFetchFails verifies
+// that a failure of the live re-read itself surfaces as an error (so the
+// existing retry-next-poll path handles it) rather than proceeding to merge
+// on the stale pre-invocation snapshot.
+func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckFetchFails(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("GraphQL error: rate limited")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err == nil {
+		t.Fatal("expected error when the live re-read fails, got nil")
+	}
+	if enabled || deferred {
+		t.Errorf("expected enabled=false, deferred=false on live-read failure, got enabled=%v deferred=%v", enabled, deferred)
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called when the live re-read fails, got %d call(s)", len(client.mergePRCalls))
+	}
+}
+
 // TestAttemptMergeOnValidate_DirectMergeAlsoFails verifies that when
 // EnablePullRequestAutoMerge returns an arbitrary error AND MergePR also fails
 // (e.g. ErrNotMergeable from a DIRTY PR), the function returns (false, err) and
