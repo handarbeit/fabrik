@@ -359,6 +359,18 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// function, so the two gate sites can never disagree on "outstanding".
 	outstanding, hasReviews := reviewGateOutstanding(requests, reviews)
 	if len(outstanding) == 0 && hasReviews {
+		// Deliberately does NOT call removeAwaitingReviewLabel here, unlike
+		// checkReviewGate's equivalent clearing branch. Removal is checkReviewGate's
+		// job: this function only ever runs on a Validate item, and every path that
+		// reaches a blocking exit below leaves stage:Validate:complete present, so
+		// handleReviewGate claims the item with hasComplete == true on the next poll
+		// and clears the label there (naturally or on timeout). Symmetric
+		// apply-and-remove here would race that owner for no gain.
+		//
+		// This is load-bearing for any future landing path: a caller that invokes
+		// attemptMergeOnValidate for an item that never re-enters catch-up Phase 1
+		// would strand a fabrik:awaiting-review applied here. Such a caller must
+		// either route through the catch-up loop or take over removal explicitly.
 		return false
 	}
 
