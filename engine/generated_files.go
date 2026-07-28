@@ -18,6 +18,15 @@ var generatedFiles = []generatedFileSpec{
 	},
 }
 
+// generatedFileSet returns the effective generated-file mapping: the test override
+// when set, otherwise the package-level generatedFiles used in production.
+func (e *Engine) generatedFileSet() []generatedFileSpec {
+	if e.generatedFilesOverride != nil {
+		return e.generatedFilesOverride
+	}
+	return generatedFiles
+}
+
 // classifyConflictedPaths splits a set of conflicted paths against the declared
 // generated-file specs. matched holds the subset of specs whose Path appears in paths
 // (deduplicated by spec, order-stable per specs), and nonGenerated holds every
