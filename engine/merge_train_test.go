@@ -3304,3 +3304,262 @@ func TestMergeTrainRunawayGuard(t *testing.T) {
 		t.Error("e2e: expected mergeTrainInFlight cleared after runaway guard fires")
 	}
 }
+
+// ── Generated-file conflict resolution (issue #1235, FR-1..FR-5) ─────────────
+
+// pushMultiFileBranchToBare creates a branch in srcDir with several files written in a
+// single commit, pushes it to bareDir, and returns the HEAD SHA. Unlike pushBranchToBare
+// (single file), this lets a test construct a member whose conflict spans more than one
+// path in a single merge step (needed for the FR-5 mixed-conflict scenario).
+func pushMultiFileBranchToBare(t *testing.T, srcDir, bareDir, branchName string, files map[string]string) string {
+	t.Helper()
+	mustGit(t, srcDir, "checkout", "main")
+	mustGit(t, srcDir, "checkout", "-b", branchName)
+	for name, content := range files {
+		writeFile(t, filepath.Join(srcDir, name), content)
+	}
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "update "+branchName)
+	mustGit(t, srcDir, "push", bareDir, branchName+":"+branchName)
+	sha := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+	mustGit(t, srcDir, "checkout", "main")
+	mustGit(t, srcDir, "branch", "-D", branchName)
+	return sha
+}
+
+// TestMergeTrainWorker_GeneratedConflictRegeneratedWithoutClaude verifies FR-1/FR-2: a
+// conflict confined entirely to a declared generated path is regenerated via the
+// declared command and never reaches Claude.
+func TestMergeTrainWorker_GeneratedConflictRegeneratedWithoutClaude(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Both branches independently add generated.txt with different content — an
+	// add/add conflict confined to the declared generated path.
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "generated.txt", "stale-content-from-1\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "generated.txt", "stale-content-from-2\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "printf 'regenerated-content\\n' > generated.txt"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "generated-only-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, trialSHA, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 2 {
+		t.Fatalf("expected both members to survive, got %d", len(survivors))
+	}
+	if trialSHA == "" {
+		t.Fatal("expected a non-empty trial SHA")
+	}
+
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected Claude never invoked for a generated-only conflict, got %d call(s)", len(claude.forCommentsCalls))
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+	got, err := os.ReadFile(filepath.Join(wtDir, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading regenerated file: %v", err)
+	}
+	if string(got) != "regenerated-content\n" {
+		t.Errorf("generated.txt content = %q, want %q", got, "regenerated-content\n")
+	}
+
+	if remaining, err := unmergedPaths(wtDir); err != nil {
+		t.Fatalf("unmergedPaths: %v", err)
+	} else if len(remaining) != 0 {
+		t.Errorf("expected no remaining unmerged paths, got %v", remaining)
+	}
+}
+
+// TestMergeTrainWorker_MixedGeneratedAndNormalConflict verifies FR-5: a conflict whose
+// paths span both a declared generated file and a normal file still dispatches the
+// non-generated portion to Claude, while the generated portion is regenerated instead
+// of being handed to Claude — and regeneration runs only after Claude's part is staged.
+func TestMergeTrainWorker_MixedGeneratedAndNormalConflict(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Member 1 touches only counter.txt and generated.txt cleanly relative to main —
+	// its merge is clean (first member merged, nothing to conflict with yet).
+	sha1 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", map[string]string{
+		"counter.txt":   "counter-from-1\n",
+		"generated.txt": "gen-from-1\n",
+	})
+	// Member 2 diverges from main on both files too — merging it into the trial
+	// (which now has member 1's changes) conflicts on both counter.txt (non-generated,
+	// modify/modify) and generated.txt (declared generated, add/add).
+	sha2 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", map[string]string{
+		"counter.txt":   "counter-from-2\n",
+		"generated.txt": "gen-from-2\n",
+	})
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	const resolvedCounter = "counter-from-1\ncounter-from-2\n"
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			if len(comments) == 0 || !strings.Contains(comments[0].Body, "generated.txt") {
+				t.Errorf("expected the synthetic conflict comment to name generated.txt as out of scope")
+			}
+			// Resolve only counter.txt — leave generated.txt's conflict markers alone,
+			// stage only the resolved file, and do not commit (per the mixed-mode
+			// instructions in buildTrainConflictComment).
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(resolvedCounter), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved counter.txt: %w", err)
+			}
+			addCmd := exec.Command("git", "add", "--", "counter.txt")
+			addCmd.Dir = workDir
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				return string(out), false, TokenUsage{}, nil
+			}
+			return "resolved non-generated part", true, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "printf 'gen-regenerated\\n' > generated.txt"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "mixed-conflict-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, trialSHA, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 2 {
+		t.Fatalf("expected both members to survive, got %d", len(survivors))
+	}
+	if trialSHA == "" {
+		t.Fatal("expected a non-empty trial SHA")
+	}
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected Claude invoked exactly once for the non-generated part, got %d", len(claude.forCommentsCalls))
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+
+	gotCounter, err := os.ReadFile(filepath.Join(wtDir, "counter.txt"))
+	if err != nil {
+		t.Fatalf("reading counter.txt: %v", err)
+	}
+	if string(gotCounter) != resolvedCounter {
+		t.Errorf("counter.txt content = %q, want %q", gotCounter, resolvedCounter)
+	}
+
+	gotGenerated, err := os.ReadFile(filepath.Join(wtDir, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading generated.txt: %v", err)
+	}
+	if string(gotGenerated) != "gen-regenerated\n" {
+		t.Errorf("generated.txt content = %q, want %q (must be regenerated, not Claude-authored)", gotGenerated, "gen-regenerated\n")
+	}
+
+	if remaining, err := unmergedPaths(wtDir); err != nil {
+		t.Fatalf("unmergedPaths: %v", err)
+	} else if len(remaining) != 0 {
+		t.Errorf("expected no remaining unmerged paths, got %v", remaining)
+	}
+
+	// The whole conflict (Claude's part + regeneration) must land as a single commit —
+	// no merge left in progress.
+	checkMergeHead := exec.Command("git", "rev-parse", "--verify", "MERGE_HEAD")
+	checkMergeHead.Dir = wtDir
+	if err := checkMergeHead.Run(); err == nil {
+		t.Error("expected MERGE_HEAD to be gone (commit finalized) after mixed resolution")
+	}
+}
+
+// TestMergeTrainWorker_RegenerationFailureEjectsMember verifies FR-4: when the declared
+// regeneration command fails, the member is ejected with a diagnosable reason rather than
+// falling back to Claude for textual resolution.
+func TestMergeTrainWorker_RegenerationFailureEjectsMember(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "generated.txt", "stale-content-from-1\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "generated.txt", "stale-content-from-2\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "exit 1"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "regen-failure-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 1 || survivors[0].item.Number != 1 {
+		t.Fatalf("expected only member #1 to survive, got %+v", survivors)
+	}
+
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected Claude never invoked when regeneration fails (no textual fallback), got %d call(s)", len(claude.forCommentsCalls))
+	}
+
+	var ejectionBody string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 2 {
+			ejectionBody = c.body
+		}
+	}
+	if ejectionBody == "" {
+		t.Fatal("expected an ejection comment on issue #2")
+	}
+	if !strings.Contains(ejectionBody, "regeneration command") {
+		t.Errorf("expected a diagnosable regeneration-failure reason in the ejection comment, got: %s", ejectionBody)
+	}
+}
