@@ -177,7 +177,7 @@ func Execute() error {
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
-	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile webhook-stream-health checks when --webhooks is enabled (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Inactive without --webhooks — the per-poll Reconcile is the only freshener in that mode.")
+	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile drift checks (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Always active — this is the sole correctness backstop in poll-only mode; when --webhooks is enabled it also drives webhook stream-health transitions.")
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
 	flag.IntVar(&cfg.LogRetentionDays, "log-retention-days", 14, "Delete log files older than this many days; 0 disables age-based pruning (also FABRIK_LOG_RETENTION_DAYS)")
 	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for .fabrik/logs/ in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")

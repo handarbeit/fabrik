@@ -3299,9 +3299,9 @@ Terminal state is stored as a `Terminal bool` field in `ItemState` and set/clear
 
 **Cold-start (startup scan)**: after `runStartupTransientLabelScan` removes stale transient labels, `runStartupTerminalScan` iterates all items in the Store and applies `TerminalFlagSet{Terminal: true}` to any that pass the terminal predicate. This uses bootstrap label data already present in the Store — no GitHub API call is needed. On a 362-item board with 340 terminal Done items, this eliminates ~340 deep-fetches on the first poll cycle.
 
-**`Reconcile` is drift-recovery only**: `cacheImpl.Reconcile(board)` is called only during drift-recovery in webhook mode (see below). It is no longer called on every poll cycle, and it is not called during cold-start bootstrap — that path uses `BootstrapFromProbe` instead.
+**`Reconcile` is drift-recovery only**: `cacheImpl.Reconcile(board)` is called only during drift-recovery, independent of webhook mode (see below). It is no longer called on every poll cycle, and it is not called during cold-start bootstrap — that path uses `BootstrapFromProbe` instead.
 
-**Full reconcile — drift-recovery (webhook mode)**
+**Full reconcile — drift-recovery (runs independent of webhook mode)**
 
 `LightReconcile` returns the fresh board snapshot when drift is detected, which the `reconcileTicker` goroutine passes directly to `cacheImpl.Reconcile(board)` — avoiding a second API call. The older full-fetch-and-reconcile helper (`reconcileCache`) has been removed; `reconcileLoop`'s `LightReconcile` path is the sole reconciliation mechanism.
 
@@ -3338,7 +3338,7 @@ The `--board-cache` flag has been removed. `CacheImpl` is now wired unconditiona
 1. **Per-poll probe (`runProbeAndDeepFetch`)** (always active on bootstrapped cache) — see D.4
 2. **Layer 2 status sweep** (always active) — see D.4 and D.7
 3. **Webhook deltas** (when `--webhooks` is enabled) — see D.2
-4. **Light-reconcile drift recovery** (when `--webhooks` is enabled) — see D.5
+4. **Light-reconcile drift recovery** (always active, independent of `--webhooks`) — see D.5
 
 Tests that need to bypass the cache use `engine.NewWithDeps`, which wires `boardcache.GitHubAdapter` directly. This bypasses the Store-mutation pipeline and silently disables observers, so it is intended only for unit tests that don't exercise Store-driven behavior.
 
