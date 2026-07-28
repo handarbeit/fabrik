@@ -68,6 +68,26 @@ func TestClassifyConflictedPaths(t *testing.T) {
 	}
 }
 
+// TestClassifyConflictedPaths_DuplicatePathDifferentCommand guards against a static
+// config mistake: if specs ever declared the same Path twice with different Commands,
+// running both commands against the same file would make the final content silently
+// depend on declaration order. classifyConflictedPaths must pick the first declaration
+// deterministically rather than returning both.
+func TestClassifyConflictedPaths_DuplicatePathDifferentCommand(t *testing.T) {
+	first := generatedFileSpec{Path: "docs/llms-full.txt", Command: []string{"bash", "scripts/generate-llms-full.sh"}}
+	second := generatedFileSpec{Path: "docs/llms-full.txt", Command: []string{"bash", "scripts/some-other-generator.sh"}}
+	specs := []generatedFileSpec{first, second}
+
+	matched, nonGenerated := classifyConflictedPaths(specs, []string{"docs/llms-full.txt"})
+	if nonGenerated != nil {
+		t.Errorf("nonGenerated = %+v, want nil", nonGenerated)
+	}
+	want := []generatedFileSpec{first}
+	if !reflect.DeepEqual(matched, want) {
+		t.Errorf("matched = %+v, want only the first declared spec %+v", matched, want)
+	}
+}
+
 func TestDeclaredGeneratedFiles(t *testing.T) {
 	if len(generatedFiles) != 1 {
 		t.Fatalf("expected exactly one declared generated file today, got %d", len(generatedFiles))

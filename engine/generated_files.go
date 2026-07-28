@@ -31,6 +31,12 @@ func (e *Engine) generatedFileSet() []generatedFileSpec {
 // generated-file specs. matched holds the subset of specs whose Path appears in paths
 // (deduplicated by spec, order-stable per specs), and nonGenerated holds every
 // conflicted path that is not covered by any spec (order-stable per paths).
+//
+// If specs ever declares the same Path twice with different Commands (a static
+// config mistake, not user input — see TestDeclaredGeneratedFiles), only the first
+// declaration for that Path is included in matched: running every command sharing a
+// Path against the same file would make the final content depend on declaration
+// order, which is worse than picking one deterministically.
 func classifyConflictedPaths(specs []generatedFileSpec, paths []string) (matched []generatedFileSpec, nonGenerated []string) {
 	generatedPathSet := make(map[string]bool, len(specs))
 	for _, spec := range specs {
@@ -45,8 +51,10 @@ func classifyConflictedPaths(specs []generatedFileSpec, paths []string) (matched
 		}
 	}
 
+	seenPaths := make(map[string]bool, len(specs))
 	for _, spec := range specs {
-		if pathSet[spec.Path] {
+		if pathSet[spec.Path] && !seenPaths[spec.Path] {
+			seenPaths[spec.Path] = true
 			matched = append(matched, spec)
 		}
 	}
