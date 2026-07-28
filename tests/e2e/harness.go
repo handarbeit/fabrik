@@ -845,27 +845,42 @@ func parseIssueNumberFromURL(url string) int {
 // fragments on Organization and User, so they work whether the test project is
 // owned by an org (the current bed, owner_type: organization) or by a user.
 
+// Both queries select `id` on projectV2 purely so the caller can tell a
+// resolved-but-empty project from one that did not resolve at all. GitHub
+// returns `projectV2: null` with NO top-level error for a valid owner and a
+// wrong or stale project number, so `gh` exits 0 and an unguarded caller reads
+// the result as "the board is empty".
+//
+// That distinction has to be drawn on the project node, not on the item count:
+// an empty board is a legitimate, routine state — scripts/e2e/reset.sh drains
+// every item as the first step of a clean run. Erroring on "no items" would
+// make the harness fail spuriously against a freshly reset bed.
 const boardItemsQuery = `
 query($login:String!,$num:Int!,$after:String){
   repositoryOwner(login:$login){
-    ... on Organization{ projectV2(number:$num){ items(first:100, after:$after){
+    ... on Organization{ projectV2(number:$num){ id items(first:100, after:$after){
       pageInfo{hasNextPage endCursor}
       nodes{ content{... on Issue{number repository{nameWithOwner}}}
              fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}} } } } }
-    ... on User{ projectV2(number:$num){ items(first:100, after:$after){
+    ... on User{ projectV2(number:$num){ id items(first:100, after:$after){
       pageInfo{hasNextPage endCursor}
       nodes{ content{... on Issue{number repository{nameWithOwner}}}
              fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}} } } } }
   }
 }`
 
+// fields(first:50) is not paginated: a project with more than 50 custom fields
+// would be pathological, and a page-through loop here would cost a round trip on
+// every scenario's setup for a case that does not occur. pageInfo is selected so
+// that if Status ever does fall outside the page, the error says so explicitly
+// rather than claiming the field does not exist.
 const statusFieldQuery = `
 query($login:String!,$num:Int!){
   repositoryOwner(login:$login){
     ... on Organization{ projectV2(number:$num){ id
-      fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}} } }
+      fields(first:50){pageInfo{hasNextPage} nodes{... on ProjectV2SingleSelectField{id name options{id name}}}} } }
     ... on User{ projectV2(number:$num){ id
-      fields(first:50){nodes{... on ProjectV2SingleSelectField{id name options{id name}}}} } }
+      fields(first:50){pageInfo{hasNextPage} nodes{... on ProjectV2SingleSelectField{id name options{id name}}}} } }
   }
 }`
 
@@ -901,6 +916,7 @@ func fetchBoardItems(env *Env) ([]boardItem, error) {
 			Data struct {
 				RepositoryOwner struct {
 					ProjectV2 struct {
+						ID    string `json:"id"`
 						Items struct {
 							PageInfo struct {
 								HasNextPage bool   `json:"hasNextPage"`
@@ -924,6 +940,11 @@ func fetchBoardItems(env *Env) ([]boardItem, error) {
 		}
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
 			return nil, fmt.Errorf("parse project board query: %w\n%s", err, out)
+		}
+		if resp.Data.RepositoryOwner.ProjectV2.ID == "" {
+			return nil, fmt.Errorf("project %s/#%d not found or not visible to this token "+
+				"(GitHub returns projectV2:null without a top-level error for a wrong project number)\n%s",
+				env.ProjectOwner, env.ProjectNumber, out)
 		}
 		batch := resp.Data.RepositoryOwner.ProjectV2.Items
 		for _, n := range batch.Nodes {
@@ -984,6 +1005,9 @@ func fetchStatusField(env *Env) (statusField, error) {
 				ProjectV2 struct {
 					ID     string `json:"id"`
 					Fields struct {
+						PageInfo struct {
+							HasNextPage bool `json:"hasNextPage"`
+						} `json:"pageInfo"`
 						Nodes []struct {
 							ID      string         `json:"id"`
 							Name    string         `json:"name"`
@@ -1006,6 +1030,10 @@ func fetchStatusField(env *Env) (statusField, error) {
 		if f.Name == "Status" {
 			return statusField{ProjectID: p.ID, FieldID: f.ID, Options: f.Options}, nil
 		}
+	}
+	if p.Fields.PageInfo.HasNextPage {
+		return statusField{}, fmt.Errorf("project %s/#%d has no Status field among its first 50 fields, "+
+			"and it has more — the query needs pagination", env.ProjectOwner, env.ProjectNumber)
 	}
 	return statusField{}, fmt.Errorf("project %s/#%d has no Status field", env.ProjectOwner, env.ProjectNumber)
 }
