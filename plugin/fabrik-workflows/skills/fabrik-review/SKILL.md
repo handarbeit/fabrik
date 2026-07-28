@@ -195,6 +195,18 @@ Use bracketed or descriptive numbering instead:
 
 This applies anywhere in your output that reaches a GitHub comment body — Review findings, thread references, file enumerations, or any list.
 
+## If You Hit the Turn Limit
+
+The turn budget is a **time-slicer**, not a deadline you have failed to meet. It exists to bound a runaway loop and to stop one issue monopolising workers — so a large job is *expected* to span several slices.
+
+If you run out of turns:
+
+- The engine commits and pushes your partial work.
+- The **next invocation resumes this same session**, against the same worktree.
+- You continue from where you stopped. Do not restart, re-plan, or redo completed work.
+
+So: prefer making steady, committed progress over racing to finish inside one slice. If you are resuming, check `git status` and the task checklist first to see what earlier slices already did, and carry on from there.
+
 ## What You Do NOT Do
 
 - **Do not rewrite the implementation** — fix issues, don't redesign

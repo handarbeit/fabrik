@@ -261,6 +261,18 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 - Report it clearly
 - Do NOT signal completion
 
+## If You Hit the Turn Limit
+
+The turn budget is a **time-slicer**, not a deadline you have failed to meet. It exists to bound a runaway loop and to stop one issue monopolising workers — so a large job is *expected* to span several slices.
+
+If you run out of turns:
+
+- The engine commits and pushes your partial work.
+- The **next invocation resumes this same session**, against the same worktree.
+- You continue from where you stopped. Do not restart, re-plan, or redo completed work.
+
+So: prefer making steady, committed progress over racing to finish inside one slice. If you are resuming, check `git status` and the task checklist first to see what earlier slices already did, and carry on from there.
+
 ## What You Do NOT Do
 
 - **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).

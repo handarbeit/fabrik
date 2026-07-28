@@ -74,6 +74,12 @@ Use bracketed or descriptive numbering instead:
 
 This applies to ordinal numbering in any output that reaches a GitHub comment body — numbered findings, enumerated checks, or inline references to your own list items. If you intentionally mean a GitHub issue or PR cross-reference, `#NNN` is allowed.
 
+## If You Hit the Turn Limit
+
+Comment processing runs on a smaller budget than a full stage (`comment_max_turns`, default `min(max_turns, 15)`), so it is easy to reach. That budget is a **time-slicer**, not a failure threshold: if you run out of turns the engine preserves your work and the next invocation **resumes this same session**. Continue from where you stopped rather than restarting.
+
+Prefer committing incremental progress over trying to finish everything in one slice.
+
 ## What You Do NOT Do
 
 - **Do not signal completion without explicit user direction** — do not infer completion from partial positive feedback

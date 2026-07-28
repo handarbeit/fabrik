@@ -112,6 +112,19 @@ Description of the chosen approach and key design decisions.
 - Risk description and mitigation.
 ```
 
+## If You Hit the Turn Limit
+
+The turn budget is a **time-slicer**, not a deadline you have failed to meet. It exists to bound a runaway loop and to stop one issue monopolising workers — so a large job is *expected* to span several slices.
+
+If you run out of turns:
+
+- The **next invocation resumes this same session**, so your reasoning and everything you have read so far are still in context.
+- You continue from where you stopped. Do not restart, re-plan, or redo completed work.
+
+Note that Plan is a `read_only` stage, so the engine does **not** commit partial work for you (`commitWIP` is skipped for read-only stages — their dirty state was restored from a stash, and committing it would misattribute the stash contents). Your continuity comes from the resumed session, not from committed files. Emit your plan inline in your final message as usual; do not try to persist intermediate state to disk expecting it to survive.
+
+So: prefer steady, incremental progress in your reasoning over racing to finish inside one slice. If you are resuming, take stock of what you have already established — the research you have read, the approach you have settled on, the tasks you have already enumerated — and carry on from there rather than re-deriving it.
+
 ## What You Do NOT Do
 
 - **Do not write code** — you're designing, not implementing
