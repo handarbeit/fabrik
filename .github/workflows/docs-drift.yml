@@ -2,9 +2,6 @@ name: Docs drift check
 
 on:
   pull_request:
-    paths:
-      - "docs/**"
-      - "scripts/generate-llms-full.sh"
 
 permissions:
   contents: read
