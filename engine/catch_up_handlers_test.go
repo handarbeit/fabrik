@@ -419,6 +419,98 @@ func TestHandleReviewGate_DisablesAutoMerge_EvenWhenCycleLimitReached(t *testing
 	}
 }
 
+// TestGuard2RoundTrip_DisableThenResolveReenablesAutoMerge verifies the full
+// #1207 round trip: guard 2 disables auto-merge and removes
+// fabrik:auto-merge-enabled when a fresh unresolved thread appears, and once
+// that thread is resolved (ROCKET reaction, the existing review-reinvoke
+// dedup signal), the next poll's attemptMergeOnValidate call (poll.go's
+// Phase 2 Validate branch) re-enables auto-merge and re-applies a fresh
+// fabrik:auto-merge-enabled label — no manual intervention, no stuck state.
+func TestGuard2RoundTrip_DisableThenResolveReenablesAutoMerge(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 55, HeadSHA: "sha1"}, nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+		{Name: "Validate", Order: 3, Prompt: "validate"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeAutoMergeReviewGatePctx(board, advancedItems, nil, false, false)
+
+	// Step 1: guard 2 fires — disable + label removal.
+	if got := eng.handleReviewGate(pctx); !got {
+		t.Fatal("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+	if len(client.disablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected DisablePullRequestAutoMerge called once, got %d", len(client.disablePullRequestAutoMergeCalls))
+	}
+	foundRemoval := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundRemoval = true
+		}
+	}
+	if !foundRemoval {
+		t.Fatal("expected fabrik:auto-merge-enabled to be removed after disable")
+	}
+
+	// Step 2: the review-reinvoke loop (§2.9) addresses the finding and reacts
+	// ROCKET — the existing buildReviewThreadComments dedup signal. The item no
+	// longer carries fabrik:auto-merge-enabled (removed in step 1).
+	resolvedItem := gh.ProjectItem{
+		Number:          10,
+		Repo:            "owner/repo",
+		Labels:          []string{"stage:Validate:complete"},
+		LinkedPRHeadSHA: "sha1",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{
+				ID: "PRRC_handler_1", DatabaseID: 100, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_handler_1",
+				IsOutdated: false,
+				Reactions:  []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+			},
+		},
+	}
+
+	// Step 3: poll.go's Phase 2 Validate branch retries attemptMergeOnValidate
+	// on every poll while the label is absent. It must now proceed and
+	// re-apply a fresh label.
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), board, resolvedItem, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error on re-enable: %v", err)
+	}
+	if deferred {
+		t.Error("expected deferred=false once the thread is resolved (ROCKET reaction)")
+	}
+	if !enabled {
+		t.Error("expected enabled=true — auto-merge must be re-enabled once the thread resolves")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once on re-enable, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if client.enablePullRequestAutoMergeCalls[0].prNumber != 55 {
+		t.Errorf("EnablePullRequestAutoMerge called with PR %d, want 55", client.enablePullRequestAutoMergeCalls[0].prNumber)
+	}
+	foundReapplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundReapplied = true
+		}
+	}
+	if !foundReapplied {
+		t.Error("expected fabrik:auto-merge-enabled to be re-applied after re-enable")
+	}
+}
+
 // ---- handleMergeAndCIGates rebase reinvoke dispatch tests ----
 
 // makeMergeGatePctx returns a phase1Ctx for merge-gate/CI-gate handler tests.
