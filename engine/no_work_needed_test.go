@@ -754,3 +754,193 @@ func TestHandleNoWorkNeeded_NoDispatchWhileAwaitingDone(t *testing.T) {
 		t.Error("expected fabrik:awaiting-done to be cleared once the issue reaches Done")
 	}
 }
+
+// TestSettleNoWorkNeededScan_RetriesItemStrandedAtNonCleanupStage is the
+// regression test #1220 requires: it drives the real scan
+// (settleNoWorkNeededScan), not settleNoWorkNeeded directly, with an item
+// stranded at a non-cleanup stage carrying fabrik:awaiting-done. Before the
+// fix, this item was invisible to the scan because it was sourced from
+// deepFetchCandidates, a set itemMayNeedWork had already filtered it out of.
+// It also verifies the comment-idempotency fix: the inline FetchItemDetails
+// call must not cause the "skipped" comment set to be re-posted on retry.
+func TestSettleNoWorkNeededScan_RetriesItemStrandedAtNonCleanupStage(t *testing.T) {
+	var statusShouldFail atomic.Bool
+	statusShouldFail.Store(true)
+	var client *mockGitHubClient
+	client = &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			if statusShouldFail.Load() {
+				return fmt.Errorf("rate limited")
+			}
+			return nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Mirrors what a real deep-fetch would see: whatever has actually been
+			// persisted (labels/comments) via the mock so far.
+			var labels []string
+			for _, c := range client.addLabelCalls {
+				labels = append(labels, c.labelName)
+			}
+			var comments []gh.Comment
+			for _, c := range client.addCommentCalls {
+				comments = append(comments, gh.Comment{Body: c.body})
+			}
+			item.Labels = append(item.Labels, labels...)
+			item.Comments = comments
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{
+				Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Plan",
+				Labels: []string{"fabrik:awaiting-done"},
+			},
+		},
+	}
+
+	// Confirm the premise of the bug: this item must be rejected by
+	// itemMayNeedWork, so a candidate list built via that filter (the old
+	// deepFetchCandidates source) would never contain it.
+	if eng.itemMayNeedWork(board.Items[0]) {
+		t.Fatal("expected itemMayNeedWork to return false for a fabrik:awaiting-done item at a non-cleanup stage")
+	}
+
+	// First poll: status update fails.
+	eng.settleNoWorkNeededScan(board)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update attempt on first pass, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 0 {
+		t.Fatalf("expected no CloseIssue call on first pass, got %d", len(client.closeIssueCalls))
+	}
+	firstPassComments := len(client.addCommentCalls)
+	if firstPassComments == 0 {
+		t.Fatal("expected the skip comment set to be posted on the first pass")
+	}
+
+	// Refresh board.Items[0] to reflect what actually persisted, the way a real
+	// poll's fresh FetchProjectBoard would (shallow — no comments). The marker
+	// itself is never re-added by settleNoWorkNeeded (only cleared on full
+	// success), so it must be carried forward explicitly here.
+	labels := []string{"fabrik:awaiting-done"}
+	for _, c := range client.addLabelCalls {
+		labels = append(labels, c.labelName)
+	}
+	board.Items[0].Labels = labels
+	board.Items[0].Comments = nil
+
+	// Second poll: mock now succeeds.
+	statusShouldFail.Store(false)
+	eng.settleNoWorkNeededScan(board)
+
+	if len(client.updateStatusCalls) != 2 {
+		t.Fatalf("expected 2 total status update attempts, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected 1 CloseIssue call after successful retry, got %d", len(client.closeIssueCalls))
+	}
+	if len(client.addCommentCalls) != firstPassComments {
+		t.Errorf("expected no additional skip comments on retry (comment-idempotency via inline deep-fetch), got %d total (was %d after first pass)",
+			len(client.addCommentCalls), firstPassComments)
+	}
+
+	markerCleared := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerCleared = true
+		}
+	}
+	if !markerCleared {
+		t.Error("expected fabrik:awaiting-done to be removed after a fully successful settle pass via the scan")
+	}
+}
+
+// TestSettleNoWorkNeededScan_EscalatesAtMaxRetries verifies that an item
+// stranded at a non-cleanup stage, driven purely through the real scan
+// (settleNoWorkNeededScan), escalates per ADR-060 (fabrik:paused added,
+// fabrik:awaiting-done removed, explanatory comment posted) once MaxRetries
+// consecutive scan passes have failed — proving FR-3 is actually reachable
+// through board.Items sourcing, not just through recordNoWorkNeededRetry
+// called directly.
+func TestSettleNoWorkNeededScan_EscalatesAtMaxRetries(t *testing.T) {
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			return fmt.Errorf("rate limited")
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+	eng.cfg.MaxRetries = 2
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{
+				Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Plan",
+				Labels: []string{"fabrik:awaiting-done"},
+			},
+		},
+	}
+
+	for i := 0; i < eng.cfg.MaxRetries; i++ {
+		eng.settleNoWorkNeededScan(board)
+	}
+
+	pausedAdded := false
+	markerRemoved := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerRemoved = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused to be added after MaxRetries settle failures via the scan")
+	}
+	if !markerRemoved {
+		t.Error("expected fabrik:awaiting-done to be removed on escalation via the scan")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Error("expected an explanatory escalation comment to be posted")
+	}
+}
+
+// TestSettleNoWorkNeededScan_SkipsPausedAndDispatchesNothing verifies the scan
+// leaves a paused item alone (FR-2/FR-3 boundary: escalation already handled it
+// or an operator is investigating) and, independently, that an item carrying
+// fabrik:awaiting-done is never dispatched as a stage by itemMayNeedWork even
+// though the settle scan itself now reaches it via board.Items.
+func TestSettleNoWorkNeededScan_SkipsPausedAndDispatchesNothing(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{
+				Number: 7, ItemID: "PVTI_7", Repo: "owner/repo", Status: "Plan",
+				Labels: []string{"fabrik:awaiting-done", "fabrik:paused"},
+			},
+		},
+	}
+
+	eng.settleNoWorkNeededScan(board)
+
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected the scan to skip a paused item entirely, got %d status update attempt(s)", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected the scan to skip a paused item entirely, got %d CloseIssue call(s)", len(client.closeIssueCalls))
+	}
+	if eng.itemMayNeedWork(board.Items[0]) {
+		t.Error("expected itemMayNeedWork to still return false for this item — dispatch suppression must be unaffected by the scan fix")
+	}
+}
