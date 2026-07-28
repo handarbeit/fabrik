@@ -694,6 +694,7 @@ query($id: ID!) {
             }
           }
           latestReviews(first: 10) {
+            pageInfo { hasNextPage }
             nodes {
               id
               databaseId
@@ -827,6 +828,9 @@ type fetchItemDetailsNode struct {
 				} `json:"nodes"`
 			} `json:"reviewRequests"`
 			LatestReviews struct {
+				PageInfo struct {
+					HasNextPage bool `json:"hasNextPage"`
+				} `json:"pageInfo"`
 				Nodes []struct {
 					ID         string `json:"id"`
 					DatabaseID int    `json:"databaseId"`
@@ -1022,6 +1026,9 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 				isBot := rr.RequestedReviewer.Typename == "Bot" || isBotLogin(login)
 				item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login, IsBot: isBot})
 			}
+		}
+		if pr.LatestReviews.PageInfo.HasNextPage {
+			fmt.Printf("[deep-fetch] #%d: latestReviews has more than 10 entries; only first 10 are used — a review beyond the first 10 (and any body-only finding it carries) will not be processed\n", item.Number)
 		}
 		for _, rev := range pr.LatestReviews.Nodes {
 			if rev.Author != nil && rev.Author.Login != "" {

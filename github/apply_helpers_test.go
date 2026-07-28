@@ -139,6 +139,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 				} `json:"nodes"`
 			} `json:"reviewRequests"`
 			LatestReviews struct {
+				PageInfo struct {
+					HasNextPage bool `json:"hasNextPage"`
+				} `json:"pageInfo"`
 				Nodes []struct {
 					ID         string `json:"id"`
 					DatabaseID int    `json:"databaseId"`
@@ -194,6 +197,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 			} `json:"nodes"`
 		} `json:"reviewRequests"`
 		LatestReviews struct {
+			PageInfo struct {
+				HasNextPage bool `json:"hasNextPage"`
+			} `json:"pageInfo"`
 			Nodes []struct {
 				ID         string `json:"id"`
 				DatabaseID int    `json:"databaseId"`
@@ -293,6 +299,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 			} `json:"nodes"`
 		} `json:"reviewRequests"`
 		LatestReviews struct {
+			PageInfo struct {
+				HasNextPage bool `json:"hasNextPage"`
+			} `json:"pageInfo"`
 			Nodes []struct {
 				ID         string `json:"id"`
 				DatabaseID int    `json:"databaseId"`
