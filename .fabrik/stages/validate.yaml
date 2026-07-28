@@ -3,7 +3,9 @@ order: 5
 skill: fabrik-validate
 comment_skill: fabrik-validate-comment
 model: sonnet
-max_turns: 50
+max_turns: 100
+comment_max_turns: 50
+max_wall_time: "60m"
 post_to_pr: true
 wait_for_reviews: true
 wait_for_ci: true

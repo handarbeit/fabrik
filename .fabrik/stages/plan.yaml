@@ -3,7 +3,9 @@ order: 2
 skill: fabrik-plan
 comment_skill: fabrik-plan-comment
 model: sonnet
-max_turns: 50
+max_turns: 100
+comment_max_turns: 50
+max_wall_time: "60m"
 read_only: true
 allowed_tools:
   - Read

@@ -3,7 +3,9 @@ order: 3
 skill: fabrik-implement
 comment_skill: fabrik-implement-comment
 model: sonnet
-max_turns: 50
+max_turns: 100
+comment_max_turns: 50
+max_wall_time: "60m"
 create_draft_pr: true
 mark_pr_ready_on_complete: true
 post_to_pr: true
