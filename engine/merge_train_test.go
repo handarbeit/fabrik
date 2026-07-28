@@ -3804,3 +3804,72 @@ func TestMergeTrainWorker_EjectionAfterPrematureCommitDoesNotContaminateLaterMem
 		t.Error("expected member #2's premature commit to be unreachable from wtDir's HEAD after ejection")
 	}
 }
+
+// TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember closes a blind spot
+// in the premature-commit guard: if Claude's non-compliant commit happens to write
+// byte-identical content to what the declared regeneration command would produce, a
+// content-diff-based check (`git diff --cached --quiet`) sees no difference and can't
+// tell the premature commit apart from a legitimate one. regenerateAndCommit now checks
+// MERGE_HEAD structurally at entry, before running any regeneration or content
+// comparison, so this is caught regardless of what the premature commit's content is.
+func TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", map[string]string{
+		"counter.txt":   "counter-from-1\n",
+		"generated.txt": "gen-from-1\n",
+	})
+	sha2 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", map[string]string{
+		"counter.txt":   "counter-from-2\n",
+		"generated.txt": "gen-from-2\n",
+	})
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	const regeneratedContent = "gen-regenerated\n"
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Violates the mixed-mode instructions: writes generated.txt with the exact
+			// content the declared regen command would produce, then commits — the
+			// worst case for a content-based guard, since the committed content is
+			// indistinguishable from a correct regeneration.
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte("counter-from-1\ncounter-from-2\n"), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved counter.txt: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(workDir, "generated.txt"), []byte(regeneratedContent), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write byte-identical generated.txt: %w", err)
+			}
+			mustGit(t, workDir, "add", "-A")
+			mustGit(t, workDir, "commit", "--no-edit", "-m", "premature commit with byte-identical content")
+			return "resolved and committed (violating instructions)", true, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "printf '" + regeneratedContent + "' > generated.txt"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "byte-identical-premature-commit-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 1 || survivors[0].item.Number != 1 {
+		t.Fatalf("expected only member #1 to survive (member #2 ejected despite byte-identical content), got %+v", survivors)
+	}
+}

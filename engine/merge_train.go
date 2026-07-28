@@ -1077,6 +1077,24 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 // the conflict has already been resolved by Claude (or there was none), so a failure
 // here is specific to the regeneration step itself.
 func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, specs []generatedFileSpec) (bool, string) {
+	// MERGE_HEAD must still be present at entry: regenerateAndCommit is only ever
+	// called either with the merge conflict still fully in progress (the all-generated
+	// case, Claude never invoked) or immediately after resolveConflictWithClaude has
+	// Claude resolve-and-stage — but not commit — the non-generated part (the mixed
+	// case, FR-5). Its absence here means something already committed prematurely,
+	// almost certainly Claude violating the mixed-mode "don't commit" instruction.
+	// Detect this directly, structurally, before running any regeneration — rather than
+	// relying on a post-hoc `git diff --cached` content comparison, which would miss
+	// the (unlikely but possible) case where the premature commit's content happens to
+	// byte-match what regeneration would have produced.
+	checkMergeHeadAtEntry := exec.Command("git", "rev-parse", "--verify", "MERGE_HEAD")
+	checkMergeHeadAtEntry.Dir = wtDir
+	if err := checkMergeHeadAtEntry.Run(); err != nil {
+		reason := "MERGE_HEAD is already gone before regeneration ran (likely Claude committed despite mixed-mode instructions not to)"
+		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+		return false, reason
+	}
+
 	seenCommands := make(map[string]bool, len(specs))
 	for _, spec := range specs {
 		cmdKey := strings.Join(spec.Command, "\x00")
@@ -1119,38 +1137,27 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 		return false, reason
 	}
 
-	diffCmd := exec.Command("git", "diff", "--check")
+	// --cached: scan the staged diff (what will actually be committed) for
+	// conflict-marker-like content. A plain `git diff --check` compares working tree to
+	// index, which is always empty here since every relevant path was just staged by
+	// the loop above — it would never see the content being committed.
+	diffCmd := exec.Command("git", "diff", "--cached", "--check")
 	diffCmd.Dir = wtDir
 	if out, err := diffCmd.CombinedOutput(); err != nil {
-		reason := fmt.Sprintf("git diff --check reports conflicts after regeneration: %s", strings.TrimSpace(string(out)))
+		reason := fmt.Sprintf("git diff --cached --check reports conflicts after regeneration: %s", strings.TrimSpace(string(out)))
 		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 		return false, reason
 	}
 
-	checkMergeHead := exec.Command("git", "rev-parse", "--verify", "MERGE_HEAD")
-	checkMergeHead.Dir = wtDir
-	if err := checkMergeHead.Run(); err == nil {
-		commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
-			fmt.Sprintf("chore(merge-train): resolve conflict for #%d (regenerated generated file(s))", memberItem.Number))
-		commitCmd.Dir = wtDir
-		if out, err := commitCmd.CombinedOutput(); err != nil {
-			reason := fmt.Sprintf("could not commit after regeneration: %s", strings.TrimSpace(string(out)))
-			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
-			return false, reason
-		}
-	} else {
-		// MERGE_HEAD is already gone. In the mixed case (FR-5) this should only happen
-		// if Claude committed despite being instructed not to — the regenerated content
-		// just staged above would then sit uncommitted on top of that premature commit.
-		// Guard explicitly rather than trusting compliance: fail closed instead of
-		// silently returning success with unstaged-vs-HEAD content left behind.
-		diffCachedCmd := exec.Command("git", "diff", "--cached", "--quiet")
-		diffCachedCmd.Dir = wtDir
-		if diffErr := diffCachedCmd.Run(); diffErr != nil {
-			reason := "merge was already committed before regeneration finished, leaving regenerated content staged but uncommitted (likely Claude committed despite mixed-mode instructions not to)"
-			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
-			return false, reason
-		}
+	// MERGE_HEAD was confirmed present at entry and nothing above commits, so it is
+	// still present here — always finalize the single commit across both parts.
+	commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+		fmt.Sprintf("chore(merge-train): resolve conflict for #%d (regenerated generated file(s))", memberItem.Number))
+	commitCmd.Dir = wtDir
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		reason := fmt.Sprintf("could not commit after regeneration: %s", strings.TrimSpace(string(out)))
+		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+		return false, reason
 	}
 
 	return true, ""
