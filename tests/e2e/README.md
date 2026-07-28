@@ -56,6 +56,41 @@ These tests assume:
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
 
+## GraphQL budget
+
+The bed token has 5,000 GraphQL points/hour, shared by the suite and the
+test-bed engine. Measured 2026-07-28:
+
+| Operation | Cost |
+|---|---|
+| `gh project item-list --limit 200` | ~101 pts |
+| `gh project field-list` | ~106 pts |
+| `fetchBoardItems` / `fetchStatusField` (harness.go) | ~2 pts |
+| Engine board poll, warm cache | ~4 pts |
+| Engine board poll, cold bootstrap | ~349 pts |
+
+**The harness must not read the board through `gh project` subcommands.** They
+resolve field values with a follow-up query per item, so cost scales with the
+requested limit rather than with the data needed. When the wait-helpers used
+them, a single scenario polling on a 10-15s interval cost ~24,000 pts/hour —
+nearly 5x the whole budget — and a full `E2E_PARALLEL=4` run exhausted the
+token in ~14 minutes. Everything after that fails with `gh` exit 1, which
+looks like a pile of engine regressions but is not.
+
+Use `fetchBoardItems` / `fetchStatusField` instead; they return the same data
+for ~2 points by resolving Status inline via `fieldValueByName`. At that cost a
+parallel-4 run is ~1,900 pts/hour, plus ~480 for the engine — roughly 2x
+headroom. `gh project item-add` / `item-edit` are one-shot mutations and are
+fine as-is.
+
+If you hit the limit anyway, check the reset time and wait it out rather than
+lengthening the poll intervals — at the old cost even a fully serial suite did
+not fit, so long intervals treat the symptom:
+
+```bash
+gh api rate_limit --jq '.resources.graphql'
+```
+
 ### Additional prerequisites for `TestCIFixReinvoke` and `TestCIFixReinvokeCycleLimit`
 
 5. **`ci-fix-sentinel` enrolled as a required status check** on
