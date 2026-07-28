@@ -145,7 +145,12 @@ the canonical setup.
 `TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`,
 `TestMergeTrainRestartSafety`, and `TestMergeTrainRunawayGuardPausesBatch` need
 one-time bed setup. They **skip cleanly** (`requireTrainBed`) if the `Queued`
-column is absent, so they are safe to merge before the bed is set up.
+column is absent, so they are safe to merge before the bed is set up. They
+also skip cleanly under train mode `"off"` — these scenarios place issues
+directly in `Queued` via the GitHub API, which succeeds regardless of mode,
+but nothing drains `Queued` when `merge_train: off` (no per-item dispatch,
+no batch handler), so without this check they'd hang to their full 10–50 min
+timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
 
 14. **`Queued` board column** on `handarbeit/projects/2`, positioned between
     `Validate` and `Done` (ADR-059 D1 — the durable train queue). Add it in the
@@ -194,13 +199,13 @@ column is absent, so they are safe to merge before the bed is set up.
 The recommended entrypoint is the runner script, which sets sensible defaults:
 
 ```bash
-# Full suite (slow — multiple scenarios × minutes each)
+# Full two-mode validation gate — off, then on (slow: two full runs)
 scripts/e2e/run.sh
 
-# Single scenario
+# Single scenario, both modes
 scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch
 
-# Subset by name pattern
+# Subset by name pattern, both modes
 scripts/e2e/run.sh -run 'Smoke|NoWork'
 ```
 
@@ -214,12 +219,42 @@ jitter (see below) reproducible — useful for locally reproducing a
 flaky-looking failure. Leave it unset for normal runs; the jitter self-seeds
 randomly by default.
 
+#### Two-mode validation gate — `merge_train: off` and `merge_train: on`
+
+`FABRIK_MERGE_TRAIN` is read once, at Fabrik startup, so exercising both
+landing paths requires restarting the bed between them — it cannot be flipped
+mid-run while `t.Parallel()` scenarios are in flight. By default `run.sh`
+drives this itself: for `off` then `on`, it runs a narrow `go test` invocation
+of `TestSwitchTrainMode` (stops the bed, edits `FABRIK_MERGE_TRAIN` in its
+`.env`, restarts it — a wholly separate process from the suite invocation
+that follows, so the restart is always complete before any scenario starts),
+then the full suite with `E2E_TRAIN_MODE` exported. `off` runs first because
+it's the path nearly all real usage takes; a regression there surfaces before
+spending time on the less-common train-on run.
+
+Force a single mode instead of the two-mode default with `E2E_TRAIN_MODE`:
+
+```bash
+E2E_TRAIN_MODE=off scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch
+E2E_TRAIN_MODE=on  scripts/e2e/run.sh
+```
+
+A two-mode run is roughly double the single-mode GitHub API cost — see #1219
+for the budget headroom this assumes, and merge it before attempting a full
+two-mode run.
+
+Scenarios resolve mode via `resolveTrainMode` (`harness.go`): `E2E_TRAIN_MODE`
+takes precedence when set (an invalid value is a hard test failure), falling
+back to a lenient read of the bed's own `.env` for ad-hoc/manual runs where
+the switch step never ran. The "Mode" column in the Scenarios table below
+records which scenarios assert a mode-specific contract.
+
 #### Parallelism cap — the shared bed oversubscribes easily
 
-15 of the 16 scenarios are `t.Parallel()`, but they **all drive one shared
+16 of the 17 scenarios are `t.Parallel()`, but they **all drive one shared
 Fabrik bed** (5 workers by default) against **one shared board and one shared
 GitHub API budget**. Go's default `-parallel` is `GOMAXPROCS` (~8–12 cores), so
-an unbounded full run fires ~15 scenarios at once, floods the 5-worker bed, and
+an unbounded full run fires ~16 scenarios at once, floods the 5-worker bed, and
 saturates the API — producing cascading `transient gh error … (will retry)`
 timeouts **even though every scenario passes standalone** (see issue #971).
 
@@ -267,26 +302,39 @@ it will refuse otherwise.
 
 ## Scenarios
 
-| Test | What it verifies | Approx wall-clock | Cost |
-|---|---|---|---|
-| `TestSmokeSingleRepoDispatch` | Worker dispatches on a trivial issue; Specify completes | 3–5 min | $0.10–0.20 |
-| `TestSmokeSingleRepoFullPipeline` | Full single-repo pipeline (Specify → … → Done with merged PR) | 20–40 min | $0.50–1.50 |
-| `TestNoWorkNeeded` | `FABRIK_NO_WORK_NEEDED` short-circuit closes issue without PR | 10–15 min | $0.30–0.50 |
-| `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` pause + comment-driven resume | 10–15 min | $0.30–0.50 |
-| `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close) | 45–60 min | $1.00–2.00 |
-| `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done via GitHub native auto-merge; timeline-verifies `fabrik:auto-merge-enabled` was applied | 20–40 min | $0.50–1.50 |
-| `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | 30–50 min | $0.80–2.00 |
-| `TestBaseBranchPipeline` | `base:<branch>` non-default base branch: throwaway branch created off main, PR targets it (not main), pipeline does not falsely pause at end of Implement, review gate clears via the base-independent REST feed | 35–55 min | $0.80–2.00 |
-| `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | 75–90 min | $1.00–3.00 |
-| `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | 30–60 min | $0.50–1.50 |
-| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
-| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
-| `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | 10–25 min | low (no Claude) |
-| `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | 20–40 min | low–moderate |
-| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | 25–50 min | low |
-| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | 10–20 min | low (no Claude) |
+"Mode" records each scenario's classification from the #1217 mode audit (FR-2/FR-3/FR-4):
+**Both** — mode-invariant, single assertion set, passes under both `merge_train`
+settings unmodified. **Both (mode-aware)** — genuinely differs by mode; the
+scenario branches internally (via `resolveTrainMode`) and asserts the
+mode-appropriate contract in each. **Train-only (on)** — exercises the merge
+train directly; skips cleanly (`requireTrainBed`) under mode `"off"` or when
+the `Queued` column is absent, so it only runs in the gate's `on` leg.
 
-Approximate suite total: ~515 min wall-clock, $8.30–26 in Claude tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted above).
+| Test | What it verifies | Mode | Approx wall-clock | Cost |
+|---|---|---|---|---|
+| `TestSmokeSingleRepoDispatch` | Worker dispatches on a trivial issue; Specify completes | Both | 3–5 min | $0.10–0.20 |
+| `TestSmokeSingleRepoFullPipeline` | Full single-repo pipeline (Specify → … → Done with merged PR) | Both | 20–40 min | $0.50–1.50 |
+| `TestNoWorkNeeded` | `FABRIK_NO_WORK_NEEDED` short-circuit closes issue without PR | Both | 10–15 min | $0.30–0.50 |
+| `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` pause + comment-driven resume | Both | 10–15 min | $0.30–0.50 |
+| `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close) | Both | 45–60 min | $1.00–2.00 |
+| `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done; mode-appropriate landing contract (native auto-merge + `fabrik:auto-merge-enabled` under "off"; train close-not-merge + label never applied under "on") | Both (mode-aware) | 20–40 min | $0.50–1.50 |
+| `TestConvergenceRace` | Deterministic post-Validate auto-merge race (#829): two conflicting yolo PRs; mode-appropriate `fabrik:auto-merge-enabled` contract, both land within budget, neither ends `fabrik:paused` | Both (mode-aware) | 80–100 min | $2–4 |
+| `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | Both | 30–50 min | $0.80–2.00 |
+| `TestBaseBranchPipeline` | `base:<branch>` non-default base branch: throwaway branch created off main, PR targets it (not main), pipeline does not falsely pause at end of Implement, review gate clears via the base-independent REST feed | Both | 35–55 min | $0.80–2.00 |
+| `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | Both | 75–90 min | $1.00–3.00 |
+| `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
+| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
+| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
+| `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
+| `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
+| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
+| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | Train-only (on) | 10–20 min | low (no Claude) |
+
+Approximate single-mode suite total: ~615 min wall-clock, $10.30–30 in Claude
+tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests
+should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted
+above). A full two-mode gate run is roughly double this, minus the near-instant
+skip of the four Train-only scenarios in the `off` leg.
 
 ### Regression coverage map
 
@@ -298,6 +346,7 @@ Approximate suite total: ~515 min wall-clock, $8.30–26 in Claude tokens (CI-fi
 | `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` marker, ed46b7fc (awaiting-input label clear) |
 | `TestCrossRepoSpawn` | #797 / #803 (on-demand spawn-target init), v0.0.66 spawn machinery, #800 (addBlockedBy mutation name) |
 | `TestYoloAutoMergeLabel` | #829 (GitHub native auto-merge for yolo), #831/#835/#871 (convergence regression cascade) |
+| `TestConvergenceRace` | #829 (post-Validate auto-merge race, Story 2/SC-002); regression guard for the production failure on example-org/example-repo#82 (spurious CI-fix-cycle-limit pause); #1217 (mode-aware `fabrik:auto-merge-enabled` assertion) |
 | `TestCruiseFullPipeline` | #898 (cruise/yolo gate at Validate, `engine/poll.go`); ensures cruise never triggers `checkAutoMergeConvergence` |
 | `TestBaseBranchPipeline` | #1046 (report: base:<branch> GraphQL data gap), #1047 (`verifyAndHealLinkageByBody` linkage fix), #1050 (base-independent review-gate REST data feed) |
 | `TestCIFixReinvoke` | #888 ADR-056 D1 (settling primitive reinterprets CI-gate signals); CI-fix reinvoke loop (engine/ci.go) |
@@ -324,9 +373,14 @@ Every escape-from-release regression earns a new scenario in this table.
 
 ## Design notes
 
-- Tests do **not** start or stop the Fabrik instance. The instance is expected
-  to be already running. (Future enhancement: a `harness.StartFabrik(t)` that
-  spawns/stops it per test session.)
+- Scenarios do **not** start or stop the Fabrik instance — the instance is
+  expected to be already running. Two exceptions, both using the
+  `StopFabrikTestBed`/`StartFabrikTestBed` helpers in `lifecycle.go`:
+  `TestMergeTrainRestartSafety` (restarts mid-scenario to exercise
+  restart-safety) and `TestSwitchTrainMode` (restarts to flip
+  `FABRIK_MERGE_TRAIN` for the two-mode gate — not itself a scenario, run
+  only via `run.sh`'s mode-switch step). Both are deliberately **not**
+  `t.Parallel()`.
 - Assertions are on **observable outcomes**, not internal state. We check
   GitHub for label changes, comments, PR creation, etc. — not the engine's
   internal `worktreeManagers` map.

@@ -32,7 +32,7 @@
 #   #1219 for the budget headroom this assumes; merge it before attempting
 #   a full two-mode run.
 #
-# Parallelism cap (E2E_PARALLEL, default 4): 15 of the 16 e2e tests are
+# Parallelism cap (E2E_PARALLEL, default 4): 16 of the 17 e2e tests are
 # t.Parallel(), but they all drive ONE shared Fabrik bed (5 workers by default)
 # against ONE shared board + API budget. Go's default -parallel is GOMAXPROCS
 # (~8-12 cores), which oversubscribes the bed and produces cascading timeouts
