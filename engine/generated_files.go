@@ -27,33 +27,51 @@ func (e *Engine) generatedFileSet() []generatedFileSpec {
 	return generatedFiles
 }
 
+// deletionInvolvingStatus reports whether a git status --porcelain conflict code
+// involves a deletion on at least one side (DD: both deleted, UD: deleted by them,
+// DU: deleted by us). A generated path conflicted this way carries deletion intent
+// from at least one contributor — regenerating it would silently recreate a file one
+// or both sides meant to remove, which is a different question than "these two
+// versions of the content disagree" and must not be resolved by rerunning the
+// generator. AU/UA (add/add-style) and AA/UU conflicts carry no deletion intent and
+// are eligible for regeneration as before.
+func deletionInvolvingStatus(status string) bool {
+	return status == "DD" || status == "UD" || status == "DU"
+}
+
 // classifyConflictedPaths splits a set of conflicted paths against the declared
 // generated-file specs. matched holds the subset of specs whose Path appears in paths
-// (deduplicated by spec, order-stable per specs), and nonGenerated holds every
-// conflicted path that is not covered by any spec (order-stable per paths).
+// with a non-deletion-involving status (deduplicated by spec, order-stable per specs),
+// and nonGenerated holds every conflicted path that is not covered by any spec, plus
+// any generated path whose conflict involves a deletion (order-stable per paths) — see
+// deletionInvolvingStatus. Routing a deletion-involving generated-path conflict to
+// nonGenerated sends it to Claude for textual resolution instead of regeneration,
+// preserving whichever side's deletion intent Claude judges correct rather than
+// silently recreating a file a contributor meant to remove.
 //
 // If specs ever declares the same Path twice with different Commands (a static
 // config mistake, not user input — see TestDeclaredGeneratedFiles), only the first
 // declaration for that Path is included in matched: running every command sharing a
 // Path against the same file would make the final content depend on declaration
 // order, which is worse than picking one deterministically.
-func classifyConflictedPaths(specs []generatedFileSpec, paths []string) (matched []generatedFileSpec, nonGenerated []string) {
+func classifyConflictedPaths(specs []generatedFileSpec, paths []conflictedPath) (matched []generatedFileSpec, nonGenerated []string) {
 	generatedPathSet := make(map[string]bool, len(specs))
 	for _, spec := range specs {
 		generatedPathSet[spec.Path] = true
 	}
 
-	pathSet := make(map[string]bool, len(paths))
-	for _, path := range paths {
-		pathSet[path] = true
-		if !generatedPathSet[path] {
-			nonGenerated = append(nonGenerated, path)
+	matchedPathSet := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		if !generatedPathSet[p.Path] || deletionInvolvingStatus(p.Status) {
+			nonGenerated = append(nonGenerated, p.Path)
+			continue
 		}
+		matchedPathSet[p.Path] = true
 	}
 
 	seenPaths := make(map[string]bool, len(specs))
 	for _, spec := range specs {
-		if pathSet[spec.Path] && !seenPaths[spec.Path] {
+		if matchedPathSet[spec.Path] && !seenPaths[spec.Path] {
 			seenPaths[spec.Path] = true
 			matched = append(matched, spec)
 		}

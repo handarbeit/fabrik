@@ -848,7 +848,29 @@ func (e *Engine) cleanupTrialArtifacts(wm *WorktreeManager, trialName string) {
 // unmergedPaths returns the paths still in an unmerged state (git status codes UU, AA,
 // DD, AU, UD, UA, DU) in workDir. Parsed line-by-line from `git status --porcelain` to
 // avoid false positives from file paths that happen to contain "UU"-like substrings.
-func unmergedPaths(workDir string) ([]string, error) {
+// conflictedPath pairs an unmerged path with its two-letter `git status --porcelain`
+// code (e.g. "UU", "DD"). The code lets callers distinguish an ordinary content
+// conflict from one where a side deleted the file — see classifyConflictedPaths.
+type conflictedPath struct {
+	Path   string
+	Status string
+}
+
+// conflictedPathNames extracts the Path field from each entry, in order, for callers
+// that only need the plain path list (e.g. logging, or a generatedSet membership check
+// keyed on path alone).
+func conflictedPathNames(paths []conflictedPath) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	names := make([]string, len(paths))
+	for i, p := range paths {
+		names[i] = p.Path
+	}
+	return names
+}
+
+func unmergedPaths(workDir string) ([]conflictedPath, error) {
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = workDir
 	statusOut, err := statusCmd.CombinedOutput()
@@ -856,7 +878,7 @@ func unmergedPaths(workDir string) ([]string, error) {
 		return nil, fmt.Errorf("git status --porcelain: %w (%s)", err, strings.TrimSpace(string(statusOut)))
 	}
 
-	var paths []string
+	var paths []conflictedPath
 	for _, line := range strings.Split(string(statusOut), "\n") {
 		if len(line) < 3 {
 			continue
@@ -864,7 +886,7 @@ func unmergedPaths(workDir string) ([]string, error) {
 		code := line[:2]
 		if code == "UU" || code == "AA" || code == "DD" ||
 			code == "AU" || code == "UD" || code == "UA" || code == "DU" {
-			paths = append(paths, strings.TrimSpace(line[2:]))
+			paths = append(paths, conflictedPath{Path: strings.TrimSpace(line[2:]), Status: code})
 		}
 	}
 	return paths, nil
@@ -1019,8 +1041,8 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	}
 	var remainingNonGenerated []string
 	for _, p := range remaining {
-		if !generatedSet[p] {
-			remainingNonGenerated = append(remainingNonGenerated, p)
+		if !generatedSet[p.Path] {
+			remainingNonGenerated = append(remainingNonGenerated, p.Path)
 		}
 	}
 	if len(remainingNonGenerated) > 0 {
@@ -1163,7 +1185,7 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 		return false, reason
 	} else if len(remaining) > 0 {
-		reason := fmt.Sprintf("conflict markers remain after regeneration: %s", strings.Join(remaining, ", "))
+		reason := fmt.Sprintf("conflict markers remain after regeneration: %s", strings.Join(conflictedPathNames(remaining), ", "))
 		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 		return false, reason
 	}

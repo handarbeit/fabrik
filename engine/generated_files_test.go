@@ -13,25 +13,25 @@ func TestClassifyConflictedPaths(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		paths            []string
+		paths            []conflictedPath
 		wantMatched      []generatedFileSpec
 		wantNonGenerated []string
 	}{
 		{
 			name:             "all generated",
-			paths:            []string{"docs/llms-full.txt"},
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}},
 			wantMatched:      []generatedFileSpec{specs[0]},
 			wantNonGenerated: nil,
 		},
 		{
 			name:             "all non-generated",
-			paths:            []string{"engine/merge_train.go", "engine/item.go"},
+			paths:            []conflictedPath{{Path: "engine/merge_train.go", Status: "UU"}, {Path: "engine/item.go", Status: "UU"}},
 			wantMatched:      nil,
 			wantNonGenerated: []string{"engine/merge_train.go", "engine/item.go"},
 		},
 		{
 			name:             "mixed",
-			paths:            []string{"docs/llms-full.txt", "docs/state-machine.md"},
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}, {Path: "docs/state-machine.md", Status: "UU"}},
 			wantMatched:      []generatedFileSpec{specs[0]},
 			wantNonGenerated: []string{"docs/state-machine.md"},
 		},
@@ -43,15 +43,39 @@ func TestClassifyConflictedPaths(t *testing.T) {
 		},
 		{
 			name:             "both generated specs matched",
-			paths:            []string{"docs/llms-full.txt", "docs/other-generated.txt"},
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}, {Path: "docs/other-generated.txt", Status: "AA"}},
 			wantMatched:      []generatedFileSpec{specs[0], specs[1]},
 			wantNonGenerated: nil,
 		},
 		{
 			name:             "duplicate matched path only counted once",
-			paths:            []string{"docs/llms-full.txt", "docs/llms-full.txt"},
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}, {Path: "docs/llms-full.txt", Status: "UU"}},
 			wantMatched:      []generatedFileSpec{specs[0]},
 			wantNonGenerated: nil,
+		},
+		{
+			name:             "both-deleted generated path routes to Claude instead of regenerating",
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}},
+			wantMatched:      nil,
+			wantNonGenerated: []string{"docs/llms-full.txt"},
+		},
+		{
+			name:             "deleted-by-them generated path routes to Claude instead of regenerating",
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "UD"}},
+			wantMatched:      nil,
+			wantNonGenerated: []string{"docs/llms-full.txt"},
+		},
+		{
+			name:             "deleted-by-us generated path routes to Claude instead of regenerating",
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "DU"}},
+			wantMatched:      nil,
+			wantNonGenerated: []string{"docs/llms-full.txt"},
+		},
+		{
+			name:             "deletion-involving generated path alongside a clean generated match",
+			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}, {Path: "docs/other-generated.txt", Status: "UU"}},
+			wantMatched:      []generatedFileSpec{specs[1]},
+			wantNonGenerated: []string{"docs/llms-full.txt"},
 		},
 	}
 
@@ -78,13 +102,33 @@ func TestClassifyConflictedPaths_DuplicatePathDifferentCommand(t *testing.T) {
 	second := generatedFileSpec{Path: "docs/llms-full.txt", Command: []string{"bash", "scripts/some-other-generator.sh"}}
 	specs := []generatedFileSpec{first, second}
 
-	matched, nonGenerated := classifyConflictedPaths(specs, []string{"docs/llms-full.txt"})
+	matched, nonGenerated := classifyConflictedPaths(specs, []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}})
 	if nonGenerated != nil {
 		t.Errorf("nonGenerated = %+v, want nil", nonGenerated)
 	}
 	want := []generatedFileSpec{first}
 	if !reflect.DeepEqual(matched, want) {
 		t.Errorf("matched = %+v, want only the first declared spec %+v", matched, want)
+	}
+}
+
+func TestDeletionInvolvingStatus(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{"DD", true},
+		{"UD", true},
+		{"DU", true},
+		{"UU", false},
+		{"AA", false},
+		{"AU", false},
+		{"UA", false},
+	}
+	for _, tt := range tests {
+		if got := deletionInvolvingStatus(tt.status); got != tt.want {
+			t.Errorf("deletionInvolvingStatus(%q) = %v, want %v", tt.status, got, tt.want)
+		}
 	}
 }
 
