@@ -912,6 +912,7 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -932,6 +933,9 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	// Landing runs on TrainCIGreen and clears the in-flight entry when done.
 	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after landing completes")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness to be cleared after landing completes")
 	}
 	if state.CIResult != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen, got %v", state.CIResult)

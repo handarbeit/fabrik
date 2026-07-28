@@ -1193,18 +1193,12 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	}
 
 	if dispatched == 0 {
-		// Check whether any workers from a previous poll cycle are still running.
-		// If so, the engine is not truly idle — auto-upgrade must not run because
-		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
-		var inFlightLabels []string
-		for _, snap := range e.store.All() {
-			if snap.Worker() != nil {
-				k := snap.Repo() + "#" + fmt.Sprint(snap.Number())
-				inFlightLabels = append(inFlightLabels, k)
-			}
-		}
-
-		if len(inFlightLabels) > 0 {
+		// Check whether any workers from a previous poll cycle — or a merge-train
+		// worker, which registers repo-scoped rather than per-item liveness — are
+		// still running. If so, the engine is not truly idle — auto-upgrade must
+		// not run because checkAndUpgrade calls syscall.Exec which would kill
+		// in-flight workers.
+		if e.store.HasInFlightWorker() {
 			e.logf(0, "poll", "workers active\n")
 			e.idleCount = 0
 		} else {

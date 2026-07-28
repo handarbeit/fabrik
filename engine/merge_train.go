@@ -154,7 +154,14 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 		return
 	}
 
-	// candidate was atomically stored — launch the worker with it.
+	// candidate was atomically stored — mark it live in the single liveness
+	// registry the idle guard and mergeTrainWorkerActive both read (FR-2), then
+	// launch the worker. Doing this synchronously, before the goroutine even
+	// starts, also closes the same-cycle gap: dispatchCandidates never counts
+	// merge-train dispatch in `dispatched`, so without this the very poll cycle
+	// that just launched this worker would still see zero in-flight workers.
+	e.store.EnterRepoWorker(repoKey)
+
 	state := candidate
 	e.wg.Add(1)
 
@@ -178,27 +185,29 @@ type trialParams struct {
 	nextTrialName    func() string // returns a unique trial name per call (first == base)
 }
 
-// finishTrain clears the per-repo in-flight marker. It is the single, centralized
-// point through which the marker is ever cleared — sync.Map.Delete on an absent
-// key is a safe no-op, so the two callers (prepareTrainWorker's own-failure defer
-// and runMergeTrainWorker's top-level defer) never need to coordinate. Any new
-// early-return path added to the runMergeTrainWorker call graph must rely on one
-// of those two defers rather than calling mergeTrainInFlight.Delete directly —
-// see ADR-067.
+// finishTrain clears the per-repo in-flight marker, in both the duplicate-launch
+// claim registry (mergeTrainInFlight) and the liveness registry (itemstate.Store)
+// the idle guard and mergeTrainWorkerActive read. It is the single, centralized
+// point through which either marker is ever cleared — sync.Map.Delete and
+// Store.ExitRepoWorker are both safe no-ops on an absent key, so the two callers
+// (prepareTrainWorker's own-failure defer and runMergeTrainWorker's top-level
+// defer) never need to coordinate. Any new early-return path added to the
+// runMergeTrainWorker call graph must rely on one of those two defers rather
+// than clearing either marker directly — see ADR-067.
 func (e *Engine) finishTrain(repoKey string) {
 	e.mergeTrainInFlight.Delete(repoKey)
+	e.store.ExitRepoWorker(repoKey)
 }
 
 // mergeTrainWorkerActive reports whether a merge-train worker is currently in
 // flight for repoKey ("owner/repo") — from dispatchMergeTrainWorker's
-// LoadOrStore through the goroutine's exit, when finishTrain clears the
-// marker (see ADR-067). This is broader than "assembling": it also covers
+// EnterRepoWorker call through the goroutine's exit, when finishTrain clears
+// the marker (see ADR-067). This is broader than "assembling": it also covers
 // bisecting and the post-CI landing window, since the marker isn't cleared
 // until the worker goroutine fully exits. Used by settleClosedItemsToDone to
 // avoid racing a live batch member that was closed without merging.
 func (e *Engine) mergeTrainWorkerActive(repoKey string) bool {
-	_, ok := e.mergeTrainInFlight.Load(repoKey)
-	return ok
+	return e.store.RepoWorkerActive(repoKey)
 }
 
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
