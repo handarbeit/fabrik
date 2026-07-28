@@ -57,10 +57,14 @@ const botRepromptedLabel = "fabrik:bot-reprompted"
 //
 // Mixed or pure-human reviewer paths are unchanged: pause at 1× ReviewWaitTimeout.
 //
-// Returns (blocked, timedOut):
-//   - (true, false)  — gate is blocking; advance should not proceed
-//   - (false, false) — gate cleared naturally; advance may proceed
-//   - (false, true)  — gate cleared due to timeout; caller should pause the issue
+// Returns (blocked, timedOut, terminated):
+//   - (true, false, false)  — gate is blocking; advance should not proceed
+//   - (false, false, false) — gate cleared naturally; advance may proceed
+//   - (false, true, false)  — gate cleared due to timeout; caller should pause the issue
+//   - (false, false, true)  — processing already terminated via a direct pauseIssue call
+//     (handleBrokenReviewLinkage). The caller MUST claim the item (do not treat this as
+//     "gate cleared") so Phase 2 does not advance an item that was just paused in this
+//     same pass. See ADR-1223.
 //
 // Side effects when blocking:
 //   - Logs a message listing why we're waiting.
@@ -69,19 +73,20 @@ const botRepromptedLabel = "fabrik:bot-reprompted"
 // Side effects when unblocking (naturally or by timeout):
 //   - Removes fabrik:awaiting-review label if present (idempotent).
 //   - Removes fabrik:bot-reprompted label if present (idempotent).
-func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut bool) {
+func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut, terminated bool) {
 	// Gate is opt-in — only active when wait_for_reviews: true.
 	if stage.WaitForReviews == nil || !*stage.WaitForReviews {
-		return false, false
+		return false, false, false
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	paused, prNumber := e.handleBrokenReviewLinkage(owner, repo, item)
 	if paused {
-		// Return (false, false): the gate did not time out — it paused for a different reason.
-		// The catch-up loop will not reapply fabrik:awaiting-review.
-		return false, false
+		// handleBrokenReviewLinkage already paused the item directly — report
+		// terminated=true so the caller claims it instead of reading this as
+		// "gate cleared naturally".
+		return false, false, true
 	}
 
 	reviewRequests, reviews := item.LinkedPRReviewRequests, item.LinkedPRReviews
@@ -118,7 +123,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// self-submit without ever appearing in reviewRequests.
 	if len(outstanding) == 0 && hasReviews {
 		e.removeAwaitingReviewLabel(owner, repo, item)
-		return false, false
+		return false, false, false
 	}
 
 	// Determine if all outstanding reviewers are bots. Used by Phase 1/2 logic.
@@ -138,7 +143,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// window has elapsed without response, pause for human.
 	if reprompted && allBots {
 		if blocked, timedOut, done := e.checkBotPhase2Timeout(owner, repo, item); done {
-			return blocked, timedOut
+			return blocked, timedOut, false
 		}
 	}
 
@@ -146,7 +151,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
 	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted); done {
-		return blocked, timedOut
+		return blocked, timedOut, false
 	}
 
 	if len(outstanding) > 0 {
@@ -167,7 +172,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		e.applyLabelAdd(item, "fabrik:awaiting-review", false)
 	}
 
-	return true, false
+	return true, false, false
 }
 
 // handleBrokenReviewLinkage detects FR-013's broken-linkage case: the item

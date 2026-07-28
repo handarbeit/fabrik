@@ -21,7 +21,7 @@ func TestCheckCIGate_WaitForCIFalse_ClearsImmediately(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate"} // WaitForCI is nil
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, PRSettleResult{})
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, PRSettleResult{})
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected all false when wait_for_ci not set, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -35,7 +35,7 @@ func TestCheckCIGate_NoPR_ClearsGate(t *testing.T) {
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
 	settle := PRSettleResult{Status: PRMergeNoPR}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected clear when no PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -49,7 +49,7 @@ func TestCheckCIGate_NoCheckRuns_ClearsGate(t *testing.T) {
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
 	settle := PRSettleResult{Status: PRMergeReady, Reason: "no CI configured", PR: &gh.PRDetails{Number: 5, HeadSHA: "sha1"}}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected clear for no check runs (R5), got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -69,7 +69,7 @@ func TestCheckCIGate_PostPushDelay_BlocksGate(t *testing.T) {
 		Reason: "post-push registration delay (hadChecks)",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-new"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when zero check runs after previously seeing checks (post-push delay)")
 	}
@@ -99,7 +99,7 @@ func TestCheckCIGate_AllGreen_ClearsGate(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha2"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected clear for all-green CI, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -120,7 +120,7 @@ func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha3"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true for pending CI")
 	}
@@ -167,7 +167,7 @@ func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha_pending_timeout"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !timedOut {
 		t.Error("expected timedOut=true when CI is pending and CIWaitTimeout elapsed")
 	}
@@ -207,7 +207,7 @@ func TestCheckCIGate_PendingSiblingBeatsFailed_BlocksNoLabel(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha3"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when a pending check coexists with a failed sibling")
 	}
@@ -243,7 +243,7 @@ func TestCheckCIGate_StaleFailedSupersededByPendingRerun_BlocksNoLabel(t *testin
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha3"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || ciFailure || timedOut {
 		t.Errorf("expected blocked=true ciFailure=false timedOut=false for stale-failed-superseded-by-pending, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -264,7 +264,7 @@ func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha4"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || !ciFailure {
 		t.Errorf("expected blocked=true ciFailure=true for failed CI, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -306,7 +306,7 @@ func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha5"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure {
 		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -346,7 +346,7 @@ func TestCheckCIGate_Failed_AlreadyLabeledNotYetTimedOut_Blocked(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha6"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || !ciFailure {
 		t.Errorf("expected blocked=true ciFailure=true when not yet timed out, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -374,7 +374,7 @@ func TestCheckCIGate_AllGreen_AddsCompleteLabel(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha10"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate cleared, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -413,7 +413,7 @@ func TestCheckCIGate_NoCheckRuns_AddsCompleteLabel(t *testing.T) {
 		Reason: "no CI configured",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha11"},
 	}
-	blocked, _, _ := eng.checkCIGate(nil, item, stage, settle)
+	blocked, _, _, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked {
 		t.Error("expected gate cleared for no check runs (R5)")
 	}
@@ -440,7 +440,7 @@ func TestCheckCIGate_NoPR_AddsCompleteLabel(t *testing.T) {
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
 	settle := PRSettleResult{Status: PRMergeNoPR}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate cleared for no PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -481,7 +481,7 @@ func TestCheckCIGate_Failed_DoesNotAddCompleteLabel(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha12"},
 	}
-	_, ciFailure, _ := eng.checkCIGate(nil, item, stage, settle)
+	_, ciFailure, _, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !ciFailure {
 		t.Error("expected ciFailure=true for failed CI")
 	}
@@ -511,7 +511,7 @@ func TestCheckCIGate_NonValidateStage_AddsCorrectCompleteLabel(t *testing.T) {
 		},
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha13"},
 	}
-	blocked, _, _ := eng.checkCIGate(nil, item, stage, settle)
+	blocked, _, _, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked {
 		t.Error("expected gate cleared")
 	}
@@ -639,7 +639,7 @@ func TestCheckCIGate_FetchLinkedPRError_BlocksGate(t *testing.T) {
 		Status: PRMergeUnsettled,
 		Reason: "FetchLinkedPR error: transient network error",
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when FetchLinkedPR returns an error")
 	}
@@ -664,7 +664,7 @@ func TestCheckCIGate_MergedPR_ClearsGate(t *testing.T) {
 		Status: PRMergeTerminal,
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-merged", Merged: true, State: "closed"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected (false,false,false) for merged PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -700,7 +700,7 @@ func TestCheckCIGate_PRMergeQueued_BlocksNoChurn(t *testing.T) {
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
 	settle := PRSettleResult{Status: PRMergeQueued, Reason: "PR in merge queue", PR: &gh.PRDetails{Number: 5}}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || ciFailure || timedOut {
 		t.Errorf("expected (true,false,false) for PRMergeQueued, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -727,9 +727,9 @@ func TestCheckCIGate_ClosedNotMergedPR_Pauses(t *testing.T) {
 		Status: PRMergeTerminal,
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-closed", Merged: false, State: "closed"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
-	if blocked || ciFailure || timedOut {
-		t.Errorf("expected (false,false,false) for closed-not-merged PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	blocked, ciFailure, timedOut, terminated := eng.checkCIGate(nil, item, stage, settle)
+	if blocked || ciFailure || timedOut || !terminated {
+		t.Errorf("expected (false,false,false,true) for closed-not-merged PR, got blocked=%v ciFailure=%v timedOut=%v terminated=%v", blocked, ciFailure, timedOut, terminated)
 	}
 	foundPaused := false
 	foundAwaitingInput := false
@@ -782,7 +782,7 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked(t *testing
 		MergeableState: "blocked",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked", Merged: false, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when OPEN+BLOCKED with no check runs and dwell not elapsed (R3 false-positive guard)")
 	}
@@ -817,9 +817,9 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses(t *testing.T) {
 		MergeableState: "blocked",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-old", Merged: false, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
-	if blocked || ciFailure || timedOut {
-		t.Errorf("expected (false,false,false) for R3 dwell-elapsed pause, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	blocked, ciFailure, timedOut, terminated := eng.checkCIGate(nil, item, stage, settle)
+	if blocked || ciFailure || timedOut || !terminated {
+		t.Errorf("expected (false,false,false,true) for R3 dwell-elapsed pause, got blocked=%v ciFailure=%v timedOut=%v terminated=%v", blocked, ciFailure, timedOut, terminated)
 	}
 	foundPaused := false
 	foundAwaitingInput := false
@@ -875,7 +875,7 @@ func TestCheckCIGate_OpenBlockedNoChecks_HadChecks_Waits(t *testing.T) {
 		Reason: "post-push registration delay (hadChecks)",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-hadchecks", Merged: false, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when OPEN+BLOCKED with no check runs but hadChecks=true (R5 preserved)")
 	}
@@ -904,7 +904,7 @@ func TestCheckCIGate_FetchCheckRunsError_BlocksGate(t *testing.T) {
 		Reason: "FetchCheckRuns error: GitHub API 503",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha1"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when FetchCheckRuns returns an error")
 	}
@@ -952,7 +952,7 @@ func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 		MergeableState: "clean",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "shaA"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate clear, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -984,7 +984,7 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 		MergeableState: "unstable",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "shaB"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate clear for unstable, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -1008,7 +1008,7 @@ func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T)
 		CheckRuns:      []gh.CheckRun{{Name: "ci", Status: "in_progress"}},
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "shaC"},
 	}
-	blocked, ciFailure, _ := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, _, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || ciFailure {
 		t.Errorf("expected blocked-pending for mergeable_state=blocked + in_progress checks, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -1032,7 +1032,7 @@ func TestCheckCIGate_EmptyHeadSHA_StaysBlocked(t *testing.T) {
 		Reason: "HeadSHA empty",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: ""},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when PR exists but HeadSHA is empty")
 	}
@@ -1121,7 +1121,7 @@ func TestCheckCIGate_BehindNoChecks_Blocks(t *testing.T) {
 		MergeableState: "behind",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-behind", Merged: false, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when mergeable_state=behind with no check_runs and hadChecks=false (new guard)")
 	}
@@ -1152,7 +1152,7 @@ func TestCheckCIGate_DirtyNoChecks_Blocks(t *testing.T) {
 		MergeableState: "dirty",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-dirty", Merged: false, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when mergeable_state=dirty with no check_runs and hadChecks=false (new guard)")
 	}
@@ -1188,7 +1188,7 @@ func TestCheckCIGate_BehindNoChecks_TimeoutElapsed_TimesOut(t *testing.T) {
 		MergeableState: "behind",
 		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-behind-timeout", Merged: false, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure {
 		t.Errorf("expected blocked=false ciFailure=false for timed-out new guard, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -1230,7 +1230,7 @@ func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
 		Reason: "post-push dwell active",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-fresh", State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("SC-1: expected blocked=true when check_runs=[] and LastHeadSHAUpdate is within PostPushDwell")
 	}
@@ -1261,7 +1261,7 @@ func TestCheckCIGate_PostPushDwell_DwellElapsed_Clears(t *testing.T) {
 		Reason: "no CI configured",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-old", State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("SC-2: expected gate to clear (false,false,false) when dwell elapsed, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -1293,7 +1293,7 @@ func TestCheckCIGate_PostPushDwell_ZeroTimestamp_Clears(t *testing.T) {
 		Reason: "no CI configured",
 		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-cold", State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("SC-3: expected gate to clear (false,false,false) when LastHeadSHAUpdate is zero, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -1324,7 +1324,7 @@ func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 		Reason: "post-push dwell active",
 		PR:     &gh.PRDetails{Number: 7, HeadSHA: newSHA, State: "open"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("SC-4: gate must not clear immediately after PRHeadSHAUpdated while within PostPushDwell")
 	}
@@ -1366,7 +1366,7 @@ func TestCheckCIGate_RequiredContextFailed_BlocksAndAddsLabel(t *testing.T) {
 		RequiredFailed:         []string{"fantasy/local-test"},
 		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-failed"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || !ciFailure {
 		t.Errorf("expected blocked=true ciFailure=true for a failed required context, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -1411,7 +1411,7 @@ func TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut(t 
 		RequiredFailed:         []string{"fantasy/local-test"},
 		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-failed-timeout"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure {
 		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -1440,7 +1440,7 @@ func TestCheckCIGate_RequiredContextPending_FallsThroughToNormalHandling(t *test
 		RequiredMissing:        []string{"fantasy/local-test"},
 		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-pending"},
 	}
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true for a pending required context")
 	}
