@@ -3627,3 +3627,55 @@ func TestMergeTrainWorker_ClaudePrematureCommitInMixedModeEjectsMember(t *testin
 		t.Fatalf("expected only member #1 to survive (member #2 ejected for the premature commit), got %+v", survivors)
 	}
 }
+
+// TestMergeTrainWorker_ClaudeAbortMasqueradesAsResolved guards against a false-positive
+// "resolved" verdict: buildTrainConflictComment's fallback instructions tell Claude to
+// run `git merge --abort` when it judges a conflict unresolvable. An abort clears every
+// conflict marker (and MERGE_HEAD) exactly as a genuine resolution would, so checking
+// "no conflict markers remain" alone can't tell the two apart — without the preMergeHEAD
+// guard, the member would be reported as a survivor even though its entire contribution
+// was silently discarded by the abort. This exercises the plain (no generated paths)
+// path, but the same ambiguity applied equally to the FR-5 mixed path before the guard.
+func TestMergeTrainWorker_ClaudeAbortMasqueradesAsResolved(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "counter.txt", "from-branch-1\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "counter.txt", "from-branch-2\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Per buildTrainConflictComment's own fallback instructions: abort rather
+			// than resolve. This leaves the worktree exactly as it was before the merge
+			// was attempted — no conflict markers, no MERGE_HEAD, HEAD unchanged.
+			mustGit(t, workDir, "merge", "--abort")
+			return "conflict not safely resolvable, aborted", true, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "abort-masquerade-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 1 || survivors[0].item.Number != 1 {
+		t.Fatalf("expected only member #1 to survive (member #2's abort must not count as resolved), got %+v", survivors)
+	}
+}

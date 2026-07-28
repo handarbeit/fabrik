@@ -477,6 +477,14 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 
 	var survivors []trainMember
 	for _, member := range members {
+		preMergeHeadCmd := exec.Command("git", "rev-parse", "HEAD")
+		preMergeHeadCmd.Dir = wtDir
+		preMergeHeadOut, preMergeHeadErr := preMergeHeadCmd.Output()
+		preMergeHEAD := strings.TrimSpace(string(preMergeHeadOut))
+		if preMergeHeadErr != nil {
+			return nil, "", fmt.Errorf("capturing pre-merge HEAD before merging #%d: %w", member.item.Number, preMergeHeadErr)
+		}
+
 		mergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", member.headSHA)
 		mergeCmd.Dir = wtDir
 		mergeOut, mergeErr := mergeCmd.CombinedOutput()
@@ -490,7 +498,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// Conflict — classify against the declared generated-file set and resolve.
 		e.logf(member.item.Number, "merge-train", "merge conflict for #%d: %s — resolving\n", member.item.Number, strings.TrimSpace(string(mergeOut)))
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride}
-		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, opts)
+		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, opts)
 		if resolved {
 			survivors = append(survivors, member)
 			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved\n", member.item.Number)
@@ -937,7 +945,17 @@ func formatPathList(paths []string) string {
 // owns finishing the commit for the whole conflict. When generatedPaths is empty this
 // function's behavior is unchanged from before FR-5: it also runs the unscoped check
 // and commits the resolution itself.
-func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, opts InvokeOptions) (bool, error) {
+//
+// preMergeHEAD is trainWorkDir's HEAD SHA captured before the failed `git merge` was
+// attempted. buildTrainConflictComment's fallback instructions tell Claude to run
+// `git merge --abort` when it judges the conflict unresolvable — which clears every
+// conflict marker (generated and non-generated alike) exactly as a genuine resolution
+// would, making the two indistinguishable from unmergedPaths alone. preMergeHEAD
+// disambiguates them: a merge still in progress (MERGE_HEAD present) or a HEAD that has
+// moved past preMergeHEAD is genuine progress; a MERGE_HEAD-less worktree still sitting
+// on preMergeHEAD means the member's entire contribution — not just the conflicted
+// path(s) — was silently discarded by the abort.
+func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, opts InvokeOptions) (bool, error) {
 	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
 		e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
 		return false, &claudeUsageLimitError{Message: "account usage-limit suspension active"}
@@ -981,6 +999,23 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	if len(remainingNonGenerated) > 0 {
 		e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution: %s\n", strings.Join(remainingNonGenerated, ", "))
 		return false, nil
+	}
+
+	// Distinguish "Claude resolved the conflict" from "Claude ran `git merge --abort`
+	// per the fallback instructions" — both leave zero conflict markers behind, but an
+	// abort means none of this member's changes are present at all.
+	mergeHeadCmd := exec.Command("git", "rev-parse", "--verify", "MERGE_HEAD")
+	mergeHeadCmd.Dir = trainWorkDir
+	mergeInProgress := mergeHeadCmd.Run() == nil
+	if !mergeInProgress {
+		headCmd := exec.Command("git", "rev-parse", "HEAD")
+		headCmd.Dir = trainWorkDir
+		headOut, headErr := headCmd.Output()
+		currentHEAD := strings.TrimSpace(string(headOut))
+		if headErr != nil || currentHEAD == preMergeHEAD {
+			e.logf(memberItem.Number, "merge-train", "merge for #%d has no remaining conflict markers but MERGE_HEAD is gone and HEAD is unchanged — treating as an abort, not a resolution\n", memberItem.Number)
+			return false, nil
+		}
 	}
 
 	if len(generatedPaths) > 0 {
@@ -1123,13 +1158,13 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 // resolveConflictWithClaude's own doc comment). When resolved is false and err is nil,
 // reason is a diagnosable message for ejectMember; an empty reason tells the caller to
 // fall back to its own generic "unresolvable conflict" message.
-func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, opts InvokeOptions) (bool, string, error) {
+func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, opts InvokeOptions) (bool, string, error) {
 	paths, err := unmergedPaths(wtDir)
 	if err != nil {
 		// Can't classify conflicted paths — fall back to the plain Claude path exactly
 		// as before this FR-1..5 change introduced generated-path awareness.
 		e.logf(memberItem.Number, "merge-train", "could not list conflicted paths, falling back to Claude: %v\n", err)
-		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, opts)
+		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, opts)
 		return resolved, "", resolveErr
 	}
 
@@ -1137,7 +1172,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 
 	if len(matched) == 0 {
 		// No generated paths involved — unchanged behavior.
-		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, opts)
+		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, opts)
 		return resolved, "", resolveErr
 	}
 
@@ -1154,7 +1189,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 	for i, spec := range matched {
 		generatedPathNames[i] = spec.Path
 	}
-	resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, generatedPathNames, opts)
+	resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, generatedPathNames, preMergeHEAD, opts)
 	if resolveErr != nil || !resolved {
 		return resolved, "", resolveErr
 	}
