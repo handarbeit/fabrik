@@ -343,6 +343,20 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		if pr == nil || pr.Number == 0 {
 			return false
 		}
+		// FetchLinkedPR resolves by head-branch name (fabrik/issue-N) alone — it
+		// does not verify that the PR body actually closes this issue, unlike
+		// handleBrokenReviewLinkage's FetchPRClosingIssues check. So on a
+		// base:<branch> repo this can gate against a PR whose linkage is broken.
+		// That is deliberately not corrected here: attemptMergeOnValidate's own
+		// landing path already resolves the PR the same way (and did so before
+		// this gate existed), so the gate evaluates reviews on exactly the PR it
+		// would go on to land. More importantly the gate is strictly subtractive
+		// — it returns either "block" or "proceed as before", and can never cause
+		// a landing that would not otherwise happen — so an unverified match here
+		// cannot widen the pre-existing linkage gap, only fail to narrow it.
+		// Adding closing-keyword verification belongs with that shared resolution
+		// path (and with handleBrokenReviewLinkage, which owns the pause), not in
+		// the review gate.
 		prNumber = pr.Number
 	}
 
