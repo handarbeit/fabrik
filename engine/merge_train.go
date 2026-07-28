@@ -805,6 +805,31 @@ func (e *Engine) cleanupTrialArtifacts(wm *WorktreeManager, trialName string) {
 	}
 }
 
+// unmergedPaths returns the paths still in an unmerged state (git status codes UU, AA,
+// DD, AU, UD, UA, DU) in workDir. Parsed line-by-line from `git status --porcelain` to
+// avoid false positives from file paths that happen to contain "UU"-like substrings.
+func unmergedPaths(workDir string) ([]string, error) {
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = workDir
+	statusOut, err := statusCmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git status --porcelain: %w (%s)", err, strings.TrimSpace(string(statusOut)))
+	}
+
+	var paths []string
+	for _, line := range strings.Split(string(statusOut), "\n") {
+		if len(line) < 3 {
+			continue
+		}
+		code := line[:2]
+		if code == "UU" || code == "AA" || code == "DD" ||
+			code == "AU" || code == "UD" || code == "UA" || code == "DU" {
+			paths = append(paths, strings.TrimSpace(line[2:]))
+		}
+	}
+	return paths, nil
+}
+
 // buildTrainConflictComment constructs a synthetic comment instructing Claude to
 // resolve merge conflict markers in the current worktree (inline, without a rebase).
 func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string) gh.Comment {
@@ -866,20 +891,12 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
 
 	// Check whether conflicts remain after Claude's work.
-	// Parse line-by-line to avoid false positives from file paths containing
-	// "UU", "AA", or "DD" as substrings. Also covers additional unmerged states.
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = trainWorkDir
-	statusOut, _ := statusCmd.CombinedOutput()
-	for _, line := range strings.Split(string(statusOut), "\n") {
-		if len(line) >= 2 {
-			code := line[:2]
-			if code == "UU" || code == "AA" || code == "DD" ||
-				code == "AU" || code == "UD" || code == "UA" || code == "DU" {
-				e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution\n")
-				return false, nil
-			}
-		}
+	if remaining, err := unmergedPaths(trainWorkDir); err != nil {
+		e.logf(memberItem.Number, "merge-train", "could not check for remaining conflicts: %v\n", err)
+		return false, nil
+	} else if len(remaining) > 0 {
+		e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution: %s\n", strings.Join(remaining, ", "))
+		return false, nil
 	}
 
 	// Check that there are no staged conflict markers in the diff.
