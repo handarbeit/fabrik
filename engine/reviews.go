@@ -343,6 +343,19 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		if pr == nil || pr.Number == 0 {
 			return false
 		}
+		// FetchLinkedPR queries state=all, so a stale PR from a previous cycle on
+		// the same fabrik/issue-N branch (or one that already merged via a race
+		// with a retried landing) can come back here. Gating on such a PR would
+		// read the wrong PR's review state — blocking on a dead reviewer request,
+		// or worse, clearing because a long-closed PR happens to carry an approval.
+		// Neither is a decision about the PR being landed, so treat it exactly as
+		// "no open PR to gate on", the same filter and the same resulting prNumber
+		// 0 that handleBrokenReviewLinkage applies to its own FetchLinkedPR result.
+		// This matters most on a base:<branch> repo, where LinkedPRNumber is always
+		// 0 and this fallback is the steady-state resolution route, not an edge case.
+		if pr.State != "open" || pr.Merged {
+			return false
+		}
 		// FetchLinkedPR resolves by head-branch name (fabrik/issue-N) alone — it
 		// does not verify that the PR body actually closes this issue, unlike
 		// handleBrokenReviewLinkage's FetchPRClosingIssues check. So on a

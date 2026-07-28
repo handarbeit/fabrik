@@ -972,12 +972,83 @@ func TestAttemptMergeOnValidate_ReviewGate_ClearedProceeds(t *testing.T) {
 // base:<branch> case, where closedByPullRequestsReferences is structurally empty
 // so item.LinkedPRNumber is always 0: the gate must resolve the PR number via
 // FetchLinkedPR rather than silently skipping itself.
+// TestAttemptMergeOnValidate_ReviewGate_IgnoresStaleClosedPR pins the State/Merged
+// filter on the FetchLinkedPR fallback. FetchLinkedPR queries state=all, so a stale
+// PR from a previous cycle on the same fabrik/issue-N branch can be returned. Gating
+// on it would read the wrong PR's review state — here the stale PR carries an
+// outstanding reviewer, which would block a landing that has nothing to do with it.
+// handleBrokenReviewLinkage applies the same filter to its own FetchLinkedPR result.
+func TestAttemptMergeOnValidate_ReviewGate_IgnoresStaleClosedPR(t *testing.T) {
+	waitTrue := true
+	reviewFetched := false
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// Stale PR from a previous cycle: closed, never merged.
+			return &gh.PRDetails{Number: 77, HeadSHA: "sha1", State: "closed"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			reviewFetched = true
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewFetched = true
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewFetched {
+		t.Error("the gate must not read review state from a closed PR that merely shares the branch name")
+	}
+	if hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("a stale closed PR must not cause the landing to be held for review")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_IgnoresAlreadyMergedPR is the Merged half of
+// the same filter: a PR that already merged (e.g. via a race with a retried landing)
+// is not a PR whose review state should decide this landing.
+func TestAttemptMergeOnValidate_ReviewGate_IgnoresAlreadyMergedPR(t *testing.T) {
+	waitTrue := true
+	reviewFetched := false
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, HeadSHA: "sha1", State: "closed", Merged: true}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			reviewFetched = true
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewFetched = true
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewFetched {
+		t.Error("the gate must not read review state from an already-merged PR")
+	}
+}
+
 func TestAttemptMergeOnValidate_ReviewGate_ResolvesPRViaFallback(t *testing.T) {
 	waitTrue := true
 	var gatedPR int
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 77, HeadSHA: "sha1"}, nil
+			return &gh.PRDetails{Number: 77, HeadSHA: "sha1", State: "open"}, nil
 		},
 		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
 			gatedPR = prNumber
