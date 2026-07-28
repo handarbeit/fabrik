@@ -3109,6 +3109,14 @@ When `handleMergeTrainBatch` has a non-empty batch of Queued items, it calls `di
 
 **Two-PR model:** The goroutine creates two PRs: (1) a *draft CI PR* (`chore(merge-train): trial integration for #N…`) that triggers checks on the trial branch immediately, and (2) a *landing integration PR* (`[merge-train] batch: #N1, #N2, …`) opened only after trial CI passes. The draft CI PR is closed implicitly when the trial branch is deleted at cleanup.
 
+**Trial assembly — merge conflicts (issue #1235):** `assembleTrialBranch` merges each batch member's head SHA into the trial worktree in sequence (`git merge --no-ff --no-edit`). A clean merge just continues to the next member. On conflict, it calls `resolveTrainConflict`, which first lists the conflicted paths (`unmergedPaths`, parsing `git status --porcelain` for the `UU`/`AA`/`DD`/`AU`/`UD`/`UA`/`DU` codes) and classifies them against a single declared generated-path → regeneration-command mapping (`generatedFiles` in `engine/generated_files.go`; today's only entry is `docs/llms-full.txt` → `bash scripts/generate-llms-full.sh`). Three outcomes:
+
+- **No generated paths involved:** unchanged pre-#1235 behavior — `resolveConflictWithClaude` dispatches Claude with a synthetic comment instructing it to resolve every conflict marker and commit.
+- **Confined entirely to declared generated path(s):** Claude is never invoked. `regenerateAndCommit` runs each distinct regeneration command once (deduplicated by command, not by path, so two paths sharing one command don't re-run it), `git add --`s each regenerated path, and verifies the tree is fully resolved before committing.
+- **Mixed (a declared generated path conflicts alongside a normal path in the same member):** Claude is dispatched for the non-generated part only — the synthetic comment names the generated path(s) as out of scope and instructs Claude to stage only what it resolved and **not commit**. `regenerateAndCommit` always runs *after* Claude returns, never before: a co-conflicted non-generated file can itself be one of the generator's own source inputs (e.g. `docs/state-machine.md`, one of `generate-llms-full.sh`'s four `ORDERED` pages), so regenerating first would read stale/conflicted content. `regenerateAndCommit` performs the single commit that finalizes both parts once its own tree-wide `git diff --check` and unmerged-path checks pass.
+
+A regeneration failure (non-zero exit, inability to stage, or conflict markers still present afterward) ejects the member via the existing `ejectMember` path with a diagnosable reason describing the specific failure — it never falls back to Claude. This mirrors the existing unresolvable-conflict eject path (`assembleTrialBranch`'s abort-and-eject branch) and reuses the same three-way `(resolved, reason, err)` contract style as the pre-existing usage-limit sentinel handling described under ADR-1120 below: a non-nil `err` (the ADR-1120 usage-limit sentinel) is still a fatal assembly abort, never an ejection, in every one of these three outcomes.
+
 **Landing sequence (FR-1 through FR-5):**
 
 1. **FR-1 — Open integration PR**: `landMergeTrainBatch` calls `CreatePR` (non-draft) with title `[merge-train] batch: #N1, #N2, …` and a body containing the idempotency marker `<!-- fabrik-merge-train-batch -->`. The body lists all batch members (issue number + title) **and a `Closes #N` line per member**. The member PRs are closed-not-merged (the change lands via this integration PR), so a member PR's own `Closes #N` never fires — the integration PR's `Closes #N` is what restores issue↔landing-PR connectivity and auto-closes each member issue when the integration PR merges **into the default branch**. (For a non-default base, or on auto-close lag, FR-3's explicit `CloseIssue` is the fallback.) The same `Closes #N` lines are carried on the trial *draft CI PR* body from assembly, since that draft PR IS the landing PR when reused (FR-5).
@@ -5066,10 +5074,17 @@ resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
   conflict and ejected a healthy member. Both paths now detect the sentinel via `errors.As` after their
   `InvokeForComments` call: `runCommentExtensionLoop` activates/clears the suspension and
   `processComments` skips `checkCommentBreaker` on a usage-limit outcome; `resolveConflictWithClaude`
-  returns `(bool, error)` instead of a bare `bool`, and `assembleTrialBranch` treats a non-nil error as
-  a fatal assembly failure (cleanup, retry next cycle) rather than running `git merge --abort` +
-  `ejectMember` — an account-wide condition says nothing about whether that member's conflict is
-  resolvable.
+  returns `(bool, error)` instead of a bare `bool`, and `assembleTrialBranch` (via `resolveTrainConflict`,
+  issue #1235) treats a non-nil error as a fatal assembly failure (cleanup, retry next cycle) rather
+  than running `git merge --abort` + `ejectMember` — an account-wide condition says nothing about
+  whether that member's conflict is resolvable. `resolveConflictWithClaude` additionally takes a
+  `generatedPaths []string` parameter (#1235): non-empty only in the mixed generated/non-generated
+  conflict case, where it changes the synthetic comment's instructions and defers the unscoped
+  `git diff --check` + commit to `regenerateAndCommit`, but does not change the usage-limit gate or
+  detection above — the suspension check and `errors.As` unwrap run identically regardless of
+  `generatedPaths`. The all-generated case (no non-generated paths at all) never calls
+  `resolveConflictWithClaude` and so never touches this gate — regeneration has no Claude dispatch to
+  suspend.
 - **Auto-resume:** there is no ticker or wake mechanism tied to the deadline itself —
   `claudeSuspendedUntilTime` simply returns "not suspended" once `now` reaches the deadline, so the very
   next dispatch attempt (which was going to happen anyway on the normal poll cadence) proceeds normally.
