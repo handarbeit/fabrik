@@ -302,7 +302,13 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 // This check only blocks and labels. It deliberately does not duplicate the
 // bot-escalation ladder or the wait timeout — once it blocks, stage:X:complete is
 // present on the next poll, so handleReviewGate claims the item with
-// hasComplete == true and checkReviewGate owns all escalation from there.
+// hasComplete == true and checkReviewGate owns all escalation from there. That
+// handoff is a hard dependency, not a convenience: nothing here bounds how long a
+// landing stays held, so every blocking exit relies on checkReviewGate's timers
+// firing off the state this function leaves behind, without the item ever
+// re-entering this function. See the comment on the final blocking exit below for
+// why that holds even in the "no reviewers requested, nothing reviewed yet" case,
+// which has no escalation ladder of its own.
 //
 // Returns false (landing may proceed) when the gate is not opted in, when the item
 // demonstrably has no PR (no PR means no reviewer requests; handleBrokenReviewLinkage
@@ -342,7 +348,8 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 
 	reviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
 	requests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
-	if reviewsErr != nil || requestsErr != nil {
+	fetchFailed := reviewsErr != nil || requestsErr != nil
+	if fetchFailed {
 		// Conservative: treat a partial failure as no-data rather than trusting
 		// whichever call succeeded — a false len(outstanding)==0 read could clear
 		// the gate while real outstanding reviewers are unknown.
@@ -378,6 +385,29 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for reviewers: %s\n",
 			prNumber, strings.Join(outstanding, ", "))
 	}
+	if fetchFailed {
+		// Distinct from the "nobody has reviewed yet" message below: both reach
+		// this point with outstanding empty and hasReviews false, but only this
+		// one means the review state is unknown. Without the distinction an
+		// operator watching a GitHub API outage sees "waiting for initial review
+		// submission" and has no signal that the gate is blocking on a fetch
+		// failure rather than on a genuinely unreviewed PR.
+		return e.holdLandingForReview(item,
+			"holding landing decision on PR #%d — review state unreadable (fetch failed), blocking conservatively\n", prNumber)
+	}
+	// Reachable steady state: zero requested reviewers and no review submitted
+	// yet (e.g. just after MarkPRReady, before any human or bot has weighed in).
+	// This blocks with no escalation of its own, which is safe only because
+	// checkReviewGate's timers fire off exactly this state without the item ever
+	// re-entering this function: every blocking exit here leaves
+	// stage:Validate:complete present, so handleReviewGate claims the item next
+	// poll with hasComplete == true. From there reviewGateAllBots returns false
+	// (it is false whenever outstanding is empty), so both bot-ladder phases are
+	// skipped and checkAwaitingReviewTimeout falls to its mixed/pure-human pause
+	// branch, which fires once ReviewWaitTimeout has elapsed since
+	// fabrik:awaiting-review was applied — the label holdLandingForReview sets, read
+	// via FetchLabelAppliedAt. That path removes the label and pauses for a human,
+	// so this is a bounded hold, not a permanent block.
 	return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
 }
 

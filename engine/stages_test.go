@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // testEngineForMerge returns a minimal engine wired for attemptMergeOnValidate tests.
@@ -1039,6 +1041,56 @@ func TestAttemptMergeOnValidate_ReviewGate_FetchErrorBlocks(t *testing.T) {
 	if len(client.enablePullRequestAutoMergeCalls) != 0 {
 		t.Errorf("EnablePullRequestAutoMerge must not be called when review state is unknown, got %d call(s)",
 			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_FetchErrorLogsDistinctly pins the
+// operator-facing signal. A review-fetch failure and a PR nobody has reviewed yet
+// both reach the same blocking exit with outstanding empty and hasReviews false,
+// so without a distinct message an operator watching a GitHub API outage would see
+// "waiting for initial review submission" and have no indication the gate is
+// actually blocking on unknown state.
+func TestAttemptMergeOnValidate_ReviewGate_FetchErrorLogsDistinctly(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, errors.New("boom")
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	eventsCh := make(chan tui.Event, 32)
+	eng.events = eventsCh
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("expected (false, nil) on a review-fetch error, got err %v", err)
+	}
+
+	close(eventsCh)
+	var sawUnreadable, sawInitialSubmission bool
+	for ev := range eventsCh {
+		le, ok := ev.(tui.LogEvent)
+		if !ok || le.Tag != "awaiting-review" {
+			continue
+		}
+		if strings.Contains(le.Message, "review state unreadable") {
+			sawUnreadable = true
+		}
+		if strings.Contains(le.Message, "waiting for initial review submission") {
+			sawInitialSubmission = true
+		}
+	}
+	if !sawUnreadable {
+		t.Error("expected the hold to report the review state as unreadable on a fetch error")
+	}
+	if sawInitialSubmission {
+		t.Error("a fetch error must not be reported as 'waiting for initial review submission' — " +
+			"that message means nobody has reviewed yet, not that review state is unknown")
 	}
 }
 
