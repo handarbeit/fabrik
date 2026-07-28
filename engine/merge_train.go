@@ -487,13 +487,13 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 			continue
 		}
 
-		// Conflict — attempt Claude resolution.
-		e.logf(member.item.Number, "merge-train", "merge conflict for #%d: %s — attempting Claude resolution\n", member.item.Number, strings.TrimSpace(string(mergeOut)))
+		// Conflict — classify against the declared generated-file set and resolve.
+		e.logf(member.item.Number, "merge-train", "merge conflict for #%d: %s — resolving\n", member.item.Number, strings.TrimSpace(string(mergeOut)))
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride}
-		resolved, resolveErr := e.resolveConflictWithClaude(ctx, member.item, wtDir, p.holdingStg, member.headSHA, opts)
+		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, opts)
 		if resolved {
 			survivors = append(survivors, member)
-			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved by Claude\n", member.item.Number)
+			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved\n", member.item.Number)
 			continue
 		}
 		if resolveErr != nil {
@@ -509,12 +509,17 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 			return nil, "", fmt.Errorf("resolving conflict for #%d: %w", member.item.Number, resolveErr)
 		}
 
-		// Unresolvable — abort merge and eject.
+		// Unresolvable (or regeneration failed, FR-4) — abort merge and eject.
 		abortCmd := exec.Command("git", "merge", "--abort")
 		abortCmd.Dir = wtDir
 		abortCmd.CombinedOutput() // best-effort
 		e.logf(member.item.Number, "merge-train", "cannot resolve conflict for #%d — ejecting\n", member.item.Number)
-		e.ejectMember(p.owner, p.repo, member.item, fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA))
+		if reason == "" {
+			reason = fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA)
+		} else {
+			reason = fmt.Sprintf("ejected from merge-train batch — %s (PR SHA %s)", reason, member.headSHA)
+		}
+		e.ejectMember(p.owner, p.repo, member.item, reason)
 	}
 
 	if len(survivors) == 0 {
@@ -832,25 +837,68 @@ func unmergedPaths(workDir string) ([]string, error) {
 
 // buildTrainConflictComment constructs a synthetic comment instructing Claude to
 // resolve merge conflict markers in the current worktree (inline, without a rebase).
-func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string) gh.Comment {
+//
+// When generatedPaths is non-empty, the conflict is mixed (FR-5): some conflicted
+// paths are declared generated files that the engine will regenerate itself, after
+// Claude finishes. Claude is instructed to leave those paths alone entirely — not
+// edit, stage, or commit them — and to stop once its own (non-generated) part is
+// resolved and staged, without committing. The engine performs the final commit
+// once regeneration has staged the generated path(s) too (see regenerateAndCommit).
+func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string, generatedPaths []string) gh.Comment {
+	if len(generatedPaths) == 0 {
+		body := fmt.Sprintf(
+			"🏭 **Fabrik merge-train — conflict resolution required**\n\n"+
+				"The merge of PR head `%s` (issue #%d) into the trial integration branch has left "+
+				"conflict markers in the working tree. Resolve them and commit the resolution.\n\n"+
+				"**Instructions:**\n"+
+				"1. Run `git status` to identify conflicted files.\n"+
+				"2. Open each conflicted file and resolve every `<<<<<<< / ======= / >>>>>>>` marker.\n"+
+				"   Resolve **semantically** — understand what each side contributes and produce the "+
+				"correct merged result (do not blindly pick one side).\n"+
+				"   Watch for **semantic collisions** (two PRs chose the same counter value, migration "+
+				"ID, or ADR number): keep both contributions with the correct identifiers.\n"+
+				"3. `git add -A` to stage all resolved files.\n"+
+				"4. `git commit -m \"chore(merge-train): resolve conflict for #%d\"` to finalize.\n"+
+				"5. Run the project's build + test commands (`go build ./...` and `go vet ./...` at minimum).\n"+
+				"6. **Do NOT emit `FABRIK_STAGE_COMPLETE`.** The merge-train engine takes over after resolution.\n\n"+
+				"If the conflict cannot be resolved safely (ambiguous intent, requires human judgment), "+
+				"abort with `git merge --abort` and explain in your response why resolution is not possible.\n",
+			prSHA, memberItem.Number, memberItem.Number,
+		)
+		return gh.Comment{
+			ID:         "merge-train-conflict-synthetic",
+			DatabaseID: 0,
+			Body:       body,
+			Author:     "fabrik",
+		}
+	}
+
 	body := fmt.Sprintf(
 		"🏭 **Fabrik merge-train — conflict resolution required**\n\n"+
 			"The merge of PR head `%s` (issue #%d) into the trial integration branch has left "+
-			"conflict markers in the working tree. Resolve them and commit the resolution.\n\n"+
+			"conflict markers in the working tree. Resolve the **non-generated** conflicts and stage "+
+			"your resolution — the engine handles the rest.\n\n"+
+			"**The following path(s) are generated files and are OUT OF SCOPE — do not edit, stage, or "+
+			"commit them. The engine will regenerate them itself once your part is done:**\n%s\n\n"+
 			"**Instructions:**\n"+
 			"1. Run `git status` to identify conflicted files.\n"+
-			"2. Open each conflicted file and resolve every `<<<<<<< / ======= / >>>>>>>` marker.\n"+
+			"2. Open every conflicted file **except the generated path(s) listed above** and resolve "+
+			"every `<<<<<<< / ======= / >>>>>>>` marker.\n"+
 			"   Resolve **semantically** — understand what each side contributes and produce the "+
 			"correct merged result (do not blindly pick one side).\n"+
 			"   Watch for **semantic collisions** (two PRs chose the same counter value, migration "+
 			"ID, or ADR number): keep both contributions with the correct identifiers.\n"+
-			"3. `git add -A` to stage all resolved files.\n"+
-			"4. `git commit -m \"chore(merge-train): resolve conflict for #%d\"` to finalize.\n"+
-			"5. Run the project's build + test commands (`go build ./...` and `go vet ./...` at minimum).\n"+
+			"3. Stage only the files you resolved (e.g. `git add <file>` per file) — do **NOT** run "+
+			"`git add -A` and do **NOT** touch the generated path(s) above.\n"+
+			"4. **Do NOT commit.** Leave the merge in progress — the engine finalizes the commit after "+
+			"regenerating the generated path(s).\n"+
+			"5. Run the project's build + test commands (`go build ./...` and `go vet ./...` at minimum) "+
+			"if they don't depend on the generated path(s) above.\n"+
 			"6. **Do NOT emit `FABRIK_STAGE_COMPLETE`.** The merge-train engine takes over after resolution.\n\n"+
-			"If the conflict cannot be resolved safely (ambiguous intent, requires human judgment), "+
-			"abort with `git merge --abort` and explain in your response why resolution is not possible.\n",
-		prSHA, memberItem.Number, memberItem.Number,
+			"If the non-generated conflict cannot be resolved safely (ambiguous intent, requires human "+
+			"judgment), abort with `git merge --abort` and explain in your response why resolution is not "+
+			"possible.\n",
+		prSHA, memberItem.Number, formatPathList(generatedPaths),
 	)
 	return gh.Comment{
 		ID:         "merge-train-conflict-synthetic",
@@ -860,20 +908,42 @@ func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string) gh.Comme
 	}
 }
 
+// formatPathList renders paths as a markdown bullet list for embedding in a synthetic
+// Claude comment.
+func formatPathList(paths []string) string {
+	var b strings.Builder
+	for _, p := range paths {
+		b.WriteString("- `")
+		b.WriteString(p)
+		b.WriteString("`\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // resolveConflictWithClaude invokes Claude inline to resolve merge conflicts in the
-// trial branch worktree. Returns (true, nil) if resolution succeeded (no conflict markers
-// remain and the resolution is committed), (false, nil) if the conflict is genuinely
-// unresolvable (the caller ejects the member), or (false, non-nil) if resolution could not
-// even be attempted — currently only a claudeUsageLimitError (ADR-1120). Callers must treat
-// the two false cases differently: an account-wide usage-limit hit is not evidence this
-// member's conflict is unresolvable, so it must not be ejected.
-func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, opts InvokeOptions) (bool, error) {
+// trial branch worktree. Returns (true, nil) if resolution succeeded, (false, nil) if
+// the conflict is genuinely unresolvable (the caller ejects the member), or (false,
+// non-nil) if resolution could not even be attempted — currently only a
+// claudeUsageLimitError (ADR-1120). Callers must treat the two false cases
+// differently: an account-wide usage-limit hit is not evidence this member's conflict
+// is unresolvable, so it must not be ejected.
+//
+// generatedPaths, when non-empty, names conflicted paths that are declared generated
+// files (FR-5's mixed case): Claude is instructed to leave them untouched and to stop
+// once its own part is staged, without committing. In that mode "resolution succeeded"
+// means only the non-generated portion is clear of conflict markers — the generated
+// path(s) are expected to still be unmerged, the unscoped `git diff --check` and the
+// commit are both deferred to regenerateAndCommit, which runs after this returns and
+// owns finishing the commit for the whole conflict. When generatedPaths is empty this
+// function's behavior is unchanged from before FR-5: it also runs the unscoped check
+// and commits the resolution itself.
+func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, opts InvokeOptions) (bool, error) {
 	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
 		e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
 		return false, &claudeUsageLimitError{Message: "account usage-limit suspension active"}
 	}
 
-	comment := buildTrainConflictComment(memberItem, prSHA)
+	comment := buildTrainConflictComment(memberItem, prSHA, generatedPaths)
 
 	_, _, _, err := e.claude.InvokeForComments(ctx, holdingStg, memberItem, []gh.Comment{comment}, trainWorkDir, opts)
 	var limitErr *claudeUsageLimitError
@@ -890,13 +960,34 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	}
 	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
 
-	// Check whether conflicts remain after Claude's work.
-	if remaining, err := unmergedPaths(trainWorkDir); err != nil {
+	generatedSet := make(map[string]bool, len(generatedPaths))
+	for _, p := range generatedPaths {
+		generatedSet[p] = true
+	}
+
+	// Check whether conflicts remain after Claude's work — excluding the declared
+	// generated path(s), which legitimately remain unmerged awaiting regeneration.
+	remaining, err := unmergedPaths(trainWorkDir)
+	if err != nil {
 		e.logf(memberItem.Number, "merge-train", "could not check for remaining conflicts: %v\n", err)
 		return false, nil
-	} else if len(remaining) > 0 {
-		e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution: %s\n", strings.Join(remaining, ", "))
+	}
+	var remainingNonGenerated []string
+	for _, p := range remaining {
+		if !generatedSet[p] {
+			remainingNonGenerated = append(remainingNonGenerated, p)
+		}
+	}
+	if len(remainingNonGenerated) > 0 {
+		e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution: %s\n", strings.Join(remainingNonGenerated, ", "))
 		return false, nil
+	}
+
+	if len(generatedPaths) > 0 {
+		// Mixed case: the generated path(s) are still unmerged by design. The unscoped
+		// `git diff --check` and the commit are deferred to regenerateAndCommit, which
+		// runs next and owns finalizing the single commit across both parts.
+		return true, nil
 	}
 
 	// Check that there are no staged conflict markers in the diff.
@@ -926,6 +1017,137 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	}
 
 	return true, nil
+}
+
+// regenerateAndCommit regenerates each declared generated-file spec's artefact by
+// running its regen command (deduplicated so a shared command runs once, not once per
+// path), stages the result, verifies the working tree is fully resolved, and commits if
+// a merge is still in progress. Returns (true, "") on success, or (false, reason) on any
+// failure — resolveTrainConflict's caller must eject the member on failure (FR-4) rather
+// than falling through to Claude. By the time this runs, any non-generated portion of
+// the conflict has already been resolved by Claude (or there was none), so a failure
+// here is specific to the regeneration step itself.
+func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, specs []generatedFileSpec) (bool, string) {
+	seenCommands := make(map[string]bool, len(specs))
+	for _, spec := range specs {
+		cmdKey := strings.Join(spec.Command, "\x00")
+		if seenCommands[cmdKey] {
+			continue
+		}
+		seenCommands[cmdKey] = true
+
+		if len(spec.Command) == 0 {
+			reason := fmt.Sprintf("regeneration for %s has an empty declared command", spec.Path)
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
+		}
+		regenCmd := exec.Command(spec.Command[0], spec.Command[1:]...)
+		regenCmd.Dir = wtDir
+		if out, err := regenCmd.CombinedOutput(); err != nil {
+			reason := fmt.Sprintf("regeneration command %q failed: %v: %s", strings.Join(spec.Command, " "), err, strings.TrimSpace(string(out)))
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
+		}
+	}
+
+	for _, spec := range specs {
+		addCmd := exec.Command("git", "add", "--", spec.Path)
+		addCmd.Dir = wtDir
+		if out, err := addCmd.CombinedOutput(); err != nil {
+			reason := fmt.Sprintf("could not stage regenerated %s: %v: %s", spec.Path, err, strings.TrimSpace(string(out)))
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
+		}
+	}
+
+	if remaining, err := unmergedPaths(wtDir); err != nil {
+		reason := fmt.Sprintf("could not verify merge state after regeneration: %v", err)
+		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+		return false, reason
+	} else if len(remaining) > 0 {
+		reason := fmt.Sprintf("conflict markers remain after regeneration: %s", strings.Join(remaining, ", "))
+		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+		return false, reason
+	}
+
+	diffCmd := exec.Command("git", "diff", "--check")
+	diffCmd.Dir = wtDir
+	if out, err := diffCmd.CombinedOutput(); err != nil {
+		reason := fmt.Sprintf("git diff --check reports conflicts after regeneration: %s", strings.TrimSpace(string(out)))
+		e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+		return false, reason
+	}
+
+	checkMergeHead := exec.Command("git", "rev-parse", "--verify", "MERGE_HEAD")
+	checkMergeHead.Dir = wtDir
+	if err := checkMergeHead.Run(); err == nil {
+		commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+			fmt.Sprintf("chore(merge-train): resolve conflict for #%d (regenerated generated file(s))", memberItem.Number))
+		commitCmd.Dir = wtDir
+		if out, err := commitCmd.CombinedOutput(); err != nil {
+			reason := fmt.Sprintf("could not commit after regeneration: %s", strings.TrimSpace(string(out)))
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
+		}
+	}
+
+	return true, ""
+}
+
+// resolveTrainConflict classifies a merge conflict's paths against the declared
+// generated-file set and dispatches accordingly:
+//   - A conflict confined entirely to generated paths is regenerated without invoking
+//     Claude (FR-1/FR-2).
+//   - A conflict with no generated paths dispatches Claude exactly as before FR-1..5.
+//   - A mixed conflict (FR-5) dispatches Claude for the non-generated part first, then
+//     regenerates. Regeneration must always run last: if a co-conflicted non-generated
+//     path is itself one of the generator's own inputs (e.g. one of the four docs/*.md
+//     files generate-llms-full.sh reads), regenerating before Claude resolves it would
+//     read stale/conflicted source content.
+//
+// Returns (resolved, reason, err). err carries only the ADR-1120 usage-limit sentinel
+// and is otherwise nil — the caller must not eject on a non-nil err (see
+// resolveConflictWithClaude's own doc comment). When resolved is false and err is nil,
+// reason is a diagnosable message for ejectMember; an empty reason tells the caller to
+// fall back to its own generic "unresolvable conflict" message.
+func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, opts InvokeOptions) (bool, string, error) {
+	paths, err := unmergedPaths(wtDir)
+	if err != nil {
+		// Can't classify conflicted paths — fall back to the plain Claude path exactly
+		// as before this FR-1..5 change introduced generated-path awareness.
+		e.logf(memberItem.Number, "merge-train", "could not list conflicted paths, falling back to Claude: %v\n", err)
+		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, opts)
+		return resolved, "", resolveErr
+	}
+
+	matched, nonGenerated := classifyConflictedPaths(e.generatedFileSet(), paths)
+
+	if len(matched) == 0 {
+		// No generated paths involved — unchanged behavior.
+		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, opts)
+		return resolved, "", resolveErr
+	}
+
+	if len(nonGenerated) == 0 {
+		// All conflicted paths are declared generated (FR-1/FR-2) — skip Claude entirely.
+		e.logf(memberItem.Number, "merge-train", "conflict for #%d confined to declared generated path(s) — regenerating instead of dispatching Claude\n", memberItem.Number)
+		resolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched)
+		return resolved, reason, nil
+	}
+
+	// Mixed (FR-5): dispatch Claude for the non-generated part first; regeneration
+	// always runs after, never before.
+	generatedPathNames := make([]string, len(matched))
+	for i, spec := range matched {
+		generatedPathNames[i] = spec.Path
+	}
+	resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, generatedPathNames, opts)
+	if resolveErr != nil || !resolved {
+		return resolved, "", resolveErr
+	}
+
+	regenResolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched)
+	return regenResolved, reason, nil
 }
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
