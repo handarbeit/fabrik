@@ -40,6 +40,13 @@ func TestSwitchTrainMode(t *testing.T) {
 
 	env := LoadEnv(t)
 
+	// Mirrors RestartFabrikTestBed (lifecycle.go): register the bring-back-up
+	// before stopping, so a failure between Stop and Start (e.g. writeEnvFileValue
+	// erroring, or StartFabrikTestBed itself failing) still leaves the bed running
+	// instead of down for whoever/whatever uses it next. StartFabrikTestBed is a
+	// no-op if the bed is already up, so this is harmless on the successful path.
+	t.Cleanup(func() { StartFabrikTestBed(t, env) })
+
 	t.Logf("switching test bed to FABRIK_MERGE_TRAIN=%s", mode)
 	StopFabrikTestBed(t, env)
 
