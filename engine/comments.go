@@ -105,6 +105,24 @@ func isBotServiceNotice(c gh.Comment) bool {
 	return false
 }
 
+// filterBotServiceNotices drops non-actionable bot service/status notices
+// (see isBotServiceNotice) from comments, preserving order. This is the single
+// chokepoint applied inside processComments to the fully-assembled working
+// slice — covering both findNewComments-sourced comments (already filtered,
+// so this is idempotent for them) and comments merged in from
+// item.LinkedPRReviewThreadComments or a reinvoke dispatcher's build() output,
+// neither of which is otherwise filtered for bot notices (#1221).
+func filterBotServiceNotices(comments []gh.Comment) []gh.Comment {
+	var filtered []gh.Comment
+	for _, c := range comments {
+		if isBotServiceNotice(c) {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	return filtered
+}
+
 // filterHuman filters a comment slice down to comments authored by a human —
 // excluding bot logins (gh.IsBotLogin) and comments with no resolvable author
 // (fail closed: an unattributed author, e.g. a deleted GitHub account, is
@@ -178,6 +196,22 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			}
 			comments = append(comments, c)
 		}
+	}
+
+	// Single chokepoint (#1221): apply isBotServiceNotice to the fully-assembled
+	// working slice, regardless of which dispatcher invoked processComments or
+	// which collection (item.Comments via findNewComments, or
+	// item.LinkedPRReviewThreadComments via the merge above) a comment came
+	// from. Comments sourced from findNewComments are already filtered — this
+	// is idempotent for them — but the merge above and the three reinvoke
+	// dispatchers' build() output are not otherwise filtered, and this is what
+	// closes that gap. If every candidate comment was a bot notice, return
+	// before any reaction/label/worktree/invocation side effect, mirroring the
+	// claudeSuspendedUntilTime early-return above.
+	comments = filterBotServiceNotices(comments)
+	if len(comments) == 0 {
+		e.logf(item.Number, "comments", "all candidate comments were bot service notices; skipping\n")
+		return nil
 	}
 
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",

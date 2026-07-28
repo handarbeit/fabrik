@@ -1075,3 +1075,90 @@ func TestCommentProcessingExtendTurnsNoProgress(t *testing.T) {
 		t.Errorf("MaxTurnsOverride = %d, want %d (2× budget pre-granted)", calls[0].opts.MaxTurnsOverride, budget2x)
 	}
 }
+
+// TestProcessComments_AllNoticeReviewThreadComments_NoOp verifies the #1221
+// chokepoint: when the caller supplies no comments and every unresolved
+// item.LinkedPRReviewThreadComments entry is a bot service notice, the merge
+// pulls the notice into the working slice but filterBotServiceNotices then
+// empties it, so processComments returns before any side effect — no Claude
+// invocation, no editing label, no reaction.
+func TestProcessComments_AllNoticeReviewThreadComments_NoOp(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+	item := gh.ProjectItem{
+		Number: 40,
+		Body:   "spec",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "RT_notice", DatabaseID: 901, ReviewThreadID: "thread1", Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
+		},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, nil); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected 0 InvokeForComments calls, got %d", len(claude.forCommentsCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:editing" {
+			t.Errorf("expected no fabrik:editing label added, got %v", client.addLabelCalls)
+		}
+	}
+	if len(client.addCommentReactionCalls) != 0 {
+		t.Errorf("expected 0 AddCommentReaction calls, got %v", client.addCommentReactionCalls)
+	}
+	if len(client.addPRReviewCommentReactionCalls) != 0 {
+		t.Errorf("expected 0 AddPRReviewCommentReaction calls, got %v", client.addPRReviewCommentReactionCalls)
+	}
+}
+
+// TestProcessComments_MixedNoticeAndLegitReviewThreadComments_FiltersOnlyNotice
+// verifies the #1221 chokepoint doesn't over-filter: a bot service notice
+// mixed with a genuine review comment in item.LinkedPRReviewThreadComments
+// results in exactly one InvokeForComments call, and only the legitimate
+// comment reaches it.
+func TestProcessComments_MixedNoticeAndLegitReviewThreadComments_FiltersOnlyNotice(t *testing.T) {
+	skipIfNoGit(t)
+
+	var seenComments []gh.Comment
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			seenComments = comments
+			return "addressed feedback", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+	item := gh.ProjectItem{
+		Number: 41,
+		Body:   "spec",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "RT_notice", DatabaseID: 902, ReviewThreadID: "thread1", Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
+			{ID: "RT_legit", DatabaseID: 903, ReviewThreadID: "thread2", Author: "coderabbitai[bot]", Body: "CHANGES_REQUESTED: this loop never terminates."},
+		},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, nil); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected exactly 1 InvokeForComments call, got %d", len(claude.forCommentsCalls))
+	}
+	if len(seenComments) != 1 {
+		t.Fatalf("expected exactly 1 comment passed to InvokeForComments, got %d: %v", len(seenComments), seenComments)
+	}
+	if seenComments[0].ID != "RT_legit" {
+		t.Errorf("expected the legitimate comment to survive, got %q", seenComments[0].ID)
+	}
+}

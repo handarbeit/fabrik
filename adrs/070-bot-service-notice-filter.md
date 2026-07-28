@@ -1,7 +1,7 @@
 # ADR 070: Bot Service-Notice Filter and No-Work-Needed Reply Suppression
 
 **Date**: 2026-07-26
-**Status**: Accepted
+**Status**: Superseded in part by ADR-1221 (the item.Comments-only scoping rationale is reversed; the pre-admission filter in findNewComments and the watermarking settle scan are unchanged)
 **Issue**: #1088 — Runaway-loop fix (2/4): don't spawn a worker or reply for non-actionable bot service-notices
 
 ## Context

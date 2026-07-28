@@ -130,6 +130,75 @@ func TestCatchUpLoop_NonYolo_NoThreads_NoAdvance(t *testing.T) {
 	}
 }
 
+// TestCatchUpLoop_ReviewReinvoke_AllNoticeThread_NoInvocation verifies the
+// #1221 chokepoint end to end via dispatchReviewReinvoke: when every
+// unresolved review-thread comment is a bot service notice,
+// buildReviewThreadComments (used by both precheck and build) does not
+// exclude it, so the reinvoke still dispatches and ReviewCycles is still
+// incremented — but processComments's chokepoint filter empties the working
+// slice before Claude is invoked. This is the documented, accepted trade-off
+// (dispatch/cycle-count waste is left unfixed; only invocation is guarded).
+func TestCatchUpLoop_ReviewReinvoke_AllNoticeThread_NoInvocation(t *testing.T) {
+	noticeComment := gh.Comment{
+		ID:             "PRRC_notice_1",
+		DatabaseID:     302,
+		Author:         "gemini-code-assist[bot]",
+		Body:           "You have reached your daily quota limit.",
+		ReviewThreadID: "RT_notice_1",
+	}
+
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 57,
+						ItemID: "PVTI_57",
+						Status: "Implement",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Implement:complete"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRReviewThreadComments = []gh.Comment{noticeComment}
+			return nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.claude = claude
+	eng.cfg.MaxReviewCycles = 5
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#57"] = true
+	eng.mayNeedWorkMu.Unlock()
+
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	eng.wg.Wait()
+
+	// Documented, accepted trade-off: ReviewCycles still increments because the
+	// dispatch/cycle gate uses the unfiltered buildReviewThreadComments count.
+	snap57, _ := eng.store.Get("owner/repo", 57)
+	if snap57.ReviewCycles("Implement") != 1 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 1 (dispatch/cycle-count gate is unfiltered by design)", snap57.ReviewCycles("Implement"))
+	}
+
+	// The chokepoint fix: no Claude invocation for an all-notice thread.
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected 0 InvokeForComments calls (all-notice review thread), got %d", len(claude.forCommentsCalls))
+	}
+}
+
 // TestProcessComments_MergesReviewThreadComments verifies that processComments
 // automatically merges unresolved PR review thread comments from
 // item.LinkedPRReviewThreadComments into the working slice. This closes the
