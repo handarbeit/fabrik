@@ -37,3 +37,4 @@ contributors and future maintainers.
 | [1146](1146-stall-detection-corrective-reinvocation.md) | Stall Detection and Corrective Re-Invocation | Accepted |
 | [1189](1189-pruefer-inline-review-comments.md) | Pruefer inline review comments (structured findings, client-side anchor validation, body-demotion) | Accepted |
 | [1216](1216-review-gate-at-landing-decision.md) | Review gate checked at the landing decision | Accepted |
+| [1222](1222-consolidate-merge-train-worker-liveness.md) | Consolidate Merge-Train Worker Liveness Into `itemstate.Store` | Accepted |
