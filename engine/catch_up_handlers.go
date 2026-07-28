@@ -89,6 +89,21 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
 	// have nothing to address; fall through to Phase 2.
 	if syntheticComments := e.buildReviewThreadComments(pctx.item); len(syntheticComments) > 0 {
+		// #1207 guard 2: an item already in the GitHub auto-merge convergence
+		// flow (fabrik:auto-merge-enabled present) that has grown a fresh
+		// unresolved thread on its current head must have auto-merge disabled
+		// now — on this same poll, before the dispatch below — so GitHub
+		// cannot merge underneath the reinvoke this handler is about to fire.
+		// Scoped to current-head threads (excludes GitHub-marked isOutdated)
+		// so a thread against a superseded commit never triggers a needless
+		// disable. handleAutoMergeConvergence (Handler 3) never runs this poll
+		// for this item regardless — Handler 2 always claims and stops the
+		// chain below — so the disable must happen here, not there.
+		if hasLabel(pctx.item.Labels, "fabrik:auto-merge-enabled") {
+			if blocking := e.currentHeadReviewThreadComments(pctx.item); len(blocking) > 0 {
+				e.disableAutoMergeForReviewThreads(pctx.item, len(blocking))
+			}
+		}
 		// Guard: if a goroutine from a previous poll cycle is still running
 		// dispatchReviewReinvoke for this item, skip the entire reinvoke path —
 		// including cycle-limit checks — to avoid pausing an item while valid

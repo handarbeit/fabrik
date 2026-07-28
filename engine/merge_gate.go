@@ -199,6 +199,49 @@ func (e *Engine) reenableAutoMergeAfterRebase(item gh.ProjectItem) {
 	}
 }
 
+// disableAutoMergeForReviewThreads is #1207 guard 2: called from
+// handleReviewGate when an item already carrying fabrik:auto-merge-enabled
+// has grown a fresh unresolved review thread on its current head. Disables
+// GitHub's real merge machinery so GitHub cannot merge underneath the
+// review-reinvoke loop (§2.9) that handleReviewGate is about to dispatch.
+//
+// Branches on LinkedPRIsMergeQueueEnabled exactly like reenableAutoMergeAfterRebase:
+// DequeuePullRequest on a queue-enabled repo (the recovery path there is
+// re-enqueue, not native auto-merge — dequeuing also keeps this from being
+// misread as a genuine ejection by checkAutoMergeConvergence's
+// ejection-recovery ladder, since removing fabrik:auto-merge-enabled stops
+// that function from running for this item at all), DisablePullRequestAutoMerge
+// otherwise.
+//
+// Mutation before label removal is deliberate: if the GitHub mutation fails,
+// fabrik:auto-merge-enabled stays in place and this same disable is retried
+// next poll. If the label were removed first and the mutation then failed,
+// Fabrik would stop watching the PR while GitHub could still merge it —
+// recreating the exact race this issue closes. On success, removing the
+// label lets the existing mechanisms do the rest without new state: it
+// removes handleAutoMergeConvergence from the Phase 1 chain for this item, and
+// its later re-application (once the review-reinvoke loop resolves the
+// thread) is handled by poll.go's Phase 2 Validate branch, which already
+// retries attemptMergeOnValidate on every poll while the label is absent —
+// the same remove-then-reapply idiom pauseForMergeGroupStall already uses.
+func (e *Engine) disableAutoMergeForReviewThreads(item gh.ProjectItem, blockingCount int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "yolo-merge-guard", "disabling auto-merge: %d unresolved review thread(s) on %s\n",
+		blockingCount, item.LinkedPRHeadSHA)
+
+	var disableErr error
+	if item.LinkedPRIsMergeQueueEnabled {
+		disableErr = e.client.DequeuePullRequest(owner, repo, item.LinkedPRNumber)
+	} else {
+		disableErr = e.client.DisablePullRequestAutoMerge(owner, repo, item.LinkedPRNumber)
+	}
+	if disableErr != nil {
+		e.logf(item.Number, "warn", "could not disable auto-merge for PR #%d: %v — will retry\n", item.LinkedPRNumber, disableErr)
+		return
+	}
+	e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
+}
+
 // checkAutoMergeConvergence monitors a yolo issue that has entered the GitHub
 // native auto-merge convergence flow (fabrik:auto-merge-enabled is present).
 // Called from Phase 1 of the catch-up loop; replaces checkMergeabilityGate and
