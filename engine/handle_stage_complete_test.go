@@ -570,3 +570,51 @@ func TestHandleStageComplete_NoAwaitingInput_NoSpuriousRemove(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleStageComplete_ReviewGate_BlocksImmediateMergeTrainAdvance covers the
+// wait_for_ci-independent instance of #1216. With wait_for_reviews: true and no
+// wait_for_ci, handleStageComplete calls attemptMergeOnValidate at the top of the
+// function — long before its own fabrik:awaiting-review seeding runs — so under
+// merge_train: on the item used to reach the holding column with an outstanding
+// reviewer and nothing downstream that would ever re-check.
+func TestHandleStageComplete_ReviewGate_BlocksImmediateMergeTrainAdvance(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+	}
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         1,
+		ItemID:         "PVTI_1",
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:yolo"},
+		LinkedPRNumber: 40,
+	}
+	validateStage := &stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}
+
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
+
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "OPT_BatchHold" {
+			t.Error("item must not advance to the merge-train holding column while a reviewer is outstanding")
+		}
+	}
+	var sawAwaitingReview bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			sawAwaitingReview = true
+		}
+	}
+	if !sawAwaitingReview {
+		t.Error("expected fabrik:awaiting-review to be applied when the landing gate blocks")
+	}
+}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // testEngineForMerge returns a minimal engine wired for attemptMergeOnValidate tests.
@@ -836,4 +838,453 @@ func TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses(t *testing.T) {
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("cruise item must not be advanced to holding stage, got %d status update(s)", len(client.updateStatusCalls))
 	}
+}
+
+// ── #1216: wait_for_reviews enforced at the landing decision ─────────────────
+//
+// The review gate used to be armed only by the catch-up loop's handleReviewGate,
+// which no-ops while !hasComplete (#617) and is ordered ahead of the handler that
+// clears CI — so it could never arm before attemptMergeOnValidate ran. These tests
+// pin the gate at the landing decision itself, for both merge_train modes.
+
+// TestAttemptMergeOnValidate_ReviewGate_BlocksAutoMerge verifies that with
+// merge_train: off and an outstanding reviewer, no landing action is taken and
+// fabrik:awaiting-review is applied (FR-1).
+func TestAttemptMergeOnValidate_ReviewGate_BlocksAutoMerge(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("expected (false, nil) when the review gate blocks, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the review gate blocks")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while reviewers are outstanding, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called while reviewers are outstanding, got %d call(s)", len(client.mergePRCalls))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called while reviewers are outstanding, got %d call(s)",
+			len(client.enqueuePullRequestCalls))
+	}
+	if !hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("expected fabrik:awaiting-review to be applied when the landing gate blocks")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_BlocksAdvanceToQueued is the FR-3 twin of
+// the test above: under merge_train: on, an outstanding reviewer must also prevent
+// the advance to the holding column. Turning the train on must not weaken the gate.
+func TestAttemptMergeOnValidate_ReviewGate_BlocksAdvanceToQueued(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+	}
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", LinkedPRNumber: 10}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("expected (false, nil) when the review gate blocks, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the review gate blocks")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("item must not advance to the holding column while reviewers are outstanding, got %d status update(s)",
+			len(client.updateStatusCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must not be added while the review gate blocks")
+		}
+	}
+	if !hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("expected fabrik:awaiting-review to be applied when the landing gate blocks")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_ClearedProceeds verifies the gate opens
+// once no reviewers are outstanding and at least one review has been submitted —
+// the landing decision then runs exactly as before.
+func TestAttemptMergeOnValidate_ReviewGate_ClearedProceeds(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{State: "APPROVED"}}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected enabled=true once the review gate has cleared")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("fabrik:awaiting-review must not be applied when the gate is clear")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_ResolvesPRViaFallback covers the
+// base:<branch> case, where closedByPullRequestsReferences is structurally empty
+// so item.LinkedPRNumber is always 0: the gate must resolve the PR number via
+// FetchLinkedPR rather than silently skipping itself.
+// TestAttemptMergeOnValidate_ReviewGate_IgnoresStaleClosedPR pins the State/Merged
+// filter on the FetchLinkedPR fallback. FetchLinkedPR queries state=all, so a stale
+// PR from a previous cycle on the same fabrik/issue-N branch can be returned. Gating
+// on it would read the wrong PR's review state — here the stale PR carries an
+// outstanding reviewer, which would block a landing that has nothing to do with it.
+// handleBrokenReviewLinkage applies the same filter to its own FetchLinkedPR result.
+func TestAttemptMergeOnValidate_ReviewGate_IgnoresStaleClosedPR(t *testing.T) {
+	waitTrue := true
+	reviewFetched := false
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// Stale PR from a previous cycle: closed, never merged.
+			return &gh.PRDetails{Number: 77, HeadSHA: "sha1", State: "closed"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			reviewFetched = true
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewFetched = true
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewFetched {
+		t.Error("the gate must not read review state from a closed PR that merely shares the branch name")
+	}
+	if hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("a stale closed PR must not cause the landing to be held for review")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_IgnoresAlreadyMergedPR is the Merged half of
+// the same filter: a PR that already merged (e.g. via a race with a retried landing)
+// is not a PR whose review state should decide this landing.
+func TestAttemptMergeOnValidate_ReviewGate_IgnoresAlreadyMergedPR(t *testing.T) {
+	waitTrue := true
+	reviewFetched := false
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, HeadSHA: "sha1", State: "closed", Merged: true}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			reviewFetched = true
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewFetched = true
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewFetched {
+		t.Error("the gate must not read review state from an already-merged PR")
+	}
+}
+
+func TestAttemptMergeOnValidate_ReviewGate_ResolvesPRViaFallback(t *testing.T) {
+	waitTrue := true
+	var gatedPR int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, HeadSHA: "sha1", State: "open"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			gatedPR = prNumber
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("expected (false, nil) when the review gate blocks, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the review gate blocks")
+	}
+	if gatedPR != 77 {
+		t.Errorf("review gate checked PR #%d, want #77 resolved via FetchLinkedPR fallback", gatedPR)
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while reviewers are outstanding, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_FetchErrorBlocks verifies the conservative
+// failure mode: an unreadable review state blocks the landing rather than clearing
+// the gate on unknown data.
+func TestAttemptMergeOnValidate_ReviewGate_FetchErrorBlocks(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, errors.New("boom")
+		},
+		// Requests succeed and report nobody outstanding — trusting this side alone
+		// would falsely clear the gate. Both sides must be discarded together.
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("expected (false, nil) on a review-fetch error, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false on a review-fetch error")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called when review state is unknown, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_FetchErrorLogsDistinctly pins the
+// operator-facing signal. A review-fetch failure and a PR nobody has reviewed yet
+// both reach the same blocking exit with outstanding empty and hasReviews false,
+// so without a distinct message an operator watching a GitHub API outage would see
+// "waiting for initial review submission" and have no indication the gate is
+// actually blocking on unknown state.
+func TestAttemptMergeOnValidate_ReviewGate_FetchErrorLogsDistinctly(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, errors.New("boom")
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	eventsCh := make(chan tui.Event, 32)
+	eng.events = eventsCh
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("expected (false, nil) on a review-fetch error, got err %v", err)
+	}
+
+	close(eventsCh)
+	var sawUnreadable, sawInitialSubmission bool
+	for ev := range eventsCh {
+		le, ok := ev.(tui.LogEvent)
+		if !ok || le.Tag != "awaiting-review" {
+			continue
+		}
+		if strings.Contains(le.Message, "review state unreadable") {
+			sawUnreadable = true
+		}
+		if strings.Contains(le.Message, "waiting for initial review submission") {
+			sawInitialSubmission = true
+		}
+	}
+	if !sawUnreadable {
+		t.Error("expected the hold to report the review state as unreadable on a fetch error")
+	}
+	if sawInitialSubmission {
+		t.Error("a fetch error must not be reported as 'waiting for initial review submission' — " +
+			"that message means nobody has reviewed yet, not that review state is unknown")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_LinkedPRFetchErrorBlocks pins the
+// distinction between "no PR" and "could not read the PR". On a base:<branch>
+// repo LinkedPRNumber is always 0, so FetchLinkedPR is the gate's only PR-resolution
+// route — treating a transient failure there as "nothing to gate on" would land the
+// item with the gate never evaluated at all, which is the exact FR-1 failure this
+// issue is about.
+func TestAttemptMergeOnValidate_ReviewGate_LinkedPRFetchErrorBlocks(t *testing.T) {
+	waitTrue := true
+	var reviewFetches int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("boom")
+		},
+		// Would report a clear gate if it were ever consulted — it must not be,
+		// since there is no PR number to key it on.
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewFetches++
+			return []gh.PRReview{{State: "APPROVED"}}, nil
+		},
+	}
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Labels: []string{"base:dev"}}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
+	if err != nil {
+		t.Fatalf("expected (false, nil) on a linked-PR fetch error, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the linked PR could not be read")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("item must not advance while review state is unknown, got %d status update(s)",
+			len(client.updateStatusCalls))
+	}
+	if reviewFetches != 0 {
+		t.Errorf("review state must not be fetched without a resolved PR number, got %d call(s)", reviewFetches)
+	}
+	if !hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("expected fabrik:awaiting-review to be applied so the review timeout can anchor")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_NoPRDoesNotBlock verifies that a
+// definitively absent PR does not strand the item: no PR means no reviewer
+// requests, so the landing proceeds (handleBrokenReviewLinkage owns the
+// broken-linkage pause). Contrast with the fetch-error case above.
+func TestAttemptMergeOnValidate_ReviewGate_NoPRDoesNotBlock(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil
+		},
+	}
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected the advance to proceed when no PR exists, got %d status update(s)", len(client.updateStatusCalls))
+	}
+	if hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("fabrik:awaiting-review must not be applied when there is no PR to review")
+	}
+}
+
+// TestAttemptMergeOnValidate_ReviewGate_OptOutCostsNothing pins the opt-in guard:
+// a stage without wait_for_reviews performs no review fetches at all, and no extra
+// FetchLinkedPR call. This is the no-regression guard for every other
+// TestAttemptMergeOnValidate_* case in this file, all of which leave WaitForReviews nil.
+func TestAttemptMergeOnValidate_ReviewGate_OptOutCostsNothing(t *testing.T) {
+	var linkedPRCalls, reviewCalls, requestCalls int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			linkedPRCalls++
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reviewCalls++
+			return nil, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			requestCalls++
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewCalls != 0 || requestCalls != 0 {
+		t.Errorf("review state must not be fetched when wait_for_reviews is unset: %d review, %d request call(s)",
+			reviewCalls, requestCalls)
+	}
+	if linkedPRCalls != 1 {
+		t.Errorf("expected exactly 1 FetchLinkedPR call (the auto-merge path's own), got %d", linkedPRCalls)
+	}
+}
+
+// hasAddLabelCall reports whether the mock recorded an AddLabelToIssue call for label.
+func hasAddLabelCall(client *mockGitHubClient, label string) bool {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == label {
+			return true
+		}
+	}
+	return false
 }

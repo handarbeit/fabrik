@@ -36,3 +36,4 @@ contributors and future maintainers.
 | [1114](1114-pruefer-tui-architecture.md) | Pruefer terminal UI architecture (event plumbing, retention, rate-limit surfacing) | Accepted |
 | [1146](1146-stall-detection-corrective-reinvocation.md) | Stall Detection and Corrective Re-Invocation | Accepted |
 | [1189](1189-pruefer-inline-review-comments.md) | Pruefer inline review comments (structured findings, client-side anchor validation, body-demotion) | Accepted |
+| [1216](1216-review-gate-at-landing-decision.md) | Review gate checked at the landing decision | Accepted |

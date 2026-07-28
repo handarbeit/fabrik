@@ -2895,3 +2895,191 @@ func TestGroupQueuedByRepo_ExcludesPausedAndClosed(t *testing.T) {
 		t.Errorf("expected only clean members #1 and #4, got %+v", groups[0].items)
 	}
 }
+
+// ── #1216: review gate armed at the landing decision ─────────────────────────
+
+// reviewGateLandingClient builds a mock board where a single Validate item sits in
+// the CI-await window (fabrik:awaiting-ci, no stage:Validate:complete) and CI turns
+// green on this very poll pass, while a human reviewer is still outstanding on the
+// linked PR. This is the interleaving that shipped broken: CI defers completion →
+// a reviewer is requested → CI clears. It must be exercised in a SINGLE poll call,
+// because handleReviewGate skipping itself and handleMergeAndCIGates clearing CI
+// happen in the same Phase 1 chain, with Phase 2 landing the item immediately after.
+func reviewGateLandingClient() *mockGitHubClient {
+	mergeable := true
+	return &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 30,
+						ItemID: "PVTI_30",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"fabrik:awaiting-ci"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRNumber = 40
+			return nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 40, State: "open", HeadSHA: "sha1"}, nil
+		},
+		// mergeable_state=clean → PRMergeReady → the CI gate clears this pass.
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return &mergeable, "clean", nil
+		},
+		// Reviewer requested during the CI-await window; no review submitted yet.
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "verveguy"}}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+	}
+}
+
+// TestValidateLanding_ReviewGateBlocks_WhenCIClearsSamePoll is the merge_train: off
+// reproduction of #1216. The CI gate must clear (stage:Validate:complete added) while
+// the review gate holds the landing: no auto-merge, no enqueue, no direct merge.
+func TestValidateLanding_ReviewGateBlocks_WhenCIClearsSamePoll(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &trueVal, WaitForReviews: &trueVal},
+		{Name: "Done", Order: 2, CleanupWorktree: true},
+	}
+	client := reviewGateLandingClient()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.Yolo = true
+	eng.cfg.MergeTrain = "off"
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	var sawComplete, sawAwaitingReview bool
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "stage:Validate:complete":
+			sawComplete = true
+		case "fabrik:awaiting-review":
+			sawAwaitingReview = true
+		}
+	}
+	if !sawComplete {
+		t.Error("expected stage:Validate:complete once the CI gate cleared")
+	}
+	if !sawAwaitingReview {
+		t.Error("expected fabrik:awaiting-review to be applied when the landing gate blocks")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("auto-merge must not be enabled while a reviewer is outstanding, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called while a reviewer is outstanding, got %d call(s)", len(client.mergePRCalls))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called while a reviewer is outstanding, got %d call(s)",
+			len(client.enqueuePullRequestCalls))
+	}
+}
+
+// TestValidateLanding_ReviewGateBlocks_MergeTrainOn is the FR-3 twin: the same
+// interleaving must not advance the item into the merge train's holding column.
+// Under merge_train: on Fabrik is the merge authority, so there is no branch
+// protection to mask a missed gate.
+func TestValidateLanding_ReviewGateBlocks_MergeTrainOn(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &trueVal, WaitForReviews: &trueVal},
+		{Name: "Queued", Order: 2, HoldingStage: true},
+		{Name: "Done", Order: 3, CleanupWorktree: true},
+	}
+	client := reviewGateLandingClient()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.Yolo = true
+	eng.cfg.MergeTrain = "on"
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "OPT_Queued" {
+			t.Error("item must not advance to the merge-train holding column while a reviewer is outstanding")
+		}
+	}
+	if !hasAddLabelCallLocked(client, "fabrik:awaiting-review") {
+		t.Error("expected fabrik:awaiting-review to be applied when the landing gate blocks")
+	}
+}
+
+// TestValidateLanding_ReviewGateDoesNotArm_DuringGenuineCIAwait is the #617
+// non-regression guard (FR-4). While CI is genuinely still pending, Phase 1's
+// mergeAndCIGates claims the item, so attemptMergeOnValidate is never reached and
+// the landing gate must not apply fabrik:awaiting-review — even though no review
+// has been submitted yet.
+func TestValidateLanding_ReviewGateDoesNotArm_DuringGenuineCIAwait(t *testing.T) {
+	trueVal := true
+	mergeable := true
+	stgs := []*stages.Stage{
+		{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &trueVal, WaitForReviews: &trueVal},
+		{Name: "Done", Order: 2, CleanupWorktree: true},
+	}
+	client := reviewGateLandingClient()
+	// CI still running: a pending check run keeps the settle result Unsettled, so
+	// handleMergeAndCIGates claims the item before Phase 2 can run.
+	client.fetchPRMergeableFieldsFn = func(owner, repo string, prNumber int) (*bool, string, error) {
+		return &mergeable, "blocked", nil
+	}
+	client.fetchCheckRunsFn = func(owner, repo, sha string) ([]gh.CheckRun, error) {
+		return []gh.CheckRun{{Name: "build", Status: "in_progress"}}, nil
+	}
+	// No reviewer requested at all — the only way fabrik:awaiting-review could
+	// appear here is a spurious gate arming during the CI-await window.
+	client.fetchPRReviewRequestsFn = func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+		return nil, nil
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.Yolo = true
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			t.Error("fabrik:awaiting-review must not be applied while CI is genuinely still pending (#617)")
+		}
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must not be added while CI is genuinely still pending")
+		}
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("no landing action may run during genuine CI-await, got %d auto-merge call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// hasAddLabelCallLocked is hasAddLabelCall for callers already holding client.mu.
+func hasAddLabelCallLocked(client *mockGitHubClient, label string) bool {
+	for _, c := range client.addLabelCalls {
+		if c.labelName == label {
+			return true
+		}
+	}
+	return false
+}

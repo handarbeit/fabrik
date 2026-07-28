@@ -277,6 +277,181 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 	return outstanding, hasReviews
 }
 
+// reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
+// whether a wait_for_reviews stage must be held back from its landing decision
+// (auto-merge enable, enqueue, direct merge, or advance-to-Queued) because reviewer
+// requests are still outstanding.
+//
+// Why this exists separately from checkReviewGate: the catch-up loop's
+// handleReviewGate deliberately no-ops while !pctx.hasComplete (#617), and
+// pctx.hasComplete is frozen before the Phase 1 handler chain runs. Because
+// reviewGate is ordered ahead of mergeAndCIGates, there is no poll pass in which
+// the gate can arm after CI clears and before Phase 2 calls attemptMergeOnValidate
+// in that same iteration. Enforcing here — at the single landing-decision choke
+// point for both merge_train modes — closes that hole, and also covers the
+// wait_for_ci-independent case where handleStageComplete merges before its own
+// fabrik:awaiting-review seeding ever runs.
+//
+// Review state is always re-fetched live rather than read from
+// item.LinkedPRReviewRequests/LinkedPRReviews: the two callers of
+// attemptMergeOnValidate have different freshness guarantees (handleStageComplete's
+// item is the pre-stage snapshot, stale by design because reviewer assignment
+// happens inside MarkPRReady), and FR-2 requires the gate to see a reviewer
+// requested during the CI-await window.
+//
+// This check only blocks and labels. It deliberately does not duplicate the
+// bot-escalation ladder or the wait timeout — once it blocks, stage:X:complete is
+// present on the next poll, so handleReviewGate claims the item with
+// hasComplete == true and checkReviewGate owns all escalation from there. That
+// handoff is a hard dependency, not a convenience: nothing here bounds how long a
+// landing stays held, so every blocking exit relies on checkReviewGate's timers
+// firing off the state this function leaves behind, without the item ever
+// re-entering this function. See the comment on the final blocking exit below for
+// why that holds even in the "no reviewers requested, nothing reviewed yet" case,
+// which has no escalation ladder of its own.
+//
+// Returns false (landing may proceed) when the gate is not opted in, when the item
+// demonstrably has no PR (no PR means no reviewer requests; handleBrokenReviewLinkage
+// owns the broken-linkage pause), or when the gate has cleared. Returns true (and
+// idempotently applies fabrik:awaiting-review) otherwise, including on any fetch
+// error — blocking conservatively on unknown state, mirroring checkReviewGate's
+// base:<branch> fallback. "No PR" and "could not read the PR" are deliberately
+// distinguished: only the former is a safe reason to let a landing through.
+func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stage, owner, repo string) bool {
+	// Gate is opt-in — only active when wait_for_reviews: true. Checked before any
+	// PR resolution so stages that don't use the gate pay zero extra API calls.
+	if stage == nil || stage.WaitForReviews == nil || !*stage.WaitForReviews {
+		return false
+	}
+
+	prNumber := item.LinkedPRNumber
+	if prNumber == 0 {
+		// On a base:<branch> repo closedByPullRequestsReferences is structurally
+		// empty, so LinkedPRNumber is always 0 there — resolve via REST instead.
+		pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+		if err != nil {
+			// Conservative, for the same reason as the review-fetch failure below:
+			// an unreadable PR is unknown state, not "no PR". On a base:<branch>
+			// repo this fallback is the ONLY PR-resolution route, so treating a
+			// transient error as "nothing to gate on" would land the item with the
+			// gate never evaluated at all. checkReviewGate blocks here too (via
+			// handleBrokenReviewLinkage returning prNumber 0, leaving the item's
+			// structurally-empty review fields to fail the clearing condition).
+			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchLinkedPR failed: %v\n", err)
+			return e.holdLandingForReview(item, "holding landing decision — linked PR unreadable, review state unknown\n")
+		}
+		if pr == nil || pr.Number == 0 {
+			return false
+		}
+		// FetchLinkedPR queries state=all, so a stale PR from a previous cycle on
+		// the same fabrik/issue-N branch (or one that already merged via a race
+		// with a retried landing) can come back here. Gating on such a PR would
+		// read the wrong PR's review state — blocking on a dead reviewer request,
+		// or worse, clearing because a long-closed PR happens to carry an approval.
+		// Neither is a decision about the PR being landed, so treat it exactly as
+		// "no open PR to gate on", the same filter and the same resulting prNumber
+		// 0 that handleBrokenReviewLinkage applies to its own FetchLinkedPR result.
+		// This matters most on a base:<branch> repo, where LinkedPRNumber is always
+		// 0 and this fallback is the steady-state resolution route, not an edge case.
+		if pr.State != "open" || pr.Merged {
+			return false
+		}
+		// FetchLinkedPR resolves by head-branch name (fabrik/issue-N) alone — it
+		// does not verify that the PR body actually closes this issue, unlike
+		// handleBrokenReviewLinkage's FetchPRClosingIssues check. So on a
+		// base:<branch> repo this can gate against a PR whose linkage is broken.
+		// That is deliberately not corrected here: attemptMergeOnValidate's own
+		// landing path already resolves the PR the same way (and did so before
+		// this gate existed), so the gate evaluates reviews on exactly the PR it
+		// would go on to land. More importantly the gate is strictly subtractive
+		// — it returns either "block" or "proceed as before", and can never cause
+		// a landing that would not otherwise happen — so an unverified match here
+		// cannot widen the pre-existing linkage gap, only fail to narrow it.
+		// Adding closing-keyword verification belongs with that shared resolution
+		// path (and with handleBrokenReviewLinkage, which owns the pause), not in
+		// the review gate.
+		prNumber = pr.Number
+	}
+
+	reviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
+	requests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
+	fetchFailed := reviewsErr != nil || requestsErr != nil
+	if fetchFailed {
+		// Conservative: treat a partial failure as no-data rather than trusting
+		// whichever call succeeded — a false len(outstanding)==0 read could clear
+		// the gate while real outstanding reviewers are unknown.
+		if reviewsErr != nil {
+			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviews failed: %v\n", reviewsErr)
+		}
+		if requestsErr != nil {
+			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewRequests failed: %v\n", requestsErr)
+		}
+		reviews, requests = nil, nil
+	}
+
+	// Same clearing condition as checkReviewGate, via the same shared pure
+	// function, so the two gate sites can never disagree on "outstanding".
+	outstanding, hasReviews := reviewGateOutstanding(requests, reviews)
+	if len(outstanding) == 0 && hasReviews {
+		// Deliberately does NOT call removeAwaitingReviewLabel here, unlike
+		// checkReviewGate's equivalent clearing branch. Removal is checkReviewGate's
+		// job: this function only ever runs on a Validate item, and every path that
+		// reaches a blocking exit below leaves stage:Validate:complete present, so
+		// handleReviewGate claims the item with hasComplete == true on the next poll
+		// and clears the label there (naturally or on timeout). Symmetric
+		// apply-and-remove here would race that owner for no gain.
+		//
+		// This is load-bearing for any future landing path: a caller that invokes
+		// attemptMergeOnValidate for an item that never re-enters catch-up Phase 1
+		// would strand a fabrik:awaiting-review applied here. Such a caller must
+		// either route through the catch-up loop or take over removal explicitly.
+		return false
+	}
+
+	if len(outstanding) > 0 {
+		return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for reviewers: %s\n",
+			prNumber, strings.Join(outstanding, ", "))
+	}
+	if fetchFailed {
+		// Distinct from the "nobody has reviewed yet" message below: both reach
+		// this point with outstanding empty and hasReviews false, but only this
+		// one means the review state is unknown. Without the distinction an
+		// operator watching a GitHub API outage sees "waiting for initial review
+		// submission" and has no signal that the gate is blocking on a fetch
+		// failure rather than on a genuinely unreviewed PR.
+		return e.holdLandingForReview(item,
+			"holding landing decision on PR #%d — review state unreadable (fetch failed), blocking conservatively\n", prNumber)
+	}
+	// Reachable steady state: zero requested reviewers and no review submitted
+	// yet (e.g. just after MarkPRReady, before any human or bot has weighed in).
+	// This blocks with no escalation of its own, which is safe only because
+	// checkReviewGate's timers fire off exactly this state without the item ever
+	// re-entering this function: every blocking exit here leaves
+	// stage:Validate:complete present, so handleReviewGate claims the item next
+	// poll with hasComplete == true. From there reviewGateAllBots returns false
+	// (it is false whenever outstanding is empty), so both bot-ladder phases are
+	// skipped and checkAwaitingReviewTimeout falls to its mixed/pure-human pause
+	// branch, which fires once ReviewWaitTimeout has elapsed since
+	// fabrik:awaiting-review was applied — the label holdLandingForReview sets, read
+	// via FetchLabelAppliedAt. That path removes the label and pauses for a human,
+	// so this is a bounded hold, not a permanent block.
+	return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
+}
+
+// holdLandingForReview is reviewGateBlocksLanding's single blocking exit: it logs
+// why the landing is being held, applies fabrik:awaiting-review idempotently (the
+// label is also the anchor checkReviewGate's timeout reads via FetchLabelAppliedAt,
+// so a persistently unreadable PR eventually pauses for a human rather than
+// hanging), and reports true. Every block path routes through here so no future
+// one forgets the label.
+func (e *Engine) holdLandingForReview(item gh.ProjectItem, format string, args ...any) bool {
+	e.logf(item.Number, "awaiting-review", format, args...)
+	if !hasLabel(item.Labels, "fabrik:awaiting-review") {
+		e.applyLabelAdd(item, "fabrik:awaiting-review", true)
+	}
+	return true
+}
+
 // reviewGateAllBots reports whether every outstanding requested reviewer is a
 // bot (false when there are no outstanding reviewers at all).
 func reviewGateAllBots(reviewRequests []gh.ReviewRequest, outstanding []string) bool {
