@@ -83,9 +83,19 @@ parallel-4 run is ~1,900 pts/hour, plus ~480 for the engine — roughly 2x
 headroom. `gh project item-add` / `item-edit` are one-shot mutations and are
 fine as-is.
 
-If you hit the limit anyway, check the reset time and wait it out rather than
-lengthening the poll intervals — at the old cost even a fully serial suite did
-not fit, so long intervals treat the symptom:
+Once board reads were cheap, the residual cost became the issue/PR wait-helpers
+(`gh issue view --json`, `gh pr list --json` — also GraphQL, ~1 pt each) polling
+on behalf of a dozen parallel scenarios. Those run on `pollBase()`, default 30s,
+overridable:
+
+```bash
+E2E_POLL_INTERVAL=15s scripts/e2e/run.sh -run TestCruiseFullPipeline
+```
+
+Shortening it is safe for a single scenario in isolation, where budget is not a
+constraint; leave it at the default for a full parallel run.
+
+If you hit the limit anyway, check the reset time and wait it out:
 
 ```bash
 gh api rate_limit --jq '.resources.graphql'

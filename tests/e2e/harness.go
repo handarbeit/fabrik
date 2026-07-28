@@ -218,6 +218,35 @@ func pollSleep(base time.Duration) {
 	time.Sleep(d)
 }
 
+// defaultPollBase is the steady-state interval for the issue/PR wait-helpers.
+//
+// Once the board reads moved to direct GraphQL (~1 point each), the suite's
+// residual rate-limit cost is dominated by these helpers: `gh issue view --json`
+// and `gh pr list --json` are also GraphQL, ~1 point per call, and a dozen
+// parallel scenarios each hold one or two waits open continuously. Measured over
+// the 2026-07-28 run that is ~4,860 points/hour against a 5,000/hour budget —
+// inside the ceiling, but with no useful margin.
+//
+// Halving the call rate halves that residual. The cost is up to one extra
+// interval of detection latency per wait, which is negligible against scenarios
+// that run 3-25 minutes. Board-status polling (WaitForProjectStatus) stays at
+// 10s: it is now ~1 point per call and is the helper most often on the critical
+// path between an engine action and the next assertion.
+//
+// Override with E2E_POLL_INTERVAL (any time.ParseDuration value) to tune without
+// a code change — e.g. E2E_POLL_INTERVAL=15s to restore the old cadence when
+// running a single scenario in isolation, where budget is not a constraint.
+const defaultPollBase = 30 * time.Second
+
+func pollBase() time.Duration {
+	if s := os.Getenv("E2E_POLL_INTERVAL"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultPollBase
+}
+
 // WaitForProjectStatus polls the project board until the item for issueNumber
 // reports Status == columnName, or fails after timeout. Use this after
 // SetIssueStatus when a subsequent action (e.g. an external PR merge that
@@ -251,7 +280,7 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 		labels, err := tryIssueLabels(env, repo, issueNumber)
 		if err != nil {
 			t.Logf("WaitForIssueLabel: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		for _, l := range labels {
@@ -259,7 +288,7 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 				return
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	last, _ := tryIssueLabels(env, repo, issueNumber)
 	t.Fatalf("timed out waiting for label %q on %s#%d (had: %v)", label, repo, issueNumber, last)
@@ -317,7 +346,7 @@ func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, ti
 		} else if state == "CLOSED" {
 			return
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	state, _ := tryIssueState(env, repo, issueNumber)
 	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
@@ -332,7 +361,7 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		labels, err := tryIssueLabels(env, repo, issueNumber)
 		if err != nil {
 			t.Logf("WaitForLabelAbsent: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		present := false
@@ -345,7 +374,7 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		if !present {
 			return
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for label %q to disappear from %s#%d", label, repo, issueNumber)
 }
@@ -472,7 +501,7 @@ func WaitForLinkedPR(t *testing.T, env *Env, repo string, issueNum int, timeout 
 				}
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for an open PR with head=%s in %s", branch, repo)
 	return 0
@@ -565,7 +594,7 @@ func WaitForChildIssueInRepo(t *testing.T, env *Env, childRepo string, since tim
 				return nums[0]
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for a child sub-issue in %s (since %s)", childRepo, sinceStr)
 	return 0
@@ -1049,7 +1078,7 @@ func LinkedPRNumber(t *testing.T, env *Env, repo string, issueNumber int) int {
 		if err == nil && n > 0 {
 			return n
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for linked PR on %s#%d", repo, issueNumber)
 	return 0
@@ -1084,7 +1113,7 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 		bodies, err := tryPRComments(env, repo, prNumber)
 		if err != nil {
 			t.Logf("WaitForPRCommentContaining: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		for _, b := range bodies {
@@ -1092,7 +1121,7 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 				return
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for PR comment containing %q on %s#%d", substring, repo, prNumber)
 }
@@ -1183,7 +1212,7 @@ func WaitForCheckConclusion(t *testing.T, env *Env, repo string, prNumber int, c
 				return
 			}
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for check %q to reach conclusion %q on %s#%d (last observed %q)",
 		checkName, want, repo, prNumber, last)
@@ -1479,14 +1508,14 @@ func WaitForPRCommentReaction(t *testing.T, env *Env, repo string, prNumber int,
 			"--jq", filter)
 		if err != nil {
 			t.Logf("WaitForPRCommentReaction: transient error on %s PR #%d: %v (will retry)", repo, prNumber, err)
-			pollSleep(15 * time.Second)
+			pollSleep(pollBase())
 			continue
 		}
 		count, parseErr := strconv.Atoi(strings.TrimSpace(out))
 		if parseErr == nil && count > 0 {
 			return
 		}
-		pollSleep(15 * time.Second)
+		pollSleep(pollBase())
 	}
 	t.Fatalf("timed out waiting for %q reaction on comment containing %q on %s PR #%d",
 		reactionContent, commentSubstring, repo, prNumber)
