@@ -3878,6 +3878,91 @@ func TestMergeTrainWorker_UntrackedFileLeftByEjectedMemberDoesNotBlockNextMerge(
 	}
 }
 
+// TestMergeTrainWorker_SharedCommandStagesAllDeclaredPaths guards against a gap in
+// regenerateAndCommit's staging: when multiple declared generatedFileSpec entries share
+// a single regeneration Command (exactly the case the command-level dedup exists to
+// support), running that command once regenerates every path it's responsible for as a
+// side effect — not just the conflicted subset passed in as `specs` (the `matched`
+// argument from resolveTrainConflict). Before this fix, only the conflicted paths were
+// staged, leaving a non-conflicted sibling path's on-disk regeneration as an unstaged
+// (or, for a not-yet-tracked path, untracked) working-tree change that would survive
+// into the next member's merge in the same trial worktree.
+func TestMergeTrainWorker_SharedCommandStagesAllDeclaredPaths(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Members 1 and 2 both add generated-a.txt with different content — an add/add
+	// conflict confined to generated-a.txt. generated-b.txt is untouched by either
+	// member and doesn't exist anywhere yet; it's produced only as a side effect of the
+	// shared regeneration command below.
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "generated-a.txt", "branch1-a\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "generated-a.txt", "branch2-a\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			t.Fatalf("expected Claude never invoked — conflict is confined to declared generated paths")
+			return "", false, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	// Both declared paths share one command that writes deterministic content to both,
+	// so regenerating generated-a.txt (the only conflicted/matched path) also rewrites
+	// generated-b.txt on disk as a side effect.
+	sharedCmd := []string{"bash", "-c", "printf 'regen-a\\n' > generated-a.txt; printf 'regen-b\\n' > generated-b.txt"}
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated-a.txt", Command: sharedCmd},
+		{Path: "generated-b.txt", Command: sharedCmd},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "shared-command-stage-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 2 {
+		t.Fatalf("expected both members to survive (regeneration resolves the conflict), got %+v", survivors)
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+
+	// generated-b.txt must be committed alongside generated-a.txt, not left as an
+	// unstaged/untracked working-tree change.
+	statusOut := gitOutputDir(t, wtDir, "status", "--porcelain")
+	if strings.TrimSpace(statusOut) != "" {
+		t.Errorf("expected a clean working tree after regeneration, got status:\n%s", statusOut)
+	}
+
+	gotB, err := os.ReadFile(filepath.Join(wtDir, "generated-b.txt"))
+	if err != nil {
+		t.Fatalf("reading generated-b.txt: %v", err)
+	}
+	if string(gotB) != "regen-b\n" {
+		t.Errorf("generated-b.txt content = %q, want %q", gotB, "regen-b\n")
+	}
+
+	// generated-b.txt must actually be part of HEAD, not just present in the working tree.
+	lsTreeOut := gitOutputDir(t, wtDir, "ls-tree", "-r", "--name-only", "HEAD")
+	if !strings.Contains(lsTreeOut, "generated-b.txt") {
+		t.Error("expected generated-b.txt to be committed as part of HEAD")
+	}
+}
+
 // TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember closes a blind spot
 // in the premature-commit guard: if Claude's non-compliant commit happens to write
 // byte-identical content to what the declared regeneration command would produce, a

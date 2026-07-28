@@ -1108,7 +1108,19 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 		return false, reason
 	}
 
+	// allSpecs is the full declared mapping, not just the conflicted subset in specs. A
+	// command shared by multiple declared paths regenerates all of them as a side effect
+	// of running once — including any sibling path that isn't part of this conflict and
+	// so is absent from specs. Staging must follow that same scope: for each command
+	// actually executed, every declared path tied to it is staged, not just the paths in
+	// specs. Otherwise a non-conflicted sibling path's on-disk regeneration would be left
+	// as an unstaged, uncommitted working-tree change that survives into the next
+	// member's `git merge` in the same trial worktree — the tracked-file counterpart of
+	// the untracked-file leftover this PR's ejection-cleanup fix already guards against.
+	allSpecs := e.generatedFileSet()
+
 	seenCommands := make(map[string]bool, len(specs))
+	var pathsToStage []string
 	for _, spec := range specs {
 		cmdKey := strings.Join(spec.Command, "\x00")
 		if seenCommands[cmdKey] {
@@ -1128,13 +1140,19 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}
+
+		for _, s := range allSpecs {
+			if strings.Join(s.Command, "\x00") == cmdKey {
+				pathsToStage = append(pathsToStage, s.Path)
+			}
+		}
 	}
 
-	for _, spec := range specs {
-		addCmd := exec.Command("git", "add", "--", spec.Path)
+	for _, path := range pathsToStage {
+		addCmd := exec.Command("git", "add", "--", path)
 		addCmd.Dir = wtDir
 		if out, err := addCmd.CombinedOutput(); err != nil {
-			reason := fmt.Sprintf("could not stage regenerated %s: %v: %s", spec.Path, err, strings.TrimSpace(string(out)))
+			reason := fmt.Sprintf("could not stage regenerated %s: %v: %s", path, err, strings.TrimSpace(string(out)))
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}
