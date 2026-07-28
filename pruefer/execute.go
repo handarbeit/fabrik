@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/config"
-	gh "github.com/handarbeit/fabrik/github"
 )
 
 // Execute is Pruefer's entry point: loads .env, resolves configuration,
@@ -36,26 +36,37 @@ func Execute() error {
 		return fmt.Errorf("no watched repos configured (set watched_repos, PRUEFER_REPOS, or --repos)")
 	}
 
-	client := gh.NewClient("")
-	auth, err := Bootstrap(cfg, client, "")
+	authSet, err := BootstrapMulti(cfg, "")
 	if err != nil {
 		return fmt.Errorf("bootstrapping GitHub App auth: %w", err)
 	}
-	logf(0, "auth", "authenticated as %s (installation %d)\n", auth.BotLogin, auth.InstallationID)
+	owners := make([]string, 0, len(authSet.Clients))
+	for owner := range authSet.Clients {
+		owners = append(owners, owner)
+	}
+	logf(0, "auth", "authenticated as %s (%d installation(s), owners: %s)\n", authSet.BotLogin, authSet.InstallationCount(), strings.Join(owners, ", "))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go auth.RunRefreshLoop(ctx, func(format string, args ...any) {
-		logf(0, "auth", format, args...)
+	authSet.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
+		prefix := fmt.Sprintf("installation %d: ", installationID)
+		return func(format string, args ...any) {
+			logf(0, "auth", prefix+format, args...)
+		}
 	})
 
+	clients := make(map[string]GitHubLister, len(authSet.Clients))
+	for owner, client := range authSet.Clients {
+		clients[owner] = client
+	}
+
 	daemon := &Daemon{
-		Client:   client,
+		Clients:  clients,
 		Claude:   &RealClaudeInvoker{},
 		Clone:    CloneForReview,
 		Config:   cfg,
-		BotLogin: auth.BotLogin,
+		BotLogin: authSet.BotLogin,
 	}
 
 	if useTUI(cfg) {

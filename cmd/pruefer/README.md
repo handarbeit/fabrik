@@ -38,7 +38,7 @@ Pruefer authenticates as a GitHub App so its reviews are attributed to a genuine
 4. **Where can this GitHub App be installed?**: your choice — "Only on this account" is simplest for a single org.
 5. Click **Create GitHub App**. Note the **App ID** shown on the app's settings page.
 6. Scroll to **Private keys** and click **Generate a private key**. This downloads a `.pem` file — save it somewhere outside version control (Pruefer's default config gitignores `.pruefer/*.pem`).
-7. Click **Install App** (left sidebar) and install it on every repository you want Pruefer to watch.
+7. Click **Install App** (left sidebar) and install it on every account whose repos you list in `watched_repos` — a single App installed on multiple orgs/accounts is exactly the multi-org setup this section leads into.
 
 ### 2. Place the private key
 
@@ -52,10 +52,11 @@ Create `.pruefer/config.yaml` (or use flags/env vars — see Configuration below
 watched_repos:
   - your-org/repo-one
   - your-org/repo-two
+  - another-org/repo-three   # a different owner works too — see below
 
 github_app_id: 123456
 # github_app_private_key_path: .pruefer/app-private-key.pem  # default shown
-# github_app_installation_id: 0  # 0 = auto-discover (requires exactly one installation)
+# github_app_installation_id: 0  # 0 = derive installations from watched_repos (see below)
 
 poll_interval_seconds: 120
 model: sonnet
@@ -68,7 +69,16 @@ max_diff_bytes: 500000
 # excluded_paths: ["vendor/**", "*.generated.go"]
 ```
 
-If the App is installed on more than one org/account, set `github_app_installation_id` explicitly — Pruefer refuses to guess among multiple installations.
+### Multi-org installations and the public-App safety property
+
+`watched_repos` may list repos across any number of distinct owners. Pruefer groups the list by owner and, for each distinct owner, resolves that owner's App installation and mints it its own token — refreshed independently on its own schedule. A single daemon can therefore cover every org/account the App is installed on, driven entirely by `watched_repos`.
+
+**The set of installations Pruefer ever tokenizes equals exactly the set of owners appearing in `watched_repos` — nothing more.** Pruefer never enumerates "every installation of the App" and acts on all of them; it only ever mints a token for, or contacts, an owner an operator explicitly listed. This is what makes it safe to register the App as installable by anyone: a stranger who installs it on their own account is structurally untouched, because no `watched_repos` entry names them. There's no separate allowlist to maintain — "only act on my own accounts" falls directly out of what's in the config.
+
+Two consequences:
+
+- If an owner in `watched_repos` has **no** matching App installation, Pruefer fails fast at startup with an error naming that owner (and how to fix it — install the App there).
+- `github_app_installation_id` is now a **legacy pin/escape hatch**, not a requirement. Leave it at `0` (or unset) to let Pruefer resolve one installation per watched owner automatically — this works cleanly even with several installations, as long as every owner you watch has one. Set it explicitly only to force every watched repo through one specific installation's token regardless of owner (the old single-installation behavior, preserved byte-for-byte for existing single-org deployments).
 
 ### 4. Run it
 
@@ -117,7 +127,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns; skip only if **every** touched path matches |
 | `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none — required) | |
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | |
-| `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (auto-discover) | Required if the App has more than one installation |
+| `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from `watched_repos`) | Legacy pin: set to force every watched repo through one specific installation, regardless of owner |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
 

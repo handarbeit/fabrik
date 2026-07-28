@@ -60,11 +60,15 @@ type ReviewCompletedEvent struct {
 
 func (ReviewCompletedEvent) tuiEvent() {}
 
-// RateLimitSnapshotEvent is emitted once per poll cycle with the daemon's
-// current REST API rate-limit stats. Pruefer only issues REST calls
-// (ListOpenPRs, FetchPRDiff, FetchPRReviews, SubmitPRReview), so this always
-// carries github.Client.RateLimitStats()'s rest return value, never graphql.
+// RateLimitSnapshotEvent is emitted once per owner client per poll cycle
+// with that client's current REST API rate-limit stats. Pruefer only issues
+// REST calls (ListOpenPRs, FetchPRDiff, FetchPRReviews, SubmitPRReview), so
+// this always carries github.Client.RateLimitStats()'s rest return value,
+// never graphql. Owner identifies which owner's installation client the
+// snapshot came from; the footer displays whichever snapshot arrived most
+// recently rather than aggregating across owners.
 type RateLimitSnapshotEvent struct {
+	Owner string
 	Stats gh.RateLimitStats
 }
 
