@@ -1090,8 +1090,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
 
 	// No-work-needed settle scan: retries the outstanding Done-move/close for any
-	// item carrying fabrik:awaiting-done, independent of item.Status.
-	e.settleNoWorkNeededScan(board, deepFetchCandidates)
+	// item carrying fabrik:awaiting-done, independent of item.Status. Runs over
+	// the raw board snapshot, not deepFetchCandidates — a stranded item fails
+	// itemMayNeedWork (the same guard that suppresses its normal dispatch) and
+	// would never appear in deepFetchCandidates (#1220).
+	e.settleNoWorkNeededScan(board)
 
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	e.settleRevalidateScan(deepFetchCandidates)

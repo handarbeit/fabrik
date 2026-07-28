@@ -2,9 +2,11 @@ package engine
 
 import (
 	"errors"
+	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -12,11 +14,18 @@ import (
 // item carrying fabrik:awaiting-done, independent of item.Status (the board
 // move may still be sitting at whichever column the emitting stage ran in —
 // see itemMayNeedWork/itemNeedsWork, which suppress normal dispatch for
-// these items). Paused items are skipped: either escalateNoWorkNeededFailure
-// already handled them (marker removed) or an operator is investigating a
-// paused item for an unrelated reason and this scan must not fight them.
-func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard, candidates []gh.ProjectItem) {
-	for _, item := range candidates {
+// these items). Sourced from board.Items directly, NOT deepFetchCandidates —
+// itemMayNeedWork returns false for exactly the items this scan exists to
+// retry (retry eligibility and dispatch eligibility are different questions;
+// see #1220), so a candidate list pre-filtered by it would drop them before
+// this scan ever saw them. This matches the precedent already established by
+// settleMergeTrainMemberCloses, settleNonDefaultBaseCloses, and
+// settleChildPlacements. Paused items are skipped: either
+// escalateNoWorkNeededFailure already handled them (marker removed) or an
+// operator is investigating a paused item for an unrelated reason and this
+// scan must not fight them.
+func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard) {
+	for _, item := range board.Items {
 		if !hasLabel(item.Labels, "fabrik:awaiting-done") || hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
@@ -25,6 +34,23 @@ func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard, candidates []gh.
 			e.logf(item.Number, "warn", "no-work-needed settle: no stage matches board column %q — will retry next poll\n", item.Status)
 			e.recordNoWorkNeededRetry(item)
 			continue
+		}
+		// item.Comments is only populated by a deep fetch, which this item never
+		// received (that's the whole reason it's stranded and reached here via
+		// board.Items rather than deepFetchCandidates). Once the board has moved to
+		// Done, settleNoWorkNeeded no longer consults item.Comments (its
+		// hasSkippedComment idempotency check only runs while item.Status != "Done"),
+		// so the fetch is skipped there to avoid spending a GraphQL call on the
+		// already-working "Done move succeeded, only CloseIssue failed" sub-case.
+		if item.Status != "Done" {
+			repo := itemOwnerRepoString(item, e.defaultRepo())
+			if err := e.readClient.FetchItemDetails(&item); err != nil {
+				e.logf(item.Number, "warn", "no-work-needed settle: could not deep-fetch item details: %v — will retry next poll\n", err)
+				e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})
+				e.recordNoWorkNeededRetry(item)
+				continue
+			}
+			e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: item})
 		}
 		e.settleNoWorkNeeded(board, item, stage)
 	}
