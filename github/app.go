@@ -106,6 +106,11 @@ func BuildAppJWT(appID int64, privateKey *rsa.PrivateKey) (string, error) {
 type AppInstallation struct {
 	ID      int64  // Installation ID, needed to mint an installation access token.
 	Account string // Login of the org/user the App is installed on.
+	// RepositorySelection is "all" or "selected". "selected" means the
+	// installation only grants access to a subset of Account's repos — the
+	// actual subset is only discoverable via FetchInstallationRepositories,
+	// which requires an installation access token (not the App's JWT).
+	RepositorySelection string
 }
 
 // appRequest performs a JWT-authenticated GitHub App API request (installation
@@ -157,13 +162,38 @@ func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, error) {
 		Account struct {
 			Login string `json:"login"`
 		} `json:"account"`
+		RepositorySelection string `json:"repository_selection"`
 	}
 	if err := appRequest("GET", baseURL, "/app/installations", jwt, &raw); err != nil {
 		return nil, fmt.Errorf("fetching app installations: %w", err)
 	}
 	out := make([]AppInstallation, len(raw))
 	for i, inst := range raw {
-		out[i] = AppInstallation{ID: inst.ID, Account: inst.Account.Login}
+		out[i] = AppInstallation{ID: inst.ID, Account: inst.Account.Login, RepositorySelection: inst.RepositorySelection}
+	}
+	return out, nil
+}
+
+// FetchInstallationRepositories lists the repositories an installation
+// actually grants access to, via GET /installation/repositories. Only
+// meaningful (and only ever called) for an installation whose
+// RepositorySelection is "selected" — an "all" installation grants access to
+// every current and future repo on the account, so there is nothing to
+// enumerate. Unlike the App-JWT-authenticated calls above, this endpoint is
+// scoped to the installation's own identity: it must be authenticated with
+// that installation's access token, not the App's JWT.
+func FetchInstallationRepositories(baseURL, installationToken string) ([]string, error) {
+	var result struct {
+		Repositories []struct {
+			FullName string `json:"full_name"`
+		} `json:"repositories"`
+	}
+	if err := appRequest("GET", baseURL, "/installation/repositories", installationToken, &result); err != nil {
+		return nil, fmt.Errorf("fetching installation repositories: %w", err)
+	}
+	out := make([]string, len(result.Repositories))
+	for i, r := range result.Repositories {
+		out[i] = r.FullName
 	}
 	return out, nil
 }

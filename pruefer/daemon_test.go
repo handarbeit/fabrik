@@ -104,7 +104,7 @@ func TestDaemonPoll_EnforcesConcurrencyCap(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	d := &Daemon{
-		Client:   client,
+		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 2},
@@ -152,7 +152,7 @@ func TestDaemonPoll_DiffSizeGuardAppliesAcrossRepos(t *testing.T) {
 	clone, cloneCalls := fakeClone(t, nil)
 
 	d := &Daemon{
-		Client:   client,
+		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, MaxDiffBytes: 5, ConcurrencyCap: 3},
@@ -172,12 +172,11 @@ func TestDaemonPoll_DiffSizeGuardAppliesAcrossRepos(t *testing.T) {
 }
 
 func TestDaemonPoll_SkipsMalformedWatchedRepo(t *testing.T) {
-	client := newFakeLister()
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
 
 	d := &Daemon{
-		Client:   client,
+		Clients:  map[string]GitHubLister{},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"not-a-valid-repo-spec"}},
@@ -194,7 +193,7 @@ func TestDaemonPoll_ContinuesAfterOneRepoListFails(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	d := &Daemon{
-		Client:   client,
+		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/broken", "owner/good"}, ConcurrencyCap: 3},
@@ -204,6 +203,75 @@ func TestDaemonPoll_ContinuesAfterOneRepoListFails(t *testing.T) {
 
 	if client.submitCallCount() != 1 {
 		t.Errorf("expected the good repo's PR to still be reviewed despite the broken repo failing, got %d submissions", client.submitCallCount())
+	}
+}
+
+// TestDaemonPoll_RoutesEachRepoThroughOwnersToken is the multi-installation
+// routing test called for in the issue's Testing section: two owners, two
+// distinct fakeLister clients with distinct tokens, watched repos spanning
+// both — every repo's diff/submit/clone calls must only ever touch its own
+// owner's client/token, never the other's. A misrouted repo would either hit
+// the wrong fakeLister (asserted via per-client submitCallCount) or clone
+// with the wrong token (asserted via the clone spy).
+func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
+	clientA := newFakeLister()
+	clientA.token = "tok-ownerA"
+	clientA.prsByRepo["ownerA/repoA"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "shaA"}}
+
+	clientB := newFakeLister()
+	clientB.token = "tok-ownerB"
+	clientB.prsByRepo["ownerB/repoB"] = []gh.PRDetails{{Number: 2, Author: "bob", HeadSHA: "shaB"}}
+
+	claude := &mockClaudeInvoker{}
+
+	var cloneMu sync.Mutex
+	var cloneTokens []string
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+		cloneMu.Lock()
+		cloneTokens = append(cloneTokens, owner+"/"+repo+"="+token)
+		cloneMu.Unlock()
+		return t.TempDir(), func() {}, nil
+	}
+
+	d := &Daemon{
+		Clients: map[string]GitHubLister{"ownerA": clientA, "ownerB": clientB},
+		Claude:  claude,
+		Clone:   clone,
+		Config: Config{
+			WatchedRepos:   []string{"ownerA/repoA", "ownerB/repoB"},
+			ConcurrencyCap: 3,
+		},
+		BotLogin: "pruefer-bot[bot]",
+	}
+	d.poll(context.Background())
+
+	if clientA.submitCallCount() != 1 {
+		t.Errorf("clientA (ownerA) submitCallCount = %d, want 1", clientA.submitCallCount())
+	}
+	if clientB.submitCallCount() != 1 {
+		t.Errorf("clientB (ownerB) submitCallCount = %d, want 1", clientB.submitCallCount())
+	}
+	for _, call := range clientA.submitCalls {
+		if call.owner != "ownerA" {
+			t.Errorf("clientA received a submit call for owner %q — should only ever see ownerA", call.owner)
+		}
+	}
+	for _, call := range clientB.submitCalls {
+		if call.owner != "ownerB" {
+			t.Errorf("clientB received a submit call for owner %q — should only ever see ownerB", call.owner)
+		}
+	}
+
+	cloneMu.Lock()
+	defer cloneMu.Unlock()
+	wantTokens := map[string]bool{"ownerA/repoA=tok-ownerA": true, "ownerB/repoB=tok-ownerB": true}
+	if len(cloneTokens) != 2 {
+		t.Fatalf("clone calls = %v, want exactly 2", cloneTokens)
+	}
+	for _, ct := range cloneTokens {
+		if !wantTokens[ct] {
+			t.Errorf("unexpected clone token pairing %q — each repo must clone with its own owner's token", ct)
+		}
 	}
 }
 
@@ -222,7 +290,7 @@ func buildParityFixture(t *testing.T, emit func(ptui.Event)) (*Daemon, *fakeList
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
 	d := &Daemon{
-		Client:   client,
+		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 3},
@@ -298,7 +366,7 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
 
-	d1 := &Daemon{Client: client, Claude: claude, Clone: clone, Config: Config{PollInterval: time.Hour}, FabrikDir: dir}
+	d1 := &Daemon{Clients: map[string]GitHubLister{"owner": client}, Claude: claude, Clone: clone, Config: Config{PollInterval: time.Hour}, FabrikDir: dir}
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()
 	errCh := make(chan error, 1)
@@ -308,7 +376,7 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	// sleep is long enough — probe the same lock file ourselves.
 	waitUntil(t, 2*time.Second, func() bool { return lockHeld(t, d1.lockPath()) })
 
-	d2 := &Daemon{Client: client, Claude: claude, Clone: clone, Config: Config{PollInterval: time.Hour}, FabrikDir: dir}
+	d2 := &Daemon{Clients: map[string]GitHubLister{"owner": client}, Claude: claude, Clone: clone, Config: Config{PollInterval: time.Hour}, FabrikDir: dir}
 	if err := d2.Run(context.Background()); err == nil {
 		t.Fatal("expected the second Daemon.Run to fail while the first holds the lock")
 	}

@@ -147,6 +147,74 @@ func TestFetchAppInstallations(t *testing.T) {
 	}
 }
 
+func TestFetchAppInstallations_DecodesRepositorySelection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 111, "account": map[string]string{"login": "handarbeit"}, "repository_selection": "all"},
+			{"id": 222, "account": map[string]string{"login": "someorg"}, "repository_selection": "selected"},
+		})
+	}))
+	defer srv.Close()
+
+	installs, err := FetchAppInstallations(srv.URL, "test-jwt")
+	if err != nil {
+		t.Fatalf("FetchAppInstallations: %v", err)
+	}
+	if len(installs) != 2 {
+		t.Fatalf("expected 2 installations, got %d", len(installs))
+	}
+	if installs[0].RepositorySelection != "all" {
+		t.Errorf("installs[0].RepositorySelection = %q, want %q", installs[0].RepositorySelection, "all")
+	}
+	if installs[1].RepositorySelection != "selected" {
+		t.Errorf("installs[1].RepositorySelection = %q, want %q", installs[1].RepositorySelection, "selected")
+	}
+}
+
+func TestFetchInstallationRepositories(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/installation/repositories" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer ghs_installation_token" {
+			t.Errorf("Authorization = %q, want Bearer ghs_installation_token", got)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"repositories": []map[string]interface{}{
+				{"full_name": "someorg/repo-one"},
+				{"full_name": "someorg/repo-two"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	repos, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
+	if err != nil {
+		t.Fatalf("FetchInstallationRepositories: %v", err)
+	}
+	want := []string{"someorg/repo-one", "someorg/repo-two"}
+	if len(repos) != len(want) {
+		t.Fatalf("repos = %v, want %v", repos, want)
+	}
+	for i := range want {
+		if repos[i] != want[i] {
+			t.Errorf("repos[%d] = %q, want %q", i, repos[i], want[i])
+		}
+	}
+}
+
+func TestFetchInstallationRepositories_ErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		w.Write([]byte(`{"message":"Forbidden"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := FetchInstallationRepositories(srv.URL, "ghs_bad"); err == nil {
+		t.Fatal("expected error on 403, got nil")
+	}
+}
+
 func TestMintInstallationToken(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
