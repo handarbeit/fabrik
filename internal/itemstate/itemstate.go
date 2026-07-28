@@ -266,6 +266,22 @@ type StageState struct {
 	// auto-heal was attempted. In-memory only — does not survive restart. Keyed by
 	// stage name so force-push (new SHA) clears the guard naturally.
 	LinkageHealAttempted map[string]string
+	// LastTurnsUsed records the most recently completed invocation's TurnsUsed for
+	// each stage. In-memory only — does not survive restart. Used by the stall
+	// detector (#1146) to compare consecutive incomplete attempts.
+	LastTurnsUsed map[string]int
+	// LastTurnsCapped records whether the most recently completed invocation for a
+	// stage was turn-capped (TurnsUsed >= MaxTurns without completing). Overwritten
+	// on every invocation, which makes stall detection self-limiting to a single
+	// corrective hint per episode (#1146): the declining attempt that triggers
+	// detection is itself uncapped, so it immediately clears the precondition for
+	// the next comparison.
+	LastTurnsCapped map[string]bool
+	// StallHintPending marks a stage for which a stall was detected and a
+	// corrective hint should be injected into the next invocation's prompt. Cleared
+	// (consumed) as soon as that invocation is dispatched. In-memory only — does
+	// not survive restart (#1146).
+	StallHintPending map[string]bool
 }
 
 // LockState describes who holds the fabrik:locked:<user> label on this issue.

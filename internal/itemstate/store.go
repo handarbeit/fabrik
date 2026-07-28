@@ -394,6 +394,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		ensureStageStateMaps(item)
 		item.StageState.Attempts[v.StageName] = 0
 		delete(item.StageState.PRCreationFailed, v.StageName)
+		delete(item.StageState.LastTurnsUsed, v.StageName)
+		delete(item.StageState.LastTurnsCapped, v.StageName)
+		delete(item.StageState.StallHintPending, v.StageName)
 		return StageStateChanged
 
 	case ReviewCycleIncremented:
@@ -442,6 +445,22 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case LinkageHealAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LinkageHealAttempted[v.StageName] = v.PRSHA
+		return StageStateChanged
+
+	case StageTurnUsageRecorded:
+		ensureStageStateMaps(item)
+		item.StageState.LastTurnsUsed[v.StageName] = v.TurnsUsed
+		item.StageState.LastTurnsCapped[v.StageName] = v.Capped
+		return StageStateChanged
+
+	case StallHintArmed:
+		ensureStageStateMaps(item)
+		item.StageState.StallHintPending[v.StageName] = true
+		return StageStateChanged
+
+	case StallHintConsumed:
+		ensureStageStateMaps(item)
+		delete(item.StageState.StallHintPending, v.StageName)
 		return StageStateChanged
 
 	case StageLastAttemptCleared:
@@ -1069,5 +1088,14 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.LinkageHealAttempted == nil {
 		ss.LinkageHealAttempted = make(map[string]string)
+	}
+	if ss.LastTurnsUsed == nil {
+		ss.LastTurnsUsed = make(map[string]int)
+	}
+	if ss.LastTurnsCapped == nil {
+		ss.LastTurnsCapped = make(map[string]bool)
+	}
+	if ss.StallHintPending == nil {
+		ss.StallHintPending = make(map[string]bool)
 	}
 }
