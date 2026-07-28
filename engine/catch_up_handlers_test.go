@@ -527,3 +527,99 @@ func TestHandleCIFixReinvoke_HappyPath_Dispatches(t *testing.T) {
 	}
 	eng.wg.Wait()
 }
+
+// TestDispatchCIFixReinvoke_BotNoticeInReviewThread_ExcludedFromInvocation
+// verifies the #1221 chokepoint end to end via dispatchCIFixReinvoke: a bot
+// service notice merged in from item.LinkedPRReviewThreadComments is excluded
+// by processComments's chokepoint filter, while the synthetic
+// "ci-fix-synthetic" comment (author "fabrik", never bot-classified) survives
+// and reaches Claude.
+func TestDispatchCIFixReinvoke_BotNoticeInReviewThread_ExcludedFromInvocation(t *testing.T) {
+	skipIfNoGit(t)
+
+	var seenComments []gh.Comment
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			seenComments = comments
+			return "fixed the CI failure", false, TokenUsage{}, nil
+		},
+	}
+	waitTrue := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 60,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-ci"},
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "RT_notice", DatabaseID: 950, ReviewThreadID: "thread1", Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
+		},
+	}
+	stage := stgs[0]
+	settle := PRSettleResult{
+		Status:    PRMergeBlocked,
+		CheckRuns: []gh.CheckRun{{Name: "test", Status: "completed", Conclusion: "failure"}},
+	}
+
+	eng.dispatchCIFixReinvoke(context.Background(), board, item, stage, settle)
+	eng.wg.Wait()
+
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected exactly 1 InvokeForComments call, got %d", len(claude.forCommentsCalls))
+	}
+	if len(seenComments) != 1 {
+		t.Fatalf("expected exactly 1 comment reaching InvokeForComments (synthetic only), got %d: %v", len(seenComments), seenComments)
+	}
+	if seenComments[0].ID != "ci-fix-synthetic" {
+		t.Errorf("expected synthetic ci-fix comment to survive, got %q", seenComments[0].ID)
+	}
+}
+
+// TestDispatchRebaseReinvoke_BotNoticeInReviewThread_ExcludedFromInvocation
+// mirrors the CI-fix test above for dispatchRebaseReinvoke: a bot service
+// notice merged in from item.LinkedPRReviewThreadComments is excluded, while
+// the synthetic "rebase-synthetic" comment survives and reaches Claude.
+func TestDispatchRebaseReinvoke_BotNoticeInReviewThread_ExcludedFromInvocation(t *testing.T) {
+	skipIfNoGit(t)
+
+	var seenComments []gh.Comment
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			seenComments = comments
+			return "rebased", false, TokenUsage{}, nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 61,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "RT_notice", DatabaseID: 951, ReviewThreadID: "thread1", Author: "coderabbitai[bot]", Body: "auto-generated reply by CodeRabbit"},
+		},
+	}
+	stage := stgs[0]
+
+	eng.dispatchRebaseReinvoke(context.Background(), board, item, stage)
+	eng.wg.Wait()
+
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected exactly 1 InvokeForComments call, got %d", len(claude.forCommentsCalls))
+	}
+	if len(seenComments) != 1 {
+		t.Fatalf("expected exactly 1 comment reaching InvokeForComments (synthetic only), got %d: %v", len(seenComments), seenComments)
+	}
+	if seenComments[0].ID != "rebase-synthetic" {
+		t.Errorf("expected synthetic rebase comment to survive, got %q", seenComments[0].ID)
+	}
+}
