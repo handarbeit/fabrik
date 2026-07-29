@@ -121,9 +121,31 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// AND at least one non-DISMISSED review exists. This catches both human
 	// reviewers who submit formally and bot reviewers (Copilot, Gemini) who
 	// self-submit without ever appearing in reviewRequests.
+	//
+	// In authoritative mode this is additive, not a replacement: the same
+	// len(outstanding)==0 && hasReviews condition still gates entry, and
+	// reviewGateAuthorityVerdict is only consulted from inside it — a PR with
+	// zero reviews stays blocked by the outer condition regardless of mode.
+	var authorityReason string
 	if len(outstanding) == 0 && hasReviews {
-		e.removeAwaitingReviewLabel(owner, repo, item)
-		return false, false, false
+		if stage.ReviewAuthority != "authoritative" {
+			e.removeAwaitingReviewLabel(owner, repo, item)
+			return false, false, false
+		}
+		if prNumber <= 0 {
+			// No PR number resolved — can't fetch a verdict. Block
+			// conservatively rather than silently falling back to advisory
+			// clearing.
+			authorityReason = "review verdict unreadable — no PR number resolved"
+		} else if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, prNumber); err != nil {
+			e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviewDecision failed: %v\n", err)
+			authorityReason = "review verdict unreadable (fetch failed), blocking conservatively"
+		} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); satisfied {
+			e.removeAwaitingReviewLabel(owner, repo, item)
+			return false, false, false
+		} else {
+			authorityReason = reason
+		}
 	}
 
 	// Determine if all outstanding reviewers are bots. Used by Phase 1/2 logic.
@@ -150,11 +172,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Still waiting. Check the fabrik:awaiting-review timeout (Phase 1
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
-	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted); done {
+	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted, authorityReason); done {
 		return blocked, timedOut, false
 	}
 
-	if len(outstanding) > 0 {
+	if authorityReason != "" {
+		e.logf(item.Number, "awaiting-review", "authoritative gate still blocking: %s\n", authorityReason)
+	} else if len(outstanding) > 0 {
 		e.logf(item.Number, "awaiting-review", "waiting for reviewers: %s\n", strings.Join(outstanding, ", "))
 	} else {
 		e.logf(item.Number, "awaiting-review", "waiting for initial review submission (no reviewers requested; bot reviewers may still be processing)\n")
