@@ -1704,6 +1704,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	// fails we break early, keeping stage:Validate:complete on GitHub so the next
 	// poll re-runs the scan and retries — no permanently-stuck partial state.
 	labelsToRemove := []string{
+		"fabrik:rebase-needed",
 		"fabrik:auto-merge-enabled",
 		"fabrik:awaiting-ci",
 		"fabrik:awaiting-review",
