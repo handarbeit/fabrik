@@ -1105,6 +1105,14 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	return true, nil
 }
 
+// regenerationCommandTimeout bounds each declared regeneration command: unlike Claude
+// dispatch, which goes through ctx-aware invocation, a hung regeneration command would
+// otherwise block the merge-train worker indefinitely with no way to eject the member.
+// Only one command is declared today (bash scripts/generate-llms-full.sh, local and
+// fast), so this is a circuit breaker for future declarations rather than a fix for an
+// observed failure.
+const regenerationCommandTimeout = 5 * time.Minute
+
 // regenerateAndCommit regenerates each declared generated-file spec's artefact by
 // running its regen command (deduplicated so a shared command runs once, not once per
 // path), stages the result, verifies the working tree is fully resolved, and commits if
@@ -1173,10 +1181,16 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}
-		regenCmd := exec.Command(spec.Command[0], spec.Command[1:]...)
+		regenCtx, cancel := context.WithTimeout(context.Background(), regenerationCommandTimeout)
+		regenCmd := exec.CommandContext(regenCtx, spec.Command[0], spec.Command[1:]...)
 		regenCmd.Dir = wtDir
-		if out, err := regenCmd.CombinedOutput(); err != nil {
+		out, err := regenCmd.CombinedOutput()
+		cancel()
+		if err != nil {
 			reason := fmt.Sprintf("regeneration command %q failed: %v: %s", strings.Join(spec.Command, " "), err, strings.TrimSpace(string(out)))
+			if regenCtx.Err() == context.DeadlineExceeded {
+				reason = fmt.Sprintf("regeneration command %q exceeded its %s timeout and was killed", strings.Join(spec.Command, " "), regenerationCommandTimeout)
+			}
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}

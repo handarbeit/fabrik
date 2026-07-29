@@ -35,6 +35,13 @@ func (e *Engine) generatedFileSet() []generatedFileSpec {
 // versions of the content disagree" and must not be resolved by rerunning the
 // generator. AU/UA (add/add-style) and AA/UU conflicts carry no deletion intent and
 // are eligible for regeneration as before.
+//
+// This code list is a deliberate subset of unmergedPaths's own seven-code unmerged
+// list (merge_train.go, the "UU"/"AA"/"DD"/"AU"/"UD"/"UA"/"DU" check) — if that list
+// ever grows (e.g. a future git version introduces a new unmerged status), review
+// whether the new code involves a deletion and, if so, add it here too. A code that
+// should be deletion-involving but is missing from this function would silently fall
+// through to regeneration instead of Claude.
 func deletionInvolvingStatus(status string) bool {
 	return status == "DD" || status == "UD" || status == "DU"
 }
