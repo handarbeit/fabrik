@@ -1324,7 +1324,10 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 	matched, nonGenerated, deletionExcluded := classifyConflictedPaths(e.generatedFileSet(), paths)
 
 	if len(matched) == 0 {
-		// No generated paths involved — unchanged behavior.
+		// Nothing left for regeneration to do: either no declared generated path is
+		// involved at all, or one is (deletionExcluded) but it was routed to Claude
+		// because its status carries deletion intent, not a regenerable modification.
+		// Either way this is a plain Claude dispatch, matching pre-FR-1..5 behavior.
 		resolved, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, opts)
 		return resolved, "", resolveErr
 	}
