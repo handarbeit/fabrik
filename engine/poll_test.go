@@ -613,6 +613,135 @@ func TestCatchupLoop_RunsReviewGate_WhenHasComplete(t *testing.T) {
 	}
 }
 
+// ── #1223: Phase 1 pause must claim the item, not fall through to Phase 2 ────
+
+// TestCatchUpLoop_CIGateTerminated_DoesNotAdvanceInSamePass is the poll()-level
+// regression test for #1223: when checkCIGate pauses an item directly (the linked
+// PR closed without merging — the PRMergeTerminal/R2 path), handleMergeAndCIGates
+// must claim the item so Phase 2 does not run for it in the same poll pass. Before
+// the fix, checkCIGate's pause branch returned the same all-false tuple as "gate
+// cleared", so Phase 1 fell through and Phase 2 advanced the just-paused item.
+//
+// The stage is configured with AutoAdvance: true (so Phase 2 would fire if the
+// item were not claimed) and a second stage exists so advanceToNextStage has
+// somewhere to advance to — a real regression here would show up as a spurious
+// UpdateProjectItemStatus call alongside the pause.
+func TestCatchUpLoop_CIGateTerminated_DoesNotAdvanceInSamePass(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &trueVal, AutoAdvance: &trueVal},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 30,
+						ItemID: "PVTI_30",
+						Status: "Implement",
+						Repo:   "owner/repo",
+						// stage:Implement:complete is deliberately absent — CI never
+						// cleared (the PR closed without merging).
+						Labels: []string{"fabrik:awaiting-ci"},
+					},
+				},
+			}, nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "deadbeef", State: "closed", Merged: false}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+		addCommentFn:    func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	eng := testEngineWithStages(t, client, stgs)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	hasPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Error("expected fabrik:paused to be added for the closed-not-merged PR")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("Phase 2 must not advance an item the CI gate just paused in this pass; got %d status update call(s): %+v",
+			len(client.updateStatusCalls), client.updateStatusCalls)
+	}
+}
+
+// TestCatchUpLoop_ReviewGateTerminated_DoesNotAdvanceInSamePass is the poll()-level
+// regression test for #1223's review-gate sibling: when checkReviewGate's
+// handleBrokenReviewLinkage path pauses an item directly (a PR exists on the
+// issue's branch but isn't linked via a closing keyword), handleReviewGate must
+// claim the item so Phase 2 does not advance it in the same poll pass.
+//
+// The item carries stage:Implement:complete (so handleReviewGate's hasComplete
+// guard doesn't skip it) and the stage is AutoAdvance: true, so a regression here
+// would show up as a spurious UpdateProjectItemStatus call alongside the pause.
+func TestCatchUpLoop_ReviewGateTerminated_DoesNotAdvanceInSamePass(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: &trueVal, AutoAdvance: &trueVal},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 31,
+						ItemID: "PVTI_31",
+						Status: "Implement",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Implement:complete"},
+						// LinkedPRNumber == 0 (broken closingIssuesReferences linkage)
+						// is the zero value — deliberately not set.
+					},
+				},
+			}, nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// A PR exists on the fabrik/issue-N branch but is not linked via a
+			// closing keyword — handleBrokenReviewLinkage pauses directly.
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	eng := testEngineWithStages(t, client, stgs)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	hasPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Error("expected fabrik:paused to be added for the broken PR↔issue linkage")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("Phase 2 must not advance an item the review gate just paused in this pass; got %d status update call(s): %+v",
+			len(client.updateStatusCalls), client.updateStatusCalls)
+	}
+}
+
 // ── Bug B: transient label sweep on closed issues (#617) ─────────────────────
 
 // TestCleanupClosedIssueTransientLabels_RemovesAllTransientLabels verifies that

@@ -91,7 +91,12 @@ func detectCycle(store *itemstate.Store, itemRepo string, itemNumber int, openDe
 // is gated by unresolved dependencies.
 //
 // Returns true if the issue is blocked (one or more blocking issues are not
-// CLOSED), false otherwise.
+// CLOSED) or was just paused for a cyclic blockedBy relationship, false
+// otherwise. Unlike checkCIGate/checkReviewGate, this bool return IS the
+// Phase 1 claim signal directly (handleDependencies passes it straight
+// through) — so the cycle-detected pause below also returns true, claiming
+// the item for this pass instead of reusing the "no open dependencies" false
+// value. See ADR-1223.
 //
 // Side effects when blocked:
 //   - Logs a "blocked" message listing what is being waited for.
@@ -99,8 +104,10 @@ func detectCycle(store *itemstate.Store, itemRepo string, itemNumber int, openDe
 //     the label (first-time block transition).
 //   - If fabrik:blocked is already on the issue and the waitingFor list changed,
 //     edits the existing blocked comment in-place (FR-016).
-//   - Detects cyclic blockedBy relationships and surfaces them as a paused error
-//     rather than deadlocking (FR-017).
+//   - Detects cyclic blockedBy relationships and pauses the issue (fabrik:paused)
+//     rather than deadlocking (FR-017); this is a distinct outcome from a plain
+//     dependency block, so it does not add fabrik:blocked or post the "waiting
+//     for" comment for the cycle case.
 //   - Emits an IssueBlockedEvent for the TUI.
 //
 // Side effects when unblocked:
@@ -218,7 +225,10 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 			e.logf(item.Number, "warn", "cycle detected in blockedBy graph — pausing issue\n")
 			cycleMsg := fmt.Sprintf("🏭 **Fabrik — cycle detected**\n\nIssue #%d has a cyclic `blockedBy` dependency: it is waiting for issues that are themselves (transitively) waiting for this issue. Fabrik cannot make progress. Remove the cycle manually and then remove `fabrik:paused` to continue.", item.Number)
 			e.pauseIssue(item, cycleMsg, pauseOpts{})
-			return false
+			// checkDependencies's own bool return IS the Phase 1 claim signal (no
+			// translation layer in handleDependencies) — return true so the item
+			// is claimed and Phase 2 does not advance it in this same pass. See ADR-1223.
+			return true
 		}
 
 		// First-time block: post the comment and add the label.

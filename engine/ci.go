@@ -19,22 +19,27 @@ import (
 // fields, check runs) is consumed from the settle parameter — no additional
 // GitHub API calls are made by this function.
 //
-// Returns (blocked, ciFailure, timedOut):
+// Returns (blocked, ciFailure, timedOut, terminated):
 //
-//   - (false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
+//   - (false, false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
 //     This includes: no PR, PR merged, all checks green, ADR-033 shortcut (clean/unstable).
 //
-//   - (true, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
+//   - (true, false, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
 //     Covers: checks still pending, transient/unsettled state, R3 dwell not elapsed.
 //     fabrik:awaiting-ci is NOT modified.
 //
-//   - (true, true, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
+//   - (true, true, false, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
 //
-//   - (false, false, true)  — CI wait timeout elapsed; caller should pause the issue.
+//   - (false, false, true, false)  — CI wait timeout elapsed; caller should pause the issue.
 //     fabrik:awaiting-ci is removed before returning.
-func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) (blocked, ciFailure, timedOut bool) {
+//
+//   - (false, false, false, true)  — processing already terminated via a direct pauseIssue call
+//     (e.g. PR closed without merging, or R3's required-check-never-runs case). The caller MUST
+//     claim the item (do not treat this as "gate cleared") so Phase 2 does not advance an item
+//     that was just paused in this same pass. See ADR-1223.
+func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) (blocked, ciFailure, timedOut, terminated bool) {
 	if stage.WaitForCI == nil || !*stage.WaitForCI {
-		return false, false, false
+		return false, false, false, false
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -49,34 +54,34 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	case PRMergeNoPR:
 		e.logf(item.Number, "ci-gate", "no linked PR found; CI gate clears (no PR to check)\n")
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		return false, false, false
+		return false, false, false, false
 
 	case PRMergeTerminal:
 		// R1: merged; R2: closed without merging.
 		if pr != nil && pr.Merged {
 			e.logf(item.Number, "ci-gate", "linked PR #%d is merged — CI gate clears; advancing to Done\n", prNum)
 			e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		} else {
-			e.logf(item.Number, "ci-gate", "linked PR #%d closed without merging — pausing\n", prNum)
-			e.pauseForPRClosedNotMerged(board, item, stage, prNum)
+			return false, false, false, false
 		}
-		return false, false, false
+		e.logf(item.Number, "ci-gate", "linked PR #%d closed without merging — pausing\n", prNum)
+		e.pauseForPRClosedNotMerged(board, item, stage, prNum)
+		return false, false, false, true
 
 	case PRMergeReady:
 		// ADR-033 shortcut (clean/unstable) or all CI checks green — gate clears.
 		e.logf(item.Number, "ci-gate", "CI gate clears (%s)\n", settle.Reason)
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		return false, false, false
+		return false, false, false, false
 
 	case PRMergeConflicting:
 		// Merge gate already applied fabrik:rebase-needed; CI gate just blocks.
-		return true, false, false
+		return true, false, false, false
 
 	case PRMergeQueued:
 		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
 		// Block with no fabrik:awaiting-ci churn (mirrors the PRMergeUnsettled
 		// fall-through) so the queue owns the merge decision while it waits.
-		return true, false, false
+		return true, false, false, false
 	}
 
 	// ADR-933: a confirmed required-context failure takes precedence over
@@ -84,13 +89,14 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// solely by a classic commit status with no corresponding check run,
 	// which classifyCIFromCheckRuns' checkRuns-only view can never see.
 	if blocked, ciFailure, timedOut := e.classifyCIFromRequiredContexts(owner, repo, item, settle); ciFailure || timedOut {
-		return blocked, ciFailure, timedOut
+		return blocked, ciFailure, timedOut, false
 	}
 
 	// PRMergeUnsettled or PRMergeBlocked: detailed classification using settle.CheckRuns
 	// and settle.MergeableState.
 	if len(settle.CheckRuns) > 0 {
-		return e.classifyCIFromCheckRuns(owner, repo, item, settle.CheckRuns)
+		blocked, ciFailure, timedOut := e.classifyCIFromCheckRuns(owner, repo, item, settle.CheckRuns)
+		return blocked, ciFailure, timedOut, false
 	}
 
 	// No check runs. Use settle.MergeableState to discriminate R3 and
@@ -201,7 +207,11 @@ func (e *Engine) classifyCIFromRequiredContexts(owner, repo string, item gh.Proj
 // (e.g. Commit Status / legacy Statuses API), applying CIWaitTimeout as a
 // false-positive guard in both cases before falling through to the generic
 // Unsettled case.
-func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, owner, repo string, prNum int, mergeableState string) (blocked, ciFailure, timedOut bool) {
+//
+// The R3 pause branch reports terminated=true (rather than reusing the
+// all-false "gate cleared" tuple) since it calls pauseForRequiredNeverRunningCheck
+// directly — see checkCIGate's doc comment for the full outcome table.
+func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, owner, repo string, prNum int, mergeableState string) (blocked, ciFailure, timedOut, terminated bool) {
 	if mergeableState == "blocked" {
 		// R3: OPEN+BLOCKED+no check runs ever observed — a required check is
 		// configured but never triggered by PR events.
@@ -212,11 +222,11 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
 				e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", prNum)
 				e.pauseForRequiredNeverRunningCheck(board, item, stage, prNum)
-				return false, false, false
+				return false, false, false, true
 			}
 		}
 		e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs — dwell not yet elapsed; waiting\n", prNum)
-		return true, false, false
+		return true, false, false, false
 	}
 
 	if mergeableState != "" && mergeableState != "unknown" {
@@ -227,16 +237,16 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
 				e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
 				e.removeAwaitingCILabel(owner, repo, item)
-				return false, false, true
+				return false, false, true, false
 			}
 		}
 		e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
-		return true, false, false
+		return true, false, false, false
 	}
 
 	// Generic Unsettled: hadChecks/dwell/HeadSHA-empty/mergeable=nil/unknown.
 	// Block and re-evaluate on next poll.
-	return true, false, false
+	return true, false, false, false
 }
 
 // removeAwaitingCILabel removes fabrik:awaiting-ci if present on the item.

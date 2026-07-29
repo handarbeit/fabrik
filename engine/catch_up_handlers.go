@@ -65,7 +65,15 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	if !pctx.hasComplete {
 		return false
 	}
-	blocked, timedOut := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+	blocked, timedOut, terminated := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+	if terminated {
+		// checkReviewGate already paused the item directly via
+		// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
+		// item that was just paused in this same pass. Checked ahead of the
+		// other branches for the same reason as handleMergeAndCIGates's
+		// ciTerminated check. See ADR-1223.
+		return true
+	}
 	if blocked {
 		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
 		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
@@ -236,8 +244,17 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 
 	// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 	// Runs in Phase 1 (unconditional) so CI failures are fixed regardless of
-	// auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut).
-	ciBlocked, ciFailure, ciTimedOut := e.checkCIGate(pctx.board, pctx.item, pctx.stage, settle)
+	// auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut, terminated).
+	ciBlocked, ciFailure, ciTimedOut, ciTerminated := e.checkCIGate(pctx.board, pctx.item, pctx.stage, settle)
+	if ciTerminated {
+		// checkCIGate already paused the item directly (e.g. PR closed without
+		// merging, or R3's required-check-never-runs case) — claim it so Phase 2
+		// does not advance an item that was just paused in this same pass. Must
+		// be checked ahead of the other branches so a future pause branch that
+		// also sets, say, timedOut for logging purposes can't silently change
+		// this claim decision. See ADR-1223.
+		return true
+	}
 	if ciTimedOut {
 		e.pauseForCITimeout(pctx.board, pctx.item, pctx.stage)
 		return true

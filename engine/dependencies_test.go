@@ -181,6 +181,67 @@ func TestCheckDependencies_OpenDeps_ReturnsTrue_FirstTime(t *testing.T) {
 	}
 }
 
+// TestCheckDependencies_CycleDetected_ReturnsTrue is the #1223 regression:
+// checkDependencies's own bool return IS the Phase 1 claim signal (no
+// translation layer in handleDependencies, unlike checkCIGate/checkReviewGate),
+// so the cycle-detection pause branch must return true — the same value as a
+// plain dependency block — rather than reusing the false value that "no open
+// dependencies" returns. Returning false here would let Phase 2 advance an
+// item that was just paused for a cyclic blockedBy relationship.
+func TestCheckDependencies_CycleDetected_ReturnsTrue(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	eng := depTestEngine(t, client)
+
+	// Seed the Store with #8's own view: it is (transitively) blocked by #10 —
+	// the item under test — creating a cycle: 10 -> 8 -> 10.
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number: 8, Repo: "owner/repo",
+		BlockedBy: []gh.Dependency{
+			{Number: 10, State: "OPEN", Repo: "owner/repo"},
+		},
+	}})
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		// No fabrik:blocked label — first-time block path, where cycle
+		// detection runs.
+		BlockedBy: []gh.Dependency{
+			{Number: 8, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if !blocked {
+		t.Error("expected checkDependencies to return true (claim the item) on cycle detection")
+	}
+	// A cycle pause is distinct from a plain dependency block: fabrik:blocked
+	// is not applied, and no "waiting for" comment is posted.
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+		if l == "fabrik:blocked" {
+			t.Error("fabrik:blocked must not be applied for a cycle-detected pause")
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused to be added on cycle detection; labels added: %v", labelNames)
+	}
+}
+
 func TestCheckDependencies_OpenDeps_AlreadyBlocked_NoComment(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := depTestEngine(t, client)

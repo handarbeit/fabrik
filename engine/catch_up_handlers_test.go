@@ -511,6 +511,69 @@ func TestGuard2RoundTrip_DisableThenResolveReenablesAutoMerge(t *testing.T) {
 	}
 }
 
+// TestHandleReviewGate_Terminated_Claims is the #1223 sibling regression: when
+// checkReviewGate's handleBrokenReviewLinkage path pauses the item directly
+// (terminated=true), handleReviewGate must claim the item (return true) rather
+// than reading the all-false blocked/timedOut tuple as "gate cleared naturally"
+// and falling through to buildReviewThreadComments — which would leave the item
+// unclaimed and let Phase 2 advance an item that was just paused.
+func TestHandleReviewGate_Terminated_Claims(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true)},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 0, // no linkage via closingIssuesReferences — broken linkage
+	}
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed) on broken-linkage terminated pause, got false")
+	}
+	if advancedItems["owner/repo#10"] {
+		t.Error("advancedItems must not be set for a terminated (paused) item")
+	}
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+		if l == "fabrik:awaiting-review" {
+			t.Error("fabrik:awaiting-review must not be applied for a terminated broken-linkage pause")
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused to be added for broken linkage; labels added: %v", labelNames)
+	}
+}
+
 // ---- handleMergeAndCIGates rebase reinvoke dispatch tests ----
 
 // makeMergeGatePctx returns a phase1Ctx for merge-gate/CI-gate handler tests.
@@ -844,6 +907,56 @@ func TestHandleCIFixReinvoke_HappyPath_Dispatches(t *testing.T) {
 		t.Errorf("CIFixCycles(Implement) = %d; want 1", snap.CIFixCycles("Implement"))
 	}
 	eng.wg.Wait()
+}
+
+// TestHandleMergeAndCIGates_CITerminated_Claims is the #1223 regression: when
+// checkCIGate's PRMergeTerminal/closed-without-merge branch pauses the item
+// directly (terminated=true), handleMergeAndCIGates must claim the item (return
+// true) rather than reading the all-false blocked/ciFailure/ciTimedOut tuple as
+// "gate cleared" — a false read would let Phase 2 advance an item that was just
+// paused in this same poll pass.
+func TestHandleMergeAndCIGates_CITerminated_Claims(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "deadbeef", State: "closed", Merged: false}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+		addCommentFn:    func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	waitTrue := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeMergeGatePctx(board, advancedItems)
+
+	got := eng.handleMergeAndCIGates(pctx)
+
+	if !got {
+		t.Error("handleMergeAndCIGates: expected true (item claimed) on CI-gate terminated pause, got false")
+	}
+	if advancedItems["owner/repo#20"] {
+		t.Error("advancedItems must not be set for a terminated (paused) item")
+	}
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused to be added for closed-not-merged PR; labels added: %v", labelNames)
+	}
 }
 
 // TestDispatchCIFixReinvoke_BotNoticeInReviewThread_ExcludedFromInvocation
