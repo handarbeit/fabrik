@@ -98,6 +98,45 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 	return out, nil
 }
 
+// FetchPRReviewDecision returns GitHub's computed review-decision verdict for a
+// pull request via GraphQL, keyed on PR number — mirroring prNodeID's
+// single-field-by-number query shape rather than closedByPullRequestsReferences,
+// so it works identically for default-branch and base:<branch> PRs (GitHub's
+// REST API has no equivalent field; reviewDecision is GraphQL-only).
+//
+// Returns one of "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED" when the
+// repository has a branch-protection review requirement configured for this
+// PR, or "" when GitHub reports no such requirement (reviewDecision is null) —
+// callers must treat "" as "no real verdict available", not as a satisfied gate.
+func (c *Client) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
+	query := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewDecision
+    }
+  }
+}`
+	vars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewDecision string `json:"reviewDecision"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return "", fmt.Errorf("fetching PR #%d review decision: %w", prNumber, err)
+	}
+	return result.Data.Repository.PullRequest.ReviewDecision, nil
+}
+
 // FetchPRReviewRequests returns the outstanding requested reviewers for a pull
 // request via the REST API, keyed on PR number — the base-independent counterpart
 // to the GraphQL-nested reviewRequests field. Team review requests are ignored,

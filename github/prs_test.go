@@ -905,6 +905,62 @@ func TestPRNodeID_GraphQLErrorWrapped(t *testing.T) {
 	}
 }
 
+func TestFetchPRReviewDecision(t *testing.T) {
+	tests := []struct {
+		name   string
+		decide string // GraphQL response value, "" for null
+		want   string
+	}{
+		{"approved", "APPROVED", "APPROVED"},
+		{"changes requested", "CHANGES_REQUESTED", "CHANGES_REQUESTED"},
+		{"review required", "REVIEW_REQUIRED", "REVIEW_REQUIRED"},
+		{"null (no branch protection review requirement)", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				var reviewDecision interface{}
+				if tt.decide != "" {
+					reviewDecision = tt.decide
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"data": map[string]interface{}{
+						"repository": map[string]interface{}{
+							"pullRequest": map[string]interface{}{
+								"reviewDecision": reviewDecision,
+							},
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewClientWithBaseURL("test-token", srv.URL)
+			got, err := c.FetchPRReviewDecision("owner", "repo", 42)
+			if err != nil {
+				t.Fatalf("FetchPRReviewDecision: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("FetchPRReviewDecision = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchPRReviewDecision_ErrorWrapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	_, err := c.FetchPRReviewDecision("owner", "repo", 42)
+	if err == nil || !strings.Contains(err.Error(), "fetching PR #42 review decision") {
+		t.Errorf("expected wrapped 'fetching PR #42 review decision' error, got %v", err)
+	}
+}
+
 func TestMarkPRReady(t *testing.T) {
 	const prNodeID = "PR_readynode"
 
