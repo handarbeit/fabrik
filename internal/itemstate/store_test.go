@@ -1116,3 +1116,107 @@ func TestTerminalFlagClearedByProjectV2ItemEdited(t *testing.T) {
 		t.Error("Terminal flag not cleared by ProjectV2ItemEdited with new status")
 	}
 }
+
+// --- Repo-scoped worker liveness (EnterRepoWorker/ExitRepoWorker/RepoWorkerActive/HasInFlightWorker) ---
+//
+// These back the single authoritative "is a worker running" answer (FR-2 of
+// issue #1222) that both the auto-upgrade idle guard and mergeTrainWorkerActive
+// read, covering merge-train workers which span a batch of issue numbers and
+// have no single natural (Repo, Number) home.
+
+func TestEnterExitRepoWorker_BasicLifecycle(t *testing.T) {
+	s := NewStore(nil)
+
+	if s.RepoWorkerActive("owner/repo") {
+		t.Error("RepoWorkerActive should be false before EnterRepoWorker")
+	}
+
+	s.EnterRepoWorker("owner/repo")
+	if !s.RepoWorkerActive("owner/repo") {
+		t.Error("RepoWorkerActive should be true after EnterRepoWorker")
+	}
+
+	s.ExitRepoWorker("owner/repo")
+	if s.RepoWorkerActive("owner/repo") {
+		t.Error("RepoWorkerActive should be false after ExitRepoWorker")
+	}
+}
+
+func TestEnterRepoWorker_Idempotent(t *testing.T) {
+	s := NewStore(nil)
+	s.EnterRepoWorker("owner/repo")
+	s.EnterRepoWorker("owner/repo") // second call must not panic or toggle anything odd
+	if !s.RepoWorkerActive("owner/repo") {
+		t.Error("RepoWorkerActive should be true after repeated EnterRepoWorker calls")
+	}
+}
+
+func TestExitRepoWorker_NoOpWhenAbsent(t *testing.T) {
+	s := NewStore(nil)
+	// Must not panic when clearing a marker that was never set.
+	s.ExitRepoWorker("owner/repo")
+	if s.RepoWorkerActive("owner/repo") {
+		t.Error("RepoWorkerActive should remain false after ExitRepoWorker on an absent key")
+	}
+}
+
+func TestRepoWorkerActive_IsolatedPerKey(t *testing.T) {
+	s := NewStore(nil)
+	s.EnterRepoWorker("owner/repoA")
+
+	if !s.RepoWorkerActive("owner/repoA") {
+		t.Error("RepoWorkerActive(owner/repoA) should be true")
+	}
+	if s.RepoWorkerActive("owner/repoB") {
+		t.Error("RepoWorkerActive(owner/repoB) should be false — markers must not leak across repo keys")
+	}
+}
+
+func TestHasInFlightWorker_FalseWhenBothEmpty(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	if s.HasInFlightWorker() {
+		t.Error("HasInFlightWorker should be false with no per-item worker and no repo worker registered")
+	}
+}
+
+func TestHasInFlightWorker_TrueFromPerItemWorker(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: time.Now()})
+	if !s.HasInFlightWorker() {
+		t.Error("HasInFlightWorker should be true when a per-item Worker is registered")
+	}
+}
+
+func TestHasInFlightWorker_TrueFromRepoWorker(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.EnterRepoWorker("owner/repo")
+	if !s.HasInFlightWorker() {
+		t.Error("HasInFlightWorker should be true when a repo-scoped (merge-train) worker is registered")
+	}
+}
+
+func TestHasInFlightWorker_FalseAfterBothCleared(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now})
+	s.EnterRepoWorker("owner/repo")
+
+	s.Apply(WorkerExited{Repo: testRepo, Number: 1})
+	s.ExitRepoWorker("owner/repo")
+
+	if s.HasInFlightWorker() {
+		t.Error("HasInFlightWorker should be false once both the per-item and repo-scoped markers are cleared")
+	}
+}
+
+func TestReset_ClearsRepoWorkers(t *testing.T) {
+	s := NewStore(nil)
+	s.EnterRepoWorker("owner/repo")
+	s.Reset(nil)
+	if s.RepoWorkerActive("owner/repo") {
+		t.Error("Reset should clear repo-scoped worker markers")
+	}
+	if s.HasInFlightWorker() {
+		t.Error("HasInFlightWorker should be false after Reset")
+	}
+}

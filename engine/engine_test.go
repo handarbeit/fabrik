@@ -618,46 +618,78 @@ func TestPollNonBlockingAtCapacity(t *testing.T) {
 }
 
 // TestIdleCountNotIncrementedWhileWorkersInFlight verifies that idleCount (which
-// drives auto-upgrade) is not incremented when dispatched==0 but workers are
-// still running from a previous poll cycle. Upgrading while workers are in-flight
-// would call syscall.Exec and kill them.
+// drives auto-upgrade) is not incremented when dispatched==0 but a worker is
+// still running from a previous poll cycle — whether that worker is a
+// per-item dispatch (itemstate.WorkerEntered) or a repo-scoped merge-train
+// worker (itemstate.Store.EnterRepoWorker). Upgrading while a worker is
+// in-flight would call syscall.Exec and kill it.
+//
+// Unlike a prior version of this test, this drives the actual production
+// guard (engine/poll.go's dispatched==0 branch, via a real eng.poll() call)
+// rather than a copy of its if/else logic inlined in the test body — the
+// guard could previously be deleted entirely and the test would still pass.
 func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
-	e := &Engine{
-		cfg: Config{
+	newIdleTestEngine := func(t *testing.T) *Engine {
+		t.Helper()
+		client := &mockGitHubClient{
+			fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+				// Zero items on the board — nothing to dispatch this poll cycle,
+				// so poll() takes the dispatched==0 idle-guard branch.
+				return &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil}, nil
+			},
+		}
+		return NewWithDeps(Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
 			AutoUpgrade:   true,
-			MaxConcurrent: 1,
-		},
-		sem:   make(chan struct{}, 1),
-		store: itemstate.NewStore(nil),
+			Stages:        testStages(),
+		}, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	}
 
-	// Simulate an in-flight worker via the Store (mirrors the actual dispatch path).
-	e.store.Apply(itemstate.WorkerEntered{
-		Repo:      "owner/repo",
-		Number:    42,
-		StageName: "test",
-		StartedAt: time.Now(),
+	t.Run("no worker in flight", func(t *testing.T) {
+		eng := newIdleTestEngine(t)
+		if _, err := eng.poll(context.Background()); err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		// idleUpgradeThreshold is 2, so a single idle poll only increments
+		// idleCount to 1 — never far enough to reach checkAndUpgrade's
+		// syscall.Exec, but far enough to prove the guard doesn't suppress
+		// the increment when nothing is actually in flight.
+		if eng.idleCount != 1 {
+			t.Errorf("idleCount = %d, want 1 (guard must not suppress the increment when no worker is in flight)", eng.idleCount)
+		}
 	})
 
-	// With dispatched==0 and an in-flight worker, idleCount must not increment.
-	dispatched := 0
-	var hasInFlight bool
-	for _, snap := range e.store.All() {
-		if snap.Worker() != nil {
-			hasInFlight = true
-			break
+	t.Run("per-item worker in flight", func(t *testing.T) {
+		eng := newIdleTestEngine(t)
+		eng.store.Apply(itemstate.WorkerEntered{
+			Repo:      "owner/repo",
+			Number:    42,
+			StageName: "test",
+			StartedAt: time.Now(),
+		})
+		if _, err := eng.poll(context.Background()); err != nil {
+			t.Fatalf("poll: %v", err)
 		}
-	}
+		if eng.idleCount != 0 {
+			t.Errorf("idleCount = %d, want 0 while a per-item worker is in flight", eng.idleCount)
+		}
+	})
 
-	if hasInFlight {
-		e.idleCount = 0
-	} else if dispatched == 0 {
-		e.idleCount++
-	}
-
-	if e.idleCount != 0 {
-		t.Errorf("idleCount should remain 0 while workers are in-flight, got %d", e.idleCount)
-	}
+	t.Run("merge-train worker in flight", func(t *testing.T) {
+		eng := newIdleTestEngine(t)
+		eng.store.EnterRepoWorker("owner/repo")
+		if _, err := eng.poll(context.Background()); err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		if eng.idleCount != 0 {
+			t.Errorf("idleCount = %d, want 0 while a merge-train worker is in flight", eng.idleCount)
+		}
+	})
 }
 
 func TestExtractModelOverride(t *testing.T) {

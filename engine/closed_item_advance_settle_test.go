@@ -140,6 +140,7 @@ func TestSettleClosedItemsToDone_ClosedAtHoldingStage_TrainWorkerActive_Skipped(
 	client := &mockGitHubClient{}
 	eng := testEngineWithStages(t, client, closedAdvanceStages())
 	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{assembling: true})
+	eng.store.EnterRepoWorker("owner/repo")
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 
 	item := gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued", IsClosed: true}

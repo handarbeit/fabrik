@@ -44,6 +44,14 @@ type Store struct {
 	// is established. Cleared by Reset to ensure a clean slate after Bootstrap.
 	pendingCheckRuns map[string][]gh.CheckRun // SHA → buffered pre-linkage runs
 
+	// repoWorkers tracks repo-scoped (as opposed to per-(Repo,Number)) worker
+	// liveness — currently just merge-train workers, which operate on a batch
+	// spanning multiple issue numbers and have no single natural item home.
+	// Keyed by "owner/repo". Presence means a worker is in flight for that repo.
+	// Mutated via EnterRepoWorker/ExitRepoWorker; read via RepoWorkerActive and
+	// HasInFlightWorker. Guarded by mu, same as items.
+	repoWorkers map[string]struct{}
+
 	observerMu sync.RWMutex
 	observers  []observerEntry
 
@@ -88,6 +96,7 @@ func NewStore(fallback FallbackFetcher, opts ...StoreOption) *Store {
 		itemIDToKey:      make(map[string]string),
 		prToKey:          make(map[string]string),
 		pendingCheckRuns: make(map[string][]gh.CheckRun),
+		repoWorkers:      make(map[string]struct{}),
 		fallback:         fallback,
 		logger:           o.logger,
 	}
@@ -890,6 +899,50 @@ func (s *Store) All() []Snapshot {
 	return snaps
 }
 
+// EnterRepoWorker marks repoKey ("owner/repo") as having an active repo-scoped
+// worker (currently: a merge-train worker spanning a batch of items). Idempotent.
+func (s *Store) EnterRepoWorker(repoKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoWorkers[repoKey] = struct{}{}
+}
+
+// ExitRepoWorker clears the repo-scoped worker marker for repoKey. Safe to call
+// even if no marker is set (no-op).
+func (s *Store) ExitRepoWorker(repoKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.repoWorkers, repoKey)
+}
+
+// RepoWorkerActive reports whether a repo-scoped worker is currently marked
+// in-flight for repoKey ("owner/repo").
+func (s *Store) RepoWorkerActive(repoKey string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.repoWorkers[repoKey]
+	return ok
+}
+
+// HasInFlightWorker reports whether any worker — per-item (WorkerEntered on a
+// (Repo, Number)) or repo-scoped (EnterRepoWorker on a repo) — is currently
+// in flight. This is the single authoritative answer to "is a worker running"
+// consumed by the auto-upgrade idle guard: neither registry alone is
+// sufficient, since a merge-train worker registers only the latter.
+func (s *Store) HasInFlightWorker() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.repoWorkers) > 0 {
+		return true
+	}
+	for _, item := range s.items {
+		if item.Worker != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // Remove deletes the item identified by (repo, number) from the Store and
 // updates the shaToKey, itemIDToKey, and prToKey indexes accordingly.
 // No-op when the item is not present.
@@ -1003,6 +1056,7 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 	s.itemIDToKey = make(map[string]string, len(items))
 	s.prToKey = make(map[string]string, len(items))
 	s.pendingCheckRuns = make(map[string][]gh.CheckRun)
+	s.repoWorkers = make(map[string]struct{})
 
 	newKeys := make(map[string]bool, len(items))
 	var notifications []resetNotification
