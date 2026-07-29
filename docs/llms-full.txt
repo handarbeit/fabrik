@@ -3552,10 +3552,10 @@ This table shows the normal flow when an issue progresses through the pipeline w
 **`shouldAdvance` resolution (Path 1, `handleStageComplete`):**
 
 1. `yoloActive = cfg.Yolo || hasYoloLabel(item)` — re-fetches labels first to pick up mid-run changes
-2. `cruiseActive = !yoloActive && hasCruiseLabel(item)` — suppressed when yolo is active
+2. `cruiseActive = !yoloActive && hasCruiseLabel(item)` — false when yolo is active. This is **not** a precedence rule: it only avoids double-counting in step 3, where `yoloActive` already contributes the same `true`. Step 5 keys off the raw label, so cruise still wins at Validate.
 3. `shouldAdvance = yoloActive || cruiseActive`
 4. If `stage.AutoAdvance != nil` AND neither `fabrik:yolo` nor `fabrik:cruise` label is present: `shouldAdvance = *stage.AutoAdvance` — this means `auto_advance: false` in YAML overrides `cfg.Yolo` (the `--yolo` flag), but explicit yolo/cruise labels override `auto_advance: false`
-5. If `cruiseActive && stage.Name == "Validate"`: `shouldAdvance = false` — cruise stops at Validate
+5. If `hasCruiseLabel(item) && stage.Name == "Validate"`: `shouldAdvance = false` — cruise stops at Validate. Note the **raw label**, not `cruiseActive`: this fires even when yolo is also present, which is what makes cruise win the stop-at-Validate decision.
 
 **Catch-up loop `shouldAdvance` resolution (Path 2):** The catch-up loop first checks `cfg.Yolo || hasYoloLabel(item) || hasCruiseLabel(item)` — items without any of these are skipped entirely. Then: if neither yolo nor cruise LABEL is present and `stage.AutoAdvance` is explicitly false, the item is skipped. This produces the same behavior as Path 1.
 
