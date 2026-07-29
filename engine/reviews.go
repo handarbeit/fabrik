@@ -344,6 +344,19 @@ func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (s
 	return true, "no branch-protection review requirement; no outstanding CHANGES_REQUESTED review"
 }
 
+// changesRequestedAuthor returns the author of the first CHANGES_REQUESTED
+// review in reviews, or "" if none. Used only for pause-message text
+// (pauseForReviewTimeout) — a lightweight, best-effort lookup over whatever
+// review data the caller already has in hand, not a gating decision.
+func changesRequestedAuthor(reviews []gh.PRReview) string {
+	for _, r := range reviews {
+		if r.State == "CHANGES_REQUESTED" {
+			return r.Author
+		}
+	}
+	return ""
+}
+
 // reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
 // whether a wait_for_reviews stage must be held back from its landing decision
 // (auto-merge enable, enqueue, direct merge, or advance-to-Queued) because reviewer
@@ -577,7 +590,14 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 // done=false means the label wasn't found, was found but the timeout hasn't
 // elapsed yet, or Phase 1 already fired and Phase 2 hasn't timed out yet —
 // the caller falls through to the "still waiting" logging/label-apply tail.
-func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool) (blocked, timedOut, done bool) {
+//
+// authorityReason is non-empty only when the caller's authoritative-mode
+// verdict check blocked (see reviewGateAuthorityVerdict) — i.e. outstanding is
+// empty and reviews exist, but the verdict itself isn't satisfied. When set,
+// it is used verbatim as the pause reason instead of the generic
+// "pending reviewers"/"no reviews submitted yet" messages, which would
+// otherwise misleadingly suggest nobody has reviewed at all.
+func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -632,7 +652,9 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 
 		// Mixed/pure-human or no PR number: existing pause behavior.
 		var reason string
-		if len(outstanding) > 0 {
+		if authorityReason != "" {
+			reason = "authoritative gate blocking: " + authorityReason
+		} else if len(outstanding) > 0 {
 			reason = "pending reviewers: " + strings.Join(outstanding, ", ")
 		} else {
 			reason = "no reviews submitted yet (bots may not have responded)"
@@ -771,10 +793,26 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		if len(reviewerParts) > 0 {
 			pendingLine = "\n\nPending reviewers: " + strings.Join(reviewerParts, ", ")
 		}
+		// Authoritative-mode context: item.LinkedPRReviews is fresh for a
+		// default-branch item (the catch-up loop deep-fetches before calling
+		// this function) but structurally empty for a base:<branch> item — in
+		// that case this line is simply omitted, matching pendingLine's own
+		// existing base:<branch> gap above (LinkedPRReviewRequests is likewise
+		// GraphQL-only).
+		authorityLine := ""
+		if stage.ReviewAuthority == "authoritative" {
+			if blocker := changesRequestedAuthor(item.LinkedPRReviews); blocker != "" {
+				authorityLine = fmt.Sprintf(
+					"\n\nReview authority is `authoritative` for this stage — `%s` requested changes, "+
+						"and the gate will not clear until that is resolved (a new review, or dismissal of the stale one).",
+					blocker,
+				)
+			}
+		}
 		msg = fmt.Sprintf(
-			"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s\n\n"+
+			"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
 				"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
-			stage.Name, pendingLine,
+			stage.Name, pendingLine, authorityLine,
 		)
 	}
 
