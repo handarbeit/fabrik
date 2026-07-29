@@ -27,6 +27,70 @@ func reviewTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
 	return testEngineWithStages(t, client, reviewTestStages())
 }
 
+func TestReviewGateAuthorityVerdict(t *testing.T) {
+	tests := []struct {
+		name           string
+		reviewDecision string
+		reviews        []gh.PRReview
+		wantSatisfied  bool
+	}{
+		{
+			name:           "reviewDecision APPROVED satisfies regardless of reviews",
+			reviewDecision: "APPROVED",
+			reviews:        nil,
+			wantSatisfied:  true,
+		},
+		{
+			name:           "reviewDecision CHANGES_REQUESTED blocks",
+			reviewDecision: "CHANGES_REQUESTED",
+			reviews:        []gh.PRReview{{Author: "alice", State: "APPROVED"}},
+			wantSatisfied:  false,
+		},
+		{
+			name:           "reviewDecision REVIEW_REQUIRED blocks",
+			reviewDecision: "REVIEW_REQUIRED",
+			reviews:        nil,
+			wantSatisfied:  false,
+		},
+		{
+			name:           "empty reviewDecision, clean reviews satisfies (fallback)",
+			reviewDecision: "",
+			reviews:        []gh.PRReview{{Author: "alice", State: "APPROVED"}},
+			wantSatisfied:  true,
+		},
+		{
+			name:           "empty reviewDecision, outstanding CHANGES_REQUESTED blocks (fallback)",
+			reviewDecision: "",
+			reviews:        []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED"}},
+			wantSatisfied:  false,
+		},
+		{
+			name:           "empty reviewDecision, DISMISSED CHANGES_REQUESTED satisfies (fallback)",
+			reviewDecision: "",
+			reviews:        []gh.PRReview{{Author: "bob", State: "DISMISSED"}},
+			wantSatisfied:  true,
+		},
+		{
+			name:           "empty reviewDecision, no reviews at all satisfies (fallback)",
+			reviewDecision: "",
+			reviews:        nil,
+			wantSatisfied:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			satisfied, reason := reviewGateAuthorityVerdict(tt.reviewDecision, tt.reviews)
+			if satisfied != tt.wantSatisfied {
+				t.Errorf("reviewGateAuthorityVerdict(%q, %v) satisfied = %v, want %v (reason: %q)",
+					tt.reviewDecision, tt.reviews, satisfied, tt.wantSatisfied, reason)
+			}
+			if reason == "" {
+				t.Errorf("reviewGateAuthorityVerdict(%q, %v): reason should never be empty", tt.reviewDecision, tt.reviews)
+			}
+		})
+	}
+}
+
 // (a) No requested reviewers AND no reviews submitted → gate STAYS BLOCKED,
 // waiting for self-assigning bot reviewers (Copilot, Gemini) to post. This
 // is the common yolo case: the pipeline marks the PR ready and immediately

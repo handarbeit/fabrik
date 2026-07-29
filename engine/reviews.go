@@ -282,6 +282,44 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 	return outstanding, hasReviews
 }
 
+// reviewGateAuthorityVerdict is the additive check `review_authority:
+// authoritative` mode applies inside the existing "outstanding == 0 &&
+// hasReviews" clearing branch of both checkReviewGate and
+// reviewGateBlocksLanding — it never runs in "advisory" mode (the caller gates
+// the call itself) and never widens what advisory already clears, only
+// narrows it further. See ADR-1250.
+//
+// When reviewDecision is one of GitHub's real branch-protection-review-requirement
+// values (APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED — computed server-side,
+// including CODEOWNERS and required-approval-count rules), that value is
+// authoritative: satisfied only on APPROVED. When reviewDecision is empty (no
+// branch-protection review requirement configured on this repo), authoritative
+// mode must not become a silent no-op — it falls back to Fabrik's own
+// computation: satisfied unless any non-DISMISSED review in reviews is in
+// CHANGES_REQUESTED state.
+func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (satisfied bool, reason string) {
+	switch reviewDecision {
+	case "APPROVED":
+		return true, "reviewDecision=APPROVED"
+	case "CHANGES_REQUESTED":
+		return false, "reviewDecision=CHANGES_REQUESTED"
+	case "REVIEW_REQUIRED":
+		return false, "reviewDecision=REVIEW_REQUIRED"
+	}
+
+	// No branch-protection review requirement configured — fall back to
+	// Fabrik's own outstanding-reviewer + no-CHANGES_REQUESTED computation.
+	// DISMISSED reviews are excluded — a dismissed CHANGES_REQUESTED review is
+	// no longer an active verdict, mirroring reviewGateOutstanding's hasReviews
+	// computation.
+	for _, r := range reviews {
+		if r.State == "CHANGES_REQUESTED" {
+			return false, fmt.Sprintf("no branch-protection review requirement; %s requested changes", r.Author)
+		}
+	}
+	return true, "no branch-protection review requirement; no outstanding CHANGES_REQUESTED review"
+}
+
 // reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
 // whether a wait_for_reviews stage must be held back from its landing decision
 // (auto-merge enable, enqueue, direct merge, or advance-to-Queued) because reviewer
