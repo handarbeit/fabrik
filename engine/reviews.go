@@ -820,24 +820,38 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		// blocking — unlike a narrower heuristic (e.g. scanning only for a
 		// CHANGES_REQUESTED review), this also surfaces REVIEW_REQUIRED and
 		// fetch-failure cases, not just an active CHANGES_REQUESTED review.
-		// item.LinkedPRNumber is 0 for a base:<branch> item (the same
-		// structurally-empty GraphQL field pendingLine's gap above relies on),
-		// so this line is simply omitted there.
+		// item.LinkedPRNumber (and LinkedPRReviews with it) is always 0/empty
+		// for a base:<branch> item — closedByPullRequestsReferences is
+		// structurally empty there. Resolve both via the same REST fallback
+		// checkReviewGate/reviewGateBlocksLanding use, so this line is still
+		// populated on a base:<branch> repo instead of silently omitted.
 		authorityLine := ""
-		if stage.ReviewAuthority == "authoritative" && item.LinkedPRNumber > 0 {
+		if stage.ReviewAuthority == "authoritative" {
 			owner, repo := itemOwnerRepo(item, e.defaultRepo())
-			if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, item.LinkedPRNumber); err != nil {
-				authorityLine = fmt.Sprintf(
-					"\n\nReview authority is `authoritative` for this stage — the review verdict could not be "+
-						"read (%v); the gate is blocking conservatively until it can be.",
-					err,
-				)
-			} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, item.LinkedPRReviews); !satisfied {
-				authorityLine = fmt.Sprintf(
-					"\n\nReview authority is `authoritative` for this stage — %s, "+
-						"and the gate will not clear until that is resolved.",
-					reason,
-				)
+			prNumber := item.LinkedPRNumber
+			reviews := item.LinkedPRReviews
+			if prNumber == 0 {
+				if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
+					prNumber = pr.Number
+					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
+						reviews = restReviews
+					}
+				}
+			}
+			if prNumber > 0 {
+				if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, prNumber); err != nil {
+					authorityLine = fmt.Sprintf(
+						"\n\nReview authority is `authoritative` for this stage — the review verdict could not be "+
+							"read (%v); the gate is blocking conservatively until it can be.",
+						err,
+					)
+				} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
+					authorityLine = fmt.Sprintf(
+						"\n\nReview authority is `authoritative` for this stage — %s, "+
+							"and the gate will not clear until that is resolved.",
+						reason,
+					)
+				}
 			}
 		}
 		msg = fmt.Sprintf(

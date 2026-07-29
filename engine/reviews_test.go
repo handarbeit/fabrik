@@ -1342,6 +1342,48 @@ func TestPauseForReviewTimeout_Authoritative_FetchError_MentionsUnreadableVerdic
 	}
 }
 
+// On a base:<branch> repo, LinkedPRNumber/LinkedPRReviews are always 0/empty
+// (closedByPullRequestsReferences is structurally empty there) — the pause
+// message must still resolve the real PR via the same REST fallback
+// checkReviewGate/reviewGateBlocksLanding use, rather than silently omitting
+// the authority explanation the way a naive item.LinkedPRNumber > 0 guard
+// would.
+func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_MentionsVerdict(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviewDecision called with resolved PR #77, got #%d", prNumber)
+			}
+			return "", nil // no branch protection configured — exercises the fallback
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review", "base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "bob requested changes") {
+		t.Errorf("expected pause comment to mention the outstanding CHANGES_REQUESTED verdict resolved via the base:<branch> REST fallback, got:\n%s", body)
+	}
+}
+
 // removeAwaitingReviewLabel also removes the fabrik:bot-reprompted label.
 func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 	client := &mockGitHubClient{}
