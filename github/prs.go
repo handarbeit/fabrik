@@ -108,6 +108,11 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 // repository has a branch-protection review requirement configured for this
 // PR, or "" when GitHub reports no such requirement (reviewDecision is null) —
 // callers must treat "" as "no real verdict available", not as a satisfied gate.
+// Returns an error (rather than "") when the query resolves with no pullRequest
+// object at all (bad prNumber, or an app-token permission gap) — that is
+// "unknown state", distinct from a legitimate null reviewDecision, and must
+// not be folded into the same "" the no-branch-protection fallback treats as
+// meaningful data.
 func (c *Client) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
 	query := `
 query($owner: String!, $repo: String!, $number: Int!) {
@@ -125,7 +130,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	var result struct {
 		Data struct {
 			Repository struct {
-				PullRequest struct {
+				PullRequest *struct {
 					ReviewDecision string `json:"reviewDecision"`
 				} `json:"pullRequest"`
 			} `json:"repository"`
@@ -133,6 +138,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	}
 	if err := c.graphqlRequest(query, vars, &result); err != nil {
 		return "", fmt.Errorf("fetching PR #%d review decision: %w", prNumber, err)
+	}
+	if result.Data.Repository.PullRequest == nil {
+		return "", fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
 	}
 	return result.Data.Repository.PullRequest.ReviewDecision, nil
 }

@@ -320,15 +320,24 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 // branch-protection review requirement configured on this repo), authoritative
 // mode must not become a silent no-op — it falls back to Fabrik's own
 // computation: satisfied unless any non-DISMISSED review in reviews is in
-// CHANGES_REQUESTED state.
+// CHANGES_REQUESTED state. Any other non-empty value (an undocumented future
+// GitHub enum addition, or a schema change) blocks conservatively instead of
+// silently falling through to the no-branch-protection fallback — GitHub did
+// report a real verdict here, just not one this function recognizes, so
+// treating it as "no requirement configured" could wrongly satisfy the gate.
 func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (satisfied bool, reason string) {
 	switch reviewDecision {
+	case "":
+		// No branch-protection review requirement configured — fall through to
+		// Fabrik's own computation below.
 	case "APPROVED":
 		return true, "reviewDecision=APPROVED"
 	case "CHANGES_REQUESTED":
 		return false, "reviewDecision=CHANGES_REQUESTED"
 	case "REVIEW_REQUIRED":
 		return false, "reviewDecision=REVIEW_REQUIRED"
+	default:
+		return false, fmt.Sprintf("unrecognized reviewDecision=%q, blocking conservatively", reviewDecision)
 	}
 
 	// No branch-protection review requirement configured — fall back to
@@ -342,19 +351,6 @@ func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (s
 		}
 	}
 	return true, "no branch-protection review requirement; no outstanding CHANGES_REQUESTED review"
-}
-
-// changesRequestedAuthor returns the author of the first CHANGES_REQUESTED
-// review in reviews, or "" if none. Used only for pause-message text
-// (pauseForReviewTimeout) — a lightweight, best-effort lookup over whatever
-// review data the caller already has in hand, not a gating decision.
-func changesRequestedAuthor(reviews []gh.PRReview) string {
-	for _, r := range reviews {
-		if r.State == "CHANGES_REQUESTED" {
-			return r.Author
-		}
-	}
-	return ""
 }
 
 // reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
@@ -818,19 +814,29 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		if len(reviewerParts) > 0 {
 			pendingLine = "\n\nPending reviewers: " + strings.Join(reviewerParts, ", ")
 		}
-		// Authoritative-mode context: item.LinkedPRReviews is fresh for a
-		// default-branch item (the catch-up loop deep-fetches before calling
-		// this function) but structurally empty for a base:<branch> item — in
-		// that case this line is simply omitted, matching pendingLine's own
-		// existing base:<branch> gap above (LinkedPRReviewRequests is likewise
-		// GraphQL-only).
+		// Authoritative-mode context: live-fetch the verdict and reuse the same
+		// reviewGateAuthorityVerdict pure function both gate sites consult, so
+		// this message can never disagree with why the gate is actually
+		// blocking — unlike a narrower heuristic (e.g. scanning only for a
+		// CHANGES_REQUESTED review), this also surfaces REVIEW_REQUIRED and
+		// fetch-failure cases, not just an active CHANGES_REQUESTED review.
+		// item.LinkedPRNumber is 0 for a base:<branch> item (the same
+		// structurally-empty GraphQL field pendingLine's gap above relies on),
+		// so this line is simply omitted there.
 		authorityLine := ""
-		if stage.ReviewAuthority == "authoritative" {
-			if blocker := changesRequestedAuthor(item.LinkedPRReviews); blocker != "" {
+		if stage.ReviewAuthority == "authoritative" && item.LinkedPRNumber > 0 {
+			owner, repo := itemOwnerRepo(item, e.defaultRepo())
+			if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, item.LinkedPRNumber); err != nil {
 				authorityLine = fmt.Sprintf(
-					"\n\nReview authority is `authoritative` for this stage — `%s` requested changes, "+
-						"and the gate will not clear until that is resolved (a new review, or dismissal of the stale one).",
-					blocker,
+					"\n\nReview authority is `authoritative` for this stage — the review verdict could not be "+
+						"read (%v); the gate is blocking conservatively until it can be.",
+					err,
+				)
+			} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, item.LinkedPRReviews); !satisfied {
+				authorityLine = fmt.Sprintf(
+					"\n\nReview authority is `authoritative` for this stage — %s, "+
+						"and the gate will not clear until that is resolved.",
+					reason,
 				)
 			}
 		}

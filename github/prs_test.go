@@ -948,6 +948,36 @@ func TestFetchPRReviewDecision(t *testing.T) {
 	}
 }
 
+// A null pullRequest object (bad prNumber, or an app-token permission gap)
+// must return an error, not "" — folding it into the same "" the
+// no-branch-protection fallback treats as legitimate data would silently
+// satisfy the authoritative gate on unknown state.
+func TestFetchPRReviewDecision_NullPullRequest_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": nil,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	got, err := c.FetchPRReviewDecision("owner", "repo", 42)
+	if err == nil {
+		t.Fatal("expected an error for a null pullRequest object, got nil")
+	}
+	if !strings.Contains(err.Error(), "PR #42 not found") {
+		t.Errorf("expected 'PR #42 not found' error, got %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty string alongside the error, got %q", got)
+	}
+}
+
 func TestFetchPRReviewDecision_ErrorWrapped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)

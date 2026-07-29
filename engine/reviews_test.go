@@ -76,6 +76,12 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 			reviews:        nil,
 			wantSatisfied:  true,
 		},
+		{
+			name:           "unrecognized reviewDecision value blocks conservatively, does not fall back",
+			reviewDecision: "SOME_FUTURE_VALUE",
+			reviews:        []gh.PRReview{{Author: "alice", State: "APPROVED"}},
+			wantSatisfied:  false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1270,6 +1276,69 @@ func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 	body := client.addCommentCalls[0].body
 	if !containsAll(body, "copilot-pull-request-reviewer", "bot", "alice", "human") {
 		t.Errorf("pause comment should list reviewers with bot/human tags; got:\n%s", body)
+	}
+}
+
+// Authoritative-mode pause messaging must cover REVIEW_REQUIRED, not just an
+// active CHANGES_REQUESTED review — it live-fetches the verdict via
+// reviewGateAuthorityVerdict rather than scanning only for CHANGES_REQUESTED.
+func TestPauseForReviewTimeout_Authoritative_ReviewRequired_MentionsVerdict(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviewDecision called with PR #77, got #%d", prNumber)
+			}
+			return "REVIEW_REQUIRED", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "REVIEW_REQUIRED") {
+		t.Errorf("expected pause comment to mention the REVIEW_REQUIRED verdict, got:\n%s", body)
+	}
+}
+
+// A FetchPRReviewDecision fetch error in the pause path must be surfaced in
+// the pause comment rather than silently falling back to the generic
+// "timed out waiting for outstanding reviewers" text.
+func TestPauseForReviewTimeout_Authoritative_FetchError_MentionsUnreadableVerdict(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", fmt.Errorf("transient GraphQL failure")
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "could not be") {
+		t.Errorf("expected pause comment to mention the unreadable verdict, got:\n%s", body)
 	}
 }
 
