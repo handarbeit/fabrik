@@ -198,6 +198,34 @@ func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
 	}
 }
 
+// Cruise still wins outright under authoritative mode — cruise's
+// hasCruiseLabel check runs before the review gate is ever consulted, so an
+// authoritative stage composes with cruise exactly like advisory does: no
+// auto-merge regardless of verdict, human merges manually.
+func TestAttemptMergeOnValidate_Authoritative_CruiseSkipsAutoMerge(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Error("FetchPRReviewDecision must not be called for a cruise item — cruise short-circuits before the review gate")
+			return "", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue, ReviewAuthority: "authoritative"})
+	if err != nil {
+		t.Fatalf("unexpected error for cruise item: %v", err)
+	}
+	if enabled {
+		t.Error("expected autoMergeEnabled=false for a cruise item regardless of review_authority")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called for cruise items, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
 // TestAttemptMergeOnValidate_AlreadyLabeled_Idempotent verifies that when
 // fabrik:auto-merge-enabled is already present, the function returns (true, nil)
 // without calling EnablePullRequestAutoMerge a second time.
@@ -1258,6 +1286,163 @@ func TestAttemptMergeOnValidate_ReviewGate_ClearedProceeds(t *testing.T) {
 	}
 	if hasAddLabelCall(client, "fabrik:awaiting-review") {
 		t.Error("fabrik:awaiting-review must not be applied when the gate is clear")
+	}
+}
+
+// --- review_authority: authoritative matrix (reviewGateBlocksLanding / attemptMergeOnValidate) ---
+
+// A CHANGES_REQUESTED reviewDecision must block the landing decision even
+// though the advisory clearing condition (outstanding==0 && hasReviews) is
+// satisfied. This is called from the same yoloActive path handleStageComplete
+// uses, so it also demonstrates "authoritative + yolo waits, does not force
+// through a still-blocking verdict".
+func TestAttemptMergeOnValidate_Authoritative_ChangesRequested_BlocksAutoMerge(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil // no outstanding requests — advisory would clear here
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue, ReviewAuthority: "authoritative"})
+	if err != nil {
+		t.Fatalf("expected (false, false, nil) when the authoritative gate blocks, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when reviewDecision=CHANGES_REQUESTED")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while the authoritative gate blocks, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called while the authoritative gate blocks, got %d call(s)", len(client.mergePRCalls))
+	}
+	if !hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("expected fabrik:awaiting-review to be applied when the authoritative landing gate blocks")
+	}
+}
+
+// Once the verdict clears (reviewDecision=APPROVED), the landing decision
+// proceeds exactly as advisory mode would — demonstrating "authoritative +
+// yolo merges as soon as the verdict clears, no human click required".
+func TestAttemptMergeOnValidate_Authoritative_Approved_ClearsAndMerges(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "APPROVED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "APPROVED", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue, ReviewAuthority: "authoritative"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected enabled=true once reviewDecision=APPROVED")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if hasAddLabelCall(client, "fabrik:awaiting-review") {
+		t.Error("fabrik:awaiting-review must not be applied when the authoritative gate is clear")
+	}
+}
+
+// A FetchPRReviewDecision fetch error at the landing gate must block
+// conservatively, mirroring the FetchPRReviews/FetchPRReviewRequests failure
+// handling already covered elsewhere in this file.
+func TestAttemptMergeOnValidate_Authoritative_FetchReviewDecisionError_BlocksConservatively(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "APPROVED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", fmt.Errorf("transient GraphQL failure")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue, ReviewAuthority: "authoritative"})
+	if err != nil {
+		t.Fatalf("expected (false, false, nil) on fetch failure (conservative block, not a hard error), got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when FetchPRReviewDecision errors")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called on a review-decision fetch failure, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// Advisory mode (default, unset ReviewAuthority) must merge exactly as before
+// even with a CHANGES_REQUESTED review present — reinforces "no behavior
+// change for advisory (default) repos" at the landing gate.
+func TestAttemptMergeOnValidate_Advisory_ChangesRequestedReview_StillMerges(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Error("FetchPRReviewDecision must not be called in advisory mode")
+			return "", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}) // ReviewAuthority unset
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Error("advisory mode must clear/merge regardless of CHANGES_REQUESTED verdict (unchanged pre-existing behavior)")
 	}
 }
 

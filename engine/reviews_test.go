@@ -91,6 +91,238 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 	}
 }
 
+// --- review_authority: authoritative matrix (checkReviewGate) -------------
+
+// Advisory mode (default, unset ReviewAuthority) must clear the gate exactly
+// as before even when a review is CHANGES_REQUESTED — reinforces "no
+// behavior change for advisory (default) repos" from the issue requirements.
+func TestCheckReviewGate_Advisory_ChangesRequestedReview_StillClears(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Error("FetchPRReviewDecision must not be called in advisory mode")
+			return "", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("advisory mode must clear regardless of CHANGES_REQUESTED verdict (unchanged pre-existing behavior)")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+}
+
+func TestCheckReviewGate_Authoritative_ReviewDecisionApproved_Clears(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			if prNumber != 55 {
+				t.Errorf("expected FetchPRReviewDecision called with PR #55, got #%d", prNumber)
+			}
+			return "APPROVED", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "APPROVED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected gate to clear when reviewDecision=APPROVED")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+}
+
+func TestCheckReviewGate_Authoritative_ReviewDecisionChangesRequested_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked when reviewDecision=CHANGES_REQUESTED")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "fabrik:awaiting-review" {
+		t.Errorf("expected fabrik:awaiting-review label add, got %v", client.addLabelCalls)
+	}
+}
+
+// No branch-protection review requirement (reviewDecision == "") — authoritative
+// mode must not become a silent no-op; it falls back to Fabrik's own
+// no-CHANGES_REQUESTED computation, which here is satisfied.
+func TestCheckReviewGate_Authoritative_NoBranchProtection_NoChangesRequested_Clears(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", nil // no branch-protection review requirement configured
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "APPROVED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected gate to clear via fallback computation when no CHANGES_REQUESTED review exists")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+}
+
+// Same no-branch-protection scenario, but with an active CHANGES_REQUESTED
+// review — the fallback computation must still block, so authoritative mode
+// is meaningful even on a repo with no branch protection configured.
+func TestCheckReviewGate_Authoritative_NoBranchProtection_ChangesRequested_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "bob", State: "CHANGES_REQUESTED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked via fallback computation on a repo with no branch protection")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// A FetchPRReviewDecision fetch error must block conservatively, never
+// silently fall back to advisory clearing.
+func TestCheckReviewGate_Authoritative_FetchReviewDecisionError_BlocksConservatively(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", fmt.Errorf("transient GraphQL failure")
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "APPROVED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to block conservatively when FetchPRReviewDecision errors")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// Authoritative mode must also work on a base:<branch> repo, where reviews
+// are REST-sourced and the resolved PR number (not item.LinkedPRNumber,
+// always 0 there) is what FetchPRReviewDecision is called with.
+func TestCheckReviewGate_NonDefaultBase_Authoritative_ChangesRequested_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviewDecision called with resolved PR #77, got #%d", prNumber)
+			}
+			return "", nil // no branch protection configured — exercises the fallback
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked on a base:<branch> repo with an outstanding CHANGES_REQUESTED review")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
 // (a) No requested reviewers AND no reviews submitted → gate STAYS BLOCKED,
 // waiting for self-assigning bot reviewers (Copilot, Gemini) to post. This
 // is the common yolo case: the pipeline marks the PR ready and immediately
