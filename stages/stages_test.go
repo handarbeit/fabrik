@@ -631,6 +631,57 @@ effort_level: `+level+`
 	}
 }
 
+func TestLoadAll_ReviewAuthority_Default(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if stages[0].ReviewAuthority != "" {
+		t.Errorf("ReviewAuthority = %q, want empty string", stages[0].ReviewAuthority)
+	}
+}
+
+func TestLoadAll_ReviewAuthority_ExplicitValues(t *testing.T) {
+	for _, val := range []string{"advisory", "authoritative"} {
+		dir := t.TempDir()
+		writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+review_authority: `+val+`
+`)
+		stages, err := LoadAll(dir)
+		if err != nil {
+			t.Fatalf("review_authority %q: LoadAll: %v", val, err)
+		}
+		if stages[0].ReviewAuthority != val {
+			t.Errorf("review_authority %q: ReviewAuthority = %q, want %q", val, stages[0].ReviewAuthority, val)
+		}
+	}
+}
+
+func TestLoadAll_ReviewAuthority_Invalid(t *testing.T) {
+	for _, val := range []string{"strict", "AUTHORITATIVE", "mandatory"} {
+		dir := t.TempDir()
+		writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+review_authority: `+val+`
+`)
+		_, err := LoadAll(dir)
+		if err == nil {
+			t.Errorf("review_authority %q: expected error, got nil", val)
+		}
+	}
+}
+
 func TestLoadAll_MaxWallTime(t *testing.T) {
 	tests := []struct {
 		name      string
