@@ -380,6 +380,52 @@ func TestBuildReviewThreadComments_ProcessedCommentsSkip(t *testing.T) {
 	}
 }
 
+// currentHeadReviewThreadComments excludes comments whose parent thread
+// GitHub has marked isOutdated (superseded by a later push) — the stale-SHA
+// scoping required at both yolo-merge guard points (#1207).
+func TestCurrentHeadReviewThreadComments_ExcludesOutdated(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_current", DatabaseID: 101, Author: "pruefer", Body: "current-head finding", ReviewThreadID: "RT_current", IsOutdated: false},
+			{ID: "PRRC_stale", DatabaseID: 102, Author: "pruefer", Body: "stale finding", ReviewThreadID: "RT_stale", IsOutdated: true},
+		},
+	}
+
+	comments := eng.currentHeadReviewThreadComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 current-head comment, got %d", len(comments))
+	}
+	if comments[0].ID != "PRRC_current" {
+		t.Errorf("expected remaining comment to be PRRC_current, got %q", comments[0].ID)
+	}
+}
+
+// When every unresolved thread is outdated, currentHeadReviewThreadComments
+// must return empty — a thread against a superseded commit must not block
+// indefinitely at either guard point.
+func TestCurrentHeadReviewThreadComments_AllOutdatedReturnsEmpty(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_stale", DatabaseID: 102, Author: "pruefer", Body: "stale finding", ReviewThreadID: "RT_stale", IsOutdated: true},
+		},
+	}
+
+	comments := eng.currentHeadReviewThreadComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 current-head comments, got %d", len(comments))
+	}
+}
+
 // (f3) catch-up loop skips dispatchReviewReinvoke when a goroutine is already
 // in-flight for the item, and does NOT increment ReviewCycles.
 func TestCatchUpLoop_InFlightGuard(t *testing.T) {

@@ -61,6 +61,7 @@ type mockGitHubClient struct {
 	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
 	addBlockedByIssueFn           func(issueNodeID, blockerNodeID string) error
 	enablePullRequestAutoMergeFn  func(owner, repo string, prNumber int, strategy string) error
+	disablePullRequestAutoMergeFn func(owner, repo string, prNumber int) error
 	enqueuePullRequestFn          func(owner, repo string, prNumber int, expectedHeadOID string) error
 	dequeuePullRequestFn          func(owner, repo string, prNumber int) error
 	fetchCommitsBehindFn          func(owner, repo, base, head string) (int, error)
@@ -85,33 +86,34 @@ type mockGitHubClient struct {
 	archiveProjectItemCalls []archiveProjectItemCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
-	getPRBaseCalls                  []getPRBaseCall
-	updatePRBaseCalls               []updatePRBaseCall
-	addLabelCalls                   []addLabelCall
-	removeLabelCalls                []removeLabelCall
-	addCommentCalls                 []addCommentCall
-	addCommentReactionCalls         []addCommentReactionCall
-	updateCommentCalls              []updateCommentCall
-	updateStatusCalls               []updateStatusCall
-	mergePRCalls                    []mergePRCall
-	closeIssueCalls                 []closeIssueCall
-	markPRReadyCalls                []markPRReadyCall
-	createDraftPRCalls              []createDraftPRCall
-	resolveReviewThreadCalls        []string
-	addPRReviewCommentReactionCalls []prReviewCommentReactionCall
-	deleteReviewRequestCalls        []reviewRequestCall
-	addReviewRequestCalls           []reviewRequestCall
-	seedLabelsCalls                 []seedLabelsCall
-	seedLabelsFn                    func(owner, repo string, stageNames []string, lockedUser string) error
-	createIssueCalls                []createIssueCall
-	addProjectV2ItemCalls           []addProjectV2ItemCall
-	addBlockedByIssueCalls          []addBlockedByIssueCall
-	enablePullRequestAutoMergeCalls []enablePullRequestAutoMergeCall
-	enqueuePullRequestCalls         []enqueuePullRequestCall
-	dequeuePullRequestCalls         []dequeuePullRequestCall
-	fetchCommitsBehindCalls         []fetchCommitsBehindCall
-	createPRCalls                   []createPRCall
-	listPRsCalls                    int
+	getPRBaseCalls                   []getPRBaseCall
+	updatePRBaseCalls                []updatePRBaseCall
+	addLabelCalls                    []addLabelCall
+	removeLabelCalls                 []removeLabelCall
+	addCommentCalls                  []addCommentCall
+	addCommentReactionCalls          []addCommentReactionCall
+	updateCommentCalls               []updateCommentCall
+	updateStatusCalls                []updateStatusCall
+	mergePRCalls                     []mergePRCall
+	closeIssueCalls                  []closeIssueCall
+	markPRReadyCalls                 []markPRReadyCall
+	createDraftPRCalls               []createDraftPRCall
+	resolveReviewThreadCalls         []string
+	addPRReviewCommentReactionCalls  []prReviewCommentReactionCall
+	deleteReviewRequestCalls         []reviewRequestCall
+	addReviewRequestCalls            []reviewRequestCall
+	seedLabelsCalls                  []seedLabelsCall
+	seedLabelsFn                     func(owner, repo string, stageNames []string, lockedUser string) error
+	createIssueCalls                 []createIssueCall
+	addProjectV2ItemCalls            []addProjectV2ItemCall
+	addBlockedByIssueCalls           []addBlockedByIssueCall
+	enablePullRequestAutoMergeCalls  []enablePullRequestAutoMergeCall
+	disablePullRequestAutoMergeCalls []disablePullRequestAutoMergeCall
+	enqueuePullRequestCalls          []enqueuePullRequestCall
+	dequeuePullRequestCalls          []dequeuePullRequestCall
+	fetchCommitsBehindCalls          []fetchCommitsBehindCall
+	createPRCalls                    []createPRCall
+	listPRsCalls                     int
 }
 
 type createPRCall struct {
@@ -704,6 +706,11 @@ type enablePullRequestAutoMergeCall struct {
 	strategy    string
 }
 
+type disablePullRequestAutoMergeCall struct {
+	owner, repo string
+	prNumber    int
+}
+
 type fetchCommitsBehindCall struct {
 	owner, repo, base, head string
 }
@@ -726,6 +733,17 @@ func (m *mockGitHubClient) EnablePullRequestAutoMerge(owner, repo string, prNumb
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, prNumber, strategy)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) DisablePullRequestAutoMerge(owner, repo string, prNumber int) error {
+	m.mu.Lock()
+	m.disablePullRequestAutoMergeCalls = append(m.disablePullRequestAutoMergeCalls, disablePullRequestAutoMergeCall{owner, repo, prNumber})
+	fn := m.disablePullRequestAutoMergeFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
 	}
 	return nil
 }

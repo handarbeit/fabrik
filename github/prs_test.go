@@ -938,6 +938,21 @@ func TestEnablePullRequestAutoMerge(t *testing.T) {
 	}
 }
 
+func TestDisablePullRequestAutoMerge(t *testing.T) {
+	const prNodeID = "PR_disableautomergenode"
+
+	_, c := makeTwoStepGraphQLServer(t, prNodeID, func(t *testing.T, vars map[string]interface{}) {
+		t.Helper()
+		if got, ok := vars["prId"].(string); !ok || got != prNodeID {
+			t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+		}
+	})
+
+	if err := c.DisablePullRequestAutoMerge("owner", "repo", 42); err != nil {
+		t.Fatalf("DisablePullRequestAutoMerge: %v", err)
+	}
+}
+
 func TestEnqueuePullRequest(t *testing.T) {
 	const prNodeID = "PR_testnode"
 	const expectedHeadOID = "deadbeef1234"

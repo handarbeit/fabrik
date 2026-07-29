@@ -167,6 +167,11 @@ type Comment struct {
 	// DiffHunk is the diff context hunk surrounding the comment. Empty for
 	// regular issue and PR body comments.
 	DiffHunk string
+	// IsOutdated mirrors the parent review thread's GitHub-computed isOutdated
+	// field: true when the commented lines have been superseded by a later
+	// push to the PR (the thread's diff no longer matches the current head).
+	// Only meaningful for review-thread comments (ReviewThreadID non-empty).
+	IsOutdated bool
 }
 
 // ReviewComment is a single line-anchored inline comment to submit as part of

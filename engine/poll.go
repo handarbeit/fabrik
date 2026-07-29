@@ -1063,7 +1063,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 				continue
 			}
-			_, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
+			_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
 			if mergeErr != nil {
 				e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
 			}

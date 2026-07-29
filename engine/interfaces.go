@@ -47,6 +47,7 @@ type GitHubClient interface {
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
 	EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error
+	DisablePullRequestAutoMerge(owner, repo string, prNumber int) error
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	CloseIssue(owner, repo string, issueNumber int) error
 	CreateIssue(owner, repo, title, body string) (number int, nodeID string, err error)

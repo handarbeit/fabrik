@@ -152,6 +152,7 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 				Nodes []struct {
 					ID           string  `json:"id"`
 					IsResolved   bool    `json:"isResolved"`
+					IsOutdated   bool    `json:"isOutdated"`
 					Path         string  `json:"path"`
 					Line         *int    `json:"line"`
 					OriginalLine *int    `json:"originalLine"`
@@ -199,6 +200,7 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 			Nodes []struct {
 				ID           string  `json:"id"`
 				IsResolved   bool    `json:"isResolved"`
+				IsOutdated   bool    `json:"isOutdated"`
 				Path         string  `json:"path"`
 				Line         *int    `json:"line"`
 				OriginalLine *int    `json:"originalLine"`
@@ -272,6 +274,7 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 			Nodes []struct {
 				ID           string  `json:"id"`
 				IsResolved   bool    `json:"isResolved"`
+				IsOutdated   bool    `json:"isOutdated"`
 				Path         string  `json:"path"`
 				Line         *int    `json:"line"`
 				OriginalLine *int    `json:"originalLine"`

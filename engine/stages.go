@@ -108,6 +108,14 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// monitor (checkAutoMergeConvergence in the catch-up loop) in that case.
 	autoMergeEnabled := false
 
+	// reviewThreadDeferred is true when attemptMergeOnValidate declined to
+	// advance because an unresolved review thread exists on the current head
+	// (#1207 guard 1). Advancement must be suppressed the same way it is for
+	// autoMergeEnabled — the catch-up loop's Phase 2 Validate branch retries
+	// attemptMergeOnValidate on every poll and will proceed once the thread
+	// is resolved by the review-reinvoke loop (§2.9).
+	reviewThreadDeferred := false
+
 	// Enable GitHub native auto-merge after Validate when yolo is active and
 	// wait_for_ci is false. When wait_for_ci: true the merge path is handled by
 	// checkCIGate in the catch-up loop (see ADR 032). This runs BEFORE adding the
@@ -116,7 +124,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	waitForCI := stage.WaitForCI != nil && *stage.WaitForCI
 	if yoloActive && stage.Name == "Validate" && !waitForCI {
 		var mergeErr error
-		autoMergeEnabled, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
+		autoMergeEnabled, reviewThreadDeferred, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
 		if mergeErr != nil {
 			e.logf(item.Number, "warn", "PR not merged: %v\n", mergeErr)
 			return
@@ -197,6 +205,14 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		shouldAdvance = false
 	}
 
+	// #1207 guard 1: an unresolved review thread on the current head deferred
+	// attemptMergeOnValidate — do not advance. poll.go's Phase 2 Validate
+	// branch retries attemptMergeOnValidate on every subsequent poll, so this
+	// resolves itself once the review-reinvoke loop (§2.9) clears the thread.
+	if reviewThreadDeferred {
+		shouldAdvance = false
+	}
+
 	if shouldAdvance {
 		if e.checkDependencies(board, item, stage) {
 			return // blocked; checkDependencies handled label + comment
@@ -238,29 +254,63 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 }
 
 // attemptMergeOnValidate enables GitHub native auto-merge for the linked PR
-// of a yolo issue at Validate completion. Returns (true, nil) when auto-merge
-// was enabled (or is already enabled as an idempotency guard), (false, nil)
-// when no action is needed (cruise label, review gate blocking, no linked PR),
-// and (false, err) on failure. The fabrik:auto-merge-enabled label serves as
-// both the idempotency guard and the budget-start anchor read by
+// of a yolo issue at Validate completion. Returns (true, false, nil) when
+// auto-merge was enabled (or is already enabled as an idempotency guard),
+// (false, false, nil) when no action is needed (cruise label, review gate
+// blocking, no linked PR), (false, true, nil) when deferred because an
+// unresolved review thread exists on the current head (#1207 guard 1), and
+// (false, false, err) on failure. The fabrik:auto-merge-enabled label serves
+// as both the idempotency guard and the budget-start anchor read by
 // checkAutoMergeConvergence.
 //
 // This function is the single landing-decision owner for both merge_train modes
 // (ADR-058/ADR-059 "invoke, don't relocate"), which is why the wait_for_reviews
 // gate is enforced here rather than at either call site — see
 // reviewGateBlocksLanding and ADR-1216.
-func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (bool, error) {
+func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (enabled bool, deferred bool, err error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// cruise > yolo: when cruise is present, auto-merge is suppressed regardless of yolo.
 	// cruise auto-advances through stages but leaves the PR for human merge at Validate.
 	if hasCruiseLabel(item) {
-		return false, nil
+		return false, false, nil
 	}
 
 	// Idempotency: auto-merge was already enabled on a prior run.
 	if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
-		return true, nil
+		return true, false, nil
+	}
+
+	// Guard 1 (#1207): do not advance out of Validate or enable auto-merge/
+	// merge-queue while an unresolved review thread exists on the current
+	// head. Scoped to the current head via currentHeadReviewThreadComments
+	// (excludes GitHub-marked isOutdated threads) so a thread against a
+	// superseded commit never blocks indefinitely. The existing catch-up
+	// loop (poll.go's Phase 2 Validate branch) retries this function on
+	// every poll while fabrik:auto-merge-enabled is absent, so once the
+	// thread is resolved by the review-reinvoke loop (§2.9), the very next
+	// poll re-enters here and proceeds — no separate retry plumbing needed.
+	//
+	// Freshness note: at the primary call site (handleStageComplete, invoked
+	// synchronously right after a Claude invocation completes), item is the
+	// same pre-invocation snapshot Path 1 already treats as stale everywhere
+	// else in this function (see the wait_for_reviews comment below) — it can
+	// be tens of minutes old by the time a long Validate run finishes, not
+	// just a few seconds. A thread posted during that run is invisible to
+	// this check. This is deliberately not solved by re-fetching here (that
+	// would re-add the per-stage-completion GraphQL round-trip Path 1 exists
+	// to avoid); instead it is closed by guard 2 on the very next poll — by
+	// then fabrik:auto-merge-enabled is set, poll.go's deep-fetch has
+	// refreshed the item, and handleReviewGate's guard 2 disables auto-merge
+	// before GitHub can act on it. The exposure this leaves is the same
+	// PollSeconds-bounded residual race already accepted for guard 2's
+	// convergence-window disable, not a new unbounded gap. poll.go's Phase 2
+	// Validate retry (the other caller of this function) always sees
+	// deep-fetched, fresh data, so it is not subject to this note.
+	if blocking := e.currentHeadReviewThreadComments(item); len(blocking) > 0 {
+		e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s\n",
+			len(blocking), item.LinkedPRHeadSHA)
+		return false, true, nil
 	}
 
 	// Review gate (#1216): a wait_for_reviews stage must not reach any landing
@@ -269,24 +319,25 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// review state live so a reviewer requested during the CI-await window still
 	// blocks (FR-2).
 	if e.reviewGateBlocksLanding(item, stage, owner, repo) {
-		return false, nil
+		return false, false, nil
 	}
 
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
 	// Cruise items always bypass this (handled above). New items never reach fabrik:auto-merge-enabled
 	// when merge_train: on, so this gate fires exactly once per qualifying Validate completion.
 	if e.cfg.MergeTrain == "on" {
-		return false, e.advanceToQueued(ctx, board, item, owner, repo)
+		advanceErr := e.advanceToQueued(ctx, board, item, owner, repo)
+		return false, false, advanceErr
 	}
 
 	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not fetch linked PR for auto-merge: %v — will retry\n", err)
-		return false, fmt.Errorf("fetch linked PR: %w", err)
+		return false, false, fmt.Errorf("fetch linked PR: %w", err)
 	}
 	if pr == nil {
 		e.logf(item.Number, "warn", "no linked PR found at Validate completion; skipping auto-merge\n")
-		return false, nil
+		return false, false, nil
 	}
 
 	// Enqueue path: when the repo requires a merge queue and merge-queue routing is not disabled.
@@ -299,7 +350,8 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// kill-switch), an operator's explicit choice. No separate guard is required at the
 	// MergePR site; this early-return is the audit evidence.
 	if e.cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled {
-		return e.enqueueForQueue(owner, repo, item, pr.Number, pr.HeadSHA)
+		queued, queueErr := e.enqueueForQueue(owner, repo, item, pr.Number, pr.HeadSHA)
+		return queued, false, queueErr
 	}
 
 	strategy := e.cfg.AutoMergeStrategy
@@ -310,15 +362,35 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		if errors.Is(err, gh.ErrAutoMergeNotEnabled) {
 			e.logf(item.Number, "warn", "auto-merge is not enabled for this repository — "+
 				"enable it in Settings → General → Allow auto-merge; Fabrik will retry on the next poll\n")
-			return false, fmt.Errorf("enabling auto-merge on PR #%d: %w", pr.Number, err)
+			return false, false, fmt.Errorf("enabling auto-merge on PR #%d: %w", pr.Number, err)
 		}
 		// Any error other than ErrAutoMergeNotEnabled means the PR is in a terminal
 		// GitHub state (CLEAN, UNSTABLE, or any future variant) where auto-merge cannot
 		// be queued. Fall back to a direct merge call. If that also fails (e.g. DIRTY),
 		// surface the MergePR error so existing rebase/CI-fix gates can act on it.
 		e.logf(item.Number, "info", "PR #%d: enable auto-merge failed (%v) — falling back to direct merge\n", pr.Number, err)
+
+		// #1207 guard 1 supplement: this direct-merge fallback is the one place
+		// in this function where "proceed now" and "no more guards will ever
+		// run" happen at the same instant. Everywhere else in this function,
+		// a miss on guard 1's stale item snapshot (see the freshness note
+		// above) is closed by guard 2 on the next poll, because enabling
+		// auto-merge/enqueuing opens a convergence window that guard 2
+		// monitors. MergePR below merges synchronously — there is no window,
+		// no next poll, nothing for guard 2 to catch. So re-check live,
+		// immediately before the point of no return, instead of trusting the
+		// stale snapshot guard 1 already checked.
+		fresh := item
+		if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+			return false, false, fmt.Errorf("direct-merge fallback: live re-read of review threads for PR #%d: %w", pr.Number, ferr)
+		}
+		if blocking := e.currentHeadReviewThreadComments(fresh); len(blocking) > 0 {
+			e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s (direct-merge fallback)\n",
+				len(blocking), fresh.LinkedPRHeadSHA)
+			return false, true, nil
+		}
 		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
-			return false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
+			return false, false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
 		}
 		// Apply idempotency guard and convergence anchor after successful direct merge.
 		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
@@ -332,7 +404,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			}
 		}
 		e.logf(item.Number, "info", "PR #%d merged directly (auto-merge unavailable fallback)\n", pr.Number)
-		return true, nil
+		return true, false, nil
 	}
 
 	// Apply fabrik:auto-merge-enabled as idempotency guard and budget-start anchor.
@@ -348,7 +420,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	}
 
 	e.logf(item.Number, "info", "GitHub auto-merge enabled on PR #%d (%s) — awaiting GitHub atomic merge\n", pr.Number, strategy)
-	return true, nil
+	return true, false, nil
 }
 
 // enqueueForQueue enqueues a linked PR into the repository's native merge queue

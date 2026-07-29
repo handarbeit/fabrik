@@ -193,6 +193,324 @@ func TestHandleReviewGate_HappyPath_Dispatches(t *testing.T) {
 	eng.wg.Wait()
 }
 
+// ---- handleReviewGate #1207 guard-2 disable tests ----
+
+// makeAutoMergeReviewGatePctx returns a phase1Ctx for an item already in the
+// GitHub auto-merge convergence flow (fabrik:auto-merge-enabled present) with
+// a single unresolved review thread comment on the current head — the shape
+// of the #1183/PR#1202 incident this guard closes.
+func makeAutoMergeReviewGatePctx(board *gh.ProjectBoard, advancedItems map[string]bool, extraLabels []string, mergeQueueEnabled bool, outdated bool) *phase1Ctx {
+	item := gh.ProjectItem{
+		Number:                      10,
+		Repo:                        "owner/repo",
+		Labels:                      append([]string{"stage:Implement:complete", "fabrik:auto-merge-enabled"}, extraLabels...),
+		LinkedPRNumber:              55,
+		LinkedPRHeadSHA:             "sha1",
+		LinkedPRIsMergeQueueEnabled: mergeQueueEnabled,
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{
+				ID:             "PRRC_handler_1",
+				DatabaseID:     100,
+				Author:         "pruefer",
+				Body:           "late finding",
+				ReviewThreadID: "RT_handler_1",
+				IsOutdated:     outdated,
+			},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", Order: 1, Prompt: "implement"}
+	return &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stage,
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+}
+
+// TestHandleReviewGate_DisablesNativeAutoMerge_OnUnresolvedCurrentHeadThread
+// verifies #1207 guard 2: when an item already carrying
+// fabrik:auto-merge-enabled has a fresh unresolved thread on its current
+// head, DisablePullRequestAutoMerge fires (not DequeuePullRequest) and
+// fabrik:auto-merge-enabled is removed, on the SAME poll that dispatches the
+// review reinvoke — not deferred to a separate checkAutoMergeConvergence pass.
+func TestHandleReviewGate_DisablesNativeAutoMerge_OnUnresolvedCurrentHeadThread(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeAutoMergeReviewGatePctx(board, advancedItems, nil, false, false)
+
+	got := eng.handleReviewGate(pctx)
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+
+	if len(client.disablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected DisablePullRequestAutoMerge called once, got %d", len(client.disablePullRequestAutoMergeCalls))
+	}
+	if client.disablePullRequestAutoMergeCalls[0].prNumber != 55 {
+		t.Errorf("DisablePullRequestAutoMerge called with PR %d, want 55", client.disablePullRequestAutoMergeCalls[0].prNumber)
+	}
+	if len(client.dequeuePullRequestCalls) != 0 {
+		t.Errorf("DequeuePullRequest must not be called on a non-queue repo, got %d call(s)", len(client.dequeuePullRequestCalls))
+	}
+	foundRemoval := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundRemoval = true
+		}
+	}
+	if !foundRemoval {
+		t.Error("expected fabrik:auto-merge-enabled to be removed after successful disable")
+	}
+}
+
+// TestHandleReviewGate_DequeuesOnMergeQueueEnabledRepo verifies the
+// queue-aware branch of guard 2 (#1207): when the linked PR is merge-queue
+// enabled, DequeuePullRequest fires instead of DisablePullRequestAutoMerge —
+// mirroring reenableAutoMergeAfterRebase's existing queue-aware branch.
+func TestHandleReviewGate_DequeuesOnMergeQueueEnabledRepo(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeAutoMergeReviewGatePctx(board, advancedItems, nil, true, false)
+
+	got := eng.handleReviewGate(pctx)
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+
+	if len(client.dequeuePullRequestCalls) != 1 {
+		t.Fatalf("expected DequeuePullRequest called once, got %d", len(client.dequeuePullRequestCalls))
+	}
+	if client.dequeuePullRequestCalls[0].prNumber != 55 {
+		t.Errorf("DequeuePullRequest called with PR %d, want 55", client.dequeuePullRequestCalls[0].prNumber)
+	}
+	if len(client.disablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("DisablePullRequestAutoMerge must not be called on a queue-enabled repo, got %d call(s)", len(client.disablePullRequestAutoMergeCalls))
+	}
+	foundRemoval := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundRemoval = true
+		}
+	}
+	if !foundRemoval {
+		t.Error("expected fabrik:auto-merge-enabled to be removed after successful dequeue")
+	}
+}
+
+// TestHandleReviewGate_OutdatedThread_DoesNotDisableAutoMerge verifies the
+// stale-SHA scoping half of guard 2 (#1207): a thread GitHub has marked
+// isOutdated (superseded by a later push) must not trigger a disable — the
+// review-reinvoke dispatch still fires (buildReviewThreadComments is
+// unscoped), but no GitHub mutation to disable merge machinery happens.
+func TestHandleReviewGate_OutdatedThread_DoesNotDisableAutoMerge(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeAutoMergeReviewGatePctx(board, advancedItems, nil, false, true)
+
+	got := eng.handleReviewGate(pctx)
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+
+	if len(client.disablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("DisablePullRequestAutoMerge must not be called for an outdated-only thread, got %d call(s)", len(client.disablePullRequestAutoMergeCalls))
+	}
+	if len(client.dequeuePullRequestCalls) != 0 {
+		t.Errorf("DequeuePullRequest must not be called for an outdated-only thread, got %d call(s)", len(client.dequeuePullRequestCalls))
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be removed for an outdated-only thread")
+		}
+	}
+}
+
+// TestHandleReviewGate_DisablesAutoMerge_EvenWhenCycleLimitReached verifies
+// that guard 2's disable fires even on the same poll that trips
+// MaxReviewCycles and pauses the issue — the disable must not be
+// conditioned on the reinvoke actually dispatching, since a paused item is
+// exactly the case where GitHub must not be left free to merge while nobody
+// is addressing the thread. Also confirms MaxReviewCycles still bounds and
+// escalates (#1207's "no new never-advancing state" requirement).
+func TestHandleReviewGate_DisablesAutoMerge_EvenWhenCycleLimitReached(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 3
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeAutoMergeReviewGatePctx(board, advancedItems, nil, false, false)
+
+	for i := 0; i < eng.cfg.MaxReviewCycles; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{
+			Repo: "owner/repo", Number: 10, StageName: "Implement",
+		})
+	}
+
+	got := eng.handleReviewGate(pctx)
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+
+	if len(client.disablePullRequestAutoMergeCalls) != 1 {
+		t.Errorf("expected DisablePullRequestAutoMerge called once even at cycle limit, got %d", len(client.disablePullRequestAutoMergeCalls))
+	}
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused to be added on cycle limit (MaxReviewCycles must still escalate); labels added: %v", labelNames)
+	}
+}
+
+// TestGuard2RoundTrip_DisableThenResolveReenablesAutoMerge verifies the full
+// #1207 round trip: guard 2 disables auto-merge and removes
+// fabrik:auto-merge-enabled when a fresh unresolved thread appears, and once
+// that thread is resolved (ROCKET reaction, the existing review-reinvoke
+// dedup signal), the next poll's attemptMergeOnValidate call (poll.go's
+// Phase 2 Validate branch) re-enables auto-merge and re-applies a fresh
+// fabrik:auto-merge-enabled label — no manual intervention, no stuck state.
+func TestGuard2RoundTrip_DisableThenResolveReenablesAutoMerge(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 55, HeadSHA: "sha1"}, nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+		{Name: "Validate", Order: 3, Prompt: "validate"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeAutoMergeReviewGatePctx(board, advancedItems, nil, false, false)
+
+	// Step 1: guard 2 fires — disable + label removal.
+	if got := eng.handleReviewGate(pctx); !got {
+		t.Fatal("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+	if len(client.disablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected DisablePullRequestAutoMerge called once, got %d", len(client.disablePullRequestAutoMergeCalls))
+	}
+	foundRemoval := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundRemoval = true
+		}
+	}
+	if !foundRemoval {
+		t.Fatal("expected fabrik:auto-merge-enabled to be removed after disable")
+	}
+
+	// Step 2: the review-reinvoke loop (§2.9) addresses the finding and reacts
+	// ROCKET — the existing buildReviewThreadComments dedup signal. The item no
+	// longer carries fabrik:auto-merge-enabled (removed in step 1).
+	resolvedItem := gh.ProjectItem{
+		Number:          10,
+		Repo:            "owner/repo",
+		Labels:          []string{"stage:Validate:complete"},
+		LinkedPRHeadSHA: "sha1",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{
+				ID: "PRRC_handler_1", DatabaseID: 100, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_handler_1",
+				IsOutdated: false,
+				Reactions:  []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+			},
+		},
+	}
+
+	// Step 3: poll.go's Phase 2 Validate branch retries attemptMergeOnValidate
+	// on every poll while the label is absent. It must now proceed and
+	// re-apply a fresh label.
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), board, resolvedItem, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error on re-enable: %v", err)
+	}
+	if deferred {
+		t.Error("expected deferred=false once the thread is resolved (ROCKET reaction)")
+	}
+	if !enabled {
+		t.Error("expected enabled=true — auto-merge must be re-enabled once the thread resolves")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once on re-enable, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if client.enablePullRequestAutoMergeCalls[0].prNumber != 55 {
+		t.Errorf("EnablePullRequestAutoMerge called with PR %d, want 55", client.enablePullRequestAutoMergeCalls[0].prNumber)
+	}
+	foundReapplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundReapplied = true
+		}
+	}
+	if !foundReapplied {
+		t.Error("expected fabrik:auto-merge-enabled to be re-applied after re-enable")
+	}
+}
+
 // ---- handleMergeAndCIGates rebase reinvoke dispatch tests ----
 
 // makeMergeGatePctx returns a phase1Ctx for merge-gate/CI-gate handler tests.

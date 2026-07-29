@@ -32,7 +32,7 @@ func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,6 +59,126 @@ func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 	}
 }
 
+// TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers verifies
+// guard 1 (#1207): a yolo item with an unresolved review thread on its
+// current head does not advance out of Validate or have auto-merge enabled
+// — attemptMergeOnValidate returns (false, true, nil) and never calls
+// EnablePullRequestAutoMerge/MergePR/EnqueuePullRequest or applies the
+// fabrik:auto-merge-enabled label.
+func TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		LinkedPRHeadSHA: "sha1",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_1", IsOutdated: false},
+		},
+	}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when an unresolved current-head thread exists")
+	}
+	if !deferred {
+		t.Error("expected deferred=true when an unresolved current-head thread exists")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while blocked, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called while blocked, got %d call(s)", len(client.mergePRCalls))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called while blocked, got %d call(s)", len(client.enqueuePullRequestCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be applied while blocked")
+		}
+	}
+}
+
+// TestAttemptMergeOnValidate_AllOutdatedThreads_ProceedsNormally verifies the
+// stale-SHA scoping half of guard 1 (#1207): a thread GitHub has marked
+// isOutdated (superseded by a later push) must not block indefinitely —
+// attemptMergeOnValidate proceeds to enable auto-merge as if no thread existed.
+func TestAttemptMergeOnValidate_AllOutdatedThreads_ProceedsNormally(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha2"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		LinkedPRHeadSHA: "sha2",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "superseded finding", ReviewThreadID: "RT_1", IsOutdated: true},
+		},
+	}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deferred {
+		t.Error("expected deferred=false when the only unresolved thread is outdated")
+	}
+	if !enabled {
+		t.Error("expected enabled=true when the only unresolved thread is outdated")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Errorf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_ResolvedThread_ProceedsNormally verifies that a
+// thread comment already addressed (carrying a ROCKET reaction, per the
+// existing buildReviewThreadComments dedup) does not block guard 1 (#1207) —
+// reusing existing detection rather than a parallel path per the issue's
+// Requirements.
+func TestAttemptMergeOnValidate_ResolvedThread_ProceedsNormally(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha3"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		LinkedPRHeadSHA: "sha3",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{
+				ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "already addressed", ReviewThreadID: "RT_1",
+				IsOutdated: false,
+				Reactions:  []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+			},
+		},
+	}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deferred {
+		t.Error("expected deferred=false when the only unresolved thread is already addressed (ROCKET reaction)")
+	}
+	if !enabled {
+		t.Error("expected enabled=true when the only unresolved thread is already addressed")
+	}
+}
+
 // TestAttemptMergeOnValidate_CruiseSkipsAutoMerge verifies that cruise > yolo:
 // a cruise-labelled item returns (false, nil) without calling EnablePullRequestAutoMerge.
 func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
@@ -66,7 +186,7 @@ func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error for cruise item: %v", err)
 	}
@@ -86,7 +206,7 @@ func TestAttemptMergeOnValidate_AlreadyLabeled_Idempotent(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:auto-merge-enabled"}}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error for already-labeled item: %v", err)
 	}
@@ -109,7 +229,7 @@ func TestAttemptMergeOnValidate_NoPR_SkipsAutoMerge(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("expected nil when no PR, got %v", err)
 	}
@@ -133,7 +253,7 @@ func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	_, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	_, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when FetchLinkedPR fails, got nil (would incorrectly allow advancement)")
 	}
@@ -160,7 +280,7 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenClean(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +326,7 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenUnstable(t *testing.T)
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -233,6 +353,124 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenUnstable(t *testing.T)
 	}
 }
 
+// TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckDefers verifies the
+// fix for Pruefer's #1207 finding: the direct-merge fallback (taken when
+// EnablePullRequestAutoMerge fails for a reason other than
+// ErrAutoMergeNotEnabled, e.g. the PR is already CLEAN) merges synchronously
+// with no convergence window for guard 2 to ever run. If a live re-read
+// immediately before MergePR reveals an unresolved current-head thread that
+// wasn't in guard 1's earlier (possibly stale) item snapshot, the function
+// must defer instead of merging.
+func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckDefers(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRHeadSHA = "sha42"
+			item.LinkedPRReviewThreadComments = []gh.Comment{
+				{ID: "PRRC_9", DatabaseID: 109, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_9", IsOutdated: false},
+			}
+			return nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false when the live re-read finds an unresolved current-head thread")
+	}
+	if !deferred {
+		t.Error("expected deferred=true when the live re-read finds an unresolved current-head thread")
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called when the live re-read finds a blocking thread, got %d call(s)", len(client.mergePRCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be applied when deferred")
+		}
+	}
+}
+
+// TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckStaleSHAProceeds
+// verifies that a thread GitHub marks isOutdated (superseded by a later push)
+// found by the live re-read does not block the direct-merge fallback.
+func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckStaleSHAProceeds(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRHeadSHA = "sha42"
+			item.LinkedPRReviewThreadComments = []gh.Comment{
+				{ID: "PRRC_9", DatabaseID: 109, Author: "pruefer", Body: "stale finding", ReviewThreadID: "RT_9", IsOutdated: true},
+			}
+			return nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Error("expected enabled=true when the only live-read thread is outdated (stale SHA)")
+	}
+	if deferred {
+		t.Error("expected deferred=false when the only live-read thread is outdated (stale SHA)")
+	}
+	if len(client.mergePRCalls) != 1 {
+		t.Errorf("expected MergePR called once, got %d call(s)", len(client.mergePRCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckFetchFails verifies
+// that a failure of the live re-read itself surfaces as an error (so the
+// existing retry-next-poll path handles it) rather than proceeding to merge
+// on the stale pre-invocation snapshot.
+func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckFetchFails(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("GraphQL error: rate limited")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err == nil {
+		t.Fatal("expected error when the live re-read fails, got nil")
+	}
+	if enabled || deferred {
+		t.Errorf("expected enabled=false, deferred=false on live-read failure, got enabled=%v deferred=%v", enabled, deferred)
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called when the live re-read fails, got %d call(s)", len(client.mergePRCalls))
+	}
+}
+
 // TestAttemptMergeOnValidate_DirectMergeAlsoFails verifies that when
 // EnablePullRequestAutoMerge returns an arbitrary error AND MergePR also fails
 // (e.g. ErrNotMergeable from a DIRTY PR), the function returns (false, err) and
@@ -252,7 +490,7 @@ func TestAttemptMergeOnValidate_DirectMergeAlsoFails(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when MergePR also fails, got nil")
 	}
@@ -292,7 +530,7 @@ func TestAttemptMergeOnValidate_DirectMergeFailsCINotGreen(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when MergePR refuses on CI, got nil")
 	}
@@ -361,6 +599,61 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	}
 	if !foundCI {
 		t.Error("fabrik:awaiting-ci must be added when wait_for_ci: true")
+	}
+}
+
+// TestHandleStageComplete_UnresolvedCurrentHeadThread_DoesNotAdvance is an
+// end-to-end guard-1 test (#1207): a yolo item completing Validate with
+// wait_for_ci: false (the synchronous handleStageComplete call site) does
+// not enable auto-merge and does not advance to the next stage while an
+// unresolved review thread exists on the current head — proving the block
+// through the full handleStageComplete path, not just the direct
+// attemptMergeOnValidate call.
+func TestHandleStageComplete_UnresolvedCurrentHeadThread_DoesNotAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha9"}, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(t, client, stgs)
+
+	fls := false
+	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &fls}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:          1,
+		ItemID:          "PVTI_1",
+		Labels:          []string{"fabrik:yolo"},
+		LinkedPRHeadSHA: "sha9",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "pruefer", Body: "late finding", ReviewThreadID: "RT_1", IsOutdated: false},
+		},
+	}
+
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
+
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while blocked, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled must not be applied while blocked")
+		}
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("item must not advance to the next stage while blocked, got %d status update(s)", len(client.updateStatusCalls))
+	}
+	// stage:Validate:complete IS added (Validate itself did complete) — only
+	// advancement past it is suppressed, mirroring the autoMergeEnabled case.
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to still be added")
 	}
 }
 
@@ -603,7 +896,7 @@ func TestAttemptMergeOnValidate_EnqueueOnYoloWithQueueEnabled(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -647,7 +940,7 @@ func TestAttemptMergeOnValidate_NoEnqueueWhenQueueNotEnabled(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -673,7 +966,7 @@ func TestAttemptMergeOnValidate_CruiseDoesNotEnqueue(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error for cruise item: %v", err)
 	}
@@ -701,7 +994,7 @@ func TestAttemptMergeOnValidate_MergeQueueOffDoesNotEnqueue(t *testing.T) {
 	eng.cfg.MergeQueue = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -741,7 +1034,7 @@ func TestAttemptMergeOnValidate_MergeTrainOn_AdvancesToQueued(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -796,7 +1089,7 @@ func TestAttemptMergeOnValidate_MergeTrainOff_UsesExistingPath(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -828,7 +1121,7 @@ func TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -867,10 +1160,10 @@ func TestAttemptMergeOnValidate_ReviewGate_BlocksAutoMerge(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
 	if err != nil {
-		t.Fatalf("expected (false, nil) when the review gate blocks, got err %v", err)
+		t.Fatalf("expected (false, false, nil) when the review gate blocks, got err %v", err)
 	}
 	if enabled {
 		t.Error("expected enabled=false when the review gate blocks")
@@ -910,10 +1203,10 @@ func TestAttemptMergeOnValidate_ReviewGate_BlocksAdvanceToQueued(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", LinkedPRNumber: 10}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), board, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
 	if err != nil {
-		t.Fatalf("expected (false, nil) when the review gate blocks, got err %v", err)
+		t.Fatalf("expected (false, false, nil) when the review gate blocks, got err %v", err)
 	}
 	if enabled {
 		t.Error("expected enabled=false when the review gate blocks")
@@ -952,7 +1245,7 @@ func TestAttemptMergeOnValidate_ReviewGate_ClearedProceeds(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -999,7 +1292,7 @@ func TestAttemptMergeOnValidate_ReviewGate_IgnoresStaleClosedPR(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
 
-	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	if _, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1034,7 +1327,7 @@ func TestAttemptMergeOnValidate_ReviewGate_IgnoresAlreadyMergedPR(t *testing.T) 
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
 
-	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	if _, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1062,10 +1355,10 @@ func TestAttemptMergeOnValidate_ReviewGate_ResolvesPRViaFallback(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"base:dev"}}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
 	if err != nil {
-		t.Fatalf("expected (false, nil) when the review gate blocks, got err %v", err)
+		t.Fatalf("expected (false, false, nil) when the review gate blocks, got err %v", err)
 	}
 	if enabled {
 		t.Error("expected enabled=false when the review gate blocks")
@@ -1101,10 +1394,10 @@ func TestAttemptMergeOnValidate_ReviewGate_FetchErrorBlocks(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
 	if err != nil {
-		t.Fatalf("expected (false, nil) on a review-fetch error, got err %v", err)
+		t.Fatalf("expected (false, false, nil) on a review-fetch error, got err %v", err)
 	}
 	if enabled {
 		t.Error("expected enabled=false on a review-fetch error")
@@ -1137,9 +1430,9 @@ func TestAttemptMergeOnValidate_ReviewGate_FetchErrorLogsDistinctly(t *testing.T
 	eng.events = eventsCh
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
 
-	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	if _, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
-		t.Fatalf("expected (false, nil) on a review-fetch error, got err %v", err)
+		t.Fatalf("expected (false, false, nil) on a review-fetch error, got err %v", err)
 	}
 
 	close(eventsCh)
@@ -1191,10 +1484,10 @@ func TestAttemptMergeOnValidate_ReviewGate_LinkedPRFetchErrorBlocks(t *testing.T
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Labels: []string{"base:dev"}}
 
-	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), board, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue})
 	if err != nil {
-		t.Fatalf("expected (false, nil) on a linked-PR fetch error, got err %v", err)
+		t.Fatalf("expected (false, false, nil) on a linked-PR fetch error, got err %v", err)
 	}
 	if enabled {
 		t.Error("expected enabled=false when the linked PR could not be read")
@@ -1228,7 +1521,7 @@ func TestAttemptMergeOnValidate_ReviewGate_NoPRDoesNotBlock(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
 
-	if _, err := eng.attemptMergeOnValidate(context.Background(), board, item,
+	if _, _, err := eng.attemptMergeOnValidate(context.Background(), board, item,
 		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1264,7 +1557,7 @@ func TestAttemptMergeOnValidate_ReviewGate_OptOutCostsNothing(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	if _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+	if _, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

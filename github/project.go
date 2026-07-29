@@ -705,6 +705,7 @@ query($id: ID!) {
             nodes {
               id
               isResolved
+              isOutdated
               path
               line
               originalLine
@@ -834,6 +835,7 @@ type fetchItemDetailsNode struct {
 				Nodes []struct {
 					ID           string  `json:"id"`
 					IsResolved   bool    `json:"isResolved"`
+					IsOutdated   bool    `json:"isOutdated"`
 					Path         string  `json:"path"`
 					Line         *int    `json:"line"`
 					OriginalLine *int    `json:"originalLine"`
@@ -1027,6 +1029,7 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 			for _, cm := range thread.Comments.Nodes {
 				c := toComment(cm, pr.Number)
 				c.ReviewThreadID = thread.ID
+				c.IsOutdated = thread.IsOutdated
 				item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, c)
 			}
 		}
