@@ -92,7 +92,7 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 ## Out of Scope
 
-- Verifying the yolo+cruise coexistence edge case end-to-end (cruise takes precedence; covered by unit tests in `engine/stages_test.go`).
+- Verifying the yolo+cruise coexistence edge case end-to-end (cruise takes precedence; covered by unit tests in `engine/handle_stage_complete_test.go` — `TestHandleStageComplete_BothCruiseAndYolo_CruiseWins` — and `engine/poll_test.go` — `TestCruiseCatchUp_BothCruiseAndYolo_CruiseWins`, one per advancement path). `engine/stages_test.go` covers cruise *alone* (`TestAttemptMergeOnValidate_CruiseSkipsAutoMerge`), not the coexistence case.
 - Paused-item recovery or convergence-reset scenarios (separate issues in the #828 chain).
 - Verifying `fabrik:bot-reprompted` or `wait_for_reviews` behavior in the cruise context.
 - ADR modifications beyond a note referencing cruise e2e coverage (ADR-056 D2 already documents cruise's stop-at-Validate behavior; no new ADR is needed).
