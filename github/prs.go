@@ -56,6 +56,14 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 // semantics; otherwise an author's earlier non-DISMISSED review (e.g. a stale COMMENTED
 // review) could outlive a later dismissal of their actual current review and falsely
 // satisfy the review-gate's hasReviews check.
+//
+// A COMMENTED submission never supersedes a prior formal verdict (APPROVED,
+// CHANGES_REQUESTED, or DISMISSED) from the same author — GitHub's own
+// reviewDecision computation treats COMMENTED as informational, not a state
+// transition, so a reviewer who requests changes and later leaves a comment-only
+// follow-up (without re-approving or dismissing) still has an active
+// CHANGES_REQUESTED verdict. Only when an author's *first* submission is
+// COMMENTED (no verdict established yet) does it become their collapsed entry.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
@@ -80,8 +88,13 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		if r.User == nil || r.User.Login == "" {
 			continue
 		}
-		if _, seen := latestByAuthor[r.User.Login]; !seen {
+		_, seen := latestByAuthor[r.User.Login]
+		if !seen {
 			order = append(order, r.User.Login)
+		} else if r.State == "COMMENTED" {
+			// A comment-only follow-up does not overwrite the author's
+			// existing formal verdict.
+			continue
 		}
 		latestByAuthor[r.User.Login] = PRReview{
 			Author:     r.User.Login,

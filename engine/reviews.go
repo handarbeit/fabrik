@@ -335,6 +335,15 @@ func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (s
 	case "CHANGES_REQUESTED":
 		return false, "reviewDecision=CHANGES_REQUESTED"
 	case "REVIEW_REQUIRED":
+		// Covers both "zero reviews submitted yet against a branch-protection
+		// requirement" and "some, but not enough, approvals" (e.g. a
+		// required-approval-count of 2 with only 1 approval so far) — GitHub
+		// reports the same REVIEW_REQUIRED value for both. This function is
+		// only reached once hasReviews is already true (checkReviewGate/
+		// reviewGateBlocksLanding gate on outstanding==0 && hasReviews before
+		// calling in), so in practice this always represents the
+		// not-enough-approvals case, not the zero-reviews case — but the
+		// block-conservatively behavior is correct for either.
 		return false, "reviewDecision=REVIEW_REQUIRED"
 	default:
 		return false, fmt.Sprintf("unrecognized reviewDecision=%q, blocking conservatively", reviewDecision)

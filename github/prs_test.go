@@ -1176,6 +1176,41 @@ func TestFetchPRReviews_CollapsesToLatestPerAuthor(t *testing.T) {
 	}
 }
 
+func TestFetchPRReviews_CommentedFollowUpDoesNotOverwriteVerdict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "CHANGES_REQUESTED", "body": "please fix"},
+			{"id": 2, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "still waiting"},
+			{"id": 3, "user": map[string]string{"login": "bob"}, "state": "COMMENTED", "body": "just a note"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	byAuthor := make(map[string]PRReview, len(reviews))
+	for _, r := range reviews {
+		byAuthor[r.Author] = r
+	}
+	// alice's CHANGES_REQUESTED verdict must survive her later comment-only
+	// follow-up — a COMMENTED submission is not a state transition.
+	if got := byAuthor["alice"].State; got != "CHANGES_REQUESTED" {
+		t.Errorf("alice's collapsed review state = %q, want CHANGES_REQUESTED (comment-only follow-up must not overwrite the verdict)", got)
+	}
+	if got := byAuthor["alice"].DatabaseID; got != 1 {
+		t.Errorf("alice's collapsed review DatabaseID = %d, want 1 (the CHANGES_REQUESTED submission)", got)
+	}
+	// bob never established a verdict — his only submission is COMMENTED, so
+	// that becomes his collapsed entry.
+	if got := byAuthor["bob"].State; got != "COMMENTED" {
+		t.Errorf("bob's collapsed review state = %q, want COMMENTED (his only submission)", got)
+	}
+}
+
 func TestFetchPRReviews_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
