@@ -28,6 +28,7 @@ type ReadClient interface {
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
+	FetchPRReviewDecision(owner, repo string, prNumber int) (string, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
 	FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
@@ -99,6 +100,10 @@ func (a *GitHubAdapter) FetchPRReviews(owner, repo string, prNumber int) ([]gh.P
 
 func (a *GitHubAdapter) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
 	return a.client.FetchPRReviewRequests(owner, repo, prNumber)
+}
+
+func (a *GitHubAdapter) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
+	return a.client.FetchPRReviewDecision(owner, repo, prNumber)
 }
 
 func (a *GitHubAdapter) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
@@ -880,6 +885,12 @@ func (c *CacheImpl) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRRev
 // FetchPRReviews.
 func (c *CacheImpl) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
 	return c.fallback.FetchPRReviewRequests(owner, repo, prNumber)
+}
+
+// FetchPRReviewDecision always delegates to GitHub, no caching — same rationale as
+// FetchPRReviews.
+func (c *CacheImpl) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
+	return c.fallback.FetchPRReviewDecision(owner, repo, prNumber)
 }
 
 // FetchPRsForSHA always delegates to GitHub — used by the auto-heal path in applyCheckRunCompleted.

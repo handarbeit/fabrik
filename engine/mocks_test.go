@@ -56,6 +56,7 @@ type mockGitHubClient struct {
 	fetchPRClosingIssuesFn        func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRReviewsFn              func(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	fetchPRReviewRequestsFn       func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
+	fetchPRReviewDecisionFn       func(owner, repo string, prNumber int) (string, error)
 	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
 	createIssueFn                 func(owner, repo, title, body string) (int, string, error)
 	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
@@ -616,6 +617,16 @@ func (m *mockGitHubClient) FetchPRReviewRequests(owner, repo string, prNumber in
 		return fn(owner, repo, prNumber)
 	}
 	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
+	m.mu.Lock()
+	fn := m.fetchPRReviewDecisionFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return "", nil
 }
 
 func (m *mockGitHubClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
