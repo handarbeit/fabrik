@@ -101,6 +101,8 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 - `tests/e2e/harness.go` — existing helpers; `AssertLabelWasNeverApplied`, `MergePR`, `GetLinkedPRNumber`, `GetIssueStatus` are new additions
 - `tests/e2e/auto_merge_test.go` — `TestYoloAutoMergeLabel` pattern (full-pipeline with post-Validate assertion)
-- `engine/poll.go:1410–1444` — the code gate that makes cruise stop at Validate without auto-merging
-- `engine/stages_test.go:60–75` — unit test `TestAttemptMergeOnValidate_CruiseSkipsAutoMerge` confirming the cruise guard exists
+- `engine/stages.go` — the two guards that make cruise stop at Validate without auto-merging, both keyed on the raw `hasCruiseLabel`: the `hasCruiseLabel(item) && stage.Name == "Validate"` check in `handleStageComplete` (suppresses the Done advance) and the early return in `attemptMergeOnValidate` (suppresses auto-merge)
+- `engine/stages_test.go` — `TestAttemptMergeOnValidate_CruiseSkipsAutoMerge`, confirming the auto-merge guard for cruise alone
+
+> Citations here name symbols rather than line numbers deliberately. Line pins in this section had rotted twice — `engine/poll.go:1410–1444` pointed at `selectDeepFetchCandidates` internals rather than any cruise gate, and `engine/stages_test.go:60–75` pointed at `TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers`, an unrelated test. A symbol name survives every edit above it; a line number is invalidated by any insertion in the file and fails silently, pointing confidently at the wrong code.
 - `adrs/056-consolidate-convergence-gate-recovery.md` — D2 describes the single advance owner stopping at Validate for cruise
