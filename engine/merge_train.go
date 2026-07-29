@@ -1105,12 +1105,14 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	return true, nil
 }
 
-// regenerationCommandTimeout bounds each declared regeneration command: unlike Claude
-// dispatch, which goes through ctx-aware invocation, a hung regeneration command would
-// otherwise block the merge-train worker indefinitely with no way to eject the member.
-// Only one command is declared today (bash scripts/generate-llms-full.sh, local and
-// fast), so this is a circuit breaker for future declarations rather than a fix for an
-// observed failure.
+// regenerationCommandTimeout bounds each declared regeneration command: a hung
+// regeneration command would otherwise block the merge-train worker indefinitely with
+// no way to eject the member. It is derived from the caller's ctx (see
+// regenerateAndCommit), so both a caller-initiated cancellation (e.g. graceful
+// shutdown) and this fixed upper bound can end the command promptly — whichever comes
+// first. Only one command is declared today (bash scripts/generate-llms-full.sh, local
+// and fast), so this is a circuit breaker for future declarations rather than a fix for
+// an observed failure.
 const regenerationCommandTimeout = 5 * time.Minute
 
 // regenerateAndCommit regenerates each declared generated-file spec's artefact by
@@ -1129,7 +1131,7 @@ const regenerationCommandTimeout = 5 * time.Minute
 // effect — that side effect is discarded rather than staged, so Claude's deletion-aware
 // resolution of the protected path is never silently overwritten by way of a command it
 // happens to share with an unrelated matched path.
-func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, specs []generatedFileSpec, protectedPaths []string) (bool, string) {
+func (e *Engine) regenerateAndCommit(ctx context.Context, memberItem gh.ProjectItem, wtDir string, specs []generatedFileSpec, protectedPaths []string) (bool, string) {
 	// MERGE_HEAD must still be present at entry: regenerateAndCommit is only ever
 	// called either with the merge conflict still fully in progress (the all-generated
 	// case, Claude never invoked) or immediately after resolveConflictWithClaude has
@@ -1181,19 +1183,30 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}
-		regenCtx, cancel := context.WithTimeout(context.Background(), regenerationCommandTimeout)
+		regenCtx, cancel := context.WithTimeout(ctx, regenerationCommandTimeout)
 		regenCmd := exec.CommandContext(regenCtx, spec.Command[0], spec.Command[1:]...)
 		regenCmd.Dir = wtDir
 		out, err := regenCmd.CombinedOutput()
-		cancel()
+		// Classify before calling cancel(): cancel() unconditionally cancels regenCtx as
+		// part of releasing its resources (the standard non-deferred-cancel idiom), so
+		// checking regenCtx.Err() after that point would always report Canceled — even
+		// for an ordinary command failure unrelated to any cancellation. ctx.Err() (the
+		// caller's original, un-derived context) is unaffected by our own cancel() call,
+		// so it alone reliably distinguishes caller-initiated cancellation from
+		// regenCtx's own timeout from a plain command failure.
 		if err != nil {
 			reason := fmt.Sprintf("regeneration command %q failed: %v: %s", strings.Join(spec.Command, " "), err, strings.TrimSpace(string(out)))
-			if regenCtx.Err() == context.DeadlineExceeded {
+			switch {
+			case ctx.Err() != nil:
+				reason = fmt.Sprintf("regeneration command %q was killed by caller cancellation (e.g. worker shutdown)", strings.Join(spec.Command, " "))
+			case regenCtx.Err() == context.DeadlineExceeded:
 				reason = fmt.Sprintf("regeneration command %q exceeded its %s timeout and was killed", strings.Join(spec.Command, " "), regenerationCommandTimeout)
 			}
+			cancel()
 			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
 			return false, reason
 		}
+		cancel()
 
 		for _, s := range allSpecs {
 			if strings.Join(s.Command, "\x00") != cmdKey {
@@ -1321,7 +1334,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		// nonGenerated is a superset of deletionExcluded, so an empty nonGenerated means
 		// there are no deletion-excluded siblings to protect either.
 		e.logf(memberItem.Number, "merge-train", "conflict for #%d confined to declared generated path(s) — regenerating instead of dispatching Claude\n", memberItem.Number)
-		resolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched, nil)
+		resolved, reason := e.regenerateAndCommit(ctx, memberItem, wtDir, matched, nil)
 		return resolved, reason, nil
 	}
 
@@ -1339,7 +1352,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 	// deletionExcluded (declared generated paths conflicted in this same trial but
 	// routed to Claude above due to a deletion-involving status) must be protected from
 	// any command matched shares with them — see regenerateAndCommit's doc comment.
-	regenResolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched, deletionExcluded)
+	regenResolved, reason := e.regenerateAndCommit(ctx, memberItem, wtDir, matched, deletionExcluded)
 	return regenResolved, reason, nil
 }
 

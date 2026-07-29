@@ -3706,6 +3706,81 @@ func TestMergeTrainWorker_RegenerationFailureEjectsMember(t *testing.T) {
 	}
 }
 
+// TestMergeTrainWorker_CancelledContextAbortsRegeneration guards against a review-flagged
+// gap: regenerateAndCommit derived its regeneration command's timeout from
+// context.Background() rather than the caller's ctx, so a worker-level cancellation
+// (e.g. graceful shutdown) would not stop an in-flight regeneration command promptly —
+// it would keep running for up to the full regenerationCommandTimeout regardless. Fixed
+// by deriving the command's context from ctx via context.WithTimeout(ctx, ...). This
+// test passes an already-cancelled ctx into assembleTrialBranch and confirms the
+// regeneration command is never actually started (exec.CommandContext returns the
+// context's error immediately) and the member is ejected with a reason identifying
+// caller cancellation, not a generic failure or a 5-minute wait.
+func TestMergeTrainWorker_CancelledContextAbortsRegeneration(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "generated.txt", "stale-content-from-1\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "generated.txt", "stale-content-from-2\n")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"bash", "-c", "printf 'should-never-run\\n' > generated.txt"}},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "cancelled-ctx-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	survivors, _, err := eng.assembleTrialBranch(ctx, p, members, trialName)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("expected near-instant abort on an already-cancelled ctx, took %s (regenerationCommandTimeout is 5m — the fix must not silently wait it out)", elapsed)
+	}
+	if len(survivors) != 1 || survivors[0].item.Number != 1 {
+		t.Fatalf("expected only member #1 to survive, got %+v", survivors)
+	}
+
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected Claude never invoked, got %d call(s)", len(claude.forCommentsCalls))
+	}
+
+	var ejectionBody string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 2 {
+			ejectionBody = c.body
+		}
+	}
+	if ejectionBody == "" {
+		t.Fatal("expected an ejection comment on issue #2")
+	}
+	if !strings.Contains(ejectionBody, "caller cancellation") {
+		t.Errorf("expected the ejection reason to identify caller cancellation, got: %s", ejectionBody)
+	}
+}
+
 // TestMergeTrainWorker_ClaudePrematureCommitInMixedModeEjectsMember guards against the
 // compliance risk flagged in ADR-1235: in the mixed case, Claude is instructed to leave
 // the generated path untouched and not commit, but nothing stops it from ignoring that
