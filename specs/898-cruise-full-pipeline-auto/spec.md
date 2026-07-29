@@ -47,7 +47,7 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 ### Edge Cases
 
-- If yolo and cruise labels coexist, yolo takes precedence (existing engine behavior per CLAUDE.md). The test does NOT verify this edge case — it is already unit-tested.
+- If yolo and cruise labels coexist, cruise takes precedence: the PR is not auto-merged and the issue does not advance to Done, exactly as with cruise alone. Both end-of-Validate guards in `engine/stages.go` test the raw cruise label, so yolo cannot override either decision. The test does NOT verify this edge case — it is already unit-tested.
 - The `MergePR` harness helper must tolerate the case where GitHub's merge endpoint returns a 405 (branch-protection rules), though for the test bed this should not occur.
 
 ## Requirements *(mandatory)*
@@ -92,7 +92,7 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 ## Out of Scope
 
-- Verifying the yolo+cruise coexistence edge case end-to-end (yolo takes precedence; covered by unit tests in `engine/stages_test.go`).
+- Verifying the yolo+cruise coexistence edge case end-to-end (cruise takes precedence; covered by unit tests in `engine/stages_test.go`).
 - Paused-item recovery or convergence-reset scenarios (separate issues in the #828 chain).
 - Verifying `fabrik:bot-reprompted` or `wait_for_reviews` behavior in the cruise context.
 - ADR modifications beyond a note referencing cruise e2e coverage (ADR-056 D2 already documents cruise's stop-at-Validate behavior; no new ADR is needed).
