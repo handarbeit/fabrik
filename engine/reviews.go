@@ -362,6 +362,13 @@ func changesRequestedAuthor(reviews []gh.PRReview) string {
 // (auto-merge enable, enqueue, direct merge, or advance-to-Queued) because reviewer
 // requests are still outstanding.
 //
+// review_authority: authoritative (ADR-1250) additionally gates the same
+// clearing branch on reviewGateAuthorityVerdict — no outstanding
+// CHANGES_REQUESTED and required approvals satisfied. Because this sits ahead
+// of attemptMergeOnValidate's yolo/cruise merge logic, `yolo`/`cruise` never
+// bypass it: they only control merge *timing* once the authoritative gate is
+// itself satisfied, never the gate's clearing condition.
+//
 // Why this exists separately from checkReviewGate: the catch-up loop's
 // handleReviewGate deliberately no-ops while !pctx.hasComplete (#617), and
 // pctx.hasComplete is frozen before the Phase 1 handler chain runs. Because
@@ -473,6 +480,24 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// function, so the two gate sites can never disagree on "outstanding".
 	outstanding, hasReviews := reviewGateOutstanding(requests, reviews)
 	if len(outstanding) == 0 && hasReviews {
+		// Authoritative mode: additive check, same reviewGateAuthorityVerdict
+		// pure function checkReviewGate uses, so the advance gate and the
+		// landing gate can never disagree on what "satisfied" means. A fetch
+		// error blocks conservatively — same rationale as the FetchPRReviews/
+		// FetchPRReviewRequests failure handling just above; a transient
+		// GraphQL error must never silently fall back to advisory clearing.
+		if stage.ReviewAuthority == "authoritative" {
+			reviewDecision, decisionErr := e.readClient.FetchPRReviewDecision(owner, repo, prNumber)
+			if decisionErr != nil {
+				e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewDecision failed: %v\n", decisionErr)
+				return e.holdLandingForReview(item,
+					"holding landing decision on PR #%d — review verdict unreadable (fetch failed), blocking conservatively\n", prNumber)
+			}
+			if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
+				return e.holdLandingForReview(item,
+					"holding landing decision on PR #%d — authoritative gate still blocking: %s\n", prNumber, reason)
+			}
+		}
 		// Deliberately does NOT call removeAwaitingReviewLabel here, unlike
 		// checkReviewGate's equivalent clearing branch. Removal is checkReviewGate's
 		// job: this function only ever runs on a Validate item, and every path that
