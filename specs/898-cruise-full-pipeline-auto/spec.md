@@ -47,7 +47,7 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 ### Edge Cases
 
-- If yolo and cruise labels coexist, yolo takes precedence (existing engine behavior per CLAUDE.md). The test does NOT verify this edge case — it is already unit-tested.
+- If yolo and cruise labels coexist, cruise takes precedence: the PR is not auto-merged and the issue does not advance to Done, exactly as with cruise alone. Both end-of-Validate guards in `engine/stages.go` test the raw cruise label, so yolo cannot override either decision. The test does NOT verify this edge case — it is already unit-tested.
 - The `MergePR` harness helper must tolerate the case where GitHub's merge endpoint returns a 405 (branch-protection rules), though for the test bed this should not occur.
 
 ## Requirements *(mandatory)*
@@ -92,7 +92,7 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 ## Out of Scope
 
-- Verifying the yolo+cruise coexistence edge case end-to-end (yolo takes precedence; covered by unit tests in `engine/stages_test.go`).
+- Verifying the yolo+cruise coexistence edge case end-to-end (cruise takes precedence; covered by unit tests in `engine/handle_stage_complete_test.go` — `TestHandleStageComplete_BothCruiseAndYolo_CruiseWins` — and `engine/poll_test.go` — `TestCruiseCatchUp_BothCruiseAndYolo_CruiseWins`, one per advancement path). `engine/stages_test.go` covers cruise *alone* (`TestAttemptMergeOnValidate_CruiseSkipsAutoMerge`), not the coexistence case.
 - Paused-item recovery or convergence-reset scenarios (separate issues in the #828 chain).
 - Verifying `fabrik:bot-reprompted` or `wait_for_reviews` behavior in the cruise context.
 - ADR modifications beyond a note referencing cruise e2e coverage (ADR-056 D2 already documents cruise's stop-at-Validate behavior; no new ADR is needed).
@@ -101,6 +101,8 @@ After cruise stops at Validate-complete with an open PR, a human (or the test ha
 
 - `tests/e2e/harness.go` — existing helpers; `AssertLabelWasNeverApplied`, `MergePR`, `GetLinkedPRNumber`, `GetIssueStatus` are new additions
 - `tests/e2e/auto_merge_test.go` — `TestYoloAutoMergeLabel` pattern (full-pipeline with post-Validate assertion)
-- `engine/poll.go:1410–1444` — the code gate that makes cruise stop at Validate without auto-merging
-- `engine/stages_test.go:60–75` — unit test `TestAttemptMergeOnValidate_CruiseSkipsAutoMerge` confirming the cruise guard exists
+- `engine/stages.go` — the two guards that make cruise stop at Validate without auto-merging, both keyed on the raw `hasCruiseLabel`: the `hasCruiseLabel(item) && stage.Name == "Validate"` check in `handleStageComplete` (suppresses the Done advance) and the early return in `attemptMergeOnValidate` (suppresses auto-merge)
+- `engine/stages_test.go` — `TestAttemptMergeOnValidate_CruiseSkipsAutoMerge`, confirming the auto-merge guard for cruise alone
+
+> Citations here name symbols rather than line numbers deliberately. Line pins in this section had rotted twice — `engine/poll.go:1410–1444` pointed at `selectDeepFetchCandidates` internals rather than any cruise gate, and `engine/stages_test.go:60–75` pointed at `TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers`, an unrelated test. A symbol name survives every edit above it; a line number is invalidated by any insertion in the file and fails silently, pointing confidently at the wrong code.
 - `adrs/056-consolidate-convergence-gate-recovery.md` — D2 describes the single advance owner stopping at Validate for cruise

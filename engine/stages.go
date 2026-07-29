@@ -99,8 +99,15 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	yoloActive := e.cfg.Yolo || hasYoloLabel(item)
 
 	// cruiseActive mirrors yoloActive for advancement but skips the two
-	// end-of-Validate actions (merge + Done advancement). When yolo is active,
-	// cruise is suppressed so yolo always takes precedence.
+	// end-of-Validate actions (merge + Done advancement).
+	//
+	// It is deliberately false when yolo is also present, but that does NOT mean
+	// yolo takes precedence: both end-of-Validate guards below test the raw
+	// hasCruiseLabel, not cruiseActive, so cruise still wins the merge decision
+	// and the stop-at-Validate decision when both labels are set. Suppressing
+	// cruiseActive under yolo only avoids double-counting in the shouldAdvance
+	// expression, where yoloActive already contributes the same true value at
+	// every non-Validate stage.
 	cruiseActive := !yoloActive && hasCruiseLabel(item)
 
 	// autoMergeEnabled is true when attemptMergeOnValidate successfully called
