@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1111,7 +1113,15 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 // than falling through to Claude. By the time this runs, any non-generated portion of
 // the conflict has already been resolved by Claude (or there was none), so a failure
 // here is specific to the regeneration step itself.
-func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, specs []generatedFileSpec) (bool, string) {
+//
+// protectedPaths (classifyConflictedPaths's deletionExcluded) names declared generated
+// paths that were themselves part of this same conflict but routed to Claude instead of
+// regeneration because their status involved a deletion. A command shared between a
+// matched path and a protected sibling still regenerates the sibling on disk as a side
+// effect — that side effect is discarded rather than staged, so Claude's deletion-aware
+// resolution of the protected path is never silently overwritten by way of a command it
+// happens to share with an unrelated matched path.
+func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, specs []generatedFileSpec, protectedPaths []string) (bool, string) {
 	// MERGE_HEAD must still be present at entry: regenerateAndCommit is only ever
 	// called either with the merge conflict still fully in progress (the all-generated
 	// case, Claude never invoked) or immediately after resolveConflictWithClaude has
@@ -1139,10 +1149,18 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 	// as an unstaged, uncommitted working-tree change that survives into the next
 	// member's `git merge` in the same trial worktree — the tracked-file counterpart of
 	// the untracked-file leftover this PR's ejection-cleanup fix already guards against.
+	// A sibling in protectedPaths is the one exception: it must never be staged from a
+	// shared command's side effect (see the doc comment above) — it goes to pathsToRestore
+	// instead.
 	allSpecs := e.generatedFileSet()
+	protectedSet := make(map[string]bool, len(protectedPaths))
+	for _, p := range protectedPaths {
+		protectedSet[p] = true
+	}
 
 	seenCommands := make(map[string]bool, len(specs))
 	var pathsToStage []string
+	var pathsToRestore []string
 	for _, spec := range specs {
 		cmdKey := strings.Join(spec.Command, "\x00")
 		if seenCommands[cmdKey] {
@@ -1164,9 +1182,43 @@ func (e *Engine) regenerateAndCommit(memberItem gh.ProjectItem, wtDir string, sp
 		}
 
 		for _, s := range allSpecs {
-			if strings.Join(s.Command, "\x00") == cmdKey {
-				pathsToStage = append(pathsToStage, s.Path)
+			if strings.Join(s.Command, "\x00") != cmdKey {
+				continue
 			}
+			if protectedSet[s.Path] {
+				pathsToRestore = append(pathsToRestore, s.Path)
+				continue
+			}
+			pathsToStage = append(pathsToStage, s.Path)
+		}
+	}
+
+	for _, path := range pathsToRestore {
+		// Discard the shared command's side effect on a protected path: if it's still
+		// tracked in the index (Claude staged content, including a resolution that
+		// keeps the file), restore the working tree from the index. If it's absent
+		// from the index (Claude staged its removal via `git rm`), the regenerated
+		// file the command just (re)created on disk must not survive either.
+		lsCmd := exec.Command("git", "ls-files", "--", path)
+		lsCmd.Dir = wtDir
+		lsOut, err := lsCmd.Output()
+		if err != nil {
+			reason := fmt.Sprintf("could not check index state for protected path %s after shared-command regeneration: %v", path, err)
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
+		}
+		if len(strings.TrimSpace(string(lsOut))) > 0 {
+			restoreCmd := exec.Command("git", "checkout-index", "-f", "--", path)
+			restoreCmd.Dir = wtDir
+			if out, err := restoreCmd.CombinedOutput(); err != nil {
+				reason := fmt.Sprintf("could not restore protected path %s after shared-command regeneration: %v: %s", path, err, strings.TrimSpace(string(out)))
+				e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+				return false, reason
+			}
+		} else if err := os.Remove(filepath.Join(wtDir, path)); err != nil && !os.IsNotExist(err) {
+			reason := fmt.Sprintf("could not remove protected path %s recreated by shared-command regeneration: %v", path, err)
+			e.logf(memberItem.Number, "merge-train", "%s\n", reason)
+			return false, reason
 		}
 	}
 
@@ -1242,7 +1294,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		return resolved, "", resolveErr
 	}
 
-	matched, nonGenerated := classifyConflictedPaths(e.generatedFileSet(), paths)
+	matched, nonGenerated, deletionExcluded := classifyConflictedPaths(e.generatedFileSet(), paths)
 
 	if len(matched) == 0 {
 		// No generated paths involved — unchanged behavior.
@@ -1252,8 +1304,10 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 
 	if len(nonGenerated) == 0 {
 		// All conflicted paths are declared generated (FR-1/FR-2) — skip Claude entirely.
+		// nonGenerated is a superset of deletionExcluded, so an empty nonGenerated means
+		// there are no deletion-excluded siblings to protect either.
 		e.logf(memberItem.Number, "merge-train", "conflict for #%d confined to declared generated path(s) — regenerating instead of dispatching Claude\n", memberItem.Number)
-		resolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched)
+		resolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched, nil)
 		return resolved, reason, nil
 	}
 
@@ -1268,7 +1322,10 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		return resolved, "", resolveErr
 	}
 
-	regenResolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched)
+	// deletionExcluded (declared generated paths conflicted in this same trial but
+	// routed to Claude above due to a deletion-involving status) must be protected from
+	// any command matched shares with them — see regenerateAndCommit's doc comment.
+	regenResolved, reason := e.regenerateAndCommit(memberItem, wtDir, matched, deletionExcluded)
 	return regenResolved, reason, nil
 }
 

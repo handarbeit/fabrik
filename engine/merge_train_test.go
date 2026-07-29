@@ -4105,6 +4105,128 @@ func TestMergeTrainWorker_SharedCommandStagesAllDeclaredPaths(t *testing.T) {
 	}
 }
 
+// TestMergeTrainWorker_SharedCommandDoesNotOverwriteDeletionExcludedSibling guards
+// against a review-flagged interaction between two of this PR's own fixes: the
+// shared-command staging fix above (stage every declared path tied to an executed
+// command, since running the command regenerates all of them as a side effect) and the
+// deletion-involving-status fix (route a generated path conflicted via DD/UD/DU to
+// Claude instead of regeneration). If a matched path and a deletion-excluded sibling
+// share one command, naively applying the first fix would stage the sibling's
+// regenerated content too — silently discarding Claude's deletion-aware resolution by
+// way of a command it merely happens to share with an unrelated matched path.
+func TestMergeTrainWorker_SharedCommandDoesNotOverwriteDeletionExcludedSibling(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Establish both declared paths on main so member branches diverge from a common
+	// base version.
+	writeFile(t, filepath.Join(srcDir, "generated-a.txt"), "base-a\n")
+	writeFile(t, filepath.Join(srcDir, "generated-b.txt"), "base-b\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "add generated-a.txt and generated-b.txt to main")
+	mustGit(t, srcDir, "push", bareDir, "main:main")
+	mustGitDir(t, bareDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	// Member 1 modifies generated-a.txt and deletes generated-b.txt — merges cleanly as
+	// the first member (no conflict yet, trial simply applies both changes).
+	mustGit(t, srcDir, "checkout", "main")
+	mustGit(t, srcDir, "checkout", "-b", "fabrik/issue-1")
+	writeFile(t, filepath.Join(srcDir, "generated-a.txt"), "a-from-1\n")
+	mustGit(t, srcDir, "rm", "generated-b.txt")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "modify generated-a.txt, delete generated-b.txt")
+	mustGit(t, srcDir, "push", bareDir, "fabrik/issue-1:fabrik/issue-1")
+	sha1 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+	mustGit(t, srcDir, "checkout", "main")
+	mustGit(t, srcDir, "branch", "-D", "fabrik/issue-1")
+
+	// Member 2 diverges from the same base, modifying both files — merging it into the
+	// trial (which now has member 1's modify of A and deletion of B) produces a
+	// modify/modify conflict on A (UU, matched) and a delete/modify conflict on B (DU,
+	// deletion-excluded) in the very same merge.
+	sha2 := pushMultiFileBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", map[string]string{
+		"generated-a.txt": "a-from-2\n",
+		"generated-b.txt": "b-from-2\n",
+	})
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			if len(comments) == 0 || !strings.Contains(comments[0].Body, "generated-a.txt") {
+				t.Errorf("expected the mixed-mode comment to name generated-a.txt as out of scope")
+			}
+			// Claude honors the deletion for generated-b.txt: stage the removal, don't
+			// touch generated-a.txt, don't commit (per the mixed-mode instructions).
+			rmCmd := exec.Command("git", "rm", "-f", "generated-b.txt")
+			rmCmd.Dir = workDir
+			if out, err := rmCmd.CombinedOutput(); err != nil {
+				return string(out), false, TokenUsage{}, nil
+			}
+			return "resolved generated-b.txt by keeping the deletion", true, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	// Both declared paths share one command, so regenerating generated-a.txt (the
+	// matched path) also rewrites generated-b.txt on disk as a side effect — exactly
+	// the interaction this test guards against.
+	sharedCmd := []string{"bash", "-c", "printf 'regen-a\\n' > generated-a.txt; printf 'regen-b\\n' > generated-b.txt"}
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated-a.txt", Command: sharedCmd},
+		{Path: "generated-b.txt", Command: sharedCmd},
+	}
+
+	p := trialParams{
+		owner:      "owner",
+		repo:       "repo",
+		baseBranch: "main",
+		baseSHA:    baseSHA,
+		wm:         wm,
+		holdingStg: holdingStage(eng.cfg),
+	}
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+	const trialName = "shared-command-deletion-exclusion-trial"
+	defer wm.CleanupTrainWorktree(trialName, true)
+
+	survivors, _, err := eng.assembleTrialBranch(context.Background(), p, members, trialName)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch: %v", err)
+	}
+	if len(survivors) != 2 {
+		t.Fatalf("expected both members to survive, got %+v", survivors)
+	}
+	if len(claude.forCommentsCalls) != 1 {
+		t.Fatalf("expected Claude invoked once to resolve generated-b.txt's deletion conflict, got %d", len(claude.forCommentsCalls))
+	}
+
+	wtDir := wm.trainWorktreeDir(trialName)
+
+	gotA, err := os.ReadFile(filepath.Join(wtDir, "generated-a.txt"))
+	if err != nil {
+		t.Fatalf("reading generated-a.txt: %v", err)
+	}
+	if string(gotA) != "regen-a\n" {
+		t.Errorf("generated-a.txt content = %q, want %q (regenerated)", gotA, "regen-a\n")
+	}
+
+	if _, err := os.Stat(filepath.Join(wtDir, "generated-b.txt")); !os.IsNotExist(err) {
+		t.Errorf("expected generated-b.txt to remain deleted per Claude's resolution, but the shared command's regeneration side effect resurrected it (err=%v)", err)
+	}
+
+	lsTreeOut := gitOutputDir(t, wtDir, "ls-tree", "-r", "--name-only", "HEAD")
+	if strings.Contains(lsTreeOut, "generated-b.txt") {
+		t.Error("expected generated-b.txt to NOT be part of HEAD — its deletion must survive the shared regeneration command")
+	}
+
+	statusOut := gitOutputDir(t, wtDir, "status", "--porcelain")
+	if strings.TrimSpace(statusOut) != "" {
+		t.Errorf("expected a clean working tree after resolution, got status:\n%s", statusOut)
+	}
+}
+
 // TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember closes a blind spot
 // in the premature-commit guard: if Claude's non-compliant commit happens to write
 // byte-identical content to what the declared regeneration command would produce, a

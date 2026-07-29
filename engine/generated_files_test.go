@@ -12,10 +12,11 @@ func TestClassifyConflictedPaths(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		paths            []conflictedPath
-		wantMatched      []generatedFileSpec
-		wantNonGenerated []string
+		name                 string
+		paths                []conflictedPath
+		wantMatched          []generatedFileSpec
+		wantNonGenerated     []string
+		wantDeletionExcluded []string
 	}{
 		{
 			name:             "all generated",
@@ -54,39 +55,53 @@ func TestClassifyConflictedPaths(t *testing.T) {
 			wantNonGenerated: nil,
 		},
 		{
-			name:             "both-deleted generated path routes to Claude instead of regenerating",
-			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}},
-			wantMatched:      nil,
-			wantNonGenerated: []string{"docs/llms-full.txt"},
+			name:                 "both-deleted generated path routes to Claude instead of regenerating",
+			paths:                []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}},
+			wantMatched:          nil,
+			wantNonGenerated:     []string{"docs/llms-full.txt"},
+			wantDeletionExcluded: []string{"docs/llms-full.txt"},
 		},
 		{
-			name:             "deleted-by-them generated path routes to Claude instead of regenerating",
-			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "UD"}},
-			wantMatched:      nil,
-			wantNonGenerated: []string{"docs/llms-full.txt"},
+			name:                 "deleted-by-them generated path routes to Claude instead of regenerating",
+			paths:                []conflictedPath{{Path: "docs/llms-full.txt", Status: "UD"}},
+			wantMatched:          nil,
+			wantNonGenerated:     []string{"docs/llms-full.txt"},
+			wantDeletionExcluded: []string{"docs/llms-full.txt"},
 		},
 		{
-			name:             "deleted-by-us generated path routes to Claude instead of regenerating",
-			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "DU"}},
-			wantMatched:      nil,
-			wantNonGenerated: []string{"docs/llms-full.txt"},
+			name:                 "deleted-by-us generated path routes to Claude instead of regenerating",
+			paths:                []conflictedPath{{Path: "docs/llms-full.txt", Status: "DU"}},
+			wantMatched:          nil,
+			wantNonGenerated:     []string{"docs/llms-full.txt"},
+			wantDeletionExcluded: []string{"docs/llms-full.txt"},
 		},
 		{
-			name:             "deletion-involving generated path alongside a clean generated match",
-			paths:            []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}, {Path: "docs/other-generated.txt", Status: "UU"}},
-			wantMatched:      []generatedFileSpec{specs[1]},
-			wantNonGenerated: []string{"docs/llms-full.txt"},
+			name:                 "deletion-involving generated path alongside a clean generated match",
+			paths:                []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}, {Path: "docs/other-generated.txt", Status: "UU"}},
+			wantMatched:          []generatedFileSpec{specs[1]},
+			wantNonGenerated:     []string{"docs/llms-full.txt"},
+			wantDeletionExcluded: []string{"docs/llms-full.txt"},
+		},
+		{
+			name:                 "duplicate deletion-involving path only counted once in deletionExcluded",
+			paths:                []conflictedPath{{Path: "docs/llms-full.txt", Status: "DD"}, {Path: "docs/llms-full.txt", Status: "DD"}},
+			wantMatched:          nil,
+			wantNonGenerated:     []string{"docs/llms-full.txt", "docs/llms-full.txt"},
+			wantDeletionExcluded: []string{"docs/llms-full.txt"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotMatched, gotNonGenerated := classifyConflictedPaths(specs, tt.paths)
+			gotMatched, gotNonGenerated, gotDeletionExcluded := classifyConflictedPaths(specs, tt.paths)
 			if !reflect.DeepEqual(gotMatched, tt.wantMatched) {
 				t.Errorf("matched = %+v, want %+v", gotMatched, tt.wantMatched)
 			}
 			if !reflect.DeepEqual(gotNonGenerated, tt.wantNonGenerated) {
 				t.Errorf("nonGenerated = %+v, want %+v", gotNonGenerated, tt.wantNonGenerated)
+			}
+			if !reflect.DeepEqual(gotDeletionExcluded, tt.wantDeletionExcluded) {
+				t.Errorf("deletionExcluded = %+v, want %+v", gotDeletionExcluded, tt.wantDeletionExcluded)
 			}
 		})
 	}
@@ -102,7 +117,7 @@ func TestClassifyConflictedPaths_DuplicatePathDifferentCommand(t *testing.T) {
 	second := generatedFileSpec{Path: "docs/llms-full.txt", Command: []string{"bash", "scripts/some-other-generator.sh"}}
 	specs := []generatedFileSpec{first, second}
 
-	matched, nonGenerated := classifyConflictedPaths(specs, []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}})
+	matched, nonGenerated, _ := classifyConflictedPaths(specs, []conflictedPath{{Path: "docs/llms-full.txt", Status: "UU"}})
 	if nonGenerated != nil {
 		t.Errorf("nonGenerated = %+v, want nil", nonGenerated)
 	}

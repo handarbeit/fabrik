@@ -42,28 +42,46 @@ func deletionInvolvingStatus(status string) bool {
 // classifyConflictedPaths splits a set of conflicted paths against the declared
 // generated-file specs. matched holds the subset of specs whose Path appears in paths
 // with a non-deletion-involving status (deduplicated by spec, order-stable per specs),
-// and nonGenerated holds every conflicted path that is not covered by any spec, plus
-// any generated path whose conflict involves a deletion (order-stable per paths) — see
-// deletionInvolvingStatus. Routing a deletion-involving generated-path conflict to
-// nonGenerated sends it to Claude for textual resolution instead of regeneration,
-// preserving whichever side's deletion intent Claude judges correct rather than
-// silently recreating a file a contributor meant to remove.
+// nonGenerated holds every conflicted path that is not covered by any spec, plus any
+// generated path whose conflict involves a deletion (order-stable per paths) — see
+// deletionInvolvingStatus — and deletionExcluded holds just that latter subset: declared
+// generated paths excluded from matched specifically because of a deletion-involving
+// status (order-stable per paths, no duplicates).
+//
+// Routing a deletion-involving generated-path conflict to nonGenerated sends it to
+// Claude for textual resolution instead of regeneration, preserving whichever side's
+// deletion intent Claude judges correct rather than silently recreating a file a
+// contributor meant to remove. deletionExcluded exists as a separate, narrower signal
+// for regenerateAndCommit's shared-command staging: a command that regenerates matched
+// path A as a side effect may also regenerate a declared sibling path B on disk even
+// though B isn't in matched — if B is in deletionExcluded, that side effect must be
+// discarded rather than staged, or regeneration would silently overwrite Claude's
+// deletion-aware resolution of B by way of a command it happens to share with A.
 //
 // If specs ever declares the same Path twice with different Commands (a static
 // config mistake, not user input — see TestDeclaredGeneratedFiles), only the first
 // declaration for that Path is included in matched: running every command sharing a
 // Path against the same file would make the final content depend on declaration
 // order, which is worse than picking one deterministically.
-func classifyConflictedPaths(specs []generatedFileSpec, paths []conflictedPath) (matched []generatedFileSpec, nonGenerated []string) {
+func classifyConflictedPaths(specs []generatedFileSpec, paths []conflictedPath) (matched []generatedFileSpec, nonGenerated []string, deletionExcluded []string) {
 	generatedPathSet := make(map[string]bool, len(specs))
 	for _, spec := range specs {
 		generatedPathSet[spec.Path] = true
 	}
 
 	matchedPathSet := make(map[string]bool, len(paths))
+	seenDeletionExcluded := make(map[string]bool, len(paths))
 	for _, p := range paths {
-		if !generatedPathSet[p.Path] || deletionInvolvingStatus(p.Status) {
+		if !generatedPathSet[p.Path] {
 			nonGenerated = append(nonGenerated, p.Path)
+			continue
+		}
+		if deletionInvolvingStatus(p.Status) {
+			nonGenerated = append(nonGenerated, p.Path)
+			if !seenDeletionExcluded[p.Path] {
+				seenDeletionExcluded[p.Path] = true
+				deletionExcluded = append(deletionExcluded, p.Path)
+			}
 			continue
 		}
 		matchedPathSet[p.Path] = true
@@ -77,5 +95,5 @@ func classifyConflictedPaths(specs []generatedFileSpec, paths []conflictedPath) 
 		}
 	}
 
-	return matched, nonGenerated
+	return matched, nonGenerated, deletionExcluded
 }
