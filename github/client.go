@@ -85,8 +85,17 @@ func NewClient(token string) *Client {
 	}
 }
 
-// NewClientWithBaseURL creates a client with a custom base URL (for testing).
+// NewClientWithBaseURL creates a client with a custom base URL. An empty
+// baseURL falls back to defaultBaseURL (the production API host), matching
+// NewClient and the appRequest convention — a caller passing "" means "the
+// real GitHub API", not a hostless client. Without this, production callers
+// (e.g. pruefer's mintAuth, which passes "" for the non-test case) built
+// clients whose requests hit "/repos/..." with no scheme/host ("unsupported
+// protocol scheme"). Tests always pass an httptest URL, so they never caught it.
 func NewClientWithBaseURL(token, baseURL string) *Client {
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
 	return &Client{
 		token:   token,
 		baseURL: baseURL,

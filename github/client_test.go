@@ -330,3 +330,18 @@ func TestRateLimitStats_Concurrent(t *testing.T) {
 		t.Errorf("graphql.Limit = %d, want 5000", graphql.Limit)
 	}
 }
+
+// TestNewClientWithBaseURL_EmptyDefaultsToProduction guards the production
+// path that pruefer's mintAuth exercises: passing "" must fall back to the
+// real API host, not leave a hostless client (which produced "unsupported
+// protocol scheme" on every request). Tests elsewhere always pass an httptest
+// URL, so this path was previously unexercised.
+func TestNewClientWithBaseURL_EmptyDefaultsToProduction(t *testing.T) {
+	if c := NewClientWithBaseURL("tok", ""); c.baseURL != defaultBaseURL {
+		t.Errorf("empty baseURL should default to %q, got %q", defaultBaseURL, c.baseURL)
+	}
+	const explicit = "https://example.test"
+	if c := NewClientWithBaseURL("tok", explicit); c.baseURL != explicit {
+		t.Errorf("explicit baseURL must be preserved: got %q, want %q", c.baseURL, explicit)
+	}
+}
