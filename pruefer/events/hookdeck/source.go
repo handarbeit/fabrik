@@ -40,6 +40,16 @@ const (
 	// (e.g. a quiet period with no forwarded webhooks) as never having
 	// connected.
 	defaultAliveGracePeriod = 5 * time.Second
+
+	// defaultWriteWait bounds every WebSocket write (the attempt_response
+	// ack and the idle ping). Without it, a peer that stops reading (e.g.
+	// its TCP receive buffer fills on a stuck network path) can block
+	// WriteMessage/WriteControl indefinitely — and since ack runs
+	// synchronously inside the single read-loop goroutine, a stuck ack
+	// would also prevent that goroutine from ever calling ReadMessage
+	// again, silently defeating the pongWait/aliveGracePeriod liveness
+	// checks (a hung write never surfaces as a read timeout).
+	defaultWriteWait = 10 * time.Second
 )
 
 // Config configures a Source.
@@ -99,6 +109,10 @@ type Config struct {
 	// frames. Defaults (5s) when zero; unexported — only tests need to
 	// shrink this for speed.
 	aliveGracePeriod time.Duration
+
+	// writeWait bounds every WebSocket write (ack, ping). Defaults (10s)
+	// when zero; unexported — only tests need to shrink this for speed.
+	writeWait time.Duration
 }
 
 // Source implements events.EventSource against Hookdeck's CLI-session
@@ -146,6 +160,9 @@ func NewSource(cfg Config) *Source {
 	}
 	if cfg.aliveGracePeriod <= 0 {
 		cfg.aliveGracePeriod = defaultAliveGracePeriod
+	}
+	if cfg.writeWait <= 0 {
+		cfg.writeWait = defaultWriteWait
 	}
 	return &Source{cfg: cfg, dedupe: events.NewDedupe(0)}
 }
@@ -294,7 +311,7 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 			case <-done:
 				return
 			case <-ticker.C:
-				if writeErr := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); writeErr != nil {
+				if writeErr := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(s.cfg.writeWait)); writeErr != nil {
 					return
 				}
 			case <-graceTimer.C:
@@ -407,5 +424,12 @@ func (s *Source) ack(conn *websocket.Conn, attempt attemptBody) {
 	if err != nil {
 		return
 	}
+	// Without a write deadline, a peer that stops reading could block this
+	// call indefinitely — and since ack runs synchronously inside the
+	// single read-loop goroutine (handleFrame -> runOnce's for loop), a
+	// stuck write would prevent the loop from ever reading again, defeating
+	// the pongWait/aliveGracePeriod liveness checks above (a hung write
+	// never surfaces as a read timeout).
+	conn.SetWriteDeadline(time.Now().Add(s.cfg.writeWait))
 	_ = conn.WriteMessage(websocket.TextMessage, data)
 }
