@@ -374,6 +374,16 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discovering app installations: %w", err)
 	}
+	// FetchAppInstallations caps at 100 results and only surfaces
+	// truncation via its own package-level log line (github/app.go) — this
+	// caller has no other way to know the list it received was incomplete.
+	// Without this, an owner whose installation exists beyond page 1 of a
+	// >100-installation App would be reported "no installation" below with
+	// the same confidence as a genuinely missing one — a false negative
+	// that triggers an unnecessary guided-install browser-open, unlike
+	// verifyRepoAccess's analogous truncated case below, which this
+	// mirrors.
+	installationsTruncated := len(installations) == 100
 	// Keyed by lower-cased account login: GitHub org/user logins are
 	// case-insensitive, but FetchAppInstallations returns each Account in
 	// its canonical case while owner (below) comes verbatim from the
@@ -408,14 +418,18 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		inst, ok := byAccount[strings.ToLower(owner)]
 		if !ok {
 			installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
+			notFoundDesc := "has no installation"
+			if installationsTruncated {
+				notFoundDesc = "not found in the first 100 installations returned — the App may have ≥100 installations, so this could be a pagination gap rather than an actual missing installation; re-run reconciliation to confirm before assuming it needs installing"
+			}
 			if !opts.NoBrowser && !openedInstallBrowser {
-				logf("! %s has no installation → opening %s …", owner, installURL)
+				logf("! %s %s → opening %s …", owner, notFoundDesc, installURL)
 				if err := openBrowser(installURL); err != nil {
 					logf("could not open browser automatically (%v) — visit the URL above manually", err)
 				}
 				openedInstallBrowser = true
 			} else {
-				logf("! %s has no installation → %s", owner, installURL)
+				logf("! %s %s → %s", owner, notFoundDesc, installURL)
 			}
 			continue
 		}

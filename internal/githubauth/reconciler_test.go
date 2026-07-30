@@ -577,6 +577,57 @@ func TestReconcile_RepoVerifyFailure_LogsSkippedNotAuthorized(t *testing.T) {
 	}
 }
 
+// TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage is
+// the regression test for a review finding: FetchAppInstallations caps at
+// 100 results and only logs truncation at the github package's own log tag,
+// with no signal Reconcile could previously observe. An owner whose
+// installation exists beyond the 100th result would be reported "has no
+// installation" with the same confidence as a genuinely missing one — a
+// false negative that triggers an unnecessary guided-install browser-open
+// — unlike verifyRepoAccess's already-covered analogous case for
+// FetchInstallationRepositories. This constructs exactly 100 fake
+// installations (none matching the watched owner) and asserts the log line
+// flags the ambiguity instead of confidently claiming no installation.
+func TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	installations := make([]gh.AppInstallation, 100)
+	for i := range installations {
+		installations[i] = gh.AppInstallation{ID: int64(i + 1), Account: fmt.Sprintf("someorg-%03d", i)}
+	}
+	srv, _ := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+
+	logf, lines := newLogCollector()
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"missingowner/repo"}, BaseURL: srv.URL, NoBrowser: true, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var found string
+	for _, l := range lines() {
+		if strings.Contains(l, "missingowner") {
+			found = l
+		}
+	}
+	if found == "" {
+		t.Fatalf("expected a log line about missingowner, got: %v", lines())
+	}
+	if !strings.Contains(found, "100") || !strings.Contains(found, "pagination") {
+		t.Errorf("log line = %q, expected it to flag the 100-result truncation as a possible pagination gap", found)
+	}
+	if strings.Contains(found, "has no installation") {
+		t.Errorf("log line = %q, should not confidently claim no installation when the result set was truncated", found)
+	}
+}
+
 // TestReconcile_PopulatesInstallationRepoCache is the regression test for
 // the bug an external review found: Credentials.InstallationRepoCache was
 // defined and round-trip tested but never actually populated by Reconcile,

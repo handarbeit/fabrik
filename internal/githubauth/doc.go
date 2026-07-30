@@ -5,15 +5,22 @@
 // — driving that state via GitHub's App Manifest flow (loopback callback,
 // browser handoff, code exchange) when no usable local credentials exist.
 //
-// This package must never import pruefer. It exists so that Pruefer (and
-// any future self-hosted daemon) can obtain a dedicated, per-user GitHub App
-// identity with no shared credential and no Pruefer-hosted backend — the
-// boundary this package draws mirrors internal/selfupgrade's: callers supply
-// their own paths/config (private key path, app-state path, watched repos,
-// a log function), and nothing here hardcodes "pruefer". The rest of the
-// caller's code depends only on the narrow GitHubAuth interface
+// This package must never import pruefer. The boundary it draws mirrors
+// internal/selfupgrade's: callers supply their own paths/config (private
+// key path, app-state path, watched repos, a log function), and the rest of
+// the caller's code depends only on the narrow GitHubAuth interface
 // (ClientForRepo, BotLogin) — it never sees PEMs, JWTs, installation IDs,
 // browser flows, or refresh loops.
+//
+// That said, unlike internal/selfupgrade, this package is not yet fully
+// caller-agnostic in practice: manifest.go's defaultAppName ("pruefer"),
+// defaultAppHomepageURL (github.com/handarbeit/fabrik), and the specific
+// permission set buildManifest requests are all Pruefer-shaped constants,
+// not Options/ManifestFlowOptions fields a second caller could override. A
+// future second self-hosted daemon reusing this package today would get an
+// App named "pruefer", homepaged at fabrik's repo, and scoped to exactly
+// Pruefer's permissions — parameterizing those three is follow-up work, not
+// something this package already does.
 //
 // See adrs/1253-github-app-manifest-auth-reconciler.md for the design
 // rationale, including why a manifest-created App supersedes (while still
