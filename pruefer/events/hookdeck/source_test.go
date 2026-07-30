@@ -396,19 +396,19 @@ func TestSource_DropsInvalidSignature(t *testing.T) {
 	}
 }
 
-// captureLogs redirects the package-level Logf hook to a slice for the
+// captureLogs redirects the package-level logf hook to a slice for the
 // duration of the test, restoring it on cleanup.
 func captureLogs(t *testing.T) *[]string {
 	t.Helper()
 	var logs []string
 	var mu sync.Mutex
-	old := Logf
-	Logf = func(format string, args ...any) {
+	old := logfHook.Load()
+	SetLogf(func(format string, args ...any) {
 		mu.Lock()
 		defer mu.Unlock()
 		logs = append(logs, fmt.Sprintf(format, args...))
-	}
-	t.Cleanup(func() { Logf = old })
+	})
+	t.Cleanup(func() { logfHook.Store(old) })
 	return &logs
 }
 

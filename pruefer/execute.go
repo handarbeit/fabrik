@@ -85,9 +85,9 @@ func Execute() error {
 		// unconditionally, bypassing whatever pruefer.Logf is ever wired to
 		// (e.g. a future TUI-safe sink) and diverging from every other
 		// pruefer log line's routing.
-		hookdeck.Logf = func(format string, args ...any) {
+		hookdeck.SetLogf(func(format string, args ...any) {
 			logf(0, "hookdeck", format, args...)
-		}
+		})
 		daemon.EventSource = hookdeck.NewSource(hookdeck.Config{
 			APIKey:        apiKey,
 			WebhookSecret: webhookSecret,

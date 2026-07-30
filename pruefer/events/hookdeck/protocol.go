@@ -89,8 +89,11 @@ func (h *flexHeaders) UnmarshalJSON(data []byte) error {
 			out[k] = arr[0]
 			continue
 		}
-		// Any other per-key shape (null, number, empty array) is skipped
-		// rather than failing the frame; lookupHeader treats a missing key
+		// Any other per-key shape (a number, or an empty array) is skipped
+		// rather than failing the frame; a JSON null is not skipped — it
+		// unmarshals into the string branch above as "" (Go's json package
+		// treats null-into-string as a no-op, not an error) — but the two
+		// end up equivalent downstream: lookupHeader treats a missing key
 		// the same as an empty value. For X-Hub-Signature-256 specifically,
 		// this means a header Hookdeck sent in some unrecognized shape is
 		// indistinguishable downstream from one it never sent at all — both
