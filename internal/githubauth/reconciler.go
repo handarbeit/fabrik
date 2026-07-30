@@ -271,6 +271,19 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	// pinned installation: unlike the discovery path below, there is no
 	// per-owner "is this actually covered" question here — the operator
 	// has explicitly asserted the pin covers everything.
+	//
+	// This trust model is unchanged by the manifest flow adding a
+	// first-run path: RunManifestFlow/loadOrBootstrapCredentials never set
+	// AppInstallationID themselves — it is only ever populated from
+	// opts.AppInstallationID, i.e. an explicit github_app_installation_id
+	// in config, env, or flag (pruefer/config.go). A genuinely first-run
+	// operator who has never manually set that field always goes through
+	// discovery below instead. If watched_repos spans more than one owner
+	// and the pin covers only some of them, requests against an uncovered
+	// owner's repo will fail at actual GitHub API call time (403/404) with
+	// no reconcile-time warning — accepted here because it's the exact
+	// legacy behavior this compat path exists to preserve, not a
+	// regression introduced by the reconciler.
 	if opts.AppInstallationID != 0 {
 		a, err := mintAuth(appID, opts.AppInstallationID, botLogin, privateKey, opts.BaseURL)
 		if err != nil {
