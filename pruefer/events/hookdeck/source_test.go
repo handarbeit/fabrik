@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -195,6 +196,34 @@ func sendAttempt(t *testing.T, conn *websocket.Conn, attemptID, deliveryID strin
 	}
 }
 
+// sendRawAttempt sends an attempt frame built from raw JSON rather than
+// through the attemptBody struct, letting a test hand-craft a headers shape
+// (e.g. http.Header-style arrays) that flexHeaders's Go struct field would
+// never produce on marshal.
+func sendRawAttempt(t *testing.T, conn *websocket.Conn, attemptID string, body []byte, headersJSON string) {
+	t.Helper()
+	bodyJSON := fmt.Sprintf(
+		`{"cli_path":"/","event_id":"evt-%s","attempt_id":%q,"webhook_id":"wh-1","request":{"method":"POST","timeout":5,"data_string":%s,"headers":%s}}`,
+		attemptID, attemptID, mustMarshalString(t, string(body)), headersJSON,
+	)
+	frameBytes, err := json.Marshal(wsFrame{Event: wsEventAttempt, Body: json.RawMessage(bodyJSON)})
+	if err != nil {
+		t.Fatalf("marshal frame: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, frameBytes); err != nil {
+		t.Fatalf("write attempt: %v", err)
+	}
+}
+
+func mustMarshalString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal string: %v", err)
+	}
+	return string(b)
+}
+
 func readAck(t *testing.T, conn *websocket.Conn) attemptResponseBody {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -314,6 +343,36 @@ func TestSource_MalformedRetryDoesNotBurnDeliveryID(t *testing.T) {
 	waitUntilCount(t, sink, 1)
 }
 
+// TestSource_TolerateArrayValuedHeaders guards against a Hookdeck attempt
+// frame whose headers use an http.Header-style array-per-key shape instead
+// of the flat string-per-key shape normally observed: a per-key shape
+// surprise must not fail decoding of the whole frame (which would silently
+// drop 100% of event-driven ingestion while transport health still reports
+// connected) — the first array element is used, same as any header GitHub
+// never sends multi-valued.
+func TestSource_TolerateArrayValuedHeaders(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	src := NewSource(testConfig(m))
+	runSourceInBackground(t, src, sink)
+
+	conn := m.nextConn(t)
+	body := prOpenedBody(t, 11)
+	sig := signBody(body, testWebhookSecret)
+	headersJSON := fmt.Sprintf(
+		`{"X-Hub-Signature-256":%q,"X-GitHub-Event":["pull_request","extra"],"X-GitHub-Delivery":["delivery-array"]}`,
+		sig,
+	)
+	sendRawAttempt(t, conn, "attempt-1", body, headersJSON)
+	readAck(t, conn)
+
+	waitUntilCount(t, sink, 1)
+	got := sink.snapshot()[0]
+	if got.DeliveryID != "delivery-array" || got.EventType != "pull_request" {
+		t.Errorf("unexpected event metadata from array-valued headers: %+v", got)
+	}
+}
+
 func TestSource_DropsInvalidSignature(t *testing.T) {
 	m := newMockHookdeckServer(t)
 	sink := &recordingSink{}
@@ -335,6 +394,83 @@ func TestSource_DropsInvalidSignature(t *testing.T) {
 	if got := sink.count(); got != 0 {
 		t.Errorf("sink.count() = %d, want 0 (invalid signature must be dropped)", got)
 	}
+}
+
+// captureLogs redirects the package-level Logf hook to a slice for the
+// duration of the test, restoring it on cleanup.
+func captureLogs(t *testing.T) *[]string {
+	t.Helper()
+	var logs []string
+	var mu sync.Mutex
+	old := Logf
+	Logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { Logf = old })
+	return &logs
+}
+
+// TestSource_ProcessAttempt_DistinguishesMissingFromInvalidSignature
+// guards against a missing X-Hub-Signature-256 header (a Hookdeck-side
+// forwarding problem) being logged identically to a present-but-wrong
+// signature (a misconfigured hookdeck.webhook_secret_env) — the two need
+// different operator fixes, so they must produce distinguishable log
+// messages.
+func TestSource_ProcessAttempt_DistinguishesMissingFromInvalidSignature(t *testing.T) {
+	body := prOpenedBody(t, 1)
+
+	t.Run("missing header", func(t *testing.T) {
+		logs := captureLogs(t)
+		src := NewSource(Config{WebhookSecret: testWebhookSecret})
+		sink := &recordingSink{}
+		src.processAttempt(context.Background(), sink, attemptBody{
+			Request: attemptRequest{
+				DataString: string(body),
+				Headers: map[string]string{
+					"X-GitHub-Event":    "pull_request",
+					"X-GitHub-Delivery": "d-missing-sig",
+				},
+			},
+		})
+		if sink.count() != 0 {
+			t.Fatalf("sink.count() = %d, want 0", sink.count())
+		}
+		joined := strings.Join(*logs, "\n")
+		if !strings.Contains(joined, "no X-Hub-Signature-256 header") {
+			t.Errorf("logs = %v, want a message about a missing signature header", *logs)
+		}
+		if strings.Contains(joined, "invalid GitHub webhook signature") {
+			t.Errorf("logs = %v, missing-header case must not log the wrong-signature message", *logs)
+		}
+	})
+
+	t.Run("present but wrong", func(t *testing.T) {
+		logs := captureLogs(t)
+		src := NewSource(Config{WebhookSecret: testWebhookSecret})
+		sink := &recordingSink{}
+		src.processAttempt(context.Background(), sink, attemptBody{
+			Request: attemptRequest{
+				DataString: string(body),
+				Headers: map[string]string{
+					"X-Hub-Signature-256": "sha256=" + strings.Repeat("00", 32),
+					"X-GitHub-Event":      "pull_request",
+					"X-GitHub-Delivery":   "d-wrong-sig",
+				},
+			},
+		})
+		if sink.count() != 0 {
+			t.Fatalf("sink.count() = %d, want 0", sink.count())
+		}
+		joined := strings.Join(*logs, "\n")
+		if !strings.Contains(joined, "invalid GitHub webhook signature") {
+			t.Errorf("logs = %v, want a message about an invalid signature", *logs)
+		}
+		if strings.Contains(joined, "no X-Hub-Signature-256 header") {
+			t.Errorf("logs = %v, wrong-signature case must not log the missing-header message", *logs)
+		}
+	})
 }
 
 func TestSource_ReconnectsAfterConnectionDrop(t *testing.T) {
