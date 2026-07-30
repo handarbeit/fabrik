@@ -149,7 +149,7 @@ func (d *Daemon) poll(ctx context.Context) {
 			logf(0, "warn", "skipping malformed watched repo %q (want owner/repo)\n", repoSpec)
 			continue
 		}
-		client, ok := d.Clients[owner]
+		client, ok := d.Clients[strings.ToLower(owner)]
 		if !ok {
 			// Expected when an owner has no resolved App installation (see
 			// internal/githubauth.Reconcile, which already logged a guided-
@@ -203,7 +203,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	wg.Wait()
 
 	for _, owner := range distinctOwners(d.Config.WatchedRepos) {
-		client, ok := d.Clients[owner]
+		client, ok := d.Clients[strings.ToLower(owner)]
 		if !ok {
 			continue
 		}
@@ -227,15 +227,28 @@ func splitOwnerRepo(spec string) (owner, repo string, ok bool) {
 // distinctOwners returns the distinct owners of every well-formed
 // "owner/repo" entry in watchedRepos, in first-seen order. Malformed entries
 // are skipped here — poll() already logs and skips them independently.
+//
+// Dedup is case-insensitive (keyed on the lower-cased owner, keeping the
+// first-seen literal casing in the result), mirroring
+// internal/githubauth's distinctOwnersLogging: GitHub org/user logins are
+// case-insensitive, so "MyOrg/repo1" and "myorg/repo2" name the same
+// account. d.Clients (built by execute.go from this same function) is
+// itself keyed by lower-cased owner for the same reason — an exact-case
+// dedup here would produce a second "distinct" owner with no corresponding
+// d.Clients entry, silently dropping that repo from every poll cycle.
 func distinctOwners(watchedRepos []string) []string {
 	seen := make(map[string]bool)
 	var owners []string
 	for _, spec := range watchedRepos {
 		owner, _, ok := splitOwnerRepo(spec)
-		if !ok || seen[owner] {
+		if !ok {
 			continue
 		}
-		seen[owner] = true
+		key := strings.ToLower(owner)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		owners = append(owners, owner)
 	}
 	return owners

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/config"
@@ -64,7 +65,10 @@ func Execute() error {
 			logf(0, "warn", "no authorized client for owner %q yet — repos under it will be skipped until reconciled: %v\n", owner, err)
 			continue
 		}
-		clients[owner] = client
+		// Keyed by lower-cased owner — see daemon.go's distinctOwners and
+		// poll()'s d.Clients lookups, which both normalize case the same
+		// way for this exact reason.
+		clients[strings.ToLower(owner)] = client
 	}
 
 	daemon := &Daemon{

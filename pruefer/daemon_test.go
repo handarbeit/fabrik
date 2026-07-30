@@ -234,7 +234,10 @@ func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
 	}
 
 	d := &Daemon{
-		Clients: map[string]GitHubLister{"ownerA": clientA, "ownerB": clientB},
+		// Clients is keyed by lower-cased owner — see distinctOwners' and
+		// poll()'s doc comments for why (execute.go, the real caller,
+		// always lower-cases when populating this map).
+		Clients: map[string]GitHubLister{"ownera": clientA, "ownerb": clientB},
 		Claude:  claude,
 		Clone:   clone,
 		Config: Config{

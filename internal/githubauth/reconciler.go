@@ -245,9 +245,16 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		for _, owner := range owners {
 			r.clients[strings.ToLower(owner)] = a.client
 		}
+		// Keyed by strings.ToLower(owner), matching r.clients two lines
+		// above: unlike the discovery path below (which iterates the
+		// already-deduped owners slice), this loop iterates every raw
+		// watched-repo spec directly, so two entries naming the same
+		// account with different casing (e.g. "MyOrg/repo1",
+		// "myorg/repo2") must still land in one InstallationRepoCache
+		// entry, not two.
 		for _, spec := range opts.WatchedRepos {
 			if owner, _, ok := splitOwnerRepo(spec); ok {
-				repoCache[owner] = append(repoCache[owner], spec)
+				repoCache[strings.ToLower(owner)] = append(repoCache[strings.ToLower(owner)], spec)
 			}
 		}
 		r.auths = []*Auth{a}
