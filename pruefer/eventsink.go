@@ -17,10 +17,11 @@ import (
 // non-fatal, since a missed event either gets retried on GitHub's
 // at-least-once redelivery or is caught by the poll-fallback safety net.
 //
-// Returns once dispatch has been handed to reviewOne's semaphore-gated
-// goroutine, not once the review itself completes — matching
-// events.EventSink.Handle's "must not block on a long-running review"
-// contract.
+// reviewOne blocks acquiring a semaphore slot before this call returns, which
+// can take arbitrarily long while the daemon's concurrency budget is full —
+// so this must never be called inline from daemonEventSink.Handle (it is
+// always invoked in its own goroutine there) or it would stall acking the
+// current webhook and reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
 	client, ok := d.Clients[owner]
 	if !ok {
@@ -76,6 +77,16 @@ type daemonEventSink struct {
 // Pruefer has no opinion on are silently no-ops, not an error condition —
 // GitHub (and Hookdeck's forwarding scope) can deliver many event types
 // this sink never needs to act on.
+//
+// Both dispatch paths below run in their own goroutine so Handle itself
+// always returns immediately, regardless of whether the daemon's shared
+// semaphore (ReviewFromEvent) or an in-flight poll cycle's wg.Wait()
+// (poll) is currently blocked on other work. Handle is called synchronously
+// from the hookdeck.Source read loop (see source.go's handleFrame/ack) —
+// blocking here would delay acking the current webhook and stall reading
+// every subsequent one, exactly what the issue's "ack the webhook promptly
+// ... never run a review synchronously in the webhook receiver" requirement
+// forbids.
 func (s *daemonEventSink) Handle(ctx context.Context, ev events.GitHubEvent) {
 	switch {
 	case ev.EventType == "pull_request" && reviewTriggerActions[ev.Action]:
@@ -84,9 +95,9 @@ func (s *daemonEventSink) Handle(ctx context.Context, ev events.GitHubEvent) {
 			logf(0, "warn", "pull_request event with unparseable ResourceID %q: %v — dropping\n", ev.ResourceID, err)
 			return
 		}
-		s.daemon.ReviewFromEvent(ctx, ev.Owner, ev.Repo, prNumber)
+		go s.daemon.ReviewFromEvent(ctx, ev.Owner, ev.Repo, prNumber)
 	case installEventTypes[ev.EventType]:
 		logf(0, "poll", "installation change event (%s) — triggering a reconciliation poll\n", ev.EventType)
-		s.daemon.poll(ctx)
+		go s.daemon.poll(ctx)
 	}
 }

@@ -81,9 +81,9 @@ func TestDaemonEventSink_InstallationEvent_TriggersReconciliationPoll(t *testing
 
 	sink.Handle(context.Background(), events.GitHubEvent{EventType: "installation_repositories", Action: "added"})
 
-	// Handle's poll fallback dispatch runs synchronously within Handle
-	// (unlike the async per-PR path), so the submission should already be
-	// observable, but poll for it anyway to avoid coupling to that detail.
+	// Handle dispatches the reconciliation poll in its own goroutine (like
+	// the per-PR path), so the submission is not necessarily observable the
+	// instant Handle returns — poll for it.
 	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
 }
 
@@ -151,5 +151,71 @@ func TestDaemonEventSink_DuplicateDeliverySameSHA_OnlyOneSubmit(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)    // let a wrongly-dispatched second review land, if any
 	if got := client.submitCallCount(); got != 1 {
 		t.Errorf("submitCallCount() = %d, want 1 (duplicate delivery at the same SHA must not double-review)", got)
+	}
+}
+
+// TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation guards
+// against a regression where Handle blocked synchronously acquiring
+// reviewOne's semaphore slot. Handle is called inline from hookdeck.Source's
+// WebSocket read loop (see source.go's handleFrame/ack): blocking there would
+// delay acking the current webhook and stall reading every subsequent one,
+// exactly what the issue's "ack the webhook promptly ... never run a review
+// synchronously in the webhook receiver" requirement forbids.
+func TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation(t *testing.T) {
+	client := newFakeLister()
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{
+		{Number: 1, Author: "alice", HeadSHA: "sha1"},
+		{Number: 2, Author: "alice", HeadSHA: "sha2"},
+	}
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		started <- struct{}{}
+		<-release
+		return ReviewResult{Text: "mock review"}, nil
+	}}
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+		return "/tmp", func() {}, nil
+	}
+	d := &Daemon{
+		Clients:  map[string]GitHubLister{"owner": client},
+		Claude:   claude,
+		Clone:    clone,
+		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 1},
+		BotLogin: "pruefer-bot[bot]",
+	}
+	sink := &daemonEventSink{daemon: d}
+
+	// Saturate the daemon's single concurrency slot with PR #1's review.
+	sink.Handle(context.Background(), events.GitHubEvent{
+		EventType: "pull_request", Action: "opened", Owner: "owner", Repo: "repo", ResourceID: "1",
+	})
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PR #1's review never started")
+	}
+	defer close(release)
+
+	// PR #2's event arrives while the only concurrency slot is held: Handle
+	// must return immediately rather than blocking on reviewOne's semaphore
+	// acquire.
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		sink.Handle(context.Background(), events.GitHubEvent{
+			EventType: "pull_request", Action: "opened", Owner: "owner", Repo: "repo", ResourceID: "2",
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Errorf("Handle took %s to return while the semaphore was saturated; want near-instant", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle blocked on the saturated semaphore instead of returning promptly")
 	}
 }
