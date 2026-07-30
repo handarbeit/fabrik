@@ -66,11 +66,13 @@ The App this flow creates is **yours** — owned by whichever GitHub account per
 
 ### Subsequent runs
 
-Once `.pruefer/app-private-key.pem` and `.pruefer/app-state.json` exist (or a manually-registered `github_app_id` + PEM — see below), every later run finds valid local credentials and skips the manifest flow entirely, going straight to installation/token verification — no prompts, no behavior change from run to run.
+Once `.pruefer/app-private-key.pem` and `.pruefer/app-state.json` exist (or a manually-registered `github_app_id` + PEM — see below), every later run finds valid local credentials and skips the manifest flow entirely, going straight to installation/token verification — no prompts, no behavior change to *auth* from run to run.
+
+**One caveat**: `.pruefer/app-state.json` is now written (created if absent) on every run, in every mode — including manual/compat setup and even when `github_app_installation_id` is pinned, not only after the manifest flow. It holds a diagnostics-only cache of which watched repos each installation authorizes (`InstallationRepoCache`), refreshed on each reconciliation pass; it is never read to make an authorization decision — `.pruefer/app-private-key.pem` plus a live GitHub call is always authoritative — and it does not change which repos Pruefer polls. An existing single-App deployment that never had this file before this change will see it appear on the first run after upgrading; nothing else about that deployment's behavior changes.
 
 ### Manual setup (compat mode)
 
-Registering the App yourself is still fully supported — this is also how Pruefer's original shared-App deployment (`handarbeit-pruefer`) keeps working unchanged.
+Registering the App yourself is still fully supported — this is also how Pruefer's original shared-App deployment (`handarbeit-pruefer`) keeps working unchanged (aside from the new `.pruefer/app-state.json` diagnostics file noted above).
 
 1. Go to your org or personal account's **Settings → Developer settings → GitHub Apps → New GitHub App**.
 2. Fill in:

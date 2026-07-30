@@ -616,6 +616,116 @@ func TestReconcile_InstallationRepoCache_KeysAreLowerCased(t *testing.T) {
 	}
 }
 
+// TestReconcile_RepoVerifyFailure_PreservesPriorCacheEntry is the regression
+// test for a review finding: saveInstallationRepoCache used to replace
+// Credentials.InstallationRepoCache wholesale on every call. Since repoCache
+// only contains entries for owners verifyRepoAccess got a definitive answer
+// for this round, a single transient failure listing
+// /installation/repositories wiped that owner's last-known-good cache entry
+// to nothing, even though nothing about actual access changed. A second
+// Reconcile call that hits the same transient failure must leave the first
+// call's cached entry for that owner intact.
+func TestReconcile_RepoVerifyFailure_PreservesPriorCacheEntry(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	statePath := filepath.Join(dir, "app-state.json")
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "someorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{111: {"someorg/repo-one"}}
+	defer srv.Close()
+
+	opts := Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: []string{"someorg/repo-one"}, BaseURL: srv.URL,
+	}
+
+	if _, err := Reconcile(context.Background(), opts); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after first Reconcile: %v", err)
+	}
+	if len(saved.InstallationRepoCache["someorg"]) != 1 || saved.InstallationRepoCache["someorg"][0] != "someorg/repo-one" {
+		t.Fatalf("InstallationRepoCache[someorg] after first Reconcile = %v, want [someorg/repo-one]", saved.InstallationRepoCache["someorg"])
+	}
+
+	fake.failRepoList = func(installationID int64) bool { return installationID == 111 }
+	if _, err := Reconcile(context.Background(), opts); err != nil {
+		t.Fatalf("second Reconcile (transient repo-list failure): %v", err)
+	}
+
+	saved, err = loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after second Reconcile: %v", err)
+	}
+	if len(saved.InstallationRepoCache["someorg"]) != 1 || saved.InstallationRepoCache["someorg"][0] != "someorg/repo-one" {
+		t.Errorf("InstallationRepoCache[someorg] after a transient verify failure = %v, want the prior entry [someorg/repo-one] preserved, not wiped", saved.InstallationRepoCache["someorg"])
+	}
+}
+
+// TestReconcile_AppIDChange_ClearsStaleSecretsAndCache is the regression
+// test for a review finding: if AppStatePath is reused across a switch to a
+// different App (e.g. an operator repoints github_app_id at a new App,
+// or a different App entirely gets pinned via config), saveInstallationRepoCache
+// used to overwrite only AppID/Slug/InstallationRepoCache, leaving the
+// previous App's WebhookSecret/ClientID/ClientSecret on disk under the new
+// AppID/Slug pair — a latent mismatch a future webhook-transport consumer
+// keyed on AppID would read as if it belonged to the new App.
+func TestReconcile_AppIDChange_ClearsStaleSecretsAndCache(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	statePath := filepath.Join(dir, "app-state.json")
+
+	// Seed app-state.json as if a prior App (ID 42) had completed a manifest
+	// flow and left behind webhook/client secrets and a populated cache.
+	if err := saveCredentials(statePath, Credentials{
+		AppID: 42, Slug: "old-app", WebhookSecret: "old-hook-secret",
+		ClientID: "old-client-id", ClientSecret: "old-client-secret",
+		InstallationRepoCache: map[string][]string{"someorg": {"someorg/repo-one"}},
+	}); err != nil {
+		t.Fatalf("seeding app-state.json: %v", err)
+	}
+
+	// Reconcile now runs against a *different* App ID (99), e.g. because the
+	// operator pointed github_app_id at a new App while reusing the same
+	// AppStatePath.
+	srv, _ := newFakeAppServer("new-app", []gh.AppInstallation{{ID: 222, Account: "someorg"}}, func() time.Time {
+		return time.Now().Add(time.Hour)
+	})
+	defer srv.Close()
+
+	if _, err := Reconcile(context.Background(), Options{
+		AppID: 99, AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: []string{"someorg/repo-one"}, BaseURL: srv.URL,
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if saved.AppID != 99 || saved.Slug != "new-app" {
+		t.Errorf("saved AppID/Slug = %d/%q, want 99/new-app", saved.AppID, saved.Slug)
+	}
+	if saved.WebhookSecret != "" || saved.ClientID != "" || saved.ClientSecret != "" {
+		t.Errorf("expected the previous App's webhook/client secrets to be cleared on an AppID change, got WebhookSecret=%q ClientID=%q ClientSecret=%q", saved.WebhookSecret, saved.ClientID, saved.ClientSecret)
+	}
+	if len(saved.InstallationRepoCache["someorg"]) != 1 || saved.InstallationRepoCache["someorg"][0] != "someorg/repo-one" {
+		t.Errorf("InstallationRepoCache[someorg] = %v, want the newly-reconciled [someorg/repo-one], not stale data from the previous App", saved.InstallationRepoCache["someorg"])
+	}
+}
+
 func TestReconcile_MissingPrivateKey_RepairErrorNeverBootstraps(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

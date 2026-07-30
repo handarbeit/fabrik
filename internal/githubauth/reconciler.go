@@ -412,12 +412,29 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	return r, nil
 }
 
-// saveInstallationRepoCache persists repoCache into AppStatePath's
-// Credentials.InstallationRepoCache, refreshing AppID/Slug to the identity
-// Reconcile just validated live while preserving every other already-stored
-// field (webhook secret, client ID/secret) untouched. Best-effort: this
-// cache is diagnostics-only (see Credentials.InstallationRepoCache's doc
-// comment) and a write failure here must never fail reconciliation itself.
+// saveInstallationRepoCache merges repoCache into AppStatePath's
+// Credentials.InstallationRepoCache (per-owner), refreshing AppID/Slug to
+// the identity Reconcile just validated live. Best-effort: this cache is
+// diagnostics-only (see Credentials.InstallationRepoCache's doc comment)
+// and a write failure here must never fail reconciliation itself.
+//
+// repoCache only contains entries for owners Reconcile got a definitive
+// answer for this round — an owner whose verifyRepoAccess call hit a
+// transient error (e.g. a network blip listing /installation/repositories)
+// contributes no entry (see the repoVerifyFailed branch in Reconcile).
+// Merging by owner, rather than replacing the whole map, means that
+// owner's last known entry survives the transient hiccup instead of being
+// wiped to empty — a purely transient failure shouldn't regress a "last
+// known good" diagnostic.
+//
+// If the AppID being reconciled differs from whatever AppID this state
+// file was last saved under, the existing entry belongs to a *different*
+// App entirely (e.g. an operator switched github_app_id to point at a new
+// App while reusing the same AppStatePath) — its WebhookSecret/
+// ClientID/ClientSecret and InstallationRepoCache must not be carried
+// forward under the new AppID, or they'd sit alongside a mismatched
+// identity, e.g. once a future webhook-transport consumer starts reading
+// them keyed on AppID.
 func saveInstallationRepoCache(statePath string, appID int64, slug string, repoCache map[string][]string, logf func(string, ...any)) {
 	existing, err := loadCredentials(statePath)
 	if err != nil {
@@ -428,9 +445,20 @@ func saveInstallationRepoCache(statePath string, appID int64, slug string, repoC
 		logf("could not update installation-repo cache: %v", err)
 		return
 	}
+	if existing.AppID != 0 && existing.AppID != appID {
+		logf("app-state %s was last saved for App ID %d; discarding its stale webhook/client secrets and repo cache now that App ID %d is active", statePath, existing.AppID, appID)
+		existing = Credentials{}
+	}
+	merged := existing.InstallationRepoCache
+	if merged == nil {
+		merged = make(map[string][]string)
+	}
+	for owner, repos := range repoCache {
+		merged[owner] = repos
+	}
 	existing.AppID = appID
 	existing.Slug = slug
-	existing.InstallationRepoCache = repoCache
+	existing.InstallationRepoCache = merged
 	if err := saveCredentials(statePath, existing); err != nil {
 		logf("could not persist installation-repo cache: %v", err)
 	}
