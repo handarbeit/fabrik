@@ -1446,6 +1446,149 @@ func TestAttemptMergeOnValidate_Advisory_ChangesRequestedReview_StillMerges(t *t
 	}
 }
 
+// review-authority:authoritative label on a stage whose YAML is advisory
+// (unset) must block the landing decision on CHANGES_REQUESTED — the label
+// override applies at the landing gate exactly as it does at the advance
+// gate (#1261).
+func TestAttemptMergeOnValidate_LabelOverride_AuthoritativeOnAdvisoryStage_Blocks(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10, Labels: []string{"review-authority:authoritative"}}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}) // ReviewAuthority unset (advisory)
+	if err != nil {
+		t.Fatalf("expected (false, false, nil) when the label-overridden authoritative gate blocks, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false: review-authority:authoritative label must make an advisory stage block on CHANGES_REQUESTED")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while the label-overridden authoritative gate blocks, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// review-authority:advisory label on a stage whose YAML is authoritative
+// must merge exactly as advisory mode would — the label overrides the stage
+// config for this issue only, at the landing gate.
+func TestAttemptMergeOnValidate_LabelOverride_AdvisoryOnAuthoritativeStage_Merges(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Error("FetchPRReviewDecision must not be called once the label resolves to advisory")
+			return "", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10, Labels: []string{"review-authority:advisory"}}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue, ReviewAuthority: "authoritative"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Error("expected review-authority:advisory label to merge despite an authoritative stage and CHANGES_REQUESTED review")
+	}
+}
+
+// yolo/cruise must never bypass a label-resolved authoritative gate: cruise
+// short-circuits before the review gate is ever consulted (mirroring
+// TestAttemptMergeOnValidate_Authoritative_CruiseSkipsAutoMerge), so a
+// review-authority:authoritative label on a cruise item still results in no
+// auto-merge — the label only changes what "satisfied" means once the gate
+// is reached, never who bypasses it (ADR-1250's composition guarantee).
+func TestAttemptMergeOnValidate_LabelOverride_Authoritative_CruiseSkipsAutoMerge(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Error("FetchPRReviewDecision must not be called for a cruise item — cruise short-circuits before the review gate")
+			return "", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise", "review-authority:authoritative"}}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}) // stage itself advisory (unset)
+	if err != nil {
+		t.Fatalf("unexpected error for cruise item: %v", err)
+	}
+	if enabled {
+		t.Error("expected autoMergeEnabled=false for a cruise item regardless of a label-resolved review_authority")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called for cruise items, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// yolo must still land only once the label-resolved authoritative gate is
+// satisfied — a review-authority:authoritative label on a yolo item with an
+// outstanding CHANGES_REQUESTED verdict blocks landing exactly as a
+// stage-YAML-authoritative gate would.
+func TestAttemptMergeOnValidate_LabelOverride_Authoritative_YoloWaitsForGate(t *testing.T) {
+	waitTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "alice", State: "CHANGES_REQUESTED"}}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{
+		Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10,
+		Labels: []string{"fabrik:yolo", "review-authority:authoritative"},
+	}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue}) // stage itself advisory (unset)
+	if err != nil {
+		t.Fatalf("expected (false, false, nil) while the label-overridden authoritative gate blocks, got err %v", err)
+	}
+	if enabled {
+		t.Error("expected enabled=false: yolo must not bypass a label-resolved authoritative gate still blocking on CHANGES_REQUESTED")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called while the authoritative gate blocks, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
 // TestAttemptMergeOnValidate_ReviewGate_ResolvesPRViaFallback covers the
 // base:<branch> case, where closedByPullRequestsReferences is structurally empty
 // so item.LinkedPRNumber is always 0: the gate must resolve the PR number via

@@ -97,6 +97,129 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 	}
 }
 
+// --- review-authority:<mode> label override (#1261) -----------------------
+
+func TestExtractReviewAuthorityOverride(t *testing.T) {
+	eng := reviewTestEngine(t, &mockGitHubClient{})
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"no labels", nil, ""},
+		{"no review-authority label", []string{"stage:Plan:complete", "fabrik:locked"}, ""},
+		{"single advisory", []string{"review-authority:advisory"}, "advisory"},
+		{"single authoritative", []string{"review-authority:authoritative"}, "authoritative"},
+		{"label among others", []string{"stage:Plan", "review-authority:authoritative", "fabrik:locked"}, "authoritative"},
+		{"both present resolves to authoritative", []string{"review-authority:advisory", "review-authority:authoritative"}, "authoritative"},
+		{"malformed suffix ignored", []string{"review-authority:Authoritative"}, ""},
+		{"unknown suffix ignored", []string{"review-authority:foo"}, ""},
+		{"empty suffix ignored", []string{"review-authority:"}, ""},
+		{"malformed alongside valid label falls back to valid", []string{"review-authority:foo", "review-authority:advisory"}, "advisory"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eng.extractReviewAuthorityOverride(0, tc.labels)
+			if got != tc.want {
+				t.Errorf("extractReviewAuthorityOverride(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveReviewAuthority(t *testing.T) {
+	eng := reviewTestEngine(t, &mockGitHubClient{})
+	tests := []struct {
+		name       string
+		labels     []string
+		stageValue string
+		want       string
+	}{
+		{"no label, stage advisory (unset) → advisory behavior", nil, "", ""},
+		{"no label, stage authoritative → authoritative behavior", nil, "authoritative", "authoritative"},
+		{"label authoritative, stage advisory → authoritative behavior", []string{"review-authority:authoritative"}, "", "authoritative"},
+		{"label advisory, stage authoritative → advisory behavior", []string{"review-authority:advisory"}, "authoritative", "advisory"},
+		{"both labels, stage advisory → authoritative wins", []string{"review-authority:advisory", "review-authority:authoritative"}, "", "authoritative"},
+		{"malformed label, stage authoritative → falls back to stage config", []string{"review-authority:bogus"}, "authoritative", "authoritative"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			item := gh.ProjectItem{Number: 10, Labels: tc.labels}
+			stage := &stages.Stage{Name: "Implement", ReviewAuthority: tc.stageValue}
+			got := eng.effectiveReviewAuthority(item, stage)
+			if got != tc.want {
+				t.Errorf("effectiveReviewAuthority(labels=%v, stage.ReviewAuthority=%q) = %q, want %q",
+					tc.labels, tc.stageValue, got, tc.want)
+			}
+		})
+	}
+}
+
+// review-authority:authoritative label on a stage whose YAML is advisory
+// (unset) must produce authoritative behavior at checkReviewGate — the
+// advance gate.
+func TestCheckReviewGate_LabelOverride_AuthoritativeOnAdvisoryStage_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		Labels:         []string{"review-authority:authoritative"},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset (advisory)
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected review-authority:authoritative label to make an advisory stage block on CHANGES_REQUESTED")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// review-authority:advisory label on a stage whose YAML is authoritative
+// must produce advisory behavior at checkReviewGate — the label overrides
+// the stage config for this issue only.
+func TestCheckReviewGate_LabelOverride_AdvisoryOnAuthoritativeStage_Clears(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Error("FetchPRReviewDecision must not be called once the label resolves to advisory")
+			return "", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 55,
+		Labels:         []string{"review-authority:advisory"},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected review-authority:advisory label to clear the gate despite an authoritative stage and CHANGES_REQUESTED review")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+}
+
 // --- review_authority: authoritative matrix (checkReviewGate) -------------
 
 // Advisory mode (default, unset ReviewAuthority) must clear the gate exactly
