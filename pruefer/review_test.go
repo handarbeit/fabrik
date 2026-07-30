@@ -27,6 +27,7 @@ type fakeReviewer struct {
 	threadsErr       error
 	submitErr        error
 	token            string
+	botLogin         string
 
 	mu          sync.Mutex
 	submitCalls []submitCall
@@ -70,6 +71,8 @@ func (f *fakeReviewer) filesCallCount() int {
 }
 
 func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.reviewsErr != nil {
 		return nil, f.reviewsErr
 	}
@@ -83,6 +86,14 @@ func (f *fakeReviewer) FetchPRReviewThreads(owner, repo string, prNumber int) ([
 	return f.threads, f.threadsTruncated, nil
 }
 
+// SubmitPRReview records the call and — mirroring real GitHub, where a
+// submitted review is immediately visible to a subsequent FetchPRReviews —
+// also appends it to f.reviews under botLogin. This is what makes ReviewPR's
+// own SHA-idempotency (alreadyReviewedAtHead) a genuine backstop in tests,
+// not just in production: without it, two concurrent ReviewPR calls for the
+// same PR/SHA (e.g. a duplicate event racing an in-flight review) would both
+// see an empty review list and both submit, regardless of any caller-side
+// locking.
 func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,6 +101,7 @@ func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSH
 		return 0, f.submitErr
 	}
 	f.submitCalls = append(f.submitCalls, submitCall{owner, repo, prNumber, commitSHA, body, event, comments})
+	f.reviews = append(f.reviews, gh.PRReview{Author: f.botLogin, CommitID: commitSHA, State: "COMMENTED"})
 	return len(f.submitCalls), nil
 }
 
@@ -124,7 +136,7 @@ func fakeClone(t *testing.T, err error) (CloneFunc, *atomic.Int32) {
 }
 
 func newFakeReviewer() *fakeReviewer {
-	return &fakeReviewer{fakeCommenter: &fakeCommenter{}, token: "tok"}
+	return &fakeReviewer{fakeCommenter: &fakeCommenter{}, token: "tok", botLogin: "pruefer-bot[bot]"}
 }
 
 func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {

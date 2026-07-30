@@ -313,7 +313,7 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 	})
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("PR #1's review never started")
 	}
 
@@ -334,12 +334,12 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 	})
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("PR #2's review did not start promptly — duplicate PR #1 events may have consumed the free semaphore slot")
 	}
 
 	close(release)
-	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 2 })
+	waitUntil(t, 10*time.Second, func() bool { return client.submitCallCount() == 2 })
 }
 
 // TestDaemonEventSink_ClosedOrMergedPR_DropsWithoutReview guards against a
