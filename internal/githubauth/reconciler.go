@@ -217,6 +217,20 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			if err != nil {
 				return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
 			}
+		} else if opts.AppInstallationID != 0 {
+			// AppID itself came from the state file (not pinned), but
+			// opts.AppInstallationID *is* pinned — and installation IDs are
+			// App-specific. Self-healing here (silently creating a new App)
+			// would produce a *new* appID while opts.AppInstallationID still
+			// names an installation of the just-deleted App; the
+			// opts.AppInstallationID != 0 branch below would then mint
+			// against a mismatched (appID, installationID) pair and fail
+			// with an opaque GitHub error instead of a clear diagnosis.
+			// Surface an explicit repair error instead, exactly like the
+			// pinned-AppID case above — an operator using the
+			// installation-ID pin must also decide what to do about it
+			// before Reconcile creates a new App out from under it.
+			return nil, fmt.Errorf("github_app_installation_id %d is configured but App ID %d no longer resolves on GitHub (%w) — it may have been deleted, which also invalidates the pinned installation ID (installation IDs are App-specific); update or remove github_app_id/github_app_installation_id in config to let first-run setup create a new App and installation (repair required, not auto-recreated)", opts.AppInstallationID, appID, err)
 		} else {
 			// AppID was resolved from the reconciler-owned state file (a
 			// prior manifest run), not pinned by config — safe to

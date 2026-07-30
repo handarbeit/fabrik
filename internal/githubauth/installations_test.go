@@ -8,15 +8,15 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
-func TestDistinctOwners(t *testing.T) {
-	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
+func TestDistinctOwnersLogging(t *testing.T) {
+	got := distinctOwnersLogging([]string{"a/one", "b/two", "a/three", "malformed", "b/four"}, func(string, ...any) {})
 	want := []string{"a", "b"}
 	if len(got) != len(want) {
-		t.Fatalf("distinctOwners = %v, want %v", got, want)
+		t.Fatalf("distinctOwnersLogging = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("distinctOwners[%d] = %q, want %q", i, got[i], want[i])
+			t.Errorf("distinctOwnersLogging[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }

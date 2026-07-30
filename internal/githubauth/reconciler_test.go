@@ -939,6 +939,53 @@ func TestReconcile_AppDeletedExternally_PinnedAppID_ReturnsRepairErrorNeverLoops
 	}
 }
 
+// TestReconcile_AppDeletedExternally_PinnedInstallationID_ReturnsRepairErrorNeverMintsStaleInstall
+// is the regression test for a review finding: when opts.AppID is *not*
+// pinned (resolved from the state file) but opts.AppInstallationID *is*
+// pinned, and the state-file App fails identity validation, the old code
+// fell into the "safe to self-heal" branch — creating a brand-new App with
+// a new AppID, then falling through to mint an installation token using
+// that new AppID against the *old*, now-stale pinned installation ID
+// (installation IDs are App-specific). That mint would fail with an opaque
+// GitHub error instead of a clear diagnosis, and runManifestFlow would have
+// been invoked (creating an orphan App) even though the pin made recovery
+// unsafe. Reconcile must instead return an explicit repair error and never
+// invoke the manifest flow.
+func TestReconcile_AppDeletedExternally_PinnedInstallationID_ReturnsRepairErrorNeverMintsStaleInstall(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+	statePath := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "old-app"}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"app not found"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath, AppInstallationID: 999,
+		WatchedRepos: []string{"handarbeit/fabrik"}, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when a pinned AppInstallationID's App fails identity validation")
+	}
+	if !strings.Contains(err.Error(), "repair") || !strings.Contains(err.Error(), "github_app_installation_id") {
+		t.Errorf("error = %v, want it to describe a github_app_installation_id repair action, not a silent recreation", err)
+	}
+}
+
 // TestReconcile_TransientAppIdentityFailure_ReturnsErrorNeverBootstraps is
 // the regression test for the bug an external review found: appRequest
 // treats a transport failure, timeout, or 5xx identically to a real

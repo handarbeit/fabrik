@@ -63,19 +63,14 @@ func verifyRepoAccess(baseURL, installToken string, installationID int64, owner 
 	return statuses, nil
 }
 
-// distinctOwners returns the distinct owners of every well-formed
-// "owner/repo" entry in watchedRepos, in first-seen order. Malformed entries
-// are silently skipped — see distinctOwnersLogging for the variant that
-// also reports them.
-func distinctOwners(watchedRepos []string) []string {
-	return distinctOwnersLogging(watchedRepos, func(string, ...any) {})
-}
-
-// distinctOwnersLogging is distinctOwners' single-pass sibling: it also logs
-// a warning for every malformed "owner/repo" entry as it encounters it, so a
-// caller that needs both (Reconcile) doesn't have to make a second full
-// pass over watchedRepos — re-running the exact same splitOwnerRepo check —
-// purely to report what this pass already skips.
+// distinctOwnersLogging returns the distinct owners of every well-formed
+// "owner/repo" entry in watchedRepos, in first-seen order, logging a
+// warning for every malformed entry as it encounters it. Reconcile is the
+// sole caller and needs both the owner list and the malformed-entry
+// warnings from one pass — an earlier revision also had a no-logging
+// distinctOwners wrapper, but nothing in production ever called it once
+// Reconcile switched to this single-pass form, so it was removed rather
+// than kept as dead code.
 //
 // Dedup is case-insensitive (keyed on the lower-cased owner, keeping the
 // first-seen literal casing in the result): GitHub org/user logins are
