@@ -40,8 +40,9 @@ type Daemon struct {
 	// Clients maps each watched-repo owner to the GitHubLister whose token
 	// is scoped to that owner's App installation — installation tokens are
 	// strictly owner-scoped, so using the wrong one is a 403, not a soft
-	// failure (see AuthSet/BootstrapMulti in auth.go). Every owner present
-	// in Config.WatchedRepos must have an entry.
+	// failure (see internal/githubauth.Reconcile). An owner present in
+	// Config.WatchedRepos may still be missing an entry — e.g. before the
+	// App is installed on that account — see the poll() nil-check below.
 	Clients  map[string]GitHubLister
 	Claude   ClaudeInvoker
 	Clone    CloneFunc
@@ -146,10 +147,9 @@ func (d *Daemon) poll(ctx context.Context) {
 		}
 		client, ok := d.Clients[owner]
 		if !ok {
-			// Should not happen: BootstrapMulti validates every watched
-			// owner has a resolved installation before the daemon starts.
-			// Defensive skip rather than a nil-pointer panic if it ever
-			// does (e.g. a hand-built Daemon in a future caller).
+			// Expected when an owner has no resolved App installation yet
+			// (e.g. first run, before the guided-install step completes) —
+			// see internal/githubauth.Reconcile. Skip rather than panic.
 			logf(0, "warn", "no client for owner %q (repo %s) — skipping this repo this cycle\n", owner, repoSpec)
 			continue
 		}
