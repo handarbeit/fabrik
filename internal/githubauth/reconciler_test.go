@@ -278,6 +278,43 @@ func TestReconcile_MissingOwnerInstallation_GuidesInstallInsteadOfHardFailing(t 
 	}
 }
 
+// TestReconcile_OwnerLookupIsCaseInsensitive is the regression test for a
+// review finding: byAccount was keyed by GitHub's exact-case canonical
+// Account login, but owner comes verbatim from the user's watched_repos
+// config string. GitHub org/user logins are case-insensitive, so a config
+// entry like "HandArbeit/fabrik" against a canonical "handarbeit"
+// installation must still resolve to that installation, not be treated as
+// uninstalled.
+func TestReconcile_OwnerLookupIsCaseInsensitive(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"HandArbeit/fabrik"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "HandArbeit", "fabrik"); err != nil {
+		t.Errorf("expected a case-insensitive owner match to authorize HandArbeit: %v", err)
+	}
+	for _, l := range lines() {
+		if strings.Contains(l, "installations/new") {
+			t.Errorf("expected no guided-install guidance for an already-installed owner differing only in case, got: %v", lines())
+		}
+	}
+}
+
 func TestReconcile_MissingOwnerInstallation_NoBrowserSkipsOpen(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

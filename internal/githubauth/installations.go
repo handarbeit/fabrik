@@ -32,9 +32,16 @@ func verifyRepoAccess(baseURL, installToken string, installationID int64, owner 
 	if err != nil {
 		return nil, fmt.Errorf("listing accessible repositories for owner %q's installation: %w", owner, err)
 	}
+	// Keyed by lower-cased "owner/repo": GitHub org/user (and repo) names are
+	// case-insensitive, but FetchInstallationRepositories returns each
+	// full_name in its canonical case while repoSpec (below) comes verbatim
+	// from the user's watched_repos config string — an exact-case map would
+	// report a config entry like "Org/Repo" as unauthorized even when
+	// access is genuinely granted under GitHub's canonical "org/repo",
+	// silently skipping review of that repo.
 	accessibleSet := make(map[string]bool, len(accessible))
 	for _, r := range accessible {
-		accessibleSet[r] = true
+		accessibleSet[strings.ToLower(r)] = true
 	}
 
 	var statuses []RepoStatus
@@ -43,7 +50,7 @@ func verifyRepoAccess(baseURL, installToken string, installationID int64, owner 
 		if !ok || o != owner {
 			continue
 		}
-		if accessibleSet[repoSpec] {
+		if accessibleSet[strings.ToLower(repoSpec)] {
 			statuses = append(statuses, RepoStatus{Repo: repoSpec, Authorized: true})
 			continue
 		}

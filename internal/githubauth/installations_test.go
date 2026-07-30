@@ -82,6 +82,43 @@ func TestVerifyRepoAccess_ExclusionSurfacesGrantURL(t *testing.T) {
 	}
 }
 
+// TestVerifyRepoAccess_RepoNameMatchIsCaseInsensitive is the regression test
+// for a review finding: accessibleSet was keyed by GitHub's exact-case
+// canonical full_name, but repoSpec comes verbatim from the user's
+// watched_repos config string. GitHub repo names are case-insensitive, so a
+// config entry like "someorg/Repo-One" must still match a canonical
+// "someorg/repo-one" the installation actually grants — not be
+// misreported as excluded/unauthorized.
+func TestVerifyRepoAccess_RepoNameMatchIsCaseInsensitive(t *testing.T) {
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "someorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{111: {"someorg/repo-one"}}
+	defer srv.Close()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	privateKey, err := loadPrivateKey(keyPath)
+	if err != nil {
+		t.Fatalf("loadPrivateKey: %v", err)
+	}
+	a, err := mintAuth(42, 111, "pruefer-bot[bot]", privateKey, srv.URL)
+	if err != nil {
+		t.Fatalf("mintAuth: %v", err)
+	}
+
+	statuses, err := verifyRepoAccess(srv.URL, a.client.Token(), 111, "someorg", []string{"someorg/Repo-One"})
+	if err != nil {
+		t.Fatalf("verifyRepoAccess: %v", err)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %d: %+v", len(statuses), statuses)
+	}
+	if !statuses[0].Authorized {
+		t.Errorf("expected a case-insensitive repo-name match to be authorized, got: %+v", statuses[0])
+	}
+}
+
 func TestVerifyRepoAccess_IgnoresOtherOwnersRepos(t *testing.T) {
 	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
 		{ID: 111, Account: "someorg", RepositorySelection: "selected"},

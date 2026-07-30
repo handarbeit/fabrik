@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -253,9 +254,16 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discovering app installations: %w", err)
 	}
+	// Keyed by lower-cased account login: GitHub org/user logins are
+	// case-insensitive, but FetchAppInstallations returns each Account in
+	// its canonical case while owner (below) comes verbatim from the
+	// user's watched_repos config string — an exact-case map would treat
+	// e.g. a config entry "MyOrg/repo" against a canonical "myorg"
+	// installation as uninstalled, spuriously re-triggering guided-install
+	// guidance every restart despite the installation already existing.
 	byAccount := make(map[string]gh.AppInstallation, len(installations))
 	for _, inst := range installations {
-		byAccount[inst.Account] = inst
+		byAccount[strings.ToLower(inst.Account)] = inst
 	}
 
 	// repoCache accumulates the "which of this owner's watched repos does
@@ -277,7 +285,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	// logged; only the first one also gets an actual browser-open attempt.
 	openedInstallBrowser := false
 	for _, owner := range owners {
-		inst, ok := byAccount[owner]
+		inst, ok := byAccount[strings.ToLower(owner)]
 		if !ok {
 			installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
 			if !opts.NoBrowser && !openedInstallBrowser {
