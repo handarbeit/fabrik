@@ -15,8 +15,21 @@ import (
 )
 
 const (
-	defaultMinBackoff = 1 * time.Second
-	defaultMaxBackoff = 60 * time.Second
+	defaultMinBackoff     = 1 * time.Second
+	defaultMaxBackoff     = 60 * time.Second
+	defaultConnectTimeout = 15 * time.Second
+
+	// defaultPongWait is the default read deadline applied to the
+	// WebSocket connection, refreshed on every received frame (data or
+	// pong). If Hookdeck's connection dies silently — a NAT timeout or a
+	// firewall dropping packets without a FIN/RST — ReadMessage would
+	// otherwise block forever with no error, and Run's reconnect/backoff
+	// loop would never re-trigger. defaultPingPeriod (well under
+	// defaultPongWait) sends an idle keepalive so a silently-dead
+	// connection is detected within one pongWait window even with no
+	// GitHub traffic to keep it alive naturally.
+	defaultPongWait   = 60 * time.Second
+	defaultPingPeriod = 30 * time.Second
 )
 
 // Config configures a Source.
@@ -54,6 +67,22 @@ type Config struct {
 	// tests need to tune these for speed.
 	minBackoff time.Duration
 	maxBackoff time.Duration
+
+	// connectTimeout bounds session creation plus the WebSocket dial as a
+	// single attempt, independently of the caller's (long-lived) ctx — a
+	// TCP-connected-but-non-responding Hookdeck endpoint would otherwise
+	// hang the entire reconnect loop indefinitely, since neither
+	// http.Client nor the WebSocket dialer has a timeout of its own here.
+	// Defaults (15s) when zero; unexported — only tests need to shrink
+	// this for speed.
+	connectTimeout time.Duration
+
+	// pongWait/pingPeriod bound how long a silently-dead connection (no
+	// FIN/RST, e.g. a NAT timeout) can go undetected; both default
+	// (60s / 30s) when zero. Unexported — only tests need to shrink these
+	// for speed.
+	pongWait   time.Duration
+	pingPeriod time.Duration
 }
 
 // Source implements events.EventSource against Hookdeck's CLI-session
@@ -89,6 +118,15 @@ func NewSource(cfg Config) *Source {
 	}
 	if cfg.maxBackoff <= 0 {
 		cfg.maxBackoff = defaultMaxBackoff
+	}
+	if cfg.connectTimeout <= 0 {
+		cfg.connectTimeout = defaultConnectTimeout
+	}
+	if cfg.pongWait <= 0 {
+		cfg.pongWait = defaultPongWait
+	}
+	if cfg.pingPeriod <= 0 {
+		cfg.pingPeriod = defaultPingPeriod
 	}
 	return &Source{cfg: cfg, dedupe: events.NewDedupe(0)}
 }
@@ -156,7 +194,16 @@ func (s *Source) Run(ctx context.Context, sink events.EventSink) error {
 // cancelled (caller stops retrying), and a non-nil err is the transport
 // failure that ended this attempt (caller backs off and retries).
 func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected bool, err error) {
-	sessionID, err := createSession(ctx, s.cfg.HTTPClient, s.cfg.APIBaseURL, s.cfg.APIKey)
+	// connectCtx bounds session creation plus the WebSocket dial as a
+	// single attempt, independently of ctx (the daemon's long-lived run
+	// context) — a TCP-connected-but-non-responding Hookdeck endpoint
+	// would otherwise hang here indefinitely, since neither http.Client
+	// nor the dialer has a timeout of its own. It is not used past the
+	// dial: the read loop below is governed by ctx alone.
+	connectCtx, cancel := context.WithTimeout(ctx, s.cfg.connectTimeout)
+	defer cancel()
+
+	sessionID, err := createSession(connectCtx, s.cfg.HTTPClient, s.cfg.APIBaseURL, s.cfg.APIKey)
 	if err != nil {
 		return false, fmt.Errorf("creating hookdeck session: %w", err)
 	}
@@ -165,23 +212,47 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 	header.Set("Websocket-Id", sessionID)
 	header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.cfg.APIKey+":")))
 
-	conn, _, err := s.cfg.Dialer.DialContext(ctx, s.cfg.WSBaseURL, header)
+	conn, _, err := s.cfg.Dialer.DialContext(connectCtx, s.cfg.WSBaseURL, header)
 	if err != nil {
 		return false, fmt.Errorf("dialing hookdeck websocket: %w", err)
 	}
 	defer conn.Close()
 
+	// A silently-dead connection (NAT timeout, a firewall dropping packets
+	// without a FIN/RST) would otherwise leave ReadMessage blocked forever
+	// with no error — Run's reconnect/backoff loop would never re-trigger,
+	// and the daemon would degrade to poll-fallback with zero
+	// operator-visible signal. The read deadline (refreshed on every
+	// received frame, data or pong) plus a periodic idle ping together
+	// bound how long such a failure can go undetected to roughly pongWait.
+	conn.SetReadDeadline(time.Now().Add(s.cfg.pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(s.cfg.pongWait))
+		return nil
+	})
+
 	// ReadMessage has no context parameter; close the connection out from
 	// under it on ctx cancellation, the standard gorilla/websocket idiom
-	// for context-aware reads. done prevents this goroutine from leaking
-	// past runOnce's return on a genuine (non-cancellation) read error.
+	// for context-aware reads. done also stops the ping ticker below, and
+	// prevents this goroutine from leaking past runOnce's return on a
+	// genuine (non-cancellation) read error.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		select {
-		case <-ctx.Done():
-			conn.Close()
-		case <-done:
+		ticker := time.NewTicker(s.cfg.pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				conn.Close()
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				if writeErr := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); writeErr != nil {
+					return
+				}
+			}
 		}
 	}()
 
@@ -201,6 +272,7 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 			}
 			return receivedFrame, fmt.Errorf("reading hookdeck websocket: %w", err)
 		}
+		conn.SetReadDeadline(time.Now().Add(s.cfg.pongWait))
 		if !receivedFrame {
 			receivedFrame = true
 			s.emitHealth(events.HealthConnected, nil)

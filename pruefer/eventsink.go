@@ -148,6 +148,6 @@ func (s *daemonEventSink) Handle(ctx context.Context, ev events.GitHubEvent) {
 		go s.daemon.ReviewFromEvent(ctx, ev.Owner, ev.Repo, prNumber)
 	case installEventTypes[ev.EventType]:
 		logf(0, "poll", "installation change event (%s) — triggering a reconciliation poll\n", ev.EventType)
-		go s.daemon.poll(ctx)
+		s.daemon.triggerReconciliationPoll(ctx)
 	}
 }

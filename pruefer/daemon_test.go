@@ -25,6 +25,13 @@ type fakeLister struct {
 	// "owner/repo#N", taking precedence over falling back to prsByRepo.
 	detailsByKey    map[string]*gh.PRDetails
 	detailsErrByKey map[string]error
+
+	// listOpenPRsCalls counts ListOpenPRs invocations; listOpenPRsBlock,
+	// when non-nil, is received from before each call returns — letting a
+	// test hold a poll cycle open long enough to observe reconciliation-poll
+	// coalescing.
+	listOpenPRsCalls int
+	listOpenPRsBlock <-chan struct{}
 }
 
 func newFakeLister() *fakeLister {
@@ -40,11 +47,24 @@ func newFakeLister() *fakeLister {
 func (f *fakeLister) ListOpenPRs(owner, repo string) ([]gh.PRDetails, error) {
 	key := owner + "/" + repo
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.listErrByRepo[key]; err != nil {
+	f.listOpenPRsCalls++
+	block := f.listOpenPRsBlock
+	err := f.listErrByRepo[key]
+	prs := f.prsByRepo[key]
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	if err != nil {
 		return nil, err
 	}
-	return f.prsByRepo[key], nil
+	return prs, nil
+}
+
+func (f *fakeLister) listOpenPRsCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listOpenPRsCalls
 }
 
 // FetchPRDetails returns the PR configured via detailsByKey for
