@@ -344,3 +344,71 @@ func TestSource_SessionCreationFailureRetriesWithoutPanic(t *testing.T) {
 	// panicking.
 	m.nextConn(t)
 }
+
+type runOnceResult struct {
+	connected bool
+	err       error
+}
+
+func TestSource_RunOnce_NotConnectedOnImmediateDrop(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	src := NewSource(testConfig(m))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resultCh := make(chan runOnceResult, 1)
+	go func() {
+		connected, err := src.runOnce(ctx, sink)
+		resultCh <- runOnceResult{connected, err}
+	}()
+
+	// Simulate Hookdeck accepting the WebSocket handshake and then
+	// immediately rejecting/dropping the session (e.g. a stale API key) —
+	// no attempt frame is ever sent.
+	conn := m.nextConn(t)
+	conn.Close()
+
+	select {
+	case res := <-resultCh:
+		if res.connected {
+			t.Error("connected = true, want false: a handshake with no successfully-read frame must not count as connected")
+		}
+		if res.err == nil {
+			t.Error("err = nil, want non-nil: the immediate drop should surface as a read error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not return after the connection was dropped")
+	}
+}
+
+func TestSource_RunOnce_ConnectedAfterFirstFrame(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	src := NewSource(testConfig(m))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resultCh := make(chan runOnceResult, 1)
+	go func() {
+		connected, err := src.runOnce(ctx, sink)
+		resultCh <- runOnceResult{connected, err}
+	}()
+
+	conn := m.nextConn(t)
+	body := prOpenedBody(t, 5)
+	sendAttempt(t, conn, "attempt-1", "delivery-1", body, signBody(body, testWebhookSecret))
+	readAck(t, conn)
+	conn.Close() // drop only after a frame was successfully received
+
+	select {
+	case res := <-resultCh:
+		if !res.connected {
+			t.Error("connected = false, want true: a frame was read successfully before the drop")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not return after the connection was dropped")
+	}
+}
