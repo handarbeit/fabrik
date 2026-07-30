@@ -28,6 +28,21 @@ const (
 	DefaultPrivateKeyPath = ".pruefer/app-private-key.pem"
 )
 
+// Defaults for the event-driven (Hookdeck) ingestion surface, justified in
+// adrs/1254-*.md. EventSourcePoll is the default: with it selected,
+// Pruefer's behavior is byte-for-byte unchanged from before this surface
+// existed.
+const (
+	EventSourcePoll     = "poll"
+	EventSourceHookdeck = "hookdeck"
+
+	DefaultEventSource                    = EventSourcePoll
+	DefaultHookdeckAPIKeyEnv              = "HOOKDECK_API_KEY"
+	DefaultHookdeckWebhookSecretEnv       = "PRUEFER_GITHUB_WEBHOOK_SECRET"
+	DefaultReconciliationStartup          = true
+	DefaultReconciliationFallbackInterval = 2 * time.Minute
+)
+
 // Config holds Pruefer's fully-resolved runtime configuration, after
 // applying the flag > env > YAML file > default precedence chain in
 // LoadConfig.
@@ -73,6 +88,34 @@ type Config struct {
 	// default) means resolve one installation per distinct owner present in
 	// WatchedRepos instead (see BootstrapMulti in pruefer/auth.go).
 	AppInstallationID int64
+
+	// EventSource selects Pruefer's event ingestion mode: EventSourcePoll
+	// (default — behavior is byte-for-byte unchanged from before this
+	// field existed) or EventSourceHookdeck (event-driven, with poll
+	// demoted to a low-frequency reconciliation fallback — see the
+	// Reconciliation* fields below). See adrs/1254-*.md.
+	EventSource string
+
+	// HookdeckAPIKeyEnv names the environment variable holding the
+	// Hookdeck API key. Only consulted when EventSource ==
+	// EventSourceHookdeck.
+	HookdeckAPIKeyEnv string
+	// HookdeckWebhookSecretEnv names the environment variable holding the
+	// GitHub App's webhook secret, used to verify every forwarded
+	// delivery's signature — required regardless of Hookdeck's own
+	// transport auth. Only consulted when EventSource ==
+	// EventSourceHookdeck.
+	HookdeckWebhookSecretEnv string
+
+	// ReconciliationStartup controls whether an event-driven run performs
+	// a full poll reconciliation pass at startup, before event delivery
+	// begins. Only consulted when EventSource == EventSourceHookdeck.
+	ReconciliationStartup bool
+	// ReconciliationFallbackInterval is the low-frequency poll interval
+	// used as a safety net in event-driven mode — a separate field from
+	// PollInterval, which remains poll-only mode's interval, unaffected by
+	// this one. Only consulted when EventSource == EventSourceHookdeck.
+	ReconciliationFallbackInterval time.Duration
 }
 
 // yamlConfig is the shape of Pruefer's YAML config file. All fields are
@@ -94,6 +137,19 @@ type yamlConfig struct {
 	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
 	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
 	TUI                     *bool    `yaml:"tui"`
+
+	EventSource string `yaml:"event_source"`
+	Hookdeck    *struct {
+		APIKeyEnv        string `yaml:"api_key_env"`
+		WebhookSecretEnv string `yaml:"webhook_secret_env"`
+	} `yaml:"hookdeck"`
+	Reconciliation *struct {
+		Startup *bool `yaml:"startup"`
+		// FallbackInterval is a Go duration string (e.g. "2m"), matching
+		// the issue's literal config example — unlike this file's other
+		// duration fields, which use a "_seconds" int convention.
+		FallbackInterval string `yaml:"fallback_interval"`
+	} `yaml:"reconciliation"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
