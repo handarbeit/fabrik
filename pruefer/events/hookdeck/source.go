@@ -364,10 +364,13 @@ func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *w
 // stay visible without flooding the log on a sustained run of failures.
 const sigFailureLogInterval = 30 * time.Second
 
-// processAttempt verifies the GitHub signature, dedupes by delivery ID,
-// normalizes, and — if all of that succeeds — hands the event to sink.
-// Any failure at any step causes the attempt to be silently dropped from
-// Pruefer's perspective (GitHub-derived review state, ReviewPR's own
+// processAttempt verifies the GitHub signature, normalizes the payload,
+// dedupes by delivery ID, and — if all of that succeeds — hands the event
+// to sink. Normalization runs before the dedupe check so a malformed
+// payload never burns a delivery ID that a well-formed retry could still
+// use (see the dedupe call site below). Any failure at any step causes the
+// attempt to be silently dropped from Pruefer's perspective (GitHub-derived
+// review state, ReviewPR's own
 // SHA-idempotency, and the poll-fallback safety net all make a dropped
 // event non-fatal).
 func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, attempt attemptBody) {
@@ -382,13 +385,17 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	}
 
 	deliveryID := lookupHeader(headers, "X-GitHub-Delivery")
-	if s.dedupe.SeenBefore(deliveryID) {
-		return
-	}
-
 	eventType := lookupHeader(headers, "X-GitHub-Event")
 	ev, err := normalizeEvent([]byte(attempt.Request.DataString), eventType, deliveryID, time.Now())
 	if err != nil {
+		return
+	}
+
+	// Dedupe only after normalization succeeds — marking a delivery ID as
+	// seen before it's known to be well-formed would permanently drop every
+	// future retry of that same delivery, even ones that would otherwise
+	// parse fine (Hookdeck retries resend the identical delivery ID).
+	if s.dedupe.SeenBefore(deliveryID) {
 		return
 	}
 

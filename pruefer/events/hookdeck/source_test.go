@@ -285,6 +285,35 @@ func TestSource_DedupesDuplicateDeliveryID(t *testing.T) {
 	}
 }
 
+// TestSource_MalformedRetryDoesNotBurnDeliveryID guards against dedupe
+// marking a delivery ID as seen before normalization has proven the
+// payload well-formed: a malformed first attempt must not cause Hookdeck's
+// well-formed retry of the very same delivery ID to be silently dropped.
+func TestSource_MalformedRetryDoesNotBurnDeliveryID(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	src := NewSource(testConfig(m))
+	runSourceInBackground(t, src, sink)
+
+	conn := m.nextConn(t)
+	malformed := []byte("not valid json")
+	sendAttempt(t, conn, "attempt-1", "delivery-retry", malformed, signBody(malformed, testWebhookSecret))
+	readAck(t, conn)
+
+	// Give a moment for a wrongly-dispatched Handle call to land before
+	// asserting the malformed attempt was dropped.
+	time.Sleep(50 * time.Millisecond)
+	if got := sink.count(); got != 0 {
+		t.Fatalf("sink.count() = %d after malformed attempt, want 0", got)
+	}
+
+	body := prOpenedBody(t, 7)
+	sendAttempt(t, conn, "attempt-2", "delivery-retry", body, signBody(body, testWebhookSecret))
+	readAck(t, conn)
+
+	waitUntilCount(t, sink, 1)
+}
+
 func TestSource_DropsInvalidSignature(t *testing.T) {
 	m := newMockHookdeckServer(t)
 	sink := &recordingSink{}
