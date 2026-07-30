@@ -15,19 +15,27 @@ import (
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
-// fakeLister extends fakeReviewer with ListOpenPRs, keyed by "owner/repo".
+// fakeLister extends fakeReviewer with ListOpenPRs and FetchPRDetails,
+// keyed by "owner/repo".
 type fakeLister struct {
 	*fakeReviewer
 	mu            sync.Mutex
 	prsByRepo     map[string][]gh.PRDetails
 	listErrByRepo map[string]error
+
+	// detailsByKey/detailsErrByKey override FetchPRDetails for a specific
+	// "owner/repo#N", taking precedence over falling back to prsByRepo.
+	detailsByKey    map[string]*gh.PRDetails
+	detailsErrByKey map[string]error
 }
 
 func newFakeLister() *fakeLister {
 	return &fakeLister{
-		fakeReviewer:  newFakeReviewer(),
-		prsByRepo:     map[string][]gh.PRDetails{},
-		listErrByRepo: map[string]error{},
+		fakeReviewer:    newFakeReviewer(),
+		prsByRepo:       map[string][]gh.PRDetails{},
+		listErrByRepo:   map[string]error{},
+		detailsByKey:    map[string]*gh.PRDetails{},
+		detailsErrByKey: map[string]error{},
 	}
 }
 
@@ -39,6 +47,30 @@ func (f *fakeLister) ListOpenPRs(owner, repo string) ([]gh.PRDetails, error) {
 		return nil, err
 	}
 	return f.prsByRepo[key], nil
+}
+
+// FetchPRDetails returns the PR configured via detailsByKey for
+// "owner/repo#N" if present, otherwise falls back to searching prsByRepo
+// (mirroring a real client, where FetchPRDetails and ListOpenPRs observe
+// the same underlying GitHub state) — so tests seeding only prsByRepo don't
+// also need to duplicate that data into detailsByKey.
+func (f *fakeLister) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, prNumber)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.detailsErrByKey[key]; err != nil {
+		return nil, err
+	}
+	if pr, ok := f.detailsByKey[key]; ok {
+		return pr, nil
+	}
+	for _, pr := range f.prsByRepo[owner+"/"+repo] {
+		if pr.Number == prNumber {
+			prCopy := pr
+			return &prCopy, nil
+		}
+	}
+	return nil, fmt.Errorf("fakeLister: no PR #%d configured for %s/%s", prNumber, owner, repo)
 }
 
 // concurrencyTrackingInvoker blocks each Review call on a shared gate until

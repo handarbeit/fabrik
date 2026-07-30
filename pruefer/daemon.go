@@ -11,14 +11,19 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/pruefer/events"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
 // GitHubLister is the subset of *github.Client's methods Daemon needs
-// beyond GitHubReviewer: listing open PRs per watched repo.
+// beyond GitHubReviewer: listing open PRs per watched repo, and fetching a
+// single PR's authoritative current state (used by the event-triggered
+// review path — see eventsink.go — which must never trust webhook payload
+// contents as PR state).
 type GitHubLister interface {
 	GitHubReviewer
 	ListOpenPRs(owner, repo string) ([]gh.PRDetails, error)
+	FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error)
 }
 
 // RateLimitReporter is an optional interface implemented by *github.Client:
@@ -68,6 +73,32 @@ type Daemon struct {
 	// ReviewPR's decision logic: every emit call here wraps ReviewPR from
 	// the outside, never alters its inputs, return value, or control flow.
 	Emit func(ptui.Event)
+
+	// EventSource, when non-nil, switches Run into event-driven mode: it is
+	// started alongside a low-frequency reconciliation fallback loop,
+	// instead of poll() being the sole/primary driver. nil (the default,
+	// matching event_source: poll) leaves Run's poll-only behavior exactly
+	// as before this field existed. See runEventDriven.
+	EventSource events.EventSource
+
+	// sem is the concurrency-capped semaphore shared by every review
+	// dispatch path — poll()'s per-cycle fan-out and event-triggered
+	// ReviewFromEvent (eventsink.go) alike — so Pruefer's one claude
+	// invocation budget is never exceeded regardless of which path
+	// triggered a given review. Lazily built by semaphore() since Daemon
+	// values are constructed as struct literals (execute.go, tests), not
+	// via a constructor that could size it upfront.
+	semOnce sync.Once
+	sem     chan struct{}
+}
+
+// semaphore returns the daemon's shared concurrency-capped semaphore,
+// building it on first use.
+func (d *Daemon) semaphore() chan struct{} {
+	d.semOnce.Do(func() {
+		d.sem = make(chan struct{}, d.effectiveConcurrency())
+	})
+	return d.sem
 }
 
 // emit is a nil-checked convenience wrapper around d.Emit.
@@ -247,7 +278,6 @@ func (d *Daemon) effectiveConcurrency() int {
 // across the whole cycle (not per-repo) — Pruefer's claude capacity is one
 // subscription shared across every watched repo, not one per repo.
 func (d *Daemon) poll(ctx context.Context) {
-	sem := make(chan struct{}, d.effectiveConcurrency())
 	var wg sync.WaitGroup
 
 	for _, repoSpec := range d.Config.WatchedRepos {
@@ -275,34 +305,7 @@ func (d *Daemon) poll(ctx context.Context) {
 		}
 		d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, PRCount: len(prs)})
 		for _, pr := range prs {
-			pr := pr
-			wg.Add(1)
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				wg.Done()
-				continue
-			}
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-				startedAt := time.Now()
-				d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
-				outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
-				if outcome.Err != nil {
-					logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
-				}
-				errText := ""
-				if outcome.Err != nil {
-					errText = outcome.Err.Error()
-				}
-				d.emit(ptui.ReviewCompletedEvent{
-					Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
-					Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
-					Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
-					Duration: time.Since(startedAt), CompletedAt: time.Now(),
-				})
-			}()
+			d.reviewOne(ctx, &wg, client, owner, repo, pr)
 		}
 	}
 	wg.Wait()
@@ -317,6 +320,47 @@ func (d *Daemon) poll(ctx context.Context) {
 			d.emit(ptui.RateLimitSnapshotEvent{Owner: owner, Stats: rest})
 		}
 	}
+}
+
+// reviewOne dispatches a single PR to ReviewPR through the daemon's shared
+// concurrency-capped semaphore, emitting the same TUI events poll()'s
+// former inline goroutine did. Calls wg.Add(1) itself and guarantees a
+// matching wg.Done, whether the PR is actually dispatched or ctx is
+// cancelled first — callers must not call wg.Add themselves.
+// Shared by poll() (fan-out per cycle) and ReviewFromEvent (event-triggered,
+// see eventsink.go) so both draw from one concurrency budget, satisfying
+// the issue's "hand off to the existing concurrency-capped review dispatch"
+// requirement for real rather than just in shape.
+func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+	repoName := owner + "/" + repo
+	sem := d.semaphore()
+	wg.Add(1)
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		wg.Done()
+		return
+	}
+	go func() {
+		defer wg.Done()
+		defer func() { <-sem }()
+		startedAt := time.Now()
+		d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
+		outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
+		if outcome.Err != nil {
+			logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
+		}
+		errText := ""
+		if outcome.Err != nil {
+			errText = outcome.Err.Error()
+		}
+		d.emit(ptui.ReviewCompletedEvent{
+			Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
+			Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
+			Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
+			Duration: time.Since(startedAt), CompletedAt: time.Now(),
+		})
+	}()
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts. Returns ok=false
