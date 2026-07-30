@@ -41,8 +41,12 @@ type Daemon struct {
 	// is scoped to that owner's App installation — installation tokens are
 	// strictly owner-scoped, so using the wrong one is a 403, not a soft
 	// failure (see internal/githubauth.Reconcile). An owner present in
-	// Config.WatchedRepos may still be missing an entry — e.g. before the
-	// App is installed on that account — see the poll() nil-check below.
+	// Config.WatchedRepos may still be missing an entry — e.g. the App
+	// hasn't been installed on that account yet. Reconcile runs once, at
+	// startup, only — this map is never refreshed afterward — so a missing
+	// entry does not resolve itself; the operator must install the App
+	// (Reconcile logs the guided-install URL) and then restart Pruefer.
+	// See the poll() nil-check below.
 	Clients  map[string]GitHubLister
 	Claude   ClaudeInvoker
 	Clone    CloneFunc
@@ -147,10 +151,13 @@ func (d *Daemon) poll(ctx context.Context) {
 		}
 		client, ok := d.Clients[owner]
 		if !ok {
-			// Expected when an owner has no resolved App installation yet
-			// (e.g. first run, before the guided-install step completes) —
-			// see internal/githubauth.Reconcile. Skip rather than panic.
-			logf(0, "warn", "no client for owner %q (repo %s) — skipping this repo this cycle\n", owner, repoSpec)
+			// Expected when an owner has no resolved App installation (see
+			// internal/githubauth.Reconcile, which already logged a guided-
+			// install URL for this owner at startup). Reconcile does not
+			// re-run after startup, so this is not transient: it recurs
+			// every poll cycle until the operator installs the App and
+			// restarts Pruefer. Skip rather than panic.
+			logf(0, "warn", "no client for owner %q (repo %s) — install the GitHub App on %q, then restart Pruefer to pick it up; skipping this repo until then\n", owner, repoSpec, owner)
 			continue
 		}
 		repoName := owner + "/" + repo
