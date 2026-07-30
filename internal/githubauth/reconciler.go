@@ -198,6 +198,13 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		}
 		// App-identity validation was actively rejected against a
 		// locally-known AppID: the App may have been deleted externally.
+		// GitHub's public API reference does not document a status code
+		// that distinguishes "deleted" from "suspended by GitHub" (e.g.
+		// for a ToS violation) for this call — both are treated
+		// identically here, and the messages below say so explicitly
+		// rather than asserting deletion as fact, so an operator whose App
+		// keeps getting recreated (rather than genuinely deleted just
+		// once) has a concrete next place to look.
 		//
 		// If AppID is pinned via opts.AppID (explicit github_app_id config —
 		// the compat-mode path), auto-recreating here would be unsafe: the
@@ -210,7 +217,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		// explicit repair error instead, naming the fix (update or clear
 		// github_app_id), rather than looping.
 		if opts.AppID != 0 {
-			return nil, fmt.Errorf("github_app_id %d is configured but no longer resolves on GitHub (%w) — it may have been deleted; update or remove github_app_id in config to let first-run setup create a new App (repair required, not auto-recreated)", opts.AppID, err)
+			return nil, fmt.Errorf("github_app_id %d is configured but no longer resolves on GitHub (%w) — it may have been deleted, or suspended by GitHub (check https://github.com/settings/apps); update or remove github_app_id in config to let first-run setup create a new App (repair required, not auto-recreated)", opts.AppID, err)
 		}
 		// justBootstrapped means loadOrBootstrapCredentials manifest-created
 		// this exact App a few lines above, in this same Reconcile call. An
@@ -245,7 +252,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			// pinned-AppID case above — an operator using the
 			// installation-ID pin must also decide what to do about it
 			// before Reconcile creates a new App out from under it.
-			return nil, fmt.Errorf("github_app_installation_id %d is configured but App ID %d no longer resolves on GitHub (%w) — it may have been deleted, which also invalidates the pinned installation ID (installation IDs are App-specific); update or remove github_app_id/github_app_installation_id in config to let first-run setup create a new App and installation (repair required, not auto-recreated)", opts.AppInstallationID, appID, err)
+			return nil, fmt.Errorf("github_app_installation_id %d is configured but App ID %d no longer resolves on GitHub (%w) — it may have been deleted, or suspended by GitHub (check https://github.com/settings/apps), either of which also invalidates the pinned installation ID (installation IDs are App-specific); update or remove github_app_id/github_app_installation_id in config to let first-run setup create a new App and installation (repair required, not auto-recreated)", opts.AppInstallationID, appID, err)
 		} else {
 			// AppID was resolved from the reconciler-owned state file (a
 			// prior manifest run), not pinned by config — safe to
@@ -255,7 +262,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			// only overwrites on full success) and re-enter the manifest
 			// flow rather than silently giving up — see the issue's "App
 			// deleted externally" failure handling requirement.
-			logf("! app identity validation failed for App ID %d (%v) — it may have been deleted; starting App creation again", appID, err)
+			logf("! app identity validation failed for App ID %d (%v) — it may have been deleted, or suspended by GitHub; if this keeps recurring after a fresh App is created, check https://github.com/settings/apps for a suspended App rather than assuming repeated deletion; starting App creation again", appID, err)
 			creds, bootErr := runManifestFlow(ctx, ManifestFlowOptions{
 				BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
 				PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
@@ -535,13 +542,23 @@ func saveInstallationRepoCache(statePath string, appID int64, slug string, repoC
 // failure-handling requirements:
 //   - no AppID anywhere (opts.AppID, nor a prior manifest run's
 //     app-state.json) → nothing to load; run the manifest flow ("missing").
-//   - an AppID is known (either way) but the private key file is missing or
-//     unparseable → an explicit repair error, never auto-regenerated
-//     ("repair-needed"). A corrupt-but-recoverable local file must never be
-//     mistaken for "the App is gone."
-//   - both are present and readable → return them; Reconcile's later
-//     identity-validation call is what detects an externally-deleted App
-//     ("app-deleted-externally") — that case is not this function's job.
+//   - an AppID is known (either way) but the private key file is missing,
+//     unparseable, or (when AppID came from opts.AppStatePath rather than a
+//     pinned opts.AppID) doesn't match that state file's recorded
+//     PrivateKeyFingerprint → an explicit repair error, never
+//     auto-regenerated ("repair-needed"). A corrupt-but-recoverable local
+//     file, or a stale key left over from an interrupted App re-creation,
+//     must never be mistaken for "the App is gone."
+//   - both are present, readable, and (when checked) fingerprint-consistent
+//     → return them; Reconcile's later identity-validation call is what
+//     detects an externally-deleted App ("app-deleted-externally") — that
+//     case is not this function's job.
+//
+// The fingerprint check is scoped to the non-pinned path (opts.AppID == 0,
+// appID resolved from opts.AppStatePath): a pinned opts.AppID already gets
+// an explicit repair error straight from Reconcile's identity-validation
+// failure if its private key doesn't match, without ever attempting
+// self-heal — see the comment there.
 //
 // The bool return reports whether this call itself just ran the manifest
 // flow — Reconcile uses it to avoid mistaking the freshly-created App's own
@@ -549,12 +566,14 @@ func saveInstallationRepoCache(statePath string, appID int64, slug string, repoC
 // around FetchAppSlug in Reconcile).
 func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(string, ...any)) (int64, *rsa.PrivateKey, bool, error) {
 	appID := opts.AppID
+	var expectedFingerprint string
 	if appID == 0 {
 		state, err := loadCredentials(opts.AppStatePath)
 		if err != nil {
 			return 0, nil, false, fmt.Errorf("app state file %s exists but is corrupt — repair or remove it: %w", opts.AppStatePath, err)
 		}
 		appID = state.AppID
+		expectedFingerprint = state.PrivateKeyFingerprint
 	}
 
 	justBootstrapped := false
@@ -574,9 +593,24 @@ func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(str
 	if _, err := os.Stat(opts.AppPrivateKeyPath); os.IsNotExist(err) {
 		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is missing — restore it from the App's settings page (repair required, not auto-regenerated)", appID, opts.AppPrivateKeyPath)
 	}
-	privateKey, err := loadPrivateKey(opts.AppPrivateKeyPath)
+	pemBytes, err := os.ReadFile(opts.AppPrivateKeyPath)
 	if err != nil {
 		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appID, opts.AppPrivateKeyPath, err)
+	}
+	privateKey, err := gh.ParseAppPrivateKey(pemBytes)
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appID, opts.AppPrivateKeyPath, err)
+	}
+
+	// justBootstrapped means we just wrote both files ourselves a few
+	// lines above — trivially consistent, no need to re-check. Otherwise,
+	// only check when the state file actually recorded a fingerprint
+	// (empty means either a pre-fingerprint state file, or AppID came
+	// from a pinned opts.AppID and this variable was never populated).
+	if !justBootstrapped && expectedFingerprint != "" {
+		if got := privateKeyFingerprint(pemBytes); got != expectedFingerprint {
+			return 0, nil, false, fmt.Errorf("app ID %d's private key at %s does not match the fingerprint recorded in %s — likely stale from an interrupted App re-creation (a crash between persisting the new App's state and its private key); restore the correct private key for App ID %d, or remove %s and %s together to trigger fresh setup (repair required, not auto-recreated)", appID, opts.AppPrivateKeyPath, opts.AppStatePath, appID, opts.AppStatePath, opts.AppPrivateKeyPath)
+		}
 	}
 
 	return appID, privateKey, justBootstrapped, nil

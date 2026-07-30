@@ -900,6 +900,63 @@ func TestReconcile_AppDeletedExternally_StateFileAppID_ReentersManifestFlow(t *t
 	}
 }
 
+// TestReconcile_StaleKeyAfterInterruptedSelfHeal_ReturnsRepairErrorNeverLoops
+// is the regression test for a review finding: RunManifestFlow persists
+// app-state.json (carrying the new AppID and PrivateKeyFingerprint) before
+// the PEM. If self-heal recreates an App and the process is killed between
+// those two writes, AppStatePath ends up naming the new App while
+// AppPrivateKeyPath still holds the *previous* (presumed-deleted) App's key
+// — both files exist and parse fine, so nothing before the fingerprint
+// check would ever notice. Without it, every subsequent Reconcile would
+// build a JWT with the mismatched key, fail identity validation again, and
+// silently self-heal a *second* time — an unbounded orphan-App-creation
+// loop with no error ever naming the real cause. This test sets up exactly
+// that post-crash on-disk state directly (state file already updated to the
+// new AppID/fingerprint, PEM still the old App's) and asserts Reconcile
+// returns a clear repair-needed error instead of ever invoking
+// runManifestFlow again.
+func TestReconcile_StaleKeyAfterInterruptedSelfHeal_ReturnsRepairErrorNeverLoops(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	statePath := filepath.Join(dir, "app-state.json")
+
+	oldPEM := writeTestPrivateKeyPEM(t)
+	newPEM := writeTestPrivateKeyPEM(t)
+	if err := savePrivateKey(keyPath, oldPEM); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+	// Simulates the state half of self-heal's persistence having
+	// succeeded — naming a new App and the fingerprint of the PEM it
+	// *should* have — while the PEM write that was supposed to follow
+	// never happened (the crash window this guards).
+	if err := saveCredentials(statePath, Credentials{
+		AppID: 999, Slug: "recreated-app",
+		PrivateKeyFingerprint: privateKeyFingerprint(newPEM),
+	}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	oldFlow := runManifestFlow
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		t.Fatal("runManifestFlow must not be invoked — a fingerprint mismatch is a repair-needed error, not grounds for another self-heal attempt")
+		return Credentials{}, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: "http://unused.invalid",
+	})
+	if err == nil {
+		t.Fatal("expected an error for the fingerprint mismatch, got nil")
+	}
+	for _, want := range []string{"999", "fingerprint", "repair required"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing expected substring %q", err.Error(), want)
+		}
+	}
+}
+
 // TestReconcile_SelfHealRecreatedApp_TransientIdentityFailure_RetriesInsteadOfFailing
 // is the regression test for a review finding: after the self-heal branch
 // recreates the App via runManifestFlow, the immediately-following identity

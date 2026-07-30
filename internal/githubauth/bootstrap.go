@@ -79,11 +79,12 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 	// duplicate App while overwriting the orphaned PEM — exactly the
 	// "silently create a duplicate app" failure mode the issue rules out.
 	creds := Credentials{
-		AppID:         mc.AppID,
-		Slug:          mc.Slug,
-		WebhookSecret: mc.WebhookSecret,
-		ClientID:      mc.ClientID,
-		ClientSecret:  mc.ClientSecret,
+		AppID:                 mc.AppID,
+		Slug:                  mc.Slug,
+		WebhookSecret:         mc.WebhookSecret,
+		ClientID:              mc.ClientID,
+		ClientSecret:          mc.ClientSecret,
+		PrivateKeyFingerprint: privateKeyFingerprint([]byte(mc.PEM)),
 	}
 	if err := saveCredentials(opts.AppStatePath, creds); err != nil {
 		return Credentials{}, fmt.Errorf("persisting new App's credentials: %w", err)

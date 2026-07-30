@@ -2,6 +2,8 @@ package githubauth
 
 import (
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,6 +34,33 @@ type Credentials struct {
 	// missing cache entry never grants access, and a stale entry claiming
 	// access can never substitute for the live check either.
 	InstallationRepoCache map[string][]string `json:"installation_repo_cache,omitempty"`
+	// PrivateKeyFingerprint is a SHA-256 hex digest of the PEM bytes this
+	// AppID's private key is expected to hold, recorded at the same time
+	// AppID itself is persisted (RunManifestFlow sets both in the same
+	// saveCredentials call, before the PEM is written to disk). It exists
+	// to close a narrow crash-window: App re-creation (self-heal after an
+	// externally-deleted App) writes app-state.json first and the PEM
+	// second — if the process is killed between the two writes, the state
+	// file names the new App while PrivateKeyPath still holds the
+	// *previous* App's key, a mismatch nothing else here would ever
+	// notice (both files exist and parse fine). loadOrBootstrapCredentials
+	// treats a fingerprint mismatch as a repair-needed error rather than
+	// silently building a JWT with the wrong key pair and re-entering
+	// self-heal on every subsequent restart. Left empty (and never
+	// checked) for state files predating this field, and for a
+	// first-ever bootstrap's own state read (nothing to compare against
+	// yet).
+	PrivateKeyFingerprint string `json:"private_key_fingerprint,omitempty"`
+}
+
+// privateKeyFingerprint returns a SHA-256 hex digest of raw PEM bytes, used
+// to detect a private key file that doesn't match the AppID it's supposed
+// to belong to (see Credentials.PrivateKeyFingerprint). Not a security
+// boundary — just a cheap consistency check against a specific crash
+// window, so a simple content hash is sufficient.
+func privateKeyFingerprint(pemBytes []byte) string {
+	sum := sha256.Sum256(pemBytes)
+	return hex.EncodeToString(sum[:])
 }
 
 // loadCredentials reads path, returning a zero-value Credentials (no error)
