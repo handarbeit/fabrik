@@ -148,7 +148,7 @@ func TestDaemonEventSink_DuplicateDeliverySameSHA_OnlyOneSubmit(t *testing.T) {
 	client.mu.Unlock()
 
 	sink.Handle(context.Background(), ev) // duplicate delivery
-	time.Sleep(150 * time.Millisecond)     // let a wrongly-dispatched second review land, if any
+	time.Sleep(150 * time.Millisecond)    // let a wrongly-dispatched second review land, if any
 	if got := client.submitCallCount(); got != 1 {
 		t.Errorf("submitCallCount() = %d, want 1 (duplicate delivery at the same SHA must not double-review)", got)
 	}
