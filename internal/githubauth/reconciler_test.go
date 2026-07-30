@@ -315,6 +315,47 @@ func TestReconcile_OwnerLookupIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestReconcile_CaseVariantOwnersDedupeToOneInstallation is the regression
+// test for a review finding: distinctOwnersLogging deduped owners by exact
+// case, so watched_repos entries naming the same GitHub account with
+// different casing (e.g. "MyOrg/repo1" and "myorg/repo2") survived as two
+// "distinct" owners. Both then independently resolved to the same
+// installation via the already-case-insensitive byAccount lookup, so
+// Reconcile minted a redundant token and ran verifyRepoAccess twice for one
+// installation, and would have spawned two redundant refresh goroutines.
+// Confirms exactly one installation is minted and ClientForRepo resolves
+// both casings to it.
+func TestReconcile_CaseVariantOwnersDedupeToOneInstallation(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "myorg", RepositorySelection: "all"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	logf, _ := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"MyOrg/repo1", "myorg/repo2"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if r.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 (case-variant owners must dedupe to one installation)", r.InstallationCount())
+	}
+	if _, err := r.ClientForRepo(context.Background(), "MyOrg", "repo1"); err != nil {
+		t.Errorf("expected ClientForRepo(MyOrg) to resolve: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "myorg", "repo2"); err != nil {
+		t.Errorf("expected ClientForRepo(myorg) to resolve to the same installation: %v", err)
+	}
+}
+
 func TestReconcile_MissingOwnerInstallation_NoBrowserSkipsOpen(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

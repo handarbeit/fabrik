@@ -61,6 +61,12 @@ type GitHubAuth interface {
 // WatchedRepos — the same security property pruefer/auth.go's AuthSet
 // established (see ADR-1233): only owners actually named in WatchedRepos are
 // ever tokenized or contacted.
+//
+// clients is keyed by lower-cased owner: GitHub org/user logins are
+// case-insensitive, and callers (e.g. pruefer/execute.go, pruefer/daemon.go)
+// may derive an owner string from watched_repos independently of — and with
+// different casing than — whatever casing Reconcile itself first saw, so
+// ClientForRepo must resolve either casing to the same client.
 type Reconciler struct {
 	botLogin string
 
@@ -81,7 +87,7 @@ func (r *Reconciler) BotLogin() string { return r.botLogin }
 func (r *Reconciler) ClientForRepo(ctx context.Context, owner, repo string) (*gh.Client, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	client, ok := r.clients[owner]
+	client, ok := r.clients[strings.ToLower(owner)]
 	if !ok {
 		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — add it to watched_repos and restart to trigger reconciliation, or install the App on %q if it's already watched", owner, owner)
 	}
@@ -237,7 +243,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		}
 		repoCache := make(map[string][]string)
 		for _, owner := range owners {
-			r.clients[owner] = a.client
+			r.clients[strings.ToLower(owner)] = a.client
 		}
 		for _, spec := range opts.WatchedRepos {
 			if owner, _, ok := splitOwnerRepo(spec); ok {
@@ -324,13 +330,13 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			// repos is authorized — no live per-repo check to make, unlike
 			// the "selected" branch above.
 			for _, spec := range opts.WatchedRepos {
-				if o, _, ok := splitOwnerRepo(spec); ok && o == owner {
+				if o, _, ok := splitOwnerRepo(spec); ok && strings.EqualFold(o, owner) {
 					repoCache[owner] = append(repoCache[owner], spec)
 				}
 			}
 		}
 
-		r.clients[owner] = a.client
+		r.clients[strings.ToLower(owner)] = a.client
 		r.auths = append(r.auths, a)
 		logf("✓ %s authorized", owner)
 	}

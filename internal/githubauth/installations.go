@@ -47,7 +47,7 @@ func verifyRepoAccess(baseURL, installToken string, installationID int64, owner 
 	var statuses []RepoStatus
 	for _, repoSpec := range watchedRepos {
 		o, _, ok := splitOwnerRepo(repoSpec)
-		if !ok || o != owner {
+		if !ok || !strings.EqualFold(o, owner) {
 			continue
 		}
 		if accessibleSet[strings.ToLower(repoSpec)] {
@@ -76,6 +76,15 @@ func distinctOwners(watchedRepos []string) []string {
 // caller that needs both (Reconcile) doesn't have to make a second full
 // pass over watchedRepos — re-running the exact same splitOwnerRepo check —
 // purely to report what this pass already skips.
+//
+// Dedup is case-insensitive (keyed on the lower-cased owner, keeping the
+// first-seen literal casing in the result): GitHub org/user logins are
+// case-insensitive, so "MyOrg/repo1" and "myorg/repo2" name the same
+// account. Without folding case here, both survive as "distinct" owners and
+// each independently resolves to the same installation downstream (via the
+// already-case-insensitive byAccount/accessibleSet lookups), causing
+// Reconcile to mint a redundant token, verify repo access, and spawn a
+// redundant refresh goroutine twice for one installation.
 func distinctOwnersLogging(watchedRepos []string, logf func(string, ...any)) []string {
 	seen := make(map[string]bool)
 	var owners []string
@@ -85,10 +94,11 @@ func distinctOwnersLogging(watchedRepos []string, logf func(string, ...any)) []s
 			logf("! %q is not a valid \"owner/repo\" watched-repo entry — skipping", spec)
 			continue
 		}
-		if seen[owner] {
+		key := strings.ToLower(owner)
+		if seen[key] {
 			continue
 		}
-		seen[owner] = true
+		seen[key] = true
 		owners = append(owners, owner)
 	}
 	return owners
