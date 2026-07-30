@@ -113,11 +113,22 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	// is served to any requester that can reach this loopback port, not just
 	// the browser this flow opened — so state here is not secret from a
 	// co-resident local process the way it is from a remote/cross-site
-	// attacker. Accepted risk, not an oversight: reading it requires local
-	// code execution on the machine running Pruefer, which is already a
-	// stronger precondition than this flow's threat model (cross-site/CSRF)
-	// defends against — a co-resident attacker with that capability can
-	// already read AppPrivateKeyPath directly, no callback race needed.
+	// attacker. During this brief first-run window (before RunManifestFlow
+	// has written anything to AppPrivateKeyPath/AppStatePath), a co-resident
+	// attacker who races /start then completes App creation as their own
+	// GitHub identity before the real user does could get this flow to
+	// adopt an App *they* control — a materially different, and not yet
+	// equally available, outcome versus "read the PEM directly" (there is
+	// no PEM yet). Accepted risk anyway, not an oversight: it requires local
+	// code execution on the machine running Pruefer, a threat model this
+	// flow's CSRF `state` check was never meant to cover (that defends
+	// against remote/cross-site redirection, not a co-resident process),
+	// and one under which every other part of Pruefer's trust boundary
+	// (config files, the browser-open command, the process itself) is
+	// already unenforceable. Narrowing the window further (e.g. serving
+	// /start at most once) would not close it, only shrink it, so it's
+	// left undone rather than adding complexity for a race that stays
+	// exploitable either way under this threat model.
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, formHTML)
