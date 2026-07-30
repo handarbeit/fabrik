@@ -227,6 +227,56 @@ func TestLoadConfig_ExplicitFlagBeatsPrueferConfigEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_RequestChangesThresholdDefaultOff(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RequestChangesThreshold != "" {
+		t.Errorf("RequestChangesThreshold = %q, want empty (off by default)", cfg.RequestChangesThreshold)
+	}
+}
+
+func TestLoadConfig_RequestChangesThresholdPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `request_changes_threshold: high`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RequestChangesThreshold != SeverityHigh {
+		t.Errorf("RequestChangesThreshold = %q, want high (from YAML)", cfg.RequestChangesThreshold)
+	}
+
+	t.Setenv("PRUEFER_REQUEST_CHANGES_THRESHOLD", "critical")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RequestChangesThreshold != SeverityCritical {
+		t.Errorf("RequestChangesThreshold = %q, want critical (env should override YAML)", cfg.RequestChangesThreshold)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-request-changes-threshold", "medium"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RequestChangesThreshold != SeverityMedium {
+		t.Errorf("RequestChangesThreshold = %q, want medium (flag should override env)", cfg.RequestChangesThreshold)
+	}
+}
+
+func TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `request_changes_threshold: hgih`)
+
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for an unrecognized request_changes_threshold value, got nil")
+	}
+}
+
 func TestSplitCSV(t *testing.T) {
 	cases := []struct {
 		in   string
