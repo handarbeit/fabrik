@@ -93,6 +93,13 @@ func TestRunManifestFlow_HappyPath(t *testing.T) {
 	if stateOnDisk.AppID != 555 || stateOnDisk.WebhookSecret != "whsec" {
 		t.Errorf("persisted state = %+v, want AppID=555 WebhookSecret=whsec", stateOnDisk)
 	}
+	pemOnDisk, err := os.ReadFile(pemPath)
+	if err != nil {
+		t.Fatalf("reading persisted PEM: %v", err)
+	}
+	if want := privateKeyFingerprint(pemOnDisk); stateOnDisk.PrivateKeyFingerprint != want {
+		t.Errorf("persisted PrivateKeyFingerprint = %q, want %q (fingerprint of the persisted PEM)", stateOnDisk.PrivateKeyFingerprint, want)
+	}
 }
 
 func TestRunManifestFlow_NoBrowserSkipsOpen(t *testing.T) {
