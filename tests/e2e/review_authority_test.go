@@ -87,13 +87,26 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
 	}
 
+	// Confirm the gate's trivial, pre-verdict block (hasReviews==false blocks
+	// unconditionally) before the review lands. This alone doesn't prove the
+	// gate evaluates the verdict rather than always blocking — a REQUEST_CHANGES
+	// scenario can't distinguish that by itself; TestReviewAuthorityClearsOnApproval
+	// (block-before/clear-after APPROVE) supplies that half. The distinguishing
+	// assertion for *this* scenario is downstream: the pause-comment content
+	// check below, which fails if authorityReason wasn't derived from the actual
+	// CHANGES_REQUESTED verdict and fell back to the generic "no reviews
+	// submitted yet" message.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
+	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
+	t.Logf("fabrik:awaiting-review confirmed on %s#%d before any review submitted — gate is genuinely engaged", env.RepoAlpha, num)
+
 	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
 	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d", env.RepoAlpha, prNum)
 
-	// Scenario 1: the gate must block — fabrik:awaiting-review appears, and
-	// the item must not advance past Review (the durable, directly-observable
-	// signal is that the gate label is applied and fabrik:paused is not yet
-	// present).
+	// Scenario 1: the gate must still be blocking — fabrik:awaiting-review
+	// remains, and the item must not advance past Review (the durable,
+	// directly-observable signal is that the gate label is applied and
+	// fabrik:paused is not yet present).
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
 	t.Logf("fabrik:awaiting-review confirmed on %s#%d — authoritative gate is blocking on CHANGES_REQUESTED", env.RepoAlpha, num)
 

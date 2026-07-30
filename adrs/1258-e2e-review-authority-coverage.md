@@ -1,7 +1,9 @@
 # ADR 1258: e2e coverage for review_authority: authoritative via a per-issue label
 
 **Status:** Accepted
-**Date:** 2026-07-30
+**Date:** 2026-07-30 (the label-based mechanism below was settled same-day, during
+Validate-stage review of this issue's own PR — see "Revision" — so this date marks
+final acceptance, not the first-draft column/stage-variant design)
 **Issue:** [#1258](https://github.com/handarbeit/fabrik/issues/1258)
 
 ## Context
