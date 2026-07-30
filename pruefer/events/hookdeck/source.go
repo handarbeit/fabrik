@@ -139,9 +139,16 @@ func (s *Source) Run(ctx context.Context, sink events.EventSink) error {
 
 // runOnce creates one Hookdeck CLI session, dials its WebSocket, and reads
 // attempt frames until the connection fails or ctx is cancelled. connected
-// reports whether the WebSocket handshake completed (used by Run to decide
-// whether to reset its backoff), independent of err: a nil err means ctx
-// was cancelled (caller stops retrying), and a non-nil err is the transport
+// reports whether the session proved itself alive by successfully reading
+// at least one frame off the WebSocket (used by Run to decide whether to
+// reset its backoff) — a completed handshake alone is not enough evidence,
+// since Hookdeck can accept the handshake and then immediately reject/drop
+// the session (e.g. a stale or invalid API key) without that surfacing as a
+// dial-time error; treating that as "connected" would reset backoff to its
+// floor every cycle and hammer the session-creation REST endpoint at
+// roughly once a second instead of ramping toward maxBackoff like any other
+// hard failure. connected is independent of err: a nil err means ctx was
+// cancelled (caller stops retrying), and a non-nil err is the transport
 // failure that ended this attempt (caller backs off and retries).
 func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected bool, err error) {
 	sessionID, err := createSession(ctx, s.cfg.HTTPClient, s.cfg.APIBaseURL, s.cfg.APIKey)
@@ -175,14 +182,16 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 		}
 	}()
 
+	receivedFrame := false
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {
 				return true, nil
 			}
-			return true, fmt.Errorf("reading hookdeck websocket: %w", err)
+			return receivedFrame, fmt.Errorf("reading hookdeck websocket: %w", err)
 		}
+		receivedFrame = true
 		s.handleFrame(ctx, sink, conn, msg)
 	}
 }
