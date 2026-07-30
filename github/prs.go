@@ -56,6 +56,14 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 // semantics; otherwise an author's earlier non-DISMISSED review (e.g. a stale COMMENTED
 // review) could outlive a later dismissal of their actual current review and falsely
 // satisfy the review-gate's hasReviews check.
+//
+// A COMMENTED submission never supersedes a prior formal verdict (APPROVED,
+// CHANGES_REQUESTED, or DISMISSED) from the same author — GitHub's own
+// reviewDecision computation treats COMMENTED as informational, not a state
+// transition, so a reviewer who requests changes and later leaves a comment-only
+// follow-up (without re-approving or dismissing) still has an active
+// CHANGES_REQUESTED verdict. Only when an author's *first* submission is
+// COMMENTED (no verdict established yet) does it become their collapsed entry.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
@@ -80,8 +88,13 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		if r.User == nil || r.User.Login == "" {
 			continue
 		}
-		if _, seen := latestByAuthor[r.User.Login]; !seen {
+		_, seen := latestByAuthor[r.User.Login]
+		if !seen {
 			order = append(order, r.User.Login)
+		} else if r.State == "COMMENTED" {
+			// A comment-only follow-up does not overwrite the author's
+			// existing formal verdict.
+			continue
 		}
 		latestByAuthor[r.User.Login] = PRReview{
 			Author:     r.User.Login,
@@ -96,6 +109,53 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		out = append(out, latestByAuthor[author])
 	}
 	return out, nil
+}
+
+// FetchPRReviewDecision returns GitHub's computed review-decision verdict for a
+// pull request via GraphQL, keyed on PR number — mirroring prNodeID's
+// single-field-by-number query shape rather than closedByPullRequestsReferences,
+// so it works identically for default-branch and base:<branch> PRs (GitHub's
+// REST API has no equivalent field; reviewDecision is GraphQL-only).
+//
+// Returns one of "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED" when the
+// repository has a branch-protection review requirement configured for this
+// PR, or "" when GitHub reports no such requirement (reviewDecision is null) —
+// callers must treat "" as "no real verdict available", not as a satisfied gate.
+// Returns an error (rather than "") when the query resolves with no pullRequest
+// object at all (bad prNumber, or an app-token permission gap) — that is
+// "unknown state", distinct from a legitimate null reviewDecision, and must
+// not be folded into the same "" the no-branch-protection fallback treats as
+// meaningful data.
+func (c *Client) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
+	query := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewDecision
+    }
+  }
+}`
+	vars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest *struct {
+					ReviewDecision string `json:"reviewDecision"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return "", fmt.Errorf("fetching PR #%d review decision: %w", prNumber, err)
+	}
+	if result.Data.Repository.PullRequest == nil {
+		return "", fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+	return result.Data.Repository.PullRequest.ReviewDecision, nil
 }
 
 // FetchPRReviewRequests returns the outstanding requested reviewers for a pull

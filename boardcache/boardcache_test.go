@@ -18,15 +18,16 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	fetchItemDetailsCount     int
-	fetchCheckRunsCount       int
-	fetchLinkedPRCount        int
-	fetchLabelsCount          int
-	fetchPRClosingIssuesCount int
-	fetchPRReviewsCount       int
+	fetchItemDetailsCount      int
+	fetchCheckRunsCount        int
+	fetchLinkedPRCount         int
+	fetchLabelsCount           int
+	fetchPRClosingIssuesCount  int
+	fetchPRReviewsCount        int
 	fetchPRReviewRequestsCount int
-	fetchPRsForSHACount       int
-	fetchProjectItemCount     int
+	fetchPRReviewDecisionCount int
+	fetchPRsForSHACount        int
+	fetchProjectItemCount      int
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
@@ -36,11 +37,12 @@ type mockClient struct {
 	projectBoardErr    error // returned by FetchProjectBoard when non-nil
 	projectItemResult  *gh.ProjectItem
 
-	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRClosingIssuesFn  func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRReviewsFn        func(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	fetchPRReviewRequestsFn func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
-	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
-	fetchProjectItemFn     func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
+	fetchPRReviewDecisionFn func(owner, repo string, prNumber int) (string, error)
+	fetchPRsForSHAFn        func(owner, repo, sha string) ([]int, error)
+	fetchProjectItemFn      func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -145,6 +147,14 @@ func (m *mockClient) FetchPRReviewRequests(owner, repo string, prNumber int) ([]
 		return m.fetchPRReviewRequestsFn(owner, repo, prNumber)
 	}
 	return nil, nil
+}
+
+func (m *mockClient) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
+	m.fetchPRReviewDecisionCount++
+	if m.fetchPRReviewDecisionFn != nil {
+		return m.fetchPRReviewDecisionFn(owner, repo, prNumber)
+	}
+	return "", nil
 }
 
 func (m *mockClient) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
@@ -896,6 +906,35 @@ func TestFetchCheckRunsFallback(t *testing.T) {
 	}
 	if len(runs2) != 1 {
 		t.Errorf("expected 1 cached run, got %d", len(runs2))
+	}
+}
+
+// TestFetchPRReviewDecisionAlwaysDelegates verifies CacheImpl.FetchPRReviewDecision
+// never caches — every call must reach the fallback, mirroring FetchPRReviews'/
+// FetchPRReviewRequests' "review state is highly volatile" no-caching rationale.
+func TestFetchPRReviewDecisionAlwaysDelegates(t *testing.T) {
+	mc := &mockClient{fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+		return "APPROVED", nil
+	}}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+
+	decision, err := c.FetchPRReviewDecision("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewDecision: %v", err)
+	}
+	if decision != "APPROVED" {
+		t.Errorf("decision = %q, want APPROVED", decision)
+	}
+	if mc.fetchPRReviewDecisionCount != 1 {
+		t.Errorf("expected 1 fallback call, got %d", mc.fetchPRReviewDecisionCount)
+	}
+
+	// Second call must also hit the fallback — no caching.
+	if _, err := c.FetchPRReviewDecision("owner", "repo", 42); err != nil {
+		t.Fatalf("FetchPRReviewDecision second: %v", err)
+	}
+	if mc.fetchPRReviewDecisionCount != 2 {
+		t.Errorf("expected 2 fallback calls (no caching), got %d", mc.fetchPRReviewDecisionCount)
 	}
 }
 

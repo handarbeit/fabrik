@@ -90,6 +90,18 @@ type Stage struct {
 	// sets this to true.
 	WaitForCI *bool `yaml:"wait_for_ci,omitempty"`
 
+	// ReviewAuthority controls whether the wait_for_reviews gate (checkReviewGate,
+	// reviewGateBlocksLanding) honors the *verdict* of a review, not just its
+	// existence. "advisory" (default, empty string behaves identically) is
+	// today's behavior: any non-DISMISSED review clears the gate regardless of
+	// state. "authoritative" additionally requires no outstanding
+	// CHANGES_REQUESTED review and required approvals satisfied (preferring
+	// GitHub's reviewDecision where a branch-protection review requirement is
+	// configured, falling back to Fabrik's own outstanding+CHANGES_REQUESTED
+	// computation otherwise). Only meaningful when WaitForReviews is also true.
+	// See ADR-1250.
+	ReviewAuthority string `yaml:"review_authority,omitempty"`
+
 	// CIFixSkill names the plugin skill to invoke for CI-fix re-invocations.
 	// When absent, falls back to CommentSkill.
 	CIFixSkill string `yaml:"ci_fix_skill,omitempty"`
@@ -265,6 +277,11 @@ func loadOne(path string) (*Stage, error) {
 	validEffortLevels := map[string]bool{"": true, "low": true, "medium": true, "high": true, "max": true}
 	if !validEffortLevels[s.EffortLevel] {
 		return nil, fmt.Errorf("stage %q: invalid effort_level %q (must be one of: low, medium, high, max)", s.Name, s.EffortLevel)
+	}
+
+	validReviewAuthorities := map[string]bool{"": true, "advisory": true, "authoritative": true}
+	if !validReviewAuthorities[s.ReviewAuthority] {
+		return nil, fmt.Errorf("stage %q: invalid review_authority %q (must be one of: advisory, authoritative)", s.Name, s.ReviewAuthority)
 	}
 
 	if s.MaxWallTimeRaw != "" {

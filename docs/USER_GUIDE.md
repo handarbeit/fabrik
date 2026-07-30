@@ -829,6 +829,12 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
                           #   See §3 Pending Reviewer Gate for full details.
+review_authority: advisory # Optional: advisory (default) | authoritative. Only meaningful alongside
+                          #   wait_for_reviews: true. advisory clears the gate once reviewers have
+                          #   responded, whatever they said. authoritative additionally requires no
+                          #   outstanding CHANGES_REQUESTED review and required approvals satisfied.
+                          #   yolo/cruise never bypass an authoritative gate — they still control
+                          #   timing, not whether the gate is open. See §3 Authoritative Mode.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
                           #   Validate+yolo) on CI checks passing on the PR head. At
                           #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
@@ -1442,6 +1448,41 @@ fabrik --review-wait-timeout=30
 #### Restart Persistence
 
 The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
+
+#### Authoritative Mode
+
+Everything above describes the default — **advisory** — mode: the gate clears once every requested reviewer has responded and at least one review exists, whatever the review actually says. A reviewer requesting changes does not, by itself, stop Fabrik from advancing.
+
+Set `review_authority: authoritative` on a stage (alongside `wait_for_reviews: true`) to make a review's *verdict* binding, not just its existence:
+
+```yaml
+name: Validate
+order: 5
+wait_for_reviews: true
+review_authority: authoritative
+...
+```
+
+In `authoritative` mode, the gate additionally requires:
+
+- **No outstanding `CHANGES_REQUESTED` review** — from any reviewer, human or bot.
+- **Required approvals satisfied** — preferring GitHub's own computed review-decision verdict when your repo's branch protection defines a review requirement (this already accounts for CODEOWNERS and required-approval counts), and otherwise falling back to Fabrik's own check that no submitted review is currently `CHANGES_REQUESTED` — so `authoritative` mode is meaningful even on a repo with no branch protection configured.
+
+This applies at **both** decision points: the stage-advance gate (the mechanism described above) and the landing/auto-merge gate at Validate completion — a `CHANGES_REQUESTED` review blocks auto-merge under `yolo`, not just stage advancement.
+
+**`yolo`/`cruise` never bypass an authoritative gate.** They still control *when* Fabrik acts once the gate is satisfied — not *whether* it's satisfied:
+
+| Mode | Behavior |
+|---|---|
+| `advisory` + `yolo` | Unchanged — auto-advance and auto-merge as soon as a review exists, regardless of verdict. |
+| `authoritative` + `yolo` | Auto-merge fires as soon as `CHANGES_REQUESTED` is cleared and required approvals are met — no human click needed for the merge itself, but Fabrik waits for a still-blocking verdict rather than forcing through it. |
+| `authoritative` + `cruise` | Cruise's existing "stop before auto-merge" behavior is unaffected — a cruise item never reaches the authoritative check at all. |
+
+If the verdict never resolves — an unfixable review finding, or a required human who never approves — the issue falls into the same pause-for-human path as an unresponsive reviewer: the existing `FABRIK_MAX_REVIEW_CYCLES` / `FABRIK_REVIEW_WAIT_TIMEOUT` machinery above applies unchanged. There is no separate timeout or cycle limit for authoritative mode.
+
+`review_authority` defaults to `advisory` (equivalent to leaving it unset) — existing repos and stages are unaffected until you opt in.
+
+For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode) and [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
 
 ---
 
@@ -2066,7 +2107,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
-| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
+| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode) |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |

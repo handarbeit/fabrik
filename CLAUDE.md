@@ -138,6 +138,15 @@ max_wall_time: "45m"            # Optional: wall-clock deadline for a single Cla
                                 # inactivity timeout (no output received) applies to every invocation regardless.
 disable_adaptive_thinking: true # Disable Claude Code's adaptive (auto-reduced) thinking budget. Default: true.
 effort_level: max               # Claude Code thinking effort: low, medium, high, max. Default: high.
+review_authority: authoritative # Optional: advisory (default) | authoritative. Only meaningful alongside
+                                # wait_for_reviews: true. advisory (unset) clears the review gate once
+                                # reviewers have responded, whatever they said. authoritative additionally
+                                # requires no outstanding CHANGES_REQUESTED and required approvals satisfied
+                                # — preferring GitHub's reviewDecision where branch protection defines a
+                                # review requirement, falling back to Fabrik's own no-CHANGES_REQUESTED
+                                # computation otherwise. yolo/cruise never bypass an authoritative gate —
+                                # they still control auto-advance/auto-merge timing, only once the gate
+                                # itself is satisfied. See ADR-1250.
 ```
 
 ## Important Conventions

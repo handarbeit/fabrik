@@ -905,6 +905,92 @@ func TestPRNodeID_GraphQLErrorWrapped(t *testing.T) {
 	}
 }
 
+func TestFetchPRReviewDecision(t *testing.T) {
+	tests := []struct {
+		name   string
+		decide string // GraphQL response value, "" for null
+		want   string
+	}{
+		{"approved", "APPROVED", "APPROVED"},
+		{"changes requested", "CHANGES_REQUESTED", "CHANGES_REQUESTED"},
+		{"review required", "REVIEW_REQUIRED", "REVIEW_REQUIRED"},
+		{"null (no branch protection review requirement)", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				var reviewDecision interface{}
+				if tt.decide != "" {
+					reviewDecision = tt.decide
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"data": map[string]interface{}{
+						"repository": map[string]interface{}{
+							"pullRequest": map[string]interface{}{
+								"reviewDecision": reviewDecision,
+							},
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewClientWithBaseURL("test-token", srv.URL)
+			got, err := c.FetchPRReviewDecision("owner", "repo", 42)
+			if err != nil {
+				t.Fatalf("FetchPRReviewDecision: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("FetchPRReviewDecision = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A null pullRequest object (bad prNumber, or an app-token permission gap)
+// must return an error, not "" — folding it into the same "" the
+// no-branch-protection fallback treats as legitimate data would silently
+// satisfy the authoritative gate on unknown state.
+func TestFetchPRReviewDecision_NullPullRequest_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": nil,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	got, err := c.FetchPRReviewDecision("owner", "repo", 42)
+	if err == nil {
+		t.Fatal("expected an error for a null pullRequest object, got nil")
+	}
+	if !strings.Contains(err.Error(), "PR #42 not found") {
+		t.Errorf("expected 'PR #42 not found' error, got %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty string alongside the error, got %q", got)
+	}
+}
+
+func TestFetchPRReviewDecision_ErrorWrapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	_, err := c.FetchPRReviewDecision("owner", "repo", 42)
+	if err == nil || !strings.Contains(err.Error(), "fetching PR #42 review decision") {
+		t.Errorf("expected wrapped 'fetching PR #42 review decision' error, got %v", err)
+	}
+}
+
 func TestMarkPRReady(t *testing.T) {
 	const prNodeID = "PR_readynode"
 
@@ -1087,6 +1173,41 @@ func TestFetchPRReviews_CollapsesToLatestPerAuthor(t *testing.T) {
 	}
 	if got := byAuthor["bob"].State; got != "CHANGES_REQUESTED" {
 		t.Errorf("bob's collapsed review state = %q, want CHANGES_REQUESTED", got)
+	}
+}
+
+func TestFetchPRReviews_CommentedFollowUpDoesNotOverwriteVerdict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "CHANGES_REQUESTED", "body": "please fix"},
+			{"id": 2, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "still waiting"},
+			{"id": 3, "user": map[string]string{"login": "bob"}, "state": "COMMENTED", "body": "just a note"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	byAuthor := make(map[string]PRReview, len(reviews))
+	for _, r := range reviews {
+		byAuthor[r.Author] = r
+	}
+	// alice's CHANGES_REQUESTED verdict must survive her later comment-only
+	// follow-up — a COMMENTED submission is not a state transition.
+	if got := byAuthor["alice"].State; got != "CHANGES_REQUESTED" {
+		t.Errorf("alice's collapsed review state = %q, want CHANGES_REQUESTED (comment-only follow-up must not overwrite the verdict)", got)
+	}
+	if got := byAuthor["alice"].DatabaseID; got != 1 {
+		t.Errorf("alice's collapsed review DatabaseID = %d, want 1 (the CHANGES_REQUESTED submission)", got)
+	}
+	// bob never established a verdict — his only submission is COMMENTED, so
+	// that becomes his collapsed entry.
+	if got := byAuthor["bob"].State; got != "COMMENTED" {
+		t.Errorf("bob's collapsed review state = %q, want COMMENTED (his only submission)", got)
 	}
 }
 

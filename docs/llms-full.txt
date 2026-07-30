@@ -827,6 +827,12 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
                           #   See §3 Pending Reviewer Gate for full details.
+review_authority: advisory # Optional: advisory (default) | authoritative. Only meaningful alongside
+                          #   wait_for_reviews: true. advisory clears the gate once reviewers have
+                          #   responded, whatever they said. authoritative additionally requires no
+                          #   outstanding CHANGES_REQUESTED review and required approvals satisfied.
+                          #   yolo/cruise never bypass an authoritative gate — they still control
+                          #   timing, not whether the gate is open. See §3 Authoritative Mode.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
                           #   Validate+yolo) on CI checks passing on the PR head. At
                           #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
@@ -1440,6 +1446,41 @@ fabrik --review-wait-timeout=30
 #### Restart Persistence
 
 The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
+
+#### Authoritative Mode
+
+Everything above describes the default — **advisory** — mode: the gate clears once every requested reviewer has responded and at least one review exists, whatever the review actually says. A reviewer requesting changes does not, by itself, stop Fabrik from advancing.
+
+Set `review_authority: authoritative` on a stage (alongside `wait_for_reviews: true`) to make a review's *verdict* binding, not just its existence:
+
+```yaml
+name: Validate
+order: 5
+wait_for_reviews: true
+review_authority: authoritative
+...
+```
+
+In `authoritative` mode, the gate additionally requires:
+
+- **No outstanding `CHANGES_REQUESTED` review** — from any reviewer, human or bot.
+- **Required approvals satisfied** — preferring GitHub's own computed review-decision verdict when your repo's branch protection defines a review requirement (this already accounts for CODEOWNERS and required-approval counts), and otherwise falling back to Fabrik's own check that no submitted review is currently `CHANGES_REQUESTED` — so `authoritative` mode is meaningful even on a repo with no branch protection configured.
+
+This applies at **both** decision points: the stage-advance gate (the mechanism described above) and the landing/auto-merge gate at Validate completion — a `CHANGES_REQUESTED` review blocks auto-merge under `yolo`, not just stage advancement.
+
+**`yolo`/`cruise` never bypass an authoritative gate.** They still control *when* Fabrik acts once the gate is satisfied — not *whether* it's satisfied:
+
+| Mode | Behavior |
+|---|---|
+| `advisory` + `yolo` | Unchanged — auto-advance and auto-merge as soon as a review exists, regardless of verdict. |
+| `authoritative` + `yolo` | Auto-merge fires as soon as `CHANGES_REQUESTED` is cleared and required approvals are met — no human click needed for the merge itself, but Fabrik waits for a still-blocking verdict rather than forcing through it. |
+| `authoritative` + `cruise` | Cruise's existing "stop before auto-merge" behavior is unaffected — a cruise item never reaches the authoritative check at all. |
+
+If the verdict never resolves — an unfixable review finding, or a required human who never approves — the issue falls into the same pause-for-human path as an unresponsive reviewer: the existing `FABRIK_MAX_REVIEW_CYCLES` / `FABRIK_REVIEW_WAIT_TIMEOUT` machinery above applies unchanged. There is no separate timeout or cycle limit for authoritative mode.
+
+`review_authority` defaults to `advisory` (equivalent to leaving it unset) — existing repos and stages are unaffected until you opt in.
+
+For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode) and [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
 
 ---
 
@@ -2064,7 +2105,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
-| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
+| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode) |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
@@ -4280,6 +4321,33 @@ When all outstanding requested reviewers are bots (detected via `ReviewRequest.I
 - `fabrik:bot-reprompted` — single fixed label (22 chars, well under GitHub's 50-char REST API limit); applied once after Phase 1 finishes re-prompting all outstanding bots; removed when Phase 2 fires (as part of Phase 2 cleanup), when the gate clears naturally via `removeAwaitingReviewLabel` (all reviewers submitted), or when the issue is closed (defensive sweep by `cleanupClosedIssueTransientLabels`). Only exists while the pure-bot escalation is in progress within a gate cycle.
 - `fabrik:awaiting-review` — applied on first block; removed on natural gate clear or when Phase 2 fires; persists while the issue is paused (mixed/human/Phase-2 timeout paths — `pauseForReviewTimeout` does not remove it).
 
+### 6.1.1 `review_authority`: Verdict-Aware Clearing (Authoritative Mode)
+
+Everything in §6.1 describes **advisory** mode — the default, and the only mode that existed before ADR-1250. Advisory clears the gate on **existence**: `len(outstanding) == 0 && hasReviews`, regardless of what any review actually says. A `CHANGES_REQUESTED` review does not, by itself, block advancement; a required reviewer only needs to *submit*, not *approve*.
+
+`review_authority: authoritative` is a per-stage YAML opt-in (`stages.Stage.ReviewAuthority`, `{"", "advisory", "authoritative"}`, default `""`/advisory) that makes the same clearing branch additionally **verdict-aware**. It is orthogonal to Fabrik's autonomy controls (`yolo`/`cruise`/manual) — autonomy answers "does Fabrik proceed without a human clicking go?"; authority answers "what must be true before proceeding is allowed?" See [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
+
+**Where the check lives.** `reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (satisfied bool, reason string)` (`engine/reviews.go`) is a pure function called from **inside** the existing `len(outstanding) == 0 && hasReviews` branch of both `checkReviewGate` (Path 2, the advance gate) and `reviewGateBlocksLanding` (Path 3, the landing gate) — never as a parallel or replacement check. This is strictly additive: a PR with zero reviews stays blocked by the outer advisory condition regardless of mode, and advisory mode's existing behavior is completely untouched (the new check is gated on `stage.ReviewAuthority == "authoritative"` and never runs otherwise — zero extra API calls, zero behavior change for advisory/default repos).
+
+**Verdict source, preferred then fallback:**
+1. **GitHub's `reviewDecision`, when it reflects a real branch-protection review requirement** — one of `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED` (computed server-side, including CODEOWNERS-required approvals and required-approval-count rules — Fabrik does no CODEOWNERS parsing of its own). Satisfied only on `APPROVED`. `REVIEW_REQUIRED` covers both "zero reviews yet" and "some, but not enough, approvals" (e.g. a required-approval-count of 2 with only 1 approval so far) — GitHub reports the same value for both, and `reviewGateAuthorityVerdict` is only reached once `hasReviews` is already true, so in practice this branch represents the not-enough-approvals case.
+2. **Fabrik's own fallback, when `reviewDecision` is `""`** (no branch-protection review requirement configured on the repo) — satisfied unless any review in the caller's `reviews` slice has `State == "CHANGES_REQUESTED"`. This exists so `authoritative` mode is never a silent no-op on a repo without branch protection; without it, opting in on such a repo would be indistinguishable from advisory. On the `base:<branch>` REST fallback path, `reviews` comes from `FetchPRReviews` (`github/prs.go`), which collapses each author's full review history down to one entry — critically, a `COMMENTED` follow-up submission never overwrites a prior formal verdict (`APPROVED`/`CHANGES_REQUESTED`/`DISMISSED`) from the same author during that collapse, so a reviewer who requests changes and later leaves a comment-only follow-up still reads as an active `CHANGES_REQUESTED` here, matching GitHub's own review-decision semantics (COMMENTED is informational, not a state transition).
+3. **Any other non-empty `reviewDecision`** (an undocumented future GitHub enum value) blocks conservatively rather than falling through to the fallback in (2) — GitHub did report a real verdict, just not one Fabrik recognizes yet, so treating it as "no requirement configured" could wrongly satisfy the gate.
+
+**Fetching `reviewDecision`.** `FetchPRReviewDecision(owner, repo string, prNumber int) (string, error)` (`github/prs.go`) is a GraphQL-by-PR-number query (`repository(owner,name){ pullRequest(number){ reviewDecision } }`), mirroring `prNodeID`'s shape rather than nesting inside `closedByPullRequestsReferences` — REST has no equivalent field, and this shape works identically for default-branch and `base:<branch>` items with no `ProjectItem` schema change, no webhook-delta freshness plumbing, and no caching (`boardcache.CacheImpl.FetchPRReviewDecision` always delegates, mirroring `FetchPRReviews`/`FetchPRReviewRequests`' "review state is highly volatile" rationale). The call is made only when `stage.ReviewAuthority == "authoritative"` and the gate has already reached the "would otherwise clear" branch, so the extra GraphQL round-trip is paid only by stages that opt in, and only on the poll where it would matter.
+
+**Fetch failure blocks conservatively.** A `FetchPRReviewDecision` error at either gate site does **not** clear the gate and does **not** silently fall back to the no-branch-protection computation — it is treated as unknown state, mirroring the existing `FetchPRReviews`/`FetchPRReviewRequests` failure handling in both functions. At `checkReviewGate` this falls through into the existing still-waiting/escalation logic with the reason `"review verdict unreadable (fetch failed), blocking conservatively"`; at `reviewGateBlocksLanding` it returns from `holdLandingForReview` with an equivalent message.
+
+**No PR number resolved.** If `checkReviewGate`'s `prNumber <= 0` at the point authoritative mode would consult it (linkage not yet resolved), the gate blocks with reason `"review verdict unreadable — no PR number resolved"` rather than skipping the check.
+
+**Graceful non-clear → existing pause path, no new machinery.** Because the verdict check is inside the shared clearing branch, a verdict that never resolves (an unfixable finding, or a required human who never approves) simply means the branch's outer condition either keeps failing (verdict blocks it) or the function falls through to whatever "still blocked" logic already existed for that outstanding state — `checkReviewGate`'s bot-escalation ladder and `checkAwaitingReviewTimeout`, ultimately `pauseForReviewTimeout`/`pauseForReviewCycleLimit`. No new pause path was added; §6.1's `ReviewWaitTimeout`/`MaxReviewCycles` machinery bounds an authoritative block exactly as it bounds an advisory one.
+
+**Messaging distinguishes "no reviews yet" from "reviews exist but the verdict blocks."** `checkAwaitingReviewTimeout` takes an `authorityReason` parameter (non-empty only when the authoritative check blocked) and uses it verbatim as both the wait-log reason and the timeout-pause reason, instead of the generic `"no reviews submitted yet"` / `"pending reviewers"` text — which would otherwise misleadingly suggest nobody has reviewed at all. `pauseForReviewTimeout`'s standard (non-Phase-2) message additionally live-fetches the verdict and reuses `reviewGateAuthorityVerdict` itself when authoritative mode is on, appending its `reason` string verbatim (e.g. `"no branch-protection review requirement; bob requested changes"` — the reviewer's login comes from `reviewGateAuthorityVerdict`'s own fallback-branch message, not a separate helper) — so this line can never disagree with why the gate is actually blocking, and covers `REVIEW_REQUIRED`/fetch-failure cases too, not just an active `CHANGES_REQUESTED` review. `item.LinkedPRNumber`/`item.LinkedPRReviews` are structurally empty for `base:<branch>` items (same gap as the existing `pendingLine`), so this resolves the PR and its reviews via the same `FetchLinkedPR`/`FetchPRReviews` REST fallback `checkReviewGate`/`reviewGateBlocksLanding` use, rather than omitting the line there.
+
+**`yolo`/`cruise` never bypass the gate — no new branching needed.** Because the check lives inside the shared clearing predicate rather than at `attemptMergeOnValidate`/`handleStageComplete`'s yolo/cruise decision points, `authoritative + yolo` "waits" for free: `attemptMergeOnValidate` simply never reaches its merge/enqueue logic while `reviewGateBlocksLanding` returns `true`, exactly like an outstanding-reviewer block today. Once the verdict clears (a fix pushed → stale review dismissed on push → re-review → `APPROVED`, or a required approval lands), `yolo` merges immediately with no human click required — the *timing* is still automatic, only the *gate* has tightened. `cruise` composes identically at both layers: `hasCruiseLabel` is checked *before* `reviewGateBlocksLanding` is ever consulted (§1's cruise-wins-over-yolo precedent — cruise is checked on the raw label, not `cruiseActive` — applies unchanged here), so a cruise item never even reaches the authoritative check — cruise's "leave the PR for human merge" behavior is unaffected by `review_authority`.
+
+**Unit tests:** `TestReviewGateAuthorityVerdict` (`engine/reviews_test.go`) is the pure-function table (`APPROVED`/`CHANGES_REQUESTED`/`REVIEW_REQUIRED`/empty-with-clean-reviews/empty-with-`CHANGES_REQUESTED`/empty-with-`DISMISSED`-`CHANGES_REQUESTED`). `TestCheckReviewGate_Authoritative_*` and `TestCheckReviewGate_NonDefaultBase_Authoritative_*` cover the advance gate across `reviewDecision` × branch-protection-present/absent × default-branch/`base:<branch>` × fetch-error. `TestAttemptMergeOnValidate_Authoritative_*` covers the identical matrix at the landing gate, plus `TestAttemptMergeOnValidate_Authoritative_CruiseSkipsAutoMerge` (cruise composition) — `attemptMergeOnValidate`'s own yolo-vs-advisory tests (`TestAttemptMergeOnValidate_YoloEnablesAutoMerge` etc.) already exercise the yolo path unconditionally, since the function has no yolo-specific branching to begin with. `TestCheckReviewGate_Advisory_ChangesRequestedReview_StillClears` and `TestAttemptMergeOnValidate_Advisory_ChangesRequestedReview_StillMerges` are explicit non-regression controls: advisory mode clears/merges regardless of a `CHANGES_REQUESTED` verdict, and `FetchPRReviewDecision` is asserted never called.
+
 ### 6.2 Review Reinvoke Mechanics
 
 The catch-up loop in `poll()` is split into two phases for every non-paused non-cleanup item that has either `stage:<X>:complete` OR `fabrik:awaiting-ci` (on a `wait_for_ci: true` stage):
@@ -4599,7 +4667,9 @@ There is therefore no poll pass in which the item sits at Validate with `hasComp
 - `TestAttemptMergeOnValidate_ReviewGate_*` (`engine/stages_test.go`) pin the gate's own semantics: PR-number fallback, conservative fetch-error blocking, and zero cost when `wait_for_reviews` is unset.
 - `TestCIAndReviewGate_JointClearingHandoff` remains the coverage for the ordinary across-polls path, where `handleReviewGate` owns escalation once `stage:X:complete` is present.
 
-**References:** [ADR-1216: Review gate checked at the landing decision](../adrs/1216-review-gate-at-landing-decision.md)
+**`review_authority: authoritative` composes unchanged (ADR-1250).** The verdict check described in §6.1.1 lives inside `reviewGateBlocksLanding`'s own `len(outstanding) == 0 && hasReviews` branch, so it participates in the joint-clearing sequence exactly as the advisory clearing condition does — no separate ordering, no new poll-gap risk. A `CHANGES_REQUESTED` verdict on the pass where CI turns green blocks the landing exactly as an outstanding reviewer would; the item still gets `stage:Validate:complete` (from `handleMergeAndCIGates`) with the landing withheld, and `checkReviewGate` (Path 2) owns escalation from the next poll onward, same as always.
+
+**References:** [ADR-1216: Review gate checked at the landing decision](../adrs/1216-review-gate-at-landing-decision.md), [ADR-1250: Review authority — advisory vs. authoritative, an axis orthogonal to autonomy](../adrs/1250-review-authority-orthogonal-to-autonomy.md)
 
 ### 6.7 Pre-Implement Spawn Path
 
@@ -6924,7 +6994,7 @@ When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — a
 6. **Validate only:** `ValidateCompletedAtSHA` mutation applied with the worktree's current `HEAD` SHA (`git rev-parse HEAD`). This records the exact post-commit SHA so the SHA-invalidation scan (`docs/state-machine.md` §2.16) can detect future SHA changes (force-push, external commits) and automatically re-enter Validate. On error (e.g. bare git call fails), the SHA is left empty — the SHA-invalidation scan's FR-5 guard treats empty completion SHA as "do nothing," preserving safe degraded behavior.
 7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
 
-**Validate + yolo**: At Validate completion, if the issue carries `fabrik:yolo` (and not `fabrik:cruise`), Fabrik calls `enablePullRequestAutoMerge` on the linked PR and applies `fabrik:auto-merge-enabled` rather than calling `MergePR` directly. GitHub then merges the PR atomically once branch-protection requirements are satisfied. The post-Validate convergence monitor (`checkAutoMergeConvergence`) tracks the PR in subsequent poll cycles until it reaches a terminal state or the convergence budget expires. If `enablePullRequestAutoMerge` fails (PR already in a terminal GitHub state — CLEAN, UNSTABLE, or similar), Fabrik falls back to a direct `MergePR` call — the only merge path with no independent `mergeable_state` gate upstream of it (reached whenever `wait_for_ci: false`). `MergePR` self-gates regardless of `enforce_admins`: it refuses to merge unless `mergeable_state ∈ {clean, unstable}`, returning the distinct sentinel `gh.ErrNotMergeableCI` when a required check is still `blocked` or pending (ADR-072). This is not a merge conflict — `fabrik:rebase-needed` is not applied and no rebase cycle is consumed; the item simply retries via a full Validate re-dispatch on the next poll. See `docs/state-machine.md` §5.4–5.5 for full details.
+**Validate + yolo**: At Validate completion, if the issue carries `fabrik:yolo` (and not `fabrik:cruise`), and the Validate stage's review gate is either not opted in (`wait_for_reviews` unset) or already satisfied — including, when `review_authority: authoritative` is set, no outstanding `CHANGES_REQUESTED` review (see `docs/state-machine.md` §6.1.1) — Fabrik calls `enablePullRequestAutoMerge` on the linked PR and applies `fabrik:auto-merge-enabled` rather than calling `MergePR` directly. GitHub then merges the PR atomically once branch-protection requirements are satisfied. The post-Validate convergence monitor (`checkAutoMergeConvergence`) tracks the PR in subsequent poll cycles until it reaches a terminal state or the convergence budget expires. If `enablePullRequestAutoMerge` fails (PR already in a terminal GitHub state — CLEAN, UNSTABLE, or similar), Fabrik falls back to a direct `MergePR` call — the only merge path with no independent `mergeable_state` gate upstream of it (reached whenever `wait_for_ci: false`). `MergePR` self-gates regardless of `enforce_admins`: it refuses to merge unless `mergeable_state ∈ {clean, unstable}`, returning the distinct sentinel `gh.ErrNotMergeableCI` when a required check is still `blocked` or pending (ADR-072). This is not a merge conflict — `fabrik:rebase-needed` is not applied and no rebase cycle is consumed; the item simply retries via a full Validate re-dispatch on the next poll. See `docs/state-machine.md` §5.4–5.5 for full details.
 
 Note: `fabrik:extend-turns` is **not** removed here. It persists across all intermediate stages and is removed only during the Done stage's cleanup path (see Cleanup Stage below).
 

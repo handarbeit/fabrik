@@ -121,9 +121,31 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// AND at least one non-DISMISSED review exists. This catches both human
 	// reviewers who submit formally and bot reviewers (Copilot, Gemini) who
 	// self-submit without ever appearing in reviewRequests.
+	//
+	// In authoritative mode this is additive, not a replacement: the same
+	// len(outstanding)==0 && hasReviews condition still gates entry, and
+	// reviewGateAuthorityVerdict is only consulted from inside it — a PR with
+	// zero reviews stays blocked by the outer condition regardless of mode.
+	var authorityReason string
 	if len(outstanding) == 0 && hasReviews {
-		e.removeAwaitingReviewLabel(owner, repo, item)
-		return false, false, false
+		if stage.ReviewAuthority != "authoritative" {
+			e.removeAwaitingReviewLabel(owner, repo, item)
+			return false, false, false
+		}
+		if prNumber <= 0 {
+			// No PR number resolved — can't fetch a verdict. Block
+			// conservatively rather than silently falling back to advisory
+			// clearing.
+			authorityReason = "review verdict unreadable — no PR number resolved"
+		} else if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, prNumber); err != nil {
+			e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviewDecision failed: %v\n", err)
+			authorityReason = "review verdict unreadable (fetch failed), blocking conservatively"
+		} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); satisfied {
+			e.removeAwaitingReviewLabel(owner, repo, item)
+			return false, false, false
+		} else {
+			authorityReason = reason
+		}
 	}
 
 	// Determine if all outstanding reviewers are bots. Used by Phase 1/2 logic.
@@ -150,11 +172,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Still waiting. Check the fabrik:awaiting-review timeout (Phase 1
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
-	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted); done {
+	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted, authorityReason); done {
 		return blocked, timedOut, false
 	}
 
-	if len(outstanding) > 0 {
+	if authorityReason != "" {
+		e.logf(item.Number, "awaiting-review", "authoritative gate still blocking: %s\n", authorityReason)
+	} else if len(outstanding) > 0 {
 		e.logf(item.Number, "awaiting-review", "waiting for reviewers: %s\n", strings.Join(outstanding, ", "))
 	} else {
 		e.logf(item.Number, "awaiting-review", "waiting for initial review submission (no reviewers requested; bot reviewers may still be processing)\n")
@@ -282,10 +306,73 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 	return outstanding, hasReviews
 }
 
+// reviewGateAuthorityVerdict is the additive check `review_authority:
+// authoritative` mode applies inside the existing "outstanding == 0 &&
+// hasReviews" clearing branch of both checkReviewGate and
+// reviewGateBlocksLanding — it never runs in "advisory" mode (the caller gates
+// the call itself) and never widens what advisory already clears, only
+// narrows it further. See ADR-1250.
+//
+// When reviewDecision is one of GitHub's real branch-protection-review-requirement
+// values (APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED — computed server-side,
+// including CODEOWNERS and required-approval-count rules), that value is
+// authoritative: satisfied only on APPROVED. When reviewDecision is empty (no
+// branch-protection review requirement configured on this repo), authoritative
+// mode must not become a silent no-op — it falls back to Fabrik's own
+// computation: satisfied unless any non-DISMISSED review in reviews is in
+// CHANGES_REQUESTED state. Any other non-empty value (an undocumented future
+// GitHub enum addition, or a schema change) blocks conservatively instead of
+// silently falling through to the no-branch-protection fallback — GitHub did
+// report a real verdict here, just not one this function recognizes, so
+// treating it as "no requirement configured" could wrongly satisfy the gate.
+func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (satisfied bool, reason string) {
+	switch reviewDecision {
+	case "":
+		// No branch-protection review requirement configured — fall through to
+		// Fabrik's own computation below.
+	case "APPROVED":
+		return true, "reviewDecision=APPROVED"
+	case "CHANGES_REQUESTED":
+		return false, "reviewDecision=CHANGES_REQUESTED"
+	case "REVIEW_REQUIRED":
+		// Covers both "zero reviews submitted yet against a branch-protection
+		// requirement" and "some, but not enough, approvals" (e.g. a
+		// required-approval-count of 2 with only 1 approval so far) — GitHub
+		// reports the same REVIEW_REQUIRED value for both. This function is
+		// only reached once hasReviews is already true (checkReviewGate/
+		// reviewGateBlocksLanding gate on outstanding==0 && hasReviews before
+		// calling in), so in practice this always represents the
+		// not-enough-approvals case, not the zero-reviews case — but the
+		// block-conservatively behavior is correct for either.
+		return false, "reviewDecision=REVIEW_REQUIRED"
+	default:
+		return false, fmt.Sprintf("unrecognized reviewDecision=%q, blocking conservatively", reviewDecision)
+	}
+
+	// No branch-protection review requirement configured — fall back to
+	// Fabrik's own outstanding-reviewer + no-CHANGES_REQUESTED computation.
+	// DISMISSED reviews are excluded — a dismissed CHANGES_REQUESTED review is
+	// no longer an active verdict, mirroring reviewGateOutstanding's hasReviews
+	// computation.
+	for _, r := range reviews {
+		if r.State == "CHANGES_REQUESTED" {
+			return false, fmt.Sprintf("no branch-protection review requirement; %s requested changes", r.Author)
+		}
+	}
+	return true, "no branch-protection review requirement; no outstanding CHANGES_REQUESTED review"
+}
+
 // reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
 // whether a wait_for_reviews stage must be held back from its landing decision
 // (auto-merge enable, enqueue, direct merge, or advance-to-Queued) because reviewer
 // requests are still outstanding.
+//
+// review_authority: authoritative (ADR-1250) additionally gates the same
+// clearing branch on reviewGateAuthorityVerdict — no outstanding
+// CHANGES_REQUESTED and required approvals satisfied. Because this sits ahead
+// of attemptMergeOnValidate's yolo/cruise merge logic, `yolo`/`cruise` never
+// bypass it: they only control merge *timing* once the authoritative gate is
+// itself satisfied, never the gate's clearing condition.
 //
 // Why this exists separately from checkReviewGate: the catch-up loop's
 // handleReviewGate deliberately no-ops while !pctx.hasComplete (#617), and
@@ -398,6 +485,24 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// function, so the two gate sites can never disagree on "outstanding".
 	outstanding, hasReviews := reviewGateOutstanding(requests, reviews)
 	if len(outstanding) == 0 && hasReviews {
+		// Authoritative mode: additive check, same reviewGateAuthorityVerdict
+		// pure function checkReviewGate uses, so the advance gate and the
+		// landing gate can never disagree on what "satisfied" means. A fetch
+		// error blocks conservatively — same rationale as the FetchPRReviews/
+		// FetchPRReviewRequests failure handling just above; a transient
+		// GraphQL error must never silently fall back to advisory clearing.
+		if stage.ReviewAuthority == "authoritative" {
+			reviewDecision, decisionErr := e.readClient.FetchPRReviewDecision(owner, repo, prNumber)
+			if decisionErr != nil {
+				e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewDecision failed: %v\n", decisionErr)
+				return e.holdLandingForReview(item,
+					"holding landing decision on PR #%d — review verdict unreadable (fetch failed), blocking conservatively\n", prNumber)
+			}
+			if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
+				return e.holdLandingForReview(item,
+					"holding landing decision on PR #%d — authoritative gate still blocking: %s\n", prNumber, reason)
+			}
+		}
 		// Deliberately does NOT call removeAwaitingReviewLabel here, unlike
 		// checkReviewGate's equivalent clearing branch. Removal is checkReviewGate's
 		// job: this function only ever runs on a Validate item, and every path that
@@ -515,7 +620,14 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 // done=false means the label wasn't found, was found but the timeout hasn't
 // elapsed yet, or Phase 1 already fired and Phase 2 hasn't timed out yet —
 // the caller falls through to the "still waiting" logging/label-apply tail.
-func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool) (blocked, timedOut, done bool) {
+//
+// authorityReason is non-empty only when the caller's authoritative-mode
+// verdict check blocked (see reviewGateAuthorityVerdict) — i.e. outstanding is
+// empty and reviews exist, but the verdict itself isn't satisfied. When set,
+// it is used verbatim as the pause reason instead of the generic
+// "pending reviewers"/"no reviews submitted yet" messages, which would
+// otherwise misleadingly suggest nobody has reviewed at all.
+func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -570,7 +682,9 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 
 		// Mixed/pure-human or no PR number: existing pause behavior.
 		var reason string
-		if len(outstanding) > 0 {
+		if authorityReason != "" {
+			reason = "authoritative gate blocking: " + authorityReason
+		} else if len(outstanding) > 0 {
 			reason = "pending reviewers: " + strings.Join(outstanding, ", ")
 		} else {
 			reason = "no reviews submitted yet (bots may not have responded)"
@@ -709,10 +823,50 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		if len(reviewerParts) > 0 {
 			pendingLine = "\n\nPending reviewers: " + strings.Join(reviewerParts, ", ")
 		}
+		// Authoritative-mode context: live-fetch the verdict and reuse the same
+		// reviewGateAuthorityVerdict pure function both gate sites consult, so
+		// this message can never disagree with why the gate is actually
+		// blocking — unlike a narrower heuristic (e.g. scanning only for a
+		// CHANGES_REQUESTED review), this also surfaces REVIEW_REQUIRED and
+		// fetch-failure cases, not just an active CHANGES_REQUESTED review.
+		// item.LinkedPRNumber (and LinkedPRReviews with it) is always 0/empty
+		// for a base:<branch> item — closedByPullRequestsReferences is
+		// structurally empty there. Resolve both via the same REST fallback
+		// checkReviewGate/reviewGateBlocksLanding use, so this line is still
+		// populated on a base:<branch> repo instead of silently omitted.
+		authorityLine := ""
+		if stage.ReviewAuthority == "authoritative" {
+			owner, repo := itemOwnerRepo(item, e.defaultRepo())
+			prNumber := item.LinkedPRNumber
+			reviews := item.LinkedPRReviews
+			if prNumber == 0 {
+				if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
+					prNumber = pr.Number
+					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
+						reviews = restReviews
+					}
+				}
+			}
+			if prNumber > 0 {
+				if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, prNumber); err != nil {
+					authorityLine = fmt.Sprintf(
+						"\n\nReview authority is `authoritative` for this stage — the review verdict could not be "+
+							"read (%v); the gate is blocking conservatively until it can be.",
+						err,
+					)
+				} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
+					authorityLine = fmt.Sprintf(
+						"\n\nReview authority is `authoritative` for this stage — %s, "+
+							"and the gate will not clear until that is resolved.",
+						reason,
+					)
+				}
+			}
+		}
 		msg = fmt.Sprintf(
-			"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s\n\n"+
+			"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
 				"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
-			stage.Name, pendingLine,
+			stage.Name, pendingLine, authorityLine,
 		)
 	}
 
