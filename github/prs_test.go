@@ -433,7 +433,10 @@ func TestFetchPRDetails_Success(t *testing.T) {
 			"state":  "open",
 			"merged": false,
 			"draft":  true,
-			"head":   map[string]string{"sha": "abc123def"},
+			"user":   map[string]string{"login": "alice"},
+			"labels": []map[string]string{{"name": "bug"}, {"name": "needs-review"}},
+			"head":   map[string]string{"sha": "abc123def", "ref": "feature-branch"},
+			"base":   map[string]string{"ref": "main"},
 		})
 	}))
 	defer srv.Close()
@@ -460,6 +463,18 @@ func TestFetchPRDetails_Success(t *testing.T) {
 	}
 	if pr.HeadSHA != "abc123def" {
 		t.Errorf("HeadSHA = %q, want 'abc123def'", pr.HeadSHA)
+	}
+	if pr.HeadRefName != "feature-branch" {
+		t.Errorf("HeadRefName = %q, want 'feature-branch'", pr.HeadRefName)
+	}
+	if pr.BaseRef != "main" {
+		t.Errorf("BaseRef = %q, want 'main'", pr.BaseRef)
+	}
+	if pr.Author != "alice" {
+		t.Errorf("Author = %q, want 'alice'", pr.Author)
+	}
+	if len(pr.Labels) != 2 || pr.Labels[0] != "bug" || pr.Labels[1] != "needs-review" {
+		t.Errorf("Labels = %v, want [bug needs-review]", pr.Labels)
 	}
 }
 

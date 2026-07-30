@@ -349,9 +349,17 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		Body           string      `json:"body"`
 		MergeableState string      `json:"mergeable_state"`
 		AutoMerge      interface{} `json:"auto_merge"` // non-null object = enabled, null = disabled
-		Head           struct {
+		User           struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []rawLabel `json:"labels"`
+		Head   struct {
 			SHA string `json:"sha"`
+			Ref string `json:"ref"`
 		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
 		return nil, fmt.Errorf("fetching PR #%d: %w", prNumber, err)
@@ -364,8 +372,12 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		Draft:            raw.Draft,
 		Body:             raw.Body,
 		HeadSHA:          raw.Head.SHA,
+		HeadRefName:      raw.Head.Ref,
+		BaseRef:          raw.Base.Ref,
 		MergeableState:   raw.MergeableState,
 		AutoMergeEnabled: raw.AutoMerge != nil,
+		Author:           raw.User.Login,
+		Labels:           labelNames(raw.Labels),
 	}, nil
 }
 
