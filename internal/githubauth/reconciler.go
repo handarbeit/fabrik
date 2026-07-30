@@ -8,9 +8,20 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
+
+// identityValidationRetryDelays are the pauses between retries when the App
+// this exact Reconcile call just manifest-created immediately fails its own
+// first identity check — see the justBootstrapped branch in Reconcile.
+var identityValidationRetryDelays = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
+
+// identityValidationSleep is identityValidationRetryDelays' delay function —
+// a package var so tests can replace it with a no-op instead of sleeping for
+// real.
+var identityValidationSleep = time.Sleep
 
 // Options configures Reconcile. It mirrors the subset of the caller's own
 // config the reconciler needs — this package must never import pruefer (see
@@ -144,7 +155,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		logf = func(string, ...any) {}
 	}
 
-	appID, privateKey, err := loadOrBootstrapCredentials(ctx, opts, logf)
+	appID, privateKey, justBootstrapped, err := loadOrBootstrapCredentials(ctx, opts, logf)
 	if err != nil {
 		return nil, err
 	}
@@ -184,34 +195,58 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		if opts.AppID != 0 {
 			return nil, fmt.Errorf("github_app_id %d is configured but no longer resolves on GitHub (%w) — it may have been deleted; update or remove github_app_id in config to let first-run setup create a new App (repair required, not auto-recreated)", opts.AppID, err)
 		}
-		// AppID was resolved from the reconciler-owned state file (a prior
-		// manifest run), not pinned by config — safe to self-heal: the next
-		// restart resolves the freshly-created App's ID from AppStatePath
-		// with no stale config value in the way. Preserve existing
-		// non-secret config (RunManifestFlow only overwrites on full
-		// success) and re-enter the manifest flow rather than silently
-		// giving up — see the issue's "App deleted externally" failure
-		// handling requirement.
-		logf("! app identity validation failed for App ID %d (%v) — it may have been deleted; starting App creation again", appID, err)
-		creds, bootErr := runManifestFlow(ctx, ManifestFlowOptions{
-			BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
-			PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
-		})
-		if bootErr != nil {
-			return nil, fmt.Errorf("app identity validation failed (%w) and re-creating the App also failed: %v", err, bootErr)
-		}
-		appID = creds.AppID
-		privateKey, err = loadPrivateKey(opts.AppPrivateKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading freshly-created App's private key: %w", err)
-		}
-		jwt, err = gh.BuildAppJWT(appID, privateKey)
-		if err != nil {
-			return nil, fmt.Errorf("building app JWT after re-creating the App: %w", err)
-		}
-		slug, err = gh.FetchAppSlug(opts.BaseURL, jwt)
-		if err != nil {
-			return nil, fmt.Errorf("validating freshly-created App's identity: %w", err)
+		// justBootstrapped means loadOrBootstrapCredentials manifest-created
+		// this exact App a few lines above, in this same Reconcile call. An
+		// immediate 401/403/404 here is far more plausibly brief
+		// propagation lag on a brand-new App (or a network blip that
+		// happens to land on one of those status codes) than genuine
+		// external deletion seconds after creation — GitHub hasn't had a
+		// chance to delete anything yet. Treating it as deletion would walk
+		// the user through creating a *second* App with no indication the
+		// first is a duplicate caused by this race, rather than a real
+		// external deletion. Retry the identity check a few times first;
+		// only self-heal (re-enter the manifest flow) below when the App
+		// was NOT just created in this call.
+		if justBootstrapped {
+			for _, delay := range identityValidationRetryDelays {
+				identityValidationSleep(delay)
+				if slug, err = gh.FetchAppSlug(opts.BaseURL, jwt); err == nil {
+					break
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
+			}
+		} else {
+			// AppID was resolved from the reconciler-owned state file (a
+			// prior manifest run), not pinned by config — safe to
+			// self-heal: the next restart resolves the freshly-created
+			// App's ID from AppStatePath with no stale config value in the
+			// way. Preserve existing non-secret config (RunManifestFlow
+			// only overwrites on full success) and re-enter the manifest
+			// flow rather than silently giving up — see the issue's "App
+			// deleted externally" failure handling requirement.
+			logf("! app identity validation failed for App ID %d (%v) — it may have been deleted; starting App creation again", appID, err)
+			creds, bootErr := runManifestFlow(ctx, ManifestFlowOptions{
+				BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
+				PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
+			})
+			if bootErr != nil {
+				return nil, fmt.Errorf("app identity validation failed (%w) and re-creating the App also failed: %v", err, bootErr)
+			}
+			appID = creds.AppID
+			privateKey, err = loadPrivateKey(opts.AppPrivateKeyPath)
+			if err != nil {
+				return nil, fmt.Errorf("reading freshly-created App's private key: %w", err)
+			}
+			jwt, err = gh.BuildAppJWT(appID, privateKey)
+			if err != nil {
+				return nil, fmt.Errorf("building app JWT after re-creating the App: %w", err)
+			}
+			slug, err = gh.FetchAppSlug(opts.BaseURL, jwt)
+			if err != nil {
+				return nil, fmt.Errorf("validating freshly-created App's identity: %w", err)
+			}
 		}
 	}
 	botLogin := slug + "[bot]"
@@ -400,16 +435,22 @@ func saveInstallationRepoCache(statePath string, appID int64, slug string, repoC
 //   - both are present and readable → return them; Reconcile's later
 //     identity-validation call is what detects an externally-deleted App
 //     ("app-deleted-externally") — that case is not this function's job.
-func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(string, ...any)) (int64, *rsa.PrivateKey, error) {
+//
+// The bool return reports whether this call itself just ran the manifest
+// flow — Reconcile uses it to avoid mistaking the freshly-created App's own
+// first identity check for a sign of external deletion (see the retry loop
+// around FetchAppSlug in Reconcile).
+func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(string, ...any)) (int64, *rsa.PrivateKey, bool, error) {
 	appID := opts.AppID
 	if appID == 0 {
 		state, err := loadCredentials(opts.AppStatePath)
 		if err != nil {
-			return 0, nil, fmt.Errorf("app state file %s exists but is corrupt — repair or remove it: %w", opts.AppStatePath, err)
+			return 0, nil, false, fmt.Errorf("app state file %s exists but is corrupt — repair or remove it: %w", opts.AppStatePath, err)
 		}
 		appID = state.AppID
 	}
 
+	justBootstrapped := false
 	if appID == 0 {
 		logf("no usable local GitHub App credentials found — starting first-run setup")
 		creds, err := runManifestFlow(ctx, ManifestFlowOptions{
@@ -417,18 +458,19 @@ func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(str
 			PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
 		})
 		if err != nil {
-			return 0, nil, fmt.Errorf("first-run GitHub App setup: %w", err)
+			return 0, nil, false, fmt.Errorf("first-run GitHub App setup: %w", err)
 		}
 		appID = creds.AppID
+		justBootstrapped = true
 	}
 
 	if _, err := os.Stat(opts.AppPrivateKeyPath); os.IsNotExist(err) {
-		return 0, nil, fmt.Errorf("github_app_id %d is configured but its private key %s is missing — restore it from the App's settings page (repair required, not auto-regenerated)", appID, opts.AppPrivateKeyPath)
+		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is missing — restore it from the App's settings page (repair required, not auto-regenerated)", appID, opts.AppPrivateKeyPath)
 	}
 	privateKey, err := loadPrivateKey(opts.AppPrivateKeyPath)
 	if err != nil {
-		return 0, nil, fmt.Errorf("github_app_id %d is configured but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appID, opts.AppPrivateKeyPath, err)
+		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appID, opts.AppPrivateKeyPath, err)
 	}
 
-	return appID, privateKey, nil
+	return appID, privateKey, justBootstrapped, nil
 }

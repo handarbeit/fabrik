@@ -914,6 +914,131 @@ func TestReconcile_TransientAppIdentityFailure_PinnedAppID_ReturnsErrorNeverBoot
 	}
 }
 
+// TestReconcile_JustBootstrapped_TransientIdentityFailure_RetriesInsteadOfSelfHealing
+// is the regression test for the bug an external review found: when
+// loadOrBootstrapCredentials runs the manifest flow because no local
+// credentials existed at all (opts.AppID == 0, no app-state.json), the very
+// next call — FetchAppSlug, a few lines below — could transiently 401/403/404
+// (e.g. brief propagation lag on a brand-new App). Before this fix, that was
+// indistinguishable from "the App was deleted externally" and immediately
+// re-invoked runManifestFlow, silently walking the user through creating a
+// second App. Reconcile must instead retry the identity check a few times
+// before ever considering self-heal, and must never call runManifestFlow a
+// second time within the same call.
+func TestReconcile_JustBootstrapped_TransientIdentityFailure_RetriesInsteadOfSelfHealing(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	statePath := filepath.Join(dir, "app-state.json")
+
+	oldSleep := identityValidationSleep
+	identityValidationSleep = func(time.Duration) {}
+	defer func() { identityValidationSleep = oldSleep }()
+
+	var appCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		appCalls++
+		if appCalls == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"message":"app not found"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"slug": "brand-new-app"})
+	})
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	var bootstrapCalls int
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		bootstrapCalls++
+		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey in stub: %v", err)
+		}
+		creds := Credentials{AppID: 999, Slug: "brand-new-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("runManifestFlow called %d times, want exactly 1 (retry must not trigger a second App creation)", bootstrapCalls)
+	}
+	if r.BotLogin() != "brand-new-app[bot]" {
+		t.Errorf("BotLogin = %q, want brand-new-app[bot]", r.BotLogin())
+	}
+	if appCalls < 2 {
+		t.Errorf("expected at least 2 calls to /app (initial failure + retry), got %d", appCalls)
+	}
+}
+
+// TestReconcile_JustBootstrapped_PersistentIdentityFailure_ReturnsErrorNeverDoubleBootstraps
+// covers the case where the just-created App's identity check keeps failing
+// through every retry: Reconcile must give up with a distinct error rather
+// than falling through to the general "may have been deleted" self-heal path
+// (which would create a second App).
+func TestReconcile_JustBootstrapped_PersistentIdentityFailure_ReturnsErrorNeverDoubleBootstraps(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	statePath := filepath.Join(dir, "app-state.json")
+
+	oldSleep := identityValidationSleep
+	identityValidationSleep = func(time.Duration) {}
+	defer func() { identityValidationSleep = oldSleep }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"app not found"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	var bootstrapCalls int
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		bootstrapCalls++
+		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey in stub: %v", err)
+		}
+		creds := Credentials{AppID: 999, Slug: "brand-new-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the just-bootstrapped App's identity never resolves")
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("runManifestFlow called %d times, want exactly 1 (must never double-bootstrap within one Reconcile call)", bootstrapCalls)
+	}
+	if strings.Contains(err.Error(), "deleted") {
+		t.Errorf("error = %v, want it to NOT claim deletion — the App was just created in this same call", err)
+	}
+	if !strings.Contains(err.Error(), "just created") {
+		t.Errorf("error = %v, want it to explain the App was just created in this run", err)
+	}
+}
+
 func TestReconcile_NoWatchedRepos_MintsNothing(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

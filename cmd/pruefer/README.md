@@ -43,6 +43,14 @@ go build -o bin/pruefer ./cmd/pruefer
 With no usable local App credentials, Pruefer walks you through GitHub's **App Manifest flow**:
 
 1. Pruefer starts a temporary local HTTP listener and opens your browser to a page that hands GitHub a pre-filled manifest — scoped to exactly the four permissions below, with webhook delivery disabled (Pruefer polls; see ADR-1113/ADR-032). If a browser can't be opened (e.g. an SSH/headless session), or you'd rather it never tried, Pruefer prints the URL to open manually instead — pass `-no-browser`, set `PRUEFER_NO_BROWSER=1`, or `no_browser: true` in config to always skip the browser-open attempt.
+
+   **Running Pruefer on a remote host (VPS, container, etc.) and completing setup from your laptop's browser?** The setup listener always binds to `127.0.0.1` *on the machine running Pruefer* — both the printed setup page and GitHub's subsequent redirect back with the App's credentials live at `http://127.0.0.1:<port>` on that machine, where `<port>` is chosen by the OS fresh on every run. A browser on a different machine can't reach that address at all; the printed setup URL will just fail to connect. Forward the port over SSH before opening the printed URL:
+
+   ```bash
+   ssh -L <port>:127.0.0.1:<port> user@remote-host
+   ```
+
+   Since `<port>` is only known once Pruefer prints the setup URL, start Pruefer first (with `-no-browser` so it doesn't try to open a browser on the remote host itself), copy the port out of the printed URL, open the SSH tunnel, then open that URL in your local browser.
 2. On GitHub, confirm (or rename) the App and click **Create GitHub App**. GitHub redirects back to Pruefer's local listener with the new App's credentials — the flow expires after about an hour if abandoned; just restart Pruefer to try again, your existing config is never disturbed by an abandoned or expired attempt.
 3. Pruefer saves the private key to `.pruefer/app-private-key.pem` and everything else (App ID, slug, webhook secret, client ID/secret) to `.pruefer/app-state.json` — both gitignored, neither ever committed or logged.
 4. Pruefer then checks every account named in `watched_repos` for an installation of the new App, printing guided-installation progress as it goes:
