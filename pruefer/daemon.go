@@ -351,30 +351,42 @@ func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHu
 	}()
 }
 
-// runReview executes ReviewPR for a single PR, emitting the same TUI events
-// poll()'s former inline goroutine did. Caller must already hold a
-// concurrency-budget semaphore slot for the duration of this call (see
-// reviewOne and ReviewFromEvent) — runReview itself does not touch the
-// semaphore.
+// runReview acquires the PR's stripe lock (prLock), blocking until any
+// review already in flight for the same PR finishes, then executes
+// ReviewPR. Used by poll()'s reviewOne: poll cycles are infrequent (default
+// 2m), so a poll-triggered dispatch blocking briefly on an event-triggered
+// review already in progress for the same PR is not a resource-exhaustion
+// concern the way a burst of event-triggered dispatches would be — see
+// ReviewFromEvent's non-blocking claim instead, which drops rather than
+// blocks for exactly that reason.
 //
-// runReview serializes on the PR's stripe lock (prLock) around the ReviewPR
-// call. Without this, ReviewPR's "check existing reviews, then submit"
-// sequence (review.go's FetchPRReviews/alreadyReviewedAtHead check against
-// a snapshot taken at call start) is a TOCTOU race: before event-triggered
-// dispatch existed, only one poll loop ever ran, so a given PR was reviewed
-// by at most one caller at a time. Now poll()'s per-cycle fan-out and
-// ReviewFromEvent's per-event dispatch can both pick up the same PR at the
-// same head SHA concurrently, both see no existing bot review, and both
-// submit — a duplicate review beyond what ReviewPR's own SHA-idempotency is
-// supposed to prevent. The lock makes the second caller's ReviewPR call
-// observe the first caller's just-submitted review and skip, restoring the
-// single-flight-per-PR property the SHA-idempotency guarantee assumes.
+// Without this lock at all, ReviewPR's "check existing reviews, then
+// submit" sequence (review.go's FetchPRReviews/alreadyReviewedAtHead check
+// against a snapshot taken at call start) is a TOCTOU race: before
+// event-triggered dispatch existed, only one poll loop ever ran, so a given
+// PR was reviewed by at most one caller at a time. Now poll()'s per-cycle
+// fan-out and ReviewFromEvent's per-event dispatch can both pick up the
+// same PR at the same head SHA concurrently, both see no existing bot
+// review, and both submit — a duplicate review beyond what ReviewPR's own
+// SHA-idempotency is supposed to prevent. The lock makes the second
+// caller's ReviewPR call observe the first caller's just-submitted review
+// and skip, restoring the single-flight-per-PR property the SHA-idempotency
+// guarantee assumes.
 func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
-	repoName := owner + "/" + repo
 	mu := d.prLock(owner, repo, pr.Number)
 	mu.Lock()
 	defer mu.Unlock()
+	d.executeReview(ctx, client, owner, repo, pr)
+}
 
+// executeReview runs ReviewPR and emits the same TUI events poll()'s former
+// inline goroutine did. Caller must already hold both a concurrency-budget
+// semaphore slot and the PR's stripe lock (prLock) — executeReview touches
+// neither itself; see runReview (blocking claim, used by poll()) and
+// ReviewFromEvent (non-blocking claim, used by event-triggered dispatch)
+// for the two ways callers establish that precondition.
+func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+	repoName := owner + "/" + repo
 	startedAt := time.Now()
 	d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
 	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
@@ -391,6 +403,26 @@ func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo
 		Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
 		Duration: time.Since(startedAt), CompletedAt: time.Now(),
 	})
+}
+
+// isWatchedRepo reports whether owner/repo is one of Config.WatchedRepos.
+// poll() never needs this check — it only ever iterates WatchedRepos in the
+// first place — but event-triggered dispatch (ReviewFromEvent) must check
+// explicitly: Daemon.Clients is owner-keyed, not repo-keyed, and an owner's
+// installation token can plausibly cover repos beyond what Pruefer is
+// configured to watch. In particular, the Hookdeck adapter creates its
+// session with webhook_ids: [] (see hookdeck/client.go's createSession) —
+// "every connection visible to this API key," not scoped to watched repos —
+// so a webhook event for an unwatched repo under a watched owner is a
+// plausible real delivery, not just a hypothetical one.
+func (d *Daemon) isWatchedRepo(owner, repo string) bool {
+	target := owner + "/" + repo
+	for _, spec := range d.Config.WatchedRepos {
+		if spec == target {
+			return true
+		}
+	}
+	return false
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts. Returns ok=false

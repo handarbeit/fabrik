@@ -98,6 +98,27 @@ func TestDaemonEventSink_UnknownOwner_DropsWithoutPanic(t *testing.T) {
 	// Must not panic; nothing to assert beyond that.
 }
 
+// TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview guards against
+// reviewing repos an owner's installation token can reach but that were
+// never configured in watched_repos — a real scenario since the Hookdeck
+// adapter's session covers every connection visible to its API key (see
+// hookdeck/client.go's createSession), not just watched repos.
+func TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview(t *testing.T) {
+	client := newFakeLister()
+	client.prsByRepo["owner/other-repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+	d := newTestDaemonForEvents(client) // WatchedRepos: []string{"owner/repo"} only
+	sink := &daemonEventSink{daemon: d}
+
+	sink.Handle(context.Background(), events.GitHubEvent{
+		EventType: "pull_request", Action: "opened", Owner: "owner", Repo: "other-repo", ResourceID: "1",
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	if got := client.submitCallCount(); got != 0 {
+		t.Errorf("submitCallCount() = %d, want 0 (an event for a repo outside watched_repos must be dropped)", got)
+	}
+}
+
 func TestDaemonEventSink_FetchPRDetailsError_DropsWithoutPanic(t *testing.T) {
 	client := newFakeLister()
 	client.detailsErrByKey["owner/repo#1"] = errFetchPRDetailsBoom
@@ -218,4 +239,74 @@ func TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation(t *testi
 	case <-time.After(2 * time.Second):
 		t.Fatal("Handle blocked on the saturated semaphore instead of returning promptly")
 	}
+}
+
+// TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
+// guards against a regression where a burst of duplicate/rapid webhook
+// deliveries for one PR (e.g. several quick synchronize pushes before the
+// first review finishes) could each spawn a goroutine that acquires a
+// semaphore slot and then blocks waiting for the same PR's stripe lock —
+// exhausting the concurrency budget on redundant waits instead of dropping
+// immediately. With a 2-slot budget: PR #1's review holds one slot; three
+// duplicate PR #1 events must each drop without consuming the second slot,
+// which must remain free for PR #2's unrelated review to start promptly.
+func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore(t *testing.T) {
+	client := newFakeLister()
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{
+		{Number: 1, Author: "alice", HeadSHA: "sha1"},
+		{Number: 2, Author: "bob", HeadSHA: "sha2"},
+	}
+
+	release := make(chan struct{})
+	started := make(chan int, 4)
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		started <- req.PRNumber
+		<-release
+		return ReviewResult{Text: "mock review"}, nil
+	}}
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+		return "/tmp", func() {}, nil
+	}
+	d := &Daemon{
+		Clients:  map[string]GitHubLister{"owner": client},
+		Claude:   claude,
+		Clone:    clone,
+		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 2},
+		BotLogin: "pruefer-bot[bot]",
+	}
+	sink := &daemonEventSink{daemon: d}
+
+	// Start PR #1's review, occupying one of two slots.
+	sink.Handle(context.Background(), events.GitHubEvent{
+		EventType: "pull_request", Action: "opened", Owner: "owner", Repo: "repo", ResourceID: "1",
+	})
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PR #1's review never started")
+	}
+
+	// Fire several duplicate events for the SAME in-flight PR — each must
+	// drop immediately (non-blocking prLock claim fails) rather than
+	// spawning a goroutine that holds the second slot waiting on that lock.
+	for i := 0; i < 3; i++ {
+		sink.Handle(context.Background(), events.GitHubEvent{
+			EventType: "pull_request", Action: "synchronize", Owner: "owner", Repo: "repo", ResourceID: "1",
+		})
+	}
+
+	// PR #2 is unrelated: its event must still claim the second slot and
+	// start promptly. If the duplicates above had consumed it instead, this
+	// would time out.
+	sink.Handle(context.Background(), events.GitHubEvent{
+		EventType: "pull_request", Action: "opened", Owner: "owner", Repo: "repo", ResourceID: "2",
+	})
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PR #2's review did not start promptly — duplicate PR #1 events may have consumed the free semaphore slot")
+	}
+
+	close(release)
+	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 2 })
 }

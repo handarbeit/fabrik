@@ -11,26 +11,56 @@ import (
 // client, fetches the PR's authoritative current state from GitHub — never
 // trusting webhook payload contents as PR state, per the issue's "webhooks
 // as triggers, not source of truth" requirement — and dispatches it through
-// runReview, the same review execution path poll() uses. Any failure to
-// resolve a client or fetch PR details is logged and the event is dropped:
-// non-fatal, since a missed event either gets retried on GitHub's
-// at-least-once redelivery or is caught by the poll-fallback safety net.
+// executeReview, the same review execution path poll() uses. Any failure to
+// resolve a client, an unwatched repo, or a failure to fetch PR details is
+// logged and the event is dropped: non-fatal, since a missed event either
+// gets retried on GitHub's at-least-once redelivery or is caught by the
+// poll-fallback safety net.
 //
-// The semaphore slot is acquired here, before FetchPRDetails, not just
-// before runReview — a burst of webhook events would otherwise fan out an
-// unbounded number of concurrent FetchPRDetails REST calls (one goroutine
-// per event, gated by nothing) before ever touching the daemon's
-// concurrency budget, exactly the budget-bypass the shared semaphore exists
-// to prevent. Acquiring can block arbitrarily long while the budget is
-// full, so this must never be called inline from daemonEventSink.Handle (it
-// is always invoked in its own goroutine there) or it would stall acking
-// the current webhook and reading the next one off the same connection.
+// d.Clients is owner-keyed, not repo-keyed — see isWatchedRepo's doc for why
+// an explicit membership check against Config.WatchedRepos is required here
+// even though poll() never needs one.
+//
+// The PR's stripe lock (prLock) is claimed non-blockingly, before the
+// semaphore slot: if a review for this exact PR is already in flight (from
+// either dispatch path), this event is dropped immediately rather than
+// spawning a goroutine that holds a semaphore slot while blocked waiting
+// for that lock. Without this, a burst of duplicate/rapid webhook
+// deliveries for one PR (e.g. several quick synchronize pushes before the
+// first review finishes) could each acquire a slot and then block on the
+// same PR's lock, exhausting the daemon's entire concurrency budget on
+// redundant waits and stalling unrelated PRs. Dropping is safe: the
+// in-flight review already covers this PR, and if a further push follows
+// after it completes, a later event (or the poll-fallback safety net) will
+// trigger a fresh review at the new head SHA.
+//
+// The semaphore slot itself is still acquired before FetchPRDetails, not
+// just before executeReview — a burst of webhook events for *different*
+// PRs would otherwise fan out an unbounded number of concurrent
+// FetchPRDetails REST calls (one goroutine per event, gated by nothing)
+// before ever touching the daemon's concurrency budget, exactly the
+// budget-bypass the shared semaphore exists to prevent. Acquiring can block
+// arbitrarily long while the budget is full, so this must never be called
+// inline from daemonEventSink.Handle (it is always invoked in its own
+// goroutine there) or it would stall acking the current webhook and
+// reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
 	client, ok := d.Clients[owner]
 	if !ok {
 		logf(prNumber, "warn", "event for %s/%s#%d: no client for owner %q — dropping\n", owner, repo, prNumber, owner)
 		return
 	}
+	if !d.isWatchedRepo(owner, repo) {
+		logf(prNumber, "warn", "event for %s/%s#%d: repo is not in watched_repos — dropping\n", owner, repo, prNumber)
+		return
+	}
+
+	mu := d.prLock(owner, repo, prNumber)
+	if !mu.TryLock() {
+		logf(prNumber, "info", "event for %s/%s#%d: a review is already in flight for this PR — dropping\n", owner, repo, prNumber)
+		return
+	}
+	defer mu.Unlock()
 
 	sem := d.semaphore()
 	select {
@@ -46,7 +76,7 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 		return
 	}
 
-	d.runReview(ctx, client, owner, repo, *pr)
+	d.executeReview(ctx, client, owner, repo, *pr)
 }
 
 // reviewTriggerActions are the pull_request webhook actions that should
