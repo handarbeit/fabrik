@@ -333,7 +333,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			}
 			for _, st := range statuses {
 				if st.Authorized {
-					repoCache[owner] = append(repoCache[owner], st.Repo)
+					repoCache[strings.ToLower(owner)] = append(repoCache[strings.ToLower(owner)], st.Repo)
 				} else {
 					logf("! %s is not authorized (%s) → %s", st.Repo, st.Reason, st.GrantURL)
 				}
@@ -345,7 +345,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			// the "selected" branch above.
 			for _, spec := range opts.WatchedRepos {
 				if o, _, ok := splitOwnerRepo(spec); ok && strings.EqualFold(o, owner) {
-					repoCache[owner] = append(repoCache[owner], spec)
+					repoCache[strings.ToLower(owner)] = append(repoCache[strings.ToLower(owner)], spec)
 				}
 			}
 		}

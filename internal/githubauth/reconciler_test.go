@@ -564,6 +564,58 @@ func TestReconcile_PopulatesInstallationRepoCache(t *testing.T) {
 	}
 }
 
+// TestReconcile_InstallationRepoCache_KeysAreLowerCased is the regression
+// test for a review finding: the discovery-path branches (both "all" and
+// "selected" installation modes) keyed InstallationRepoCache by the raw,
+// first-seen-case owner from distinctOwnersLogging, while the pinned-
+// installation path already lower-cased its keys — an inconsistency that
+// would produce differently-capitalized cache entries for the same owner
+// depending on which mode Reconcile ran under, and depending on which
+// casing watched_repos happened to spell an owner with first. Uses a
+// mixed-case owner in watched_repos to catch a regression to the old,
+// inconsistent keying.
+func TestReconcile_InstallationRepoCache_KeysAreLowerCased(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	statePath := filepath.Join(dir, "app-state.json")
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", RepositorySelection: "all"},
+		{ID: 222, Account: "someorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{222: {"SomeOrg/repo-one"}}
+	defer srv.Close()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: []string{"HandArbeit/fabrik", "SomeOrg/repo-one"},
+		BaseURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after Reconcile: %v", err)
+	}
+	if len(saved.InstallationRepoCache["handarbeit"]) != 1 {
+		t.Errorf("InstallationRepoCache[handarbeit] (lower-cased key) = %v, want a single entry — got keys %v", saved.InstallationRepoCache["handarbeit"], saved.InstallationRepoCache)
+	}
+	if len(saved.InstallationRepoCache["someorg"]) != 1 {
+		t.Errorf("InstallationRepoCache[someorg] (lower-cased key) = %v, want a single entry — got keys %v", saved.InstallationRepoCache["someorg"], saved.InstallationRepoCache)
+	}
+	if _, ok := saved.InstallationRepoCache["HandArbeit"]; ok {
+		t.Errorf("InstallationRepoCache has a raw-case %q key — cache keys must always be lower-cased", "HandArbeit")
+	}
+	if _, ok := saved.InstallationRepoCache["SomeOrg"]; ok {
+		t.Errorf("InstallationRepoCache has a raw-case %q key — cache keys must always be lower-cased", "SomeOrg")
+	}
+}
+
 func TestReconcile_MissingPrivateKey_RepairErrorNeverBootstraps(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
