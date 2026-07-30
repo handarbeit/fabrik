@@ -71,6 +71,13 @@ func saveCredentials(path string, c Credentials) error {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
+	// os.WriteFile only applies the mode argument when it creates the file;
+	// an existing file (e.g. re-bootstrap after "App deleted externally")
+	// keeps whatever permissions it already had. Chmod explicitly so this
+	// secret-bearing file is always owner-only regardless of prior state.
+	if err := os.Chmod(path, 0600); err != nil {
+		return fmt.Errorf("tightening permissions on %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -83,6 +90,11 @@ func savePrivateKey(path string, pemBytes []byte) error {
 	}
 	if err := os.WriteFile(path, pemBytes, 0600); err != nil {
 		return fmt.Errorf("writing private key %s: %w", path, err)
+	}
+	// See saveCredentials: os.WriteFile does not tighten permissions on an
+	// already-existing file, and this file holds the App's private key.
+	if err := os.Chmod(path, 0600); err != nil {
+		return fmt.Errorf("tightening permissions on private key %s: %w", path, err)
 	}
 	return nil
 }

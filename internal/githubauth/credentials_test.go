@@ -74,6 +74,31 @@ func TestSaveCredentials_RoundTripAndPerms(t *testing.T) {
 	}
 }
 
+func TestSaveCredentials_TightensPermsOnExistingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix file permissions not applicable on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app-state.json")
+	// Simulate a pre-existing file with wider-than-expected permissions,
+	// e.g. left over from an older/looser version or a manual copy.
+	if err := os.WriteFile(path, []byte("{}"), 0644); err != nil {
+		t.Fatalf("seeding existing file: %v", err)
+	}
+
+	if err := saveCredentials(path, Credentials{AppID: 42}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("file perm = %o, want 0600 (saveCredentials must tighten perms on an existing file, not just a newly created one)", perm)
+	}
+}
+
 func writeTestPrivateKeyPEM(t *testing.T) []byte {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 1024)
@@ -111,6 +136,33 @@ func TestSavePrivateKey_RoundTripAndPerms(t *testing.T) {
 	}
 	if key == nil {
 		t.Fatal("expected a parsed private key")
+	}
+}
+
+func TestSavePrivateKey_TightensPermsOnExistingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix file permissions not applicable on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app-private-key.pem")
+	// Simulate a pre-existing PEM with wider-than-expected permissions,
+	// e.g. copied in manually under a default umask, or from a re-bootstrap
+	// after "App deleted externally" overwriting a file left at 0644.
+	if err := os.WriteFile(path, []byte("placeholder"), 0644); err != nil {
+		t.Fatalf("seeding existing file: %v", err)
+	}
+	pemBytes := writeTestPrivateKeyPEM(t)
+
+	if err := savePrivateKey(path, pemBytes); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("file perm = %o, want 0600 (savePrivateKey must tighten perms on an existing file, not just a newly created one)", perm)
 	}
 }
 
