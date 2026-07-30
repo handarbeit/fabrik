@@ -1,6 +1,7 @@
 package hookdeck
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,7 @@ func TestCreateSession_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, err := createSession(http.DefaultClient, srv.URL, "test-api-key")
+	id, err := createSession(context.Background(), http.DefaultClient, srv.URL, "test-api-key")
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestCreateSession_ErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := createSession(http.DefaultClient, srv.URL, "bad-key")
+	_, err := createSession(context.Background(), http.DefaultClient, srv.URL, "bad-key")
 	if err == nil {
 		t.Fatal("expected an error for a 401 response")
 	}
@@ -67,7 +68,7 @@ func TestCreateSession_MissingID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := createSession(http.DefaultClient, srv.URL, "test-api-key")
+	_, err := createSession(context.Background(), http.DefaultClient, srv.URL, "test-api-key")
 	if err == nil {
 		t.Fatal("expected an error when the response is missing an id")
 	}
@@ -79,7 +80,7 @@ func TestCreateSession_MalformedResponseBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := createSession(http.DefaultClient, srv.URL, "test-api-key")
+	_, err := createSession(context.Background(), http.DefaultClient, srv.URL, "test-api-key")
 	if err == nil {
 		t.Fatal("expected an error for a malformed response body")
 	}
