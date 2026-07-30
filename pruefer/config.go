@@ -26,6 +26,11 @@ const (
 	DefaultMaxDiffBytes   = 500_000 // 500 KB
 	DefaultConfigPath     = ".pruefer/config.yaml"
 	DefaultPrivateKeyPath = ".pruefer/app-private-key.pem"
+	// DefaultAppStatePath is where the auth reconciler persists its own
+	// non-key metadata (App ID once manifest-created, slug, webhook secret,
+	// client ID/secret, installation cache) — see internal/githubauth.
+	// Never written into config.yaml itself.
+	DefaultAppStatePath = ".pruefer/app-state.json"
 )
 
 // Config holds Pruefer's fully-resolved runtime configuration, after
@@ -71,8 +76,16 @@ type Config struct {
 	// watched repo, regardless of owner, through this one installation's
 	// token — preserving pre-multi-installation behavior exactly. Zero (the
 	// default) means resolve one installation per distinct owner present in
-	// WatchedRepos instead (see BootstrapMulti in pruefer/auth.go).
+	// WatchedRepos instead (see internal/githubauth.Reconcile).
 	AppInstallationID int64
+	// AppStatePath is where the auth reconciler persists its own non-key
+	// metadata — see DefaultAppStatePath.
+	AppStatePath string
+	// NoBrowser skips attempting to open a local browser during first-run
+	// GitHub App manifest setup — the setup URL is always printed
+	// regardless. Set this in headless/SSH/CI environments where no local
+	// browser exists to launch.
+	NoBrowser bool
 }
 
 // yamlConfig is the shape of Pruefer's YAML config file. All fields are
@@ -93,6 +106,8 @@ type yamlConfig struct {
 	AppID                   *int64   `yaml:"github_app_id"`
 	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
 	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
+	AppStatePath            string   `yaml:"github_app_state_path"`
+	NoBrowser               *bool    `yaml:"no_browser"`
 	TUI                     *bool    `yaml:"tui"`
 }
 
@@ -129,6 +144,8 @@ type flagValues struct {
 	appID                   int64
 	appPrivateKeyPath       string
 	appInstallationID       int64
+	appStatePath            string
+	noBrowser               bool
 	configPath              string
 	noTUI                   bool
 }
@@ -156,6 +173,8 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
 	fs.StringVar(&fv.appPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's PEM private key")
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
+	fs.StringVar(&fv.appStatePath, "github-app-state-path", "", "Path to the auth reconciler's app-state file")
+	fs.BoolVar(&fv.noBrowser, "no-browser", false, "Skip attempting to open a local browser during first-run GitHub App setup")
 	fs.StringVar(&fv.configPath, "config", DefaultConfigPath, "Path to Pruefer's YAML config file")
 	fs.BoolVar(&fv.noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	if err := fs.Parse(args); err != nil {
@@ -188,6 +207,7 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedPaths:     yc.ExcludedPaths,
 		ExcludedLabels:    yc.ExcludedLabels,
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
+		AppStatePath:      DefaultAppStatePath,
 		TUI:               true,
 	}
 	if yc.RequestChangesThreshold != "" {
@@ -222,6 +242,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AppInstallationID != nil {
 		cfg.AppInstallationID = *yc.AppInstallationID
+	}
+	if yc.AppStatePath != "" {
+		cfg.AppStatePath = yc.AppStatePath
+	}
+	if yc.NoBrowser != nil {
+		cfg.NoBrowser = *yc.NoBrowser
 	}
 
 	applyEnv(&cfg)
@@ -267,6 +293,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["github-app-installation-id"] {
 		cfg.AppInstallationID = fv.appInstallationID
+	}
+	if explicit["github-app-state-path"] {
+		cfg.AppStatePath = fv.appStatePath
+	}
+	if explicit["no-browser"] {
+		cfg.NoBrowser = fv.noBrowser
 	}
 	if explicit["notui"] {
 		cfg.TUI = !fv.noTUI
@@ -334,6 +366,14 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_GITHUB_APP_INSTALLATION_ID"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.AppInstallationID = n
+		}
+	}
+	if v := os.Getenv("PRUEFER_GITHUB_APP_STATE_PATH"); v != "" {
+		cfg.AppStatePath = v
+	}
+	if v := os.Getenv("PRUEFER_NO_BROWSER"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.NoBrowser = b
 		}
 	}
 	if v := os.Getenv("PRUEFER_TUI"); v != "" {
