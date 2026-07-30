@@ -31,7 +31,7 @@ Pruefer authenticates as a GitHub App so its reviews are attributed to a genuine
 2. Fill in:
    - **GitHub App name**: anything unique (e.g. `your-org-pruefer`). This becomes the `<slug>` in the App's `<slug>[bot]` identity.
    - **Homepage URL**: any placeholder URL — not used.
-   - **Webhook**: **uncheck "Active"**. Pruefer polls; it does not receive webhooks (see ADR-1113 for why this doesn't conflict with ADR-032's webhook-delivery ruling).
+   - **Webhook**: **uncheck "Active"**. Pruefer polls by default; it does not receive webhooks (see ADR-1113 for why this doesn't conflict with ADR-032's webhook-delivery ruling). If you plan to use `event_source: hookdeck` (see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck) below), leave this unchecked for now — you'll come back and point it at Hookdeck once a source is provisioned.
 3. **Repository permissions**, minimum required:
    - **Pull requests**: Read and write (review submission, reading PR metadata/diff)
    - **Contents**: Read (cloning the PR head commit)
@@ -106,6 +106,43 @@ Which upgrade path runs depends on how the binary was built:
 - **Release mode** (running version is a stamped tag): Pruefer checks `handarbeit/fabrik`'s GitHub Releases for a newer tag using a dedicated, unauthenticated GitHub API client (decoupled from the per-owner App installation tokens used for reviews — those aren't guaranteed to cover `handarbeit/fabrik`), downloads the matching platform archive, atomically replaces the running binary, and re-execs. This is the mode for a deployment running from a distinct directory (e.g. `~/dev/pruefer`) with a binary downloaded from a release — the actual "usage" deployment shape this feature targets.
 
 On macOS arm64, a release-mode upgrade re-signs the replacement binary ad-hoc after download (the same step Fabrik's own upgrade path uses) so the swapped-in binary isn't rejected by Gatekeeper/AMFI.
+
+## Event-driven mode (Hookdeck)
+
+By default (`event_source: poll`, unset), Pruefer's behavior is exactly what's described above — poll every `poll_interval_seconds`, list open PRs, review the eligible ones. `event_source: hookdeck` is an opt-in alternative: GitHub webhooks are forwarded through [Hookdeck](https://hookdeck.com) into Pruefer, which reviews a PR within moments of `opened`/`synchronize`/`ready_for_review` instead of waiting up to a full poll interval. Polling is never removed in this mode — it's demoted to a low-frequency reconciliation safety net (`reconciliation.fallback_interval`, default `2m`), covering startup, a Hookdeck outage, and the moment right after reconnecting, so a missed or dropped event is never fatal.
+
+Pruefer is the deliberate test bed for this pattern before it's ported to Fabrik's own webhook infrastructure — see [adrs/1254-event-driven-hookdeck-ingestion.md](../../adrs/1254-event-driven-hookdeck-ingestion.md).
+
+### Provisioning a Hookdeck source
+
+1. Sign up at [hookdeck.com](https://hookdeck.com) and create a **Connection** (a Source + Destination pair is Hookdeck's terminology, but Pruefer only needs the Source side — see "no local HTTP hop" below).
+2. From your Hookdeck dashboard, copy an **API key** — this authenticates Pruefer's CLI-session connection to Hookdeck, not GitHub.
+3. Set the API key in your environment under whatever variable name you configure via `hookdeck.api_key_env` (default `HOOKDECK_API_KEY`) — e.g. in `.env`:
+   ```
+   HOOKDECK_API_KEY=hd_...
+   ```
+4. Go back to your GitHub App's settings (**Settings → Developer settings → GitHub Apps → your app → General**) and:
+   - Check **"Active"** under Webhook.
+   - Set the **Webhook URL** to the URL Hookdeck's dashboard shows for your source (Hookdeck forwards from there to Pruefer over a persistent, replay-capable session — no public endpoint needs to run on Pruefer's own host).
+   - Set a **Webhook secret** — generate one yourself (e.g. `openssl rand -hex 32`), enter it here, and set the same value in your environment under whatever variable name you configure via `hookdeck.webhook_secret_env` (default `PRUEFER_GITHUB_WEBHOOK_SECRET`):
+     ```
+     PRUEFER_GITHUB_WEBHOOK_SECRET=<the same secret you entered in the GitHub App settings>
+     ```
+5. Set `event_source: hookdeck` in `.pruefer/config.yaml`:
+   ```yaml
+   event_source: hookdeck
+   hookdeck:
+     api_key_env: HOOKDECK_API_KEY
+     webhook_secret_env: PRUEFER_GITHUB_WEBHOOK_SECRET
+   reconciliation:
+     startup: true
+     fallback_interval: 2m
+   ```
+6. Run Pruefer as usual (`./pruefer`). It authenticates to Hookdeck's CLI-session protocol, verifies every forwarded delivery's GitHub signature, dedupes by delivery ID, and dispatches reviews the moment a relevant event arrives — falling back to poll on any Hookdeck outage, with no crash at any point (startup, mid-run, or reconnect failure).
+
+### Why signature verification still matters
+
+Hookdeck's own transport auth (your API key) proves a request came from *your Hookdeck source*, not from GitHub. A webhook secret and its HMAC-SHA256 signature (`X-Hub-Signature-256`) is what proves the payload's *contents* actually originated at GitHub and weren't tampered with in transit or fabricated by anyone who obtained your Hookdeck forwarding URL. Pruefer verifies this signature on every received event regardless of transport; an unverified or invalid signature is dropped before it's ever normalized or acted on.
 
 ## Terminal UI
 
@@ -192,6 +229,11 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |
 | `--auto-upgrade` | `PRUEFER_AUTO_UPGRADE` | `auto_upgrade` | `false` | Check for a newer version at the poll boundary and self-upgrade (dev-rebuild or release-download, depending on the running build — see [Version & self-upgrade](#version--self-upgrade)). Recommended for long-running deployments. |
 | `--version` | — | — | — | Print the running version (a stamped release tag, or `dev(<sha>)`) and exit. |
+| `--event-source` | `PRUEFER_EVENT_SOURCE` | `event_source` | `poll` | `poll` (default, unchanged behavior) or `hookdeck` (event-driven — see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck)) |
+| `--hookdeck-api-key-env` | `PRUEFER_HOOKDECK_API_KEY_ENV` | `hookdeck.api_key_env` | `HOOKDECK_API_KEY` | Name of the env var holding the Hookdeck API key. Only consulted when `event_source: hookdeck` |
+| `--hookdeck-webhook-secret-env` | `PRUEFER_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck.webhook_secret_env` | `PRUEFER_GITHUB_WEBHOOK_SECRET` | Name of the env var holding the GitHub App's webhook secret. Only consulted when `event_source: hookdeck` |
+| `--reconciliation-startup` | `PRUEFER_RECONCILIATION_STARTUP` | `reconciliation.startup` | `true` | Run a full poll reconciliation pass at startup before event delivery begins. Only consulted when `event_source: hookdeck` |
+| `--reconciliation-fallback-interval` | `PRUEFER_RECONCILIATION_FALLBACK_INTERVAL` | `reconciliation.fallback_interval` | `2m` | Go duration (e.g. `2m`, `90s`); the low-frequency poll interval used as a safety net in event-driven mode. Separate from `poll_interval_seconds`, which only applies in poll-only mode. Only consulted when `event_source: hookdeck` |
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 
