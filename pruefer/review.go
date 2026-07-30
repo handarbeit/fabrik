@@ -135,15 +135,22 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 // findings' already-JSON-parsed Severity fields — never from Claude's prose.
 // threshold is the operator-configured Config.RequestChangesThreshold; the
 // zero value ("") means the severity-gated behavior is off, so this always
-// returns ReviewEventComment regardless of findings. Otherwise, if any
-// finding's severity ranks at or above threshold, ReviewEventRequestChanges
+// returns ReviewEventComment regardless of findings. An unrecognized non-empty
+// threshold is treated identically to off (fail closed) rather than degrading
+// to severityRank's 0 for both — LoadConfig rejects an invalid threshold, but
+// Config is a public struct ReviewPR takes directly, so decideEvent must not
+// assume its input was pre-validated: if it trusted severityRank(threshold)==0
+// to mean "match everything", a typo'd threshold that bypassed LoadConfig
+// would turn every review with any finding — including ones with a missing
+// severity — into REQUEST_CHANGES, the opposite of fail-safe. Otherwise, if
+// any finding's severity ranks at or above threshold, ReviewEventRequestChanges
 // is returned; an unrecognized or missing per-finding severity ranks 0 and
-// never meets any threshold (see severityRank's fail-closed-toward-COMMENT
+// never meets any real threshold (see severityRank's fail-closed-toward-COMMENT
 // doc comment). Takes the full pre-partition findings slice, not just the
 // diff-anchorable subset — a severity-worthy finding that can't be anchored
 // to a line must still count toward the threshold.
 func decideEvent(findings []ReviewFinding, threshold Severity) gh.ReviewEvent {
-	if threshold == "" {
+	if !validSeverity(threshold) {
 		return gh.ReviewEventComment
 	}
 	thresholdRank := severityRank(threshold)

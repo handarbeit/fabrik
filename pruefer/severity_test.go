@@ -94,6 +94,26 @@ func TestDecideEvent_MissingSeverity_NeverTriggers(t *testing.T) {
 	}
 }
 
+// TestDecideEvent_InvalidNonEmptyThreshold_FailsClosedToComment guards
+// against decideEvent trusting an unvalidated Config.RequestChangesThreshold.
+// LoadConfig rejects a non-empty, non-tier threshold value, but Config is a
+// public struct and ReviewPR takes it directly — nothing at the type level
+// stops a caller from constructing one with an invalid threshold. Before
+// this test's invariant was enforced, an invalid threshold ranked 0 via
+// severityRank, identical to "match everything" (every finding's rank is
+// >= 0, including an unrecognized/missing severity's own rank-0), which is
+// the worst-case outcome rather than the safe one. decideEvent must treat
+// any non-recognized threshold — empty or not — as "gating off".
+func TestDecideEvent_InvalidNonEmptyThreshold_FailsClosedToComment(t *testing.T) {
+	findings := []ReviewFinding{
+		{Path: "a.go", Line: 1, Body: "no severity set"},
+		{Path: "b.go", Line: 2, Body: "unrecognized severity", Severity: "urgent"},
+	}
+	if got := decideEvent(findings, Severity("hgih")); got != gh.ReviewEventComment {
+		t.Errorf("decideEvent with invalid threshold %+v, want ReviewEventComment (an invalid threshold must fail closed, not match every finding)", got)
+	}
+}
+
 // TestDecideEvent_PromptInjection_BodyTextIgnored guards the core
 // invariant this issue exists to preserve: decideEvent must never be
 // influenced by anything Claude wrote in prose, even a finding's own Body
