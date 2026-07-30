@@ -29,7 +29,7 @@ func TestBuildManifest_ScopedPermissions(t *testing.T) {
 		"metadata":      "read",
 		"pull_requests": "write",
 		"contents":      "read",
-		"issues":        "read",
+		"issues":        "write",
 	}
 	if len(perms) != len(want) {
 		t.Fatalf("default_permissions = %+v, want exactly %+v", perms, want)

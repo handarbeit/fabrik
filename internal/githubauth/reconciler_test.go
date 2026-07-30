@@ -136,6 +136,54 @@ func TestReconcile_BackwardCompat_PinnedInstallationSkipsDiscovery(t *testing.T)
 	}
 }
 
+// TestReconcile_PinnedInstallation_PopulatesInstallationRepoCache is the
+// regression test for a review finding: the pinned-installation compat path
+// (opts.AppInstallationID != 0) returned before ever calling
+// saveInstallationRepoCache, so Credentials.InstallationRepoCache stayed
+// unpopulated for every operator on the legacy pinned-installation escape
+// hatch — even though the owners it should cache are already known at that
+// point in Reconcile, with no extra GitHub call required.
+func TestReconcile_PinnedInstallation_PopulatesInstallationRepoCache(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	statePath := filepath.Join(dir, "app-state.json")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"slug": "pruefer-bot"})
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token": "ghs_x", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: statePath,
+		WatchedRepos: []string{"handarbeit/fabrik", "verveguy/otherrepo"}, BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after Reconcile: %v", err)
+	}
+	if len(saved.InstallationRepoCache["handarbeit"]) != 1 || saved.InstallationRepoCache["handarbeit"][0] != "handarbeit/fabrik" {
+		t.Errorf("InstallationRepoCache[handarbeit] = %v, want [handarbeit/fabrik]", saved.InstallationRepoCache["handarbeit"])
+	}
+	if len(saved.InstallationRepoCache["verveguy"]) != 1 || saved.InstallationRepoCache["verveguy"][0] != "verveguy/otherrepo" {
+		t.Errorf("InstallationRepoCache[verveguy] = %v, want [verveguy/otherrepo]", saved.InstallationRepoCache["verveguy"])
+	}
+}
+
 func TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

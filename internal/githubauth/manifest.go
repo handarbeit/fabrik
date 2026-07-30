@@ -38,12 +38,19 @@ var manifestHTTPClient = &http.Client{Timeout: 30 * time.Second}
 // buildManifest returns the JSON manifest GitHub's App-creation-from-manifest
 // flow expects, scoped to exactly the permissions Pruefer's code paths use
 // (matching cmd/pruefer/README.md's manual-setup permission list):
-// Metadata: read, Pull requests: write, Contents: read, Issues: read.
-// hook_attributes.active is always false and no default_events are
-// requested — Pruefer V1 is polling-only (ADR-1113 §1, ADR-032); enabling
-// webhook delivery is a separate, out-of-scope future issue this manifest
-// must never enable. redirectURL is the loopback callback server's own URL,
-// assigned only after it starts listening (see runManifestCallbackServer).
+// Metadata: read, Pull requests: write, Contents: read, Issues: write.
+// Issues is "write", not "read": pruefer/comment.go's
+// AcknowledgeForceReview/MarkForceReviewsProcessed POST to
+// /repos/{owner}/{repo}/issues/comments/{id}/reactions (github/comments.go's
+// AddCommentReaction) to leave the eyes/rocket acknowledgment on a
+// "/pruefer review" comment — GitHub's Issue Comments API requires "issues:
+// write" to create a reaction, not "read"; "read" only covers listing
+// comments. hook_attributes.active is always false and no default_events
+// are requested — Pruefer V1 is polling-only (ADR-1113 §1, ADR-032);
+// enabling webhook delivery is a separate, out-of-scope future issue this
+// manifest must never enable. redirectURL is the loopback callback server's
+// own URL, assigned only after it starts listening (see
+// runManifestCallbackServer).
 func buildManifest(redirectURL string) map[string]interface{} {
 	return map[string]interface{}{
 		"name":         defaultAppName,
@@ -54,7 +61,7 @@ func buildManifest(redirectURL string) map[string]interface{} {
 			"metadata":      "read",
 			"pull_requests": "write",
 			"contents":      "read",
-			"issues":        "read",
+			"issues":        "write",
 		},
 		"default_events": []string{},
 		"hook_attributes": map[string]interface{}{

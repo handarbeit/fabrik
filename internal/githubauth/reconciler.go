@@ -212,13 +212,12 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 
 	r := &Reconciler{botLogin: botLogin, clients: map[string]*gh.Client{}}
 
-	for _, spec := range opts.WatchedRepos {
-		if _, _, ok := splitOwnerRepo(spec); !ok {
-			logf("! %q is not a valid \"owner/repo\" watched-repo entry — skipping", spec)
-		}
-	}
-
-	owners := distinctOwners(opts.WatchedRepos)
+	// A single pass both validates and enumerates — see
+	// distinctOwnersLogging's own doc comment for why this replaced two
+	// separate passes (one purely to log malformed entries, one via
+	// distinctOwners to actually use them) that re-ran the identical
+	// splitOwnerRepo check over the same slice.
+	owners := distinctOwnersLogging(opts.WatchedRepos, logf)
 	if len(owners) == 0 {
 		logf("no watched repos configured — reconciliation has nothing to authorize")
 		return r, nil
@@ -226,16 +225,26 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 
 	// Compat path: a pinned installation ID skips discovery entirely,
 	// preserving pre-reconciler behavior byte-for-byte — see ADR-1233
-	// Decision 4.
+	// Decision 4. Every watched repo is cached as authorized under the
+	// pinned installation: unlike the discovery path below, there is no
+	// per-owner "is this actually covered" question here — the operator
+	// has explicitly asserted the pin covers everything.
 	if opts.AppInstallationID != 0 {
 		a, err := mintAuth(appID, opts.AppInstallationID, botLogin, privateKey, opts.BaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("minting pinned installation token: %w", err)
 		}
+		repoCache := make(map[string][]string)
 		for _, owner := range owners {
 			r.clients[owner] = a.client
 		}
+		for _, spec := range opts.WatchedRepos {
+			if owner, _, ok := splitOwnerRepo(spec); ok {
+				repoCache[owner] = append(repoCache[owner], spec)
+			}
+		}
 		r.auths = []*Auth{a}
+		saveInstallationRepoCache(opts.AppStatePath, appID, slug, repoCache, logf)
 		logf("✓ using pinned installation %d for all watched repos", opts.AppInstallationID)
 		return r, nil
 	}

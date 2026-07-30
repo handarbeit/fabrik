@@ -73,7 +73,7 @@ Registering the App yourself is still fully supported — this is also how Pruef
    - **Pull requests**: Read and write (review submission, reading PR metadata/diff)
    - **Contents**: Read (cloning the PR head commit)
    - **Metadata**: Read (mandatory baseline for every App)
-   - **Issues**: Read (reading `/pruefer review` comments and their reactions — GitHub's Issue Comments API also covers PR-conversation comments)
+   - **Issues**: Read and write (reading `/pruefer review` comments and leaving the eyes/rocket acknowledgment reaction on them — GitHub's Issue Comments API also covers PR-conversation comments, and creating a reaction requires write, not just read)
 4. **Where can this GitHub App be installed?**: your choice — "Only on this account" is simplest for a single org.
 5. Click **Create GitHub App**. Note the **App ID** shown on the app's settings page.
 6. Scroll to **Private keys** and click **Generate a private key**. This downloads a `.pem` file — save it somewhere outside version control (Pruefer's default config gitignores `.pruefer/*.pem`).
