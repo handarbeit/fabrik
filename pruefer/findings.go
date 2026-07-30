@@ -15,6 +15,13 @@ type ReviewFinding struct {
 	Path string `json:"path"`
 	Line int    `json:"line"`
 	Body string `json:"body"`
+	// Severity is Claude's self-reported tier for this finding (see
+	// Severity's doc comment for the 4-tier vocabulary). An unrecognized or
+	// missing value unmarshals fine (json.Unmarshal never errors over an
+	// unknown string or an absent field) but ranks 0 — see severityRank —
+	// so it never meets any REQUEST_CHANGES threshold. This is the sole
+	// field decideEvent reads; it never inspects Body or the prose summary.
+	Severity Severity `json:"severity"`
 }
 
 // findingsFenceRE matches a fenced ```json ... ``` code block, non-greedy so

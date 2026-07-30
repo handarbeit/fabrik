@@ -33,6 +33,7 @@ type submitCall struct {
 	prNumber    int
 	commitSHA   string
 	body        string
+	event       gh.ReviewEvent
 	comments    []gh.ReviewComment
 }
 
@@ -53,13 +54,13 @@ func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PR
 	return f.reviews, nil
 }
 
-func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, comments []gh.ReviewComment) (int, error) {
+func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.submitErr != nil {
 		return 0, f.submitErr
 	}
-	f.submitCalls = append(f.submitCalls, submitCall{owner, repo, prNumber, commitSHA, body, comments})
+	f.submitCalls = append(f.submitCalls, submitCall{owner, repo, prNumber, commitSHA, body, event, comments})
 	return len(f.submitCalls), nil
 }
 

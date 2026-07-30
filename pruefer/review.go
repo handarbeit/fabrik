@@ -17,7 +17,7 @@ type GitHubReviewer interface {
 	GitHubCommenter
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
-	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, comments []gh.ReviewComment) (int, error)
+	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error)
 	Token() string
 }
 
@@ -113,10 +113,11 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 
 	summary, findings := parseReviewFindings(result.Text)
+	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
 	body := buildReviewBody(summary, demoted)
 
-	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, comments); err != nil {
+	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
 	}
 
@@ -128,4 +129,28 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
 	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD}
+}
+
+// decideEvent computes the review event to submit, deterministically, from
+// findings' already-JSON-parsed Severity fields — never from Claude's prose.
+// threshold is the operator-configured Config.RequestChangesThreshold; the
+// zero value ("") means the severity-gated behavior is off, so this always
+// returns ReviewEventComment regardless of findings. Otherwise, if any
+// finding's severity ranks at or above threshold, ReviewEventRequestChanges
+// is returned; an unrecognized or missing per-finding severity ranks 0 and
+// never meets any threshold (see severityRank's fail-closed-toward-COMMENT
+// doc comment). Takes the full pre-partition findings slice, not just the
+// diff-anchorable subset — a severity-worthy finding that can't be anchored
+// to a line must still count toward the threshold.
+func decideEvent(findings []ReviewFinding, threshold Severity) gh.ReviewEvent {
+	if threshold == "" {
+		return gh.ReviewEventComment
+	}
+	thresholdRank := severityRank(threshold)
+	for _, f := range findings {
+		if severityRank(f.Severity) >= thresholdRank {
+			return gh.ReviewEventRequestChanges
+		}
+	}
+	return gh.ReviewEventComment
 }
