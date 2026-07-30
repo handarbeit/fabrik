@@ -22,8 +22,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # -tags e2e so the build-tagged e2e suite is vetted too. Without the tag
+      # `go vet ./...` matches no packages under tests/e2e, so that code is
+      # never vetted at all.
       - name: go vet
-        run: go vet ./...
+        run: go vet -tags e2e ./...
 
       - name: Test hygiene lint
         run: |
@@ -40,3 +43,15 @@ jobs:
         # TestExecute_ConfigYAMLApplied is a timing-sensitive SIGINT integration
         # test that fails intermittently on CI; it is tracked separately.
         run: go test -race -timeout 5m -skip TestExecute_ConfigYAMLApplied ./...
+
+      # Compile the e2e suite without running it. The scenarios are behind the
+      # `e2e` build tag and drive a real Fabrik bed against real repos, so they
+      # can't run in CI — but that also meant ~4k lines were never compiled
+      # here, and a signature change in engine/ or github/ could silently break
+      # the harness. The break would then only surface when someone runs the
+      # release gate, mid-release. `-run '^$'` matches no test, so this builds
+      # the test binary (catching errors inside Test functions, not just
+      # package code) and exits without executing a scenario or making any
+      # network call. There is no TestMain, so nothing runs. Takes <1s.
+      - name: compile e2e suite (not run)
+        run: go test -tags e2e -run '^$' ./tests/e2e/...
