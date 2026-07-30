@@ -15,6 +15,13 @@ import (
 // that has nothing in common with Client's authenticated request core.
 const defaultGitHubBaseURL = "https://api.github.com"
 
+// maxManifestExchangeResponseBytes caps how much of the manifest-exchange
+// HTTP response exchangeManifestCode will read. A real GitHub App's
+// credentials (PEM, secrets, slug) fit comfortably in a few KB; this is
+// generous headroom against an operator-configured BaseURL pointed at a
+// misbehaving or untrusted endpoint, not a tight production-shaped limit.
+const maxManifestExchangeResponseBytes = 1 << 20 // 1 MiB
+
 // defaultAppName is the name prefilled on GitHub's manifest-confirmation
 // page. GitHub lets the user rename it there before creating the App, so
 // this is a sensible default rather than a configurable option — see the
@@ -107,7 +114,11 @@ func exchangeManifestCode(baseURL, code string) (ManifestCredentials, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// baseURL is normally api.github.com, but is operator-configurable
+	// (tests point it at an httptest server) — cap the read so a
+	// misbehaving or untrusted endpoint can't exhaust memory via an
+	// unbounded response body.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestExchangeResponseBytes))
 	if err != nil {
 		return ManifestCredentials{}, fmt.Errorf("reading manifest exchange response: %w", err)
 	}

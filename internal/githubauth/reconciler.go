@@ -117,7 +117,7 @@ func (r *Reconciler) ClientForRepo(ctx context.Context, owner, repo string) (*gh
 	defer r.mu.Unlock()
 	client, ok := r.clients[strings.ToLower(owner)]
 	if !ok {
-		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — add it to watched_repos and restart to trigger reconciliation, or install the App on %q if it's already watched", owner, owner)
+		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — if it's already in watched_repos, install the App on %q (Reconcile logs the install URL at startup); otherwise add it to watched_repos and restart to trigger reconciliation", owner, owner)
 	}
 	return client, nil
 }

@@ -64,6 +64,16 @@ type Daemon struct {
 	// ReviewPR's decision logic: every emit call here wraps ReviewPR from
 	// the outside, never alters its inputs, return value, or control flow.
 	Emit func(ptui.Event)
+
+	// preAcquiredLock, when set, is an already-open, already-flocked lock
+	// file Run should use instead of acquiring its own — see Execute's
+	// call site, which must hold this same lock across
+	// githubauth.Reconcile (not just the poll loop) so two concurrently
+	// started Pruefer processes can't both race through App
+	// bootstrap/self-heal at once. nil (the default, and what every
+	// existing test constructs) preserves Run's original
+	// self-contained acquire-then-release behavior exactly.
+	preAcquiredLock *os.File
 }
 
 // emit is a nil-checked convenience wrapper around d.Emit.
@@ -81,35 +91,66 @@ func (d *Daemon) lockPath() string {
 	return filepath.Join(dir, ".pruefer", "pruefer.lock")
 }
 
-// Run acquires an exclusive file lock (preventing two Pruefer instances from
-// double-polling the same watched repos, mirroring engine/poll.go's
-// Engine.Run) and polls on Config.PollInterval until ctx is cancelled.
-func (d *Daemon) Run(ctx context.Context) (err error) {
-	lockPath := d.lockPath()
+// acquireLock opens (creating if needed) and non-blockingly, exclusively
+// flocks .pruefer/pruefer.lock under fabrikDir ("" defaults to "."),
+// returning the open, locked file for the caller to release via
+// releaseLock when done. Extracted so Execute can hold the same lock across
+// githubauth.Reconcile (which mutates on-disk credentials and can talk to
+// GitHub) and not just Daemon.Run's poll loop — see Daemon.preAcquiredLock
+// and this function's call sites in both places.
+func acquireLock(fabrikDir string) (*os.File, error) {
+	dir := fabrikDir
+	if dir == "" {
+		dir = "."
+	}
+	lockPath := filepath.Join(dir, ".pruefer", "pruefer.lock")
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
-		return fmt.Errorf("creating lock dir: %w", err)
+		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return fmt.Errorf("opening lock file %s: %w", lockPath, err)
+		return nil, fmt.Errorf("opening lock file %s: %w", lockPath, err)
 	}
-	// A failed Close on a writable handle can mean a lost write (though the
-	// lock file's own contents are never written to — this guards against
-	// the general case). Surface it as the function's error when nothing
-	// else already failed; otherwise log it so it isn't silently dropped.
-	defer func() {
-		if cerr := lockFile.Close(); cerr != nil {
-			if err == nil {
-				err = fmt.Errorf("closing lock file %s: %w", lockPath, cerr)
-			} else {
-				logf(0, "poll", "closing lock file %s after prior error: %v\n", lockPath, cerr)
-			}
-		}
-	}()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
+		lockFile.Close()
+		return nil, fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return lockFile, nil
+}
+
+// releaseLock unlocks and closes a *os.File returned by acquireLock.
+func releaseLock(lockFile *os.File) error {
+	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return lockFile.Close()
+}
+
+// Run acquires an exclusive file lock (preventing two Pruefer instances from
+// double-polling the same watched repos, mirroring engine/poll.go's
+// Engine.Run) — unless d.preAcquiredLock is already set, in which case Run
+// uses that instead of acquiring (or releasing) its own — and polls on
+// Config.PollInterval until ctx is cancelled.
+func (d *Daemon) Run(ctx context.Context) (err error) {
+	lockFile := d.preAcquiredLock
+	if lockFile == nil {
+		lockFile, err = acquireLock(d.FabrikDir)
+		if err != nil {
+			return err
+		}
+		// A failed Close on a writable handle can mean a lost write (though
+		// the lock file's own contents are never written to — this guards
+		// against the general case). Surface it as the function's error
+		// when nothing else already failed; otherwise log it so it isn't
+		// silently dropped.
+		defer func() {
+			if cerr := releaseLock(lockFile); cerr != nil {
+				if err == nil {
+					err = fmt.Errorf("releasing lock file %s: %w", d.lockPath(), cerr)
+				} else {
+					logf(0, "poll", "releasing lock file %s after prior error: %v\n", d.lockPath(), cerr)
+				}
+			}
+		}()
+	}
 
 	interval := d.Config.PollInterval
 	if interval <= 0 {

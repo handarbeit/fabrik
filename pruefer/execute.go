@@ -44,6 +44,32 @@ func Execute() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Acquired here, before githubauth.Reconcile, rather than only around
+	// Daemon.Run's poll loop as before: Reconcile can spin up the loopback
+	// manifest callback server, launch a browser, hit GitHub's
+	// manifest-exchange endpoint, and write PEM/app-state files (including
+	// the self-heal path that recreates the App when identity validation
+	// fails). Two Pruefer processes started concurrently against the same
+	// .pruefer directory (e.g. an overlapping systemd restart) could
+	// otherwise both race through first-run bootstrap or self-heal at
+	// once, with each independently atomic file write interleaving into a
+	// mismatched (AppID, private key) pair — exactly the
+	// PrivateKeyFingerprint repair-needed case loadOrBootstrapCredentials
+	// exists to catch, but avoidable in the first place by never letting
+	// two processes attempt it simultaneously. Handed to daemon below via
+	// preAcquiredLock so Daemon.Run doesn't try to acquire it a second
+	// time (which would deadlock/fail against this same process's own
+	// held lock).
+	lockFile, err := acquireLock("")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := releaseLock(lockFile); cerr != nil {
+			logf(0, "poll", "releasing lock file: %v\n", cerr)
+		}
+	}()
+
 	auth, err := githubauth.Reconcile(ctx, githubauth.Options{
 		AppID:             cfg.AppID,
 		AppInstallationID: cfg.AppInstallationID,
@@ -79,11 +105,12 @@ func Execute() error {
 	}
 
 	daemon := &Daemon{
-		Clients:  clients,
-		Claude:   &RealClaudeInvoker{},
-		Clone:    CloneForReview,
-		Config:   cfg,
-		BotLogin: auth.BotLogin(),
+		Clients:         clients,
+		Claude:          &RealClaudeInvoker{},
+		Clone:           CloneForReview,
+		Config:          cfg,
+		BotLogin:        auth.BotLogin(),
+		preAcquiredLock: lockFile,
 	}
 
 	if useTUI(cfg) {

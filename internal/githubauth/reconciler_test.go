@@ -184,6 +184,66 @@ func TestReconcile_PinnedInstallation_PopulatesInstallationRepoCache(t *testing.
 	}
 }
 
+// TestReconcile_PinnedInstallation_CacheWriteFailureIsNonFatal is the
+// regression test for a review finding: saveInstallationRepoCache's call
+// site in the pinned-AppInstallationID branch (unlike the discovery path,
+// which already had coverage) had no test confirming a failing write there
+// is merely logged, not surfaced as a Reconcile error — even though
+// saveInstallationRepoCache has no error return at all, so this is true by
+// construction today. Forces that structural guarantee into an explicit
+// test so a future refactor threading an error return through this call
+// can't silently make the pinned path fail reconciliation over a
+// diagnostics-only cache write.
+func TestReconcile_PinnedInstallation_CacheWriteFailureIsNonFatal(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+
+	// A regular file in place of AppStatePath's parent directory makes
+	// saveCredentials's os.MkdirAll (and therefore the whole write) fail
+	// deterministically, without relying on OS-specific permission
+	// semantics.
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+	statePath := filepath.Join(blocker, "app-state.json")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"slug": "pruefer-bot"})
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token": "ghs_x", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: statePath,
+		WatchedRepos: []string{"handarbeit/fabrik"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile must not fail when the diagnostics-only installation-repo cache write fails: %v", err)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "could not update installation-repo cache") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a log line about the failed cache write, got: %v", lines())
+	}
+}
+
 func TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

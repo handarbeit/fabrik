@@ -119,21 +119,35 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	// GitHub identity before the real user does could get this flow to
 	// adopt an App *they* control — a materially different, and not yet
 	// equally available, outcome versus "read the PEM directly" (there is
-	// no PEM yet). Accepted risk anyway, not an oversight: it requires local
-	// code execution on the machine running Pruefer, a threat model this
-	// flow's CSRF `state` check was never meant to cover (that defends
-	// against remote/cross-site redirection, not a co-resident process),
-	// and one under which every other part of Pruefer's trust boundary
-	// (config files, the browser-open command, the process itself) is
-	// already unenforceable. Narrowing the window further (e.g. serving
-	// /start at most once) would not close it, only shrink it, so it's
-	// left undone rather than adding complexity for a race that stays
-	// exploitable either way under this threat model.
+	// no PEM yet). Accepted risk anyway, not an oversight: the bar for it is
+	// merely reading state off this process's own stdout/logs (or a process
+	// listing showing the /start URL) and issuing a plain HTTP request with
+	// it — not "arbitrary code execution" in the stronger sense that phrase
+	// usually implies, just local, unprivileged access to this machine. A
+	// threat model this flow's CSRF `state` check was never meant to cover
+	// (that defends against remote/cross-site redirection, not a
+	// co-resident process reading local output), and one under which every
+	// other part of Pruefer's trust boundary (config files, the
+	// browser-open command, the process itself) is already unenforceable.
+	// Narrowing the window further (e.g. serving /start at most once) would
+	// not close it, only shrink it, so it's left undone rather than adding
+	// complexity for a race that stays exploitable either way under this
+	// threat model.
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, formHTML)
 	})
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		// GitHub's own redirect is always a GET. Rejecting other methods is
+		// a cheap hardening step, but — per the /start comment above — it
+		// does not close the actual co-resident-process risk: state is
+		// carried in the URL (query string), so a GET with the right state
+		// works exactly as well as any other method for whoever already has
+		// it.
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		if q.Get("state") == "" || subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(state)) != 1 {
 			// Either no state parameter at all, or one that doesn't match
