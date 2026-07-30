@@ -11,12 +11,15 @@ import "sync"
 const DefaultDedupeCapacity = 4096
 
 // Dedupe is a bounded, in-memory, insertion-order-eviction cache of
-// recently-seen delivery IDs. Safe for concurrent use.
+// recently-seen delivery IDs, backed by a fixed-size ring buffer so its
+// memory footprint never grows past capacity. Safe for concurrent use.
 type Dedupe struct {
 	mu       sync.Mutex
 	capacity int
 	seen     map[string]struct{}
-	order    []string
+	order    []string // len == capacity; ring buffer, next write at head
+	head     int
+	size     int // number of valid entries in order, <= capacity
 }
 
 // NewDedupe returns a Dedupe holding at most capacity delivery IDs. A
@@ -28,6 +31,7 @@ func NewDedupe(capacity int) *Dedupe {
 	return &Dedupe{
 		capacity: capacity,
 		seen:     make(map[string]struct{}, capacity),
+		order:    make([]string, capacity),
 	}
 }
 
@@ -46,12 +50,13 @@ func (d *Dedupe) SeenBefore(id string) bool {
 	if _, ok := d.seen[id]; ok {
 		return true
 	}
-	d.seen[id] = struct{}{}
-	d.order = append(d.order, id)
-	if len(d.order) > d.capacity {
-		oldest := d.order[0]
-		d.order = d.order[1:]
-		delete(d.seen, oldest)
+	if d.size == d.capacity {
+		delete(d.seen, d.order[d.head])
+	} else {
+		d.size++
 	}
+	d.order[d.head] = id
+	d.seen[id] = struct{}{}
+	d.head = (d.head + 1) % d.capacity
 	return false
 }
