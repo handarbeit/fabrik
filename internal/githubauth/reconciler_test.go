@@ -259,6 +259,59 @@ func TestReconcile_MissingOwnerInstallation_NoBrowserSkipsOpen(t *testing.T) {
 	}
 }
 
+// TestReconcile_MultipleMissingOwnerInstallations_OpensBrowserOnlyOnce is
+// the regression test for a review finding: WatchedRepos spanning several
+// owners with no installation (a plausible first run watching repos under
+// multiple orgs) must not pop open a separate browser tab/window per
+// missing owner — only the first gets an actual browser-open attempt, every
+// missing owner still gets its install URL logged.
+func TestReconcile_MultipleMissingOwnerInstallations_OpensBrowserOnlyOnce(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	var openCount int
+	oldBrowser := openBrowser
+	defer func() { openBrowser = oldBrowser }()
+	openBrowser = func(url string) error {
+		openCount++
+		return nil
+	}
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik", "orgone/repo", "orgtwo/repo"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail with multiple missing installations, got: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "handarbeit", "fabrik"); err != nil {
+		t.Errorf("expected handarbeit to remain authorized: %v", err)
+	}
+	if openCount != 1 {
+		t.Errorf("openBrowser called %d times, want exactly 1 (avoid popping a browser tab per missing owner)", openCount)
+	}
+	for _, owner := range []string{"orgone", "orgtwo"} {
+		found := false
+		for _, l := range lines() {
+			if strings.Contains(l, owner) && strings.Contains(l, "installations/new") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected a guided-install log line naming %s, got: %v", owner, lines())
+		}
+	}
+}
+
 func TestReconcile_SelectedModeExclusion_SoftStatusNotHardError(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

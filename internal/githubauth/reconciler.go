@@ -235,15 +235,26 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		byAccount[inst.Account] = inst
 	}
 
+	// openedInstallBrowser bounds guided-installation browser-opening to at
+	// most once per Reconcile call: WatchedRepos can plausibly span several
+	// owners with no installation at all (e.g. a first run watching repos
+	// under three different orgs), and popping open a separate browser
+	// tab/window per missing owner is surprising, unlike the single-flow
+	// manifest bootstrap. Every missing owner still gets its install URL
+	// logged; only the first one also gets an actual browser-open attempt.
+	openedInstallBrowser := false
 	for _, owner := range owners {
 		inst, ok := byAccount[owner]
 		if !ok {
 			installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
-			logf("! %s has no installation → opening %s …", owner, installURL)
-			if !opts.NoBrowser {
+			if !opts.NoBrowser && !openedInstallBrowser {
+				logf("! %s has no installation → opening %s …", owner, installURL)
 				if err := openBrowser(installURL); err != nil {
 					logf("could not open browser automatically (%v) — visit the URL above manually", err)
 				}
+				openedInstallBrowser = true
+			} else {
+				logf("! %s has no installation → %s", owner, installURL)
 			}
 			continue
 		}
