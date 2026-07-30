@@ -168,6 +168,77 @@ func TestRunManifestFlow_NoBrowserSkipsOpen(t *testing.T) {
 	}
 }
 
+// TestRunManifestFlow_PrivateKeyWriteFailureLeavesAppStatePersisted is the
+// regression test for a review finding: app-state must be persisted before
+// the PEM, not after. If app-state were written second and the PEM write
+// (which happens first in the old ordering) succeeded while app-state
+// failed, the next Reconcile would see AppID == 0 (no state file) and
+// silently start the manifest flow again, minting a second, orphaned App
+// and overwriting the first one's now-untracked PEM. With app-state written
+// first, a subsequent PEM-write failure instead leaves AppID already
+// persisted, which loadOrBootstrapCredentials treats as an explicit "repair
+// needed" error — never a silent duplicate App.
+func TestRunManifestFlow_PrivateKeyWriteFailureLeavesAppStatePersisted(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "app-state.json")
+	// ENAMETOOLONG: an implausibly long directory component deterministically
+	// fails the PEM's os.MkdirAll, simulating a private-key write failure
+	// without depending on real disk-full/permission conditions (see
+	// .claude/rules/golang.md).
+	pemPath := filepath.Join(dir, strings.Repeat("a", 10000), "app-private-key.pem")
+
+	srv := newManifestExchangeServer(t, 888, "orphan-guard-app")
+	defer srv.Close()
+
+	oldBrowser := openBrowser
+	defer func() { openBrowser = oldBrowser }()
+	browserOpened := make(chan string, 1)
+	openBrowser = func(url string) error {
+		browserOpened <- url
+		return nil
+	}
+
+	resultCh := make(chan manifestFlowResult, 1)
+	go func() {
+		creds, err := RunManifestFlow(context.Background(), ManifestFlowOptions{
+			BaseURL: srv.URL, PrivateKeyPath: pemPath, AppStatePath: statePath,
+		})
+		resultCh <- manifestFlowResult{creds, err}
+	}()
+
+	var startURL string
+	select {
+	case startURL = <-browserOpened:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for browser open")
+	}
+
+	state := fetchStartAndExtractState(t, startURL)
+	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state + "&code=abc123"
+	resp, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case res := <-resultCh:
+		if res.err == nil {
+			t.Fatal("expected RunManifestFlow to fail when the private key write fails")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for RunManifestFlow to return")
+	}
+
+	stateOnDisk, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if stateOnDisk.AppID != 888 {
+		t.Errorf("persisted state AppID = %d, want 888 (app-state must persist before the failing PEM write)", stateOnDisk.AppID)
+	}
+}
+
 func TestRunManifestFlow_TimeoutLeavesNoFilesBehind(t *testing.T) {
 	oldTimeout := manifestCallbackTimeout
 	manifestCallbackTimeout = 30 * time.Millisecond

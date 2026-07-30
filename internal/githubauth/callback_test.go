@@ -186,6 +186,55 @@ func TestRunManifestCallbackServer_SpuriousBareHitDoesNotConsumeResult(t *testin
 	}
 }
 
+// TestRunManifestCallbackServer_CodeOnlyHitDoesNotConsumeResult is the
+// regression test for a review finding: the earlier "state and code both
+// absent" bare-hit guard let a hit carrying only ?code= (no state at all)
+// fall through to the state-mismatch check, which permanently consumed the
+// single-buffered result channel — silently dropping the genuine GitHub
+// redirect if it arrived afterward. A stray hit with a code but no state is
+// not a plausible completion attempt (GitHub always echoes state back) and
+// must be ignored, not treated as terminal.
+func TestRunManifestCallbackServer_CodeOnlyHitDoesNotConsumeResult(t *testing.T) {
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	if err != nil {
+		t.Fatalf("runManifestCallbackServer: %v", err)
+	}
+	defer shutdown()
+
+	codeOnlyURL := strings.TrimSuffix(startURL, "/start") + "/callback?code=attackercode"
+	resp, err := http.Get(codeOnlyURL)
+	if err != nil {
+		t.Fatalf("GET code-only callback: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("code-only callback status = %d, want 404", resp.StatusCode)
+	}
+
+	state := fetchStartAndExtractState(t, startURL)
+	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state + "&code=realcode123"
+	resp2, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET real callback: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("real callback status = %d, want 200", resp2.StatusCode)
+	}
+
+	select {
+	case res := <-results:
+		if res.err != nil {
+			t.Fatalf("unexpected callback error: %v", res.err)
+		}
+		if res.code != "realcode123" {
+			t.Errorf("code = %q, want realcode123 (the genuine redirect must not have been dropped)", res.code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for callback result — the genuine redirect after a code-only hit was silently dropped")
+	}
+}
+
 func TestWaitForCallback_TimeoutRestoresCleanly(t *testing.T) {
 	old := manifestCallbackTimeout
 	manifestCallbackTimeout = 30 * time.Millisecond

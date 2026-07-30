@@ -34,7 +34,11 @@ type ManifestFlowOptions struct {
 // abandoned flow, an expired code, or any error along the way leaves prior
 // valid local config completely untouched — the caller can simply retry by
 // calling RunManifestFlow again, per the issue's expiry/abandonment
-// handling requirements.
+// handling requirements. The two post-exchange writes (app-state, then PEM)
+// are not atomic as a pair, but are deliberately ordered so a failure
+// between them always lands in the same explicit "repair needed" state
+// loadOrBootstrapCredentials already handles for a lost/corrupt key — never
+// a silently duplicated App (see the comment at the writes below).
 func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
 	logf := opts.Logf
 	if logf == nil {
@@ -64,9 +68,16 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 		return Credentials{}, fmt.Errorf("exchanging manifest code: %w", err)
 	}
 
-	if err := savePrivateKey(opts.PrivateKeyPath, []byte(mc.PEM)); err != nil {
-		return Credentials{}, fmt.Errorf("persisting new App's private key: %w", err)
-	}
+	// Persist app-state (which carries AppID) before the PEM, not after: if
+	// the PEM write below then fails, the next Reconcile finds a non-zero
+	// AppID in AppStatePath but no private key at PrivateKeyPath, which
+	// loadOrBootstrapCredentials already treats as an explicit "repair
+	// needed" error — never silently re-running the manifest flow and
+	// creating a second, orphaned App. Persisting in the other order would
+	// leave a PEM on disk with no corresponding state file if this step
+	// failed, so the next run would see AppID == 0 and quietly mint a
+	// duplicate App while overwriting the orphaned PEM — exactly the
+	// "silently create a duplicate app" failure mode the issue rules out.
 	creds := Credentials{
 		AppID:         mc.AppID,
 		Slug:          mc.Slug,
@@ -76,6 +87,9 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 	}
 	if err := saveCredentials(opts.AppStatePath, creds); err != nil {
 		return Credentials{}, fmt.Errorf("persisting new App's credentials: %w", err)
+	}
+	if err := savePrivateKey(opts.PrivateKeyPath, []byte(mc.PEM)); err != nil {
+		return Credentials{}, fmt.Errorf("persisting new App's private key: %w", err)
 	}
 
 	logf("✓ created GitHub App %q (id %d) — install it on each account you watch: https://github.com/apps/%s/installations/new", mc.Slug, mc.AppID, mc.Slug)

@@ -198,6 +198,12 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 
 	r := &Reconciler{botLogin: botLogin, clients: map[string]*gh.Client{}}
 
+	for _, spec := range opts.WatchedRepos {
+		if _, _, ok := splitOwnerRepo(spec); !ok {
+			logf("! %q is not a valid \"owner/repo\" watched-repo entry — skipping", spec)
+		}
+	}
+
 	owners := distinctOwners(opts.WatchedRepos)
 	if len(owners) == 0 {
 		logf("no watched repos configured — reconciliation has nothing to authorize")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -73,8 +74,12 @@ func exchangeManifestCode(baseURL, code string) (ManifestCredentials, error) {
 	if baseURL == "" {
 		baseURL = defaultGitHubBaseURL
 	}
-	url := fmt.Sprintf("%s/app-manifests/%s/conversions", baseURL, code)
-	req, err := http.NewRequest(http.MethodPost, url, nil)
+	// code comes from an untrusted /callback query parameter (its state
+	// check only proves it arrived from a plausible completion attempt, not
+	// that it's well-formed) — path-escape it so a value containing "/",
+	// "?", or "#" can't redirect this request to a different path/query.
+	reqURL := fmt.Sprintf("%s/app-manifests/%s/conversions", baseURL, url.PathEscape(code))
+	req, err := http.NewRequest(http.MethodPost, reqURL, nil)
 	if err != nil {
 		return ManifestCredentials{}, fmt.Errorf("creating manifest exchange request: %w", err)
 	}

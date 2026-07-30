@@ -90,6 +90,40 @@ func TestExchangeManifestCode_ErrorStatus(t *testing.T) {
 	}
 }
 
+// TestExchangeManifestCode_EscapesSpecialCharacters is the regression test
+// for a review finding: code comes from an untrusted /callback query
+// parameter and was previously interpolated unescaped into the request URL
+// via fmt.Sprintf, so a value containing "/", "?", or "#" could redirect
+// the request to a different path or inject query parameters instead of
+// just failing to exchange. It must be escaped as an opaque path segment.
+func TestExchangeManifestCode_EscapesSpecialCharacters(t *testing.T) {
+	var gotPath, gotRawQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app-manifests/", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRawQuery = r.URL.RawQuery
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": 1, "slug": "s", "pem": "pem",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	maliciousCode := "abc?evil=1#frag/xyz"
+	if _, err := exchangeManifestCode(srv.URL, maliciousCode); err != nil {
+		t.Fatalf("exchangeManifestCode: %v", err)
+	}
+	if gotRawQuery != "" {
+		t.Errorf("gotRawQuery = %q, want empty — an unescaped code must not be able to inject query parameters", gotRawQuery)
+	}
+	if !strings.HasSuffix(gotPath, "/conversions") {
+		t.Errorf("gotPath = %q, want it to still end in /conversions (not redirected by the code's own path-like characters)", gotPath)
+	}
+	if !strings.Contains(gotPath, "evil=1") {
+		t.Errorf("gotPath = %q, want the code's literal characters present as an escaped path segment", gotPath)
+	}
+}
+
 func TestExchangeManifestCode_MissingIDOrPEM(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app-manifests/", func(w http.ResponseWriter, r *http.Request) {

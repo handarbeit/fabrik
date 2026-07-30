@@ -533,3 +533,43 @@ func TestReconcile_NoWatchedRepos_MintsNothing(t *testing.T) {
 		t.Errorf("mintCount = %d, want 0 (no installation calls with zero watched repos)", fake.mintCount.Load())
 	}
 }
+
+// TestReconcile_MalformedWatchedRepoEntry_LogsAndSkips is the regression
+// test for a review finding: distinctOwners/splitOwnerRepo's doc comment
+// claimed "Reconcile logs and skips" malformed watched_repos entries, but
+// Reconcile never actually logged anything about them — a typo'd entry
+// (e.g. missing slash) was silently dropped with zero operator-visible
+// feedback.
+func TestReconcile_MalformedWatchedRepoEntry_LogsAndSkips(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik", "not-a-valid-entry"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail on a malformed watched-repo entry, got: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "handarbeit", "fabrik"); err != nil {
+		t.Errorf("expected handarbeit to remain authorized: %v", err)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "not-a-valid-entry") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a log line naming the malformed watched-repo entry, got: %v", lines())
+	}
+}

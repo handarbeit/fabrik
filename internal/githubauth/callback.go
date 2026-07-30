@@ -114,15 +114,19 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	})
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if q.Get("state") == "" && q.Get("code") == "" {
-			// Neither parameter a genuine GitHub redirect always carries is
-			// present — this isn't a plausible attempt at completing the
-			// manifest flow at all (e.g. a stray local probe hitting this
-			// ephemeral port: browser prefetch, an extension, antivirus
-			// scanning). resultCh is single-buffered and only ever consumed
-			// once (via once.Do below), so treating this as terminal would
-			// silently drop the real GitHub redirect if it arrives after —
-			// respond and keep listening instead.
+		if q.Get("state") == "" {
+			// No state parameter at all — this isn't a plausible attempt at
+			// completing the manifest flow (a genuine GitHub redirect always
+			// echoes state back unchanged), just a stray hit on this ephemeral
+			// port (browser prefetch, an extension, antivirus scanning, or —
+			// more pointedly — a local process trying to smuggle in its own
+			// code without knowing our state). Keying the guard on state alone
+			// (rather than "state and code both absent") matters: a hit
+			// carrying only ?code= with no state would otherwise fall through
+			// to the switch below, fail the state-mismatch check, and once.Do
+			// would permanently consume the single-buffered resultCh with that
+			// error — silently dropping the real GitHub redirect if it arrives
+			// afterward. Respond and keep listening instead.
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
