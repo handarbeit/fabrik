@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -188,7 +189,10 @@ func (d *Daemon) lockPath() string {
 
 // Run acquires an exclusive file lock (preventing two Pruefer instances from
 // double-polling the same watched repos, mirroring engine/poll.go's
-// Engine.Run) and polls on Config.PollInterval until ctx is cancelled.
+// Engine.Run), then dispatches to runPollOnly (Config.PollInterval-driven,
+// the default, byte-for-byte unchanged from before EventSource existed) or
+// runEventDriven (when EventSource is set — event_source: hookdeck),
+// running until ctx is cancelled either way.
 func (d *Daemon) Run(ctx context.Context) (err error) {
 	lockPath := d.lockPath()
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
@@ -216,6 +220,17 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
+	if d.EventSource != nil {
+		return d.runEventDriven(ctx)
+	}
+	return d.runPollOnly(ctx)
+}
+
+// runPollOnly is Run's original (pre-EventSource) poll loop, unchanged:
+// poll every Config.PollInterval until ctx is cancelled. This is
+// event_source: poll's entire behavior — the default, and what makes that
+// default "byte-for-byte unchanged" from before this issue.
+func (d *Daemon) runPollOnly(ctx context.Context) error {
 	interval := d.Config.PollInterval
 	if interval <= 0 {
 		interval = DefaultPollInterval
@@ -263,6 +278,84 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 			return nil
 		case <-time.After(interval):
 		}
+	}
+}
+
+func (d *Daemon) reconciliationFallbackInterval() time.Duration {
+	if d.Config.ReconciliationFallbackInterval > 0 {
+		return d.Config.ReconciliationFallbackInterval
+	}
+	return DefaultReconciliationFallbackInterval
+}
+
+// runEventDriven runs Pruefer in event_source: hookdeck mode: EventSource
+// delivers events to a daemonEventSink in the background, while poll() is
+// demoted to a low-frequency safety net — an optional pass at startup, then
+// one every reconciliationFallbackInterval() for the lifetime of the run.
+// EventSource.Run is trusted to retry transport failures internally and
+// never return except on ctx cancellation (see events.EventSource's
+// contract), but this loop tolerates a misbehaving implementation that
+// returns early anyway: the fallback ticker keeps polling regardless, so a
+// dead event source degrades to poll-only rather than crashing the daemon.
+func (d *Daemon) runEventDriven(ctx context.Context) error {
+	fallback := d.reconciliationFallbackInterval()
+	logf(0, "poll", "pruefer starting: watching %d repo(s) in event-driven mode, reconciliation fallback %s, concurrency %d\n",
+		len(d.Config.WatchedRepos), fallback, d.effectiveConcurrency())
+
+	if d.Config.ReconciliationStartup {
+		logf(0, "poll", "running startup reconciliation poll\n")
+		d.poll(ctx)
+	}
+
+	sourceDone := make(chan error, 1)
+	go func() { sourceDone <- d.EventSource.Run(ctx, &daemonEventSink{daemon: d}) }()
+
+	ticker := time.NewTicker(fallback)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			d.poll(ctx)
+		case err := <-sourceDone:
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				logf(0, "warn", "event source exited unexpectedly: %v — continuing on poll-fallback only\n", err)
+			} else {
+				logf(0, "warn", "event source returned before ctx cancellation — continuing on poll-fallback only\n")
+			}
+			// Disable this case: the goroutine has exited and sourceDone
+			// will never receive again, so avoid busy-looping on it.
+			sourceDone = nil
+		}
+	}
+}
+
+// HealthHandler returns a callback suitable for wiring into an
+// EventSource's transport-health hook (e.g. hookdeck.Config.OnHealth),
+// bound to ctx — execute.go constructs the EventSource (and this callback)
+// before Run/runEventDriven starts, so ctx is threaded through explicitly
+// rather than stored on Daemon. A transition into events.HealthConnected
+// that follows a prior connection (a reconnect) triggers a reconciliation
+// poll: events may have been missed while disconnected, so this catches up
+// via poll rather than trusting the transport's own replay alone. The very
+// first connect is not treated as a reconnect — ReconciliationStartup
+// already covers startup.
+func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
+	var connectedBefore atomic.Bool
+	return func(ev events.HealthEvent) {
+		if ev.State != events.HealthConnected {
+			return
+		}
+		if !connectedBefore.Swap(true) {
+			return
+		}
+		logf(0, "poll", "event source reconnected — running a reconciliation poll\n")
+		go d.poll(ctx)
 	}
 }
 
