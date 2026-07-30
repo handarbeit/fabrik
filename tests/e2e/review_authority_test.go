@@ -28,8 +28,13 @@ import (
 // the 4 scenarios, letting the suite go green having validated zero
 // authoritative behavior. See adrs/1258-e2e-review-authority-coverage.md.
 //
-// No bed setup is required beyond FABRIK_REVIEWER_TOKEN (see README) — none
-// of these scenarios skip for lack of bed prerequisites.
+// Bed setup required: FABRIK_REVIEWER_TOKEN, and the
+// "review-authority:authoritative" label must already exist as a label
+// object in the target repo (gh issue create --label fails hard, not
+// gracefully, if it doesn't — see README prerequisite). Neither is a bed
+// column or stage-YAML variant, and no scenario skips for lack of either —
+// a missing label surfaces as a t.Fatalf from FileIssue, by design (see the
+// ADR's rationale for rejecting silent skips).
 //
 // Scope limitation (see adrs/1258-e2e-review-authority-coverage.md): the
 // landing/auto-merge gate (reviewGateBlocksLanding, called only from
@@ -57,8 +62,11 @@ import (
 // Requires #1261 (engine support for the review-authority:authoritative
 // label) to be merged.
 //
-// Wall-clock: ~FABRIK_REVIEW_WAIT_TIMEOUT + 10 min. Use a short bed value
-// (e.g. 2) for a fast iteration run — see README.
+// Wall-clock (worst case): ~FABRIK_REVIEW_WAIT_TIMEOUT + 30 min — 10 min for
+// the initial block-confirmation wait, FABRIK_REVIEW_WAIT_TIMEOUT+10 min for
+// the pause wait itself, plus two trailing 5 min waits (fabrik:awaiting-input,
+// the pause comment). Typically much faster in practice. Use a short bed
+// value (e.g. 2) for a fast iteration run — see README.
 func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)

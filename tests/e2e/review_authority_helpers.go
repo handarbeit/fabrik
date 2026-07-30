@@ -18,6 +18,13 @@ import (
 // existing Review column with its default (advisory) stage config. See
 // adrs/1258-e2e-review-authority-coverage.md for the full rationale,
 // including why the earlier column/stage-variant design was rejected.
+//
+// Bed prerequisite: the "review-authority:authoritative" label must already
+// exist in the target repo. FileIssue passes extraLabels straight through to
+// `gh issue create --label`, which fails hard (not gracefully) if the label
+// is absent — see tests/e2e/README.md's prerequisite for this test file,
+// which mirrors the existing "Gate labels seeded" precedent for
+// TestPausedMergedPRRecovery.
 
 // seedReviewGateItem files an issue, adds it to the project, builds a member
 // PR directly via the GitHub API (CreateMemberPR — no Claude cost), seeds
