@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -602,5 +603,78 @@ func TestSource_RunOnce_ConnectedAfterGracePeriodWithNoFrames(t *testing.T) {
 	}
 	if !found {
 		t.Error("no HealthConnected event emitted despite the connection surviving past aliveGracePeriod")
+	}
+}
+
+// deadlineRecordingConn wraps a net.Conn to record every SetWriteDeadline
+// call — used to verify ack bounds its WriteMessage call, since a stuck
+// write (peer stops reading) would otherwise block the single read-loop
+// goroutine forever with no way to observe it from the outside.
+type deadlineRecordingConn struct {
+	net.Conn
+	mu             sync.Mutex
+	writeDeadlines []time.Time
+}
+
+func (c *deadlineRecordingConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.writeDeadlines = append(c.writeDeadlines, t)
+	c.mu.Unlock()
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *deadlineRecordingConn) recordedDeadlines() []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]time.Time, len(c.writeDeadlines))
+	copy(out, c.writeDeadlines)
+	return out
+}
+
+func TestSource_Ack_SetsWriteDeadline(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+	cfg.writeWait = 250 * time.Millisecond
+
+	var wrapped *deadlineRecordingConn
+	var mu sync.Mutex
+	cfg.Dialer = &websocket.Dialer{
+		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			wrapped = &deadlineRecordingConn{Conn: c}
+			mu.Unlock()
+			return wrapped, nil
+		},
+	}
+	src := NewSource(cfg)
+	runSourceInBackground(t, src, sink)
+
+	conn := m.nextConn(t)
+	body := prOpenedBody(t, 7)
+	before := time.Now()
+	sendAttempt(t, conn, "attempt-1", "delivery-1", body, signBody(body, testWebhookSecret))
+	waitUntilCount(t, sink, 1)
+	readAck(t, conn)
+
+	mu.Lock()
+	w := wrapped
+	mu.Unlock()
+	if w == nil {
+		t.Fatal("client-side connection was never captured")
+	}
+	deadlines := w.recordedDeadlines()
+	if len(deadlines) == 0 {
+		t.Fatal("ack did not call conn.SetWriteDeadline — a stuck write to a non-reading peer could block the read loop forever")
+	}
+	maxWant := before.Add(cfg.writeWait + time.Second) // generous slack for scheduling jitter
+	for _, d := range deadlines {
+		if d.After(maxWant) {
+			t.Errorf("recorded write deadline %v is later than expected bound %v (writeWait = %s)", d, maxWant, cfg.writeWait)
+		}
 	}
 }

@@ -262,7 +262,12 @@ func (d *Daemon) runEventDriven(ctx context.Context) error {
 // poll: events may have been missed while disconnected, so this catches up
 // via poll rather than trusting the transport's own replay alone. The very
 // first connect is not treated as a reconnect — ReconciliationStartup
-// already covers startup.
+// already covers startup. The poll is coalesced via triggerReconciliationPoll
+// (shared with installation events) rather than a bare goroutine — a
+// flapping connection can achieve HealthConnected repeatedly in quick
+// succession, and without coalescing each reconnect would spawn its own
+// independent full ListOpenPRs sweep across every watched repo, exactly
+// when the network is already unreliable.
 func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 	var connectedBefore atomic.Bool
 	return func(ev events.HealthEvent) {
@@ -273,7 +278,7 @@ func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 			return
 		}
 		logf(0, "poll", "event source reconnected — running a reconciliation poll\n")
-		go d.poll(ctx)
+		d.triggerReconciliationPoll(ctx)
 	}
 }
 
@@ -287,12 +292,13 @@ func (d *Daemon) effectiveConcurrency() int {
 // triggerReconciliationPoll starts one poll cycle in its own goroutine,
 // coalescing concurrent requests: a burst of installation/repo-selection
 // events (e.g. an app install across many repos, each a distinct delivery
-// so dedupe doesn't collapse them) would otherwise spawn one redundant
-// full ListOpenPRs sweep per event. Only one poll runs at a time; a
-// trigger that arrives while one is already in flight is dropped — the
-// in-flight poll already re-derives current GitHub state, and any further
-// change is still covered by the next fallback-interval tick or the
-// poll-fallback safety net.
+// so dedupe doesn't collapse them), or a flapping Hookdeck connection
+// achieving HealthConnected repeatedly in quick succession (see
+// HealthHandler), would otherwise spawn one redundant full ListOpenPRs
+// sweep per trigger. Only one poll runs at a time; a trigger that arrives
+// while one is already in flight is dropped — the in-flight poll already
+// re-derives current GitHub state, and any further change is still covered
+// by the next fallback-interval tick or the poll-fallback safety net.
 func (d *Daemon) triggerReconciliationPoll(ctx context.Context) {
 	if !d.pollInFlight.CompareAndSwap(false, true) {
 		logf(0, "poll", "reconciliation poll already in flight — coalescing this trigger\n")

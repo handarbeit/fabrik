@@ -144,6 +144,45 @@ func TestDaemonRunEventDriven_ReconnectTriggersReconciliation(t *testing.T) {
 	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
 }
 
+func TestDaemonRunEventDriven_FlappingReconnect_CoalescesReconciliationPolls(t *testing.T) {
+	source := &fakeEventSource{}
+	d, client := newEventDrivenTestDaemon(source)
+	d.Config.ReconciliationStartup = false
+	d.Config.ReconciliationFallbackInterval = time.Hour // must not fire during this test
+	block := make(chan struct{})
+	client.listOpenPRsBlock = block
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDaemonInBackground(t, d, ctx)
+
+	time.Sleep(50 * time.Millisecond) // let runEventDriven start up first
+
+	handler := d.HealthHandler(ctx)
+	handler(events.HealthEvent{State: events.HealthConnected}) // first connect: no-op
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate a flapping connection: several genuine connect/drop cycles in
+	// quick succession, each achieving HealthConnected before failing again —
+	// exactly the scenario HealthHandler's coalescing (via
+	// triggerReconciliationPoll) guards against.
+	for i := 0; i < 5; i++ {
+		handler(events.HealthEvent{State: events.HealthReconnecting})
+		handler(events.HealthEvent{State: events.HealthConnected})
+	}
+
+	waitUntil(t, 2*time.Second, func() bool { return client.listOpenPRsCallCount() >= 1 })
+	// Give any wrongly-uncoalesced extra poll cycles a chance to start their
+	// own ListOpenPRs call before asserting the negative.
+	time.Sleep(50 * time.Millisecond)
+	if got := client.listOpenPRsCallCount(); got != 1 {
+		t.Errorf("listOpenPRsCallCount() = %d, want 1 (a flapping-reconnect burst must coalesce into a single in-flight poll)", got)
+	}
+
+	close(block)
+	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
+}
+
 func TestDaemonRunEventDriven_SourceFailsImmediately_PollFallbackStillWorks(t *testing.T) {
 	source := &fakeEventSource{
 		runFn: func(ctx context.Context, sink events.EventSink) error {
