@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -217,6 +218,9 @@ func TestReviewAuthorityYoloDoesNotBypassBlock(t *testing.T) {
 	for time.Now().Before(blockedDeadline) {
 		if state, err := tryIssueState(env, env.RepoAlpha, num); err == nil && state == "CLOSED" {
 			t.Fatalf("yolo bypassed the authoritative gate — %s#%d closed while CHANGES_REQUESTED still stood", env.RepoAlpha, num)
+		}
+		if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && !slices.Contains(labels, "fabrik:awaiting-review") {
+			t.Fatalf("yolo bypassed the authoritative gate — fabrik:awaiting-review cleared from %s#%d while CHANGES_REQUESTED still stood", env.RepoAlpha, num)
 		}
 		pollSleep(pollBase())
 	}

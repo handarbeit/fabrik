@@ -1526,6 +1526,8 @@ func ghOutputWithToken(token string, args ...string) (string, error) {
 // SubmitPRReview submits a review on the PR using reviewerToken (a PAT for a
 // non-author identity — GitHub forbids the PR author from approving their own
 // PR). action must be "APPROVE" or "REQUEST_CHANGES" (GitHub API event values).
+// GitHub's API requires a non-empty body for REQUEST_CHANGES/COMMENT (only
+// APPROVE may omit it), so a fixed body is always sent — harmless for APPROVE.
 // Fails the test on API error (e.g. 422 if reviewerToken == env.GHToken).
 func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, prNumber int, action string) {
 	t.Helper()
@@ -1535,7 +1537,8 @@ func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, p
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
 	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
-		"-f", "event="+action)
+		"-f", "event="+action,
+		"-f", "body=e2e harness review ("+action+")")
 	if err != nil {
 		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
 	}
