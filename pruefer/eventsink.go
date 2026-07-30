@@ -128,15 +128,23 @@ type daemonEventSink struct {
 // GitHub (and Hookdeck's forwarding scope) can deliver many event types
 // this sink never needs to act on.
 //
-// Both dispatch paths below run in their own goroutine so Handle itself
-// always returns immediately, regardless of whether the daemon's shared
-// semaphore (ReviewFromEvent) or an in-flight poll cycle's wg.Wait()
-// (poll) is currently blocked on other work. Handle is called synchronously
-// from the hookdeck.Source read loop (see source.go's handleFrame/ack) —
-// blocking here would delay acking the current webhook and stall reading
-// every subsequent one, exactly what the issue's "ack the webhook promptly
-// ... never run a review synchronously in the webhook receiver" requirement
-// forbids.
+// Handle itself always returns immediately, regardless of whether the
+// daemon's shared semaphore (ReviewFromEvent) or an in-flight poll cycle's
+// wg.Wait() (poll) is currently blocked on other work. Handle is called
+// synchronously from the hookdeck.Source read loop (see source.go's
+// handleFrame/ack) — blocking here would delay acking the current webhook
+// and stall reading every subsequent one, exactly what the issue's "ack the
+// webhook promptly ... never run a review synchronously in the webhook
+// receiver" requirement forbids.
+//
+// The pull_request branch dispatches via its own `go`, since
+// ReviewFromEvent itself blocks (on the semaphore, then optionally the PR
+// lock). The install-event branch calls triggerReconciliationPoll directly,
+// not via `go` — that's still non-blocking, but by triggerReconciliationPoll's
+// own construction (an atomic CompareAndSwap guard around an internally
+// spawned goroutine), not because this call site wraps it. If
+// triggerReconciliationPoll ever grew blocking work ahead of that
+// CompareAndSwap, this call site would need its own `go` too.
 //
 // This makes the per-event goroutine count itself uncapped — a burst of
 // legitimate events across many distinct PRs can pile up more goroutines
