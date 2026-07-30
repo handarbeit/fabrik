@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -269,6 +270,62 @@ func TestFetchAppSlug_MissingSlug(t *testing.T) {
 
 	if _, err := FetchAppSlug(srv.URL, "test-jwt"); err == nil {
 		t.Fatal("expected error when slug is missing, got nil")
+	}
+}
+
+// TestFetchAppSlug_UnauthorizedWrapsErrAppUnauthorized and
+// TestFetchAppSlug_NotFoundWrapsErrNotFound guard the distinction
+// internal/githubauth's Reconcile relies on: only a JWT GitHub actively
+// rejected (401/403) or an App ID it reports as gone (404) should read as
+// "the App may have been deleted" — never a generic transport/5xx failure.
+func TestFetchAppSlug_UnauthorizedWrapsErrAppUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"bad credentials"}`))
+	}))
+	defer srv.Close()
+
+	_, err := FetchAppSlug(srv.URL, "test-jwt")
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+	if !errors.Is(err, ErrAppUnauthorized) {
+		t.Errorf("err = %v, want errors.Is(err, ErrAppUnauthorized)", err)
+	}
+}
+
+func TestFetchAppSlug_NotFoundWrapsErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"not found"}`))
+	}))
+	defer srv.Close()
+
+	_, err := FetchAppSlug(srv.URL, "test-jwt")
+	if err == nil {
+		t.Fatal("expected an error for a 404 response")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want errors.Is(err, ErrNotFound)", err)
+	}
+}
+
+// TestFetchAppSlug_ServerErrorIsNotWrappedAsAppRejection guards the actual
+// bug: a 500 must not satisfy errors.Is against either sentinel, or a caller
+// distinguishing "rejected" from "transient" would misclassify it.
+func TestFetchAppSlug_ServerErrorIsNotWrappedAsAppRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"internal server error"}`))
+	}))
+	defer srv.Close()
+
+	_, err := FetchAppSlug(srv.URL, "test-jwt")
+	if err == nil {
+		t.Fatal("expected an error for a 500 response")
+	}
+	if errors.Is(err, ErrAppUnauthorized) || errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want a 500 to NOT be wrapped as ErrAppUnauthorized or ErrNotFound", err)
 	}
 }
 

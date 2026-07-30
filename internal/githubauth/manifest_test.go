@@ -48,6 +48,23 @@ func TestBuildManifest_RedirectURLPropagated(t *testing.T) {
 	}
 }
 
+// TestBuildManifest_HomepageURLIsStableNotEphemeralCallback is the
+// regression test for the bug an external review found: the manifest's
+// "url" field (the App's public homepage link on its GitHub settings page)
+// must not reuse the ephemeral loopback redirectURL, which stops existing
+// the moment the local manifest-flow server shuts down — that would leave
+// the created App's homepage link permanently dead.
+func TestBuildManifest_HomepageURLIsStableNotEphemeralCallback(t *testing.T) {
+	redirectURL := "http://127.0.0.1:54321/callback"
+	m := buildManifest(redirectURL)
+	if m["url"] == redirectURL {
+		t.Error("manifest \"url\" must not be the ephemeral loopback redirectURL — it would be a dead link once local setup finishes")
+	}
+	if m["url"] != defaultAppHomepageURL {
+		t.Errorf("manifest \"url\" = %v, want %v", m["url"], defaultAppHomepageURL)
+	}
+}
+
 func TestExchangeManifestCode_Success(t *testing.T) {
 	var gotPath string
 	mux := http.NewServeMux()

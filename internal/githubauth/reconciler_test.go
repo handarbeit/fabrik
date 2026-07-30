@@ -347,6 +347,53 @@ func TestReconcile_SelectedModeExclusion_SoftStatusNotHardError(t *testing.T) {
 	}
 }
 
+// TestReconcile_PopulatesInstallationRepoCache is the regression test for
+// the bug an external review found: Credentials.InstallationRepoCache was
+// defined and round-trip tested but never actually populated by Reconcile,
+// making it dead weight despite the issue's own credential-model
+// requirement to persist "installation→repo mapping (cacheable metadata)".
+// Covers both installation modes: "all" (every watched repo under that
+// owner is cached as accessible, no live per-repo check) and "selected"
+// (only the repos verifyRepoAccess actually confirms are cached).
+func TestReconcile_PopulatesInstallationRepoCache(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	statePath := filepath.Join(dir, "app-state.json")
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", RepositorySelection: "all"},
+		{ID: 222, Account: "someorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{222: {"someorg/repo-one"}}
+	defer srv.Close()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: []string{"handarbeit/fabrik", "someorg/repo-one", "someorg/repo-excluded"},
+		BaseURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after Reconcile: %v", err)
+	}
+	if saved.Slug != "pruefer-bot" {
+		t.Errorf("saved Slug = %q, want pruefer-bot", saved.Slug)
+	}
+	if len(saved.InstallationRepoCache["handarbeit"]) != 1 || saved.InstallationRepoCache["handarbeit"][0] != "handarbeit/fabrik" {
+		t.Errorf("InstallationRepoCache[handarbeit] = %v, want [handarbeit/fabrik] (an \"all\" installation authorizes every watched repo)", saved.InstallationRepoCache["handarbeit"])
+	}
+	if len(saved.InstallationRepoCache["someorg"]) != 1 || saved.InstallationRepoCache["someorg"][0] != "someorg/repo-one" {
+		t.Errorf("InstallationRepoCache[someorg] = %v, want [someorg/repo-one] only (repo-excluded is not granted by the selected-mode installation)", saved.InstallationRepoCache["someorg"])
+	}
+}
+
 func TestReconcile_MissingPrivateKey_RepairErrorNeverBootstraps(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
@@ -557,6 +604,91 @@ func TestReconcile_AppDeletedExternally_PinnedAppID_ReturnsRepairErrorNeverLoops
 	}
 	if !strings.Contains(err.Error(), "repair") || !strings.Contains(err.Error(), "github_app_id") {
 		t.Errorf("error = %v, want it to describe a github_app_id repair action, not a silent recreation", err)
+	}
+}
+
+// TestReconcile_TransientAppIdentityFailure_ReturnsErrorNeverBootstraps is
+// the regression test for the bug an external review found: appRequest
+// treats a transport failure, timeout, or 5xx identically to a real
+// 401/403/404 rejection, and a naive "any FetchAppSlug error means the App
+// was deleted" check would kick off a full re-bootstrap (or, on the pinned
+// path, a "repair required" error) on an ordinary transient hiccup — the
+// steady-state restart path for every self-hosted operator, not just
+// first-run. A 500 must be reported as a plain, retryable error and must
+// never invoke runManifestFlow.
+func TestReconcile_TransientAppIdentityFailure_ReturnsErrorNeverBootstraps(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+	statePath := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "my-app"}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"internal server error"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when app identity validation fails with a 500")
+	}
+	if strings.Contains(err.Error(), "deleted") || strings.Contains(err.Error(), "repair") {
+		t.Errorf("error = %v, want a plain transient-failure error, not deletion/repair language for a 500", err)
+	}
+	if !strings.Contains(err.Error(), "transient") {
+		t.Errorf("error = %v, want it to describe the failure as transient", err)
+	}
+}
+
+// TestReconcile_TransientAppIdentityFailure_PinnedAppID_ReturnsErrorNeverBootstraps
+// is the pinned-AppID variant of the above: a 500 on the compat path must
+// also be reported as a plain retryable error, not the "github_app_id ...
+// repair required" message reserved for an actual 401/403/404 rejection.
+func TestReconcile_TransientAppIdentityFailure_PinnedAppID_ReturnsErrorNeverBootstraps(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"internal server error"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when a pinned AppID's identity validation fails with a 500")
+	}
+	if strings.Contains(err.Error(), "repair") {
+		t.Errorf("error = %v, want a plain transient-failure error, not a repair-required message for a 500", err)
+	}
+	if !strings.Contains(err.Error(), "transient") {
+		t.Errorf("error = %v, want it to describe the failure as transient", err)
 	}
 }
 

@@ -79,7 +79,17 @@ func TestRunManifestCallbackServer_HappyPath(t *testing.T) {
 	}
 }
 
-func TestRunManifestCallbackServer_StateMismatchRejected(t *testing.T) {
+// TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult is the
+// regression test for a review finding: a /callback hit with a
+// wrong-but-non-empty state (e.g. a different local process trying to
+// complete the flow with its own code, or any other stray hit on this
+// ephemeral port) must not consume the single-buffered result channel. The
+// state check still rejects it (a wrong state can never be accepted as a
+// completion of this flow), but treating it as terminal would silently drop
+// the genuine GitHub redirect — carrying the correct state — if it arrives
+// afterward, hanging the flow until manifestCallbackTimeout with no
+// indication of the real cause.
+func TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult(t *testing.T) {
 	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
@@ -88,27 +98,39 @@ func TestRunManifestCallbackServer_StateMismatchRejected(t *testing.T) {
 
 	// Deliberately ignore the real state and supply a wrong one, simulating
 	// a different local process trying to complete the flow with its own
-	// code — the CSRF check must reject this, not silently accept it.
+	// code — the CSRF check must reject this, not silently accept it, but
+	// must also not block the real redirect that follows.
 	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=wrong-state&code=testcode123"
 	resp, err := http.Get(callbackURL)
 	if err != nil {
 		t.Fatalf("GET callback: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("callback status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("state-mismatch callback status = %d, want 404", resp.StatusCode)
+	}
+
+	state := fetchStartAndExtractState(t, startURL)
+	realCallbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state + "&code=realcode123"
+	resp2, err := http.Get(realCallbackURL)
+	if err != nil {
+		t.Fatalf("GET real callback: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("real callback status = %d, want 200", resp2.StatusCode)
 	}
 
 	select {
 	case res := <-results:
-		if res.err == nil {
-			t.Fatal("expected a state-mismatch error, got nil")
+		if res.err != nil {
+			t.Fatalf("unexpected callback error: %v", res.err)
 		}
-		if !strings.Contains(res.err.Error(), "state mismatch") {
-			t.Errorf("error = %v, want it to mention state mismatch", res.err)
+		if res.code != "realcode123" {
+			t.Errorf("code = %q, want realcode123 (the genuine redirect must not have been dropped)", res.code)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for callback result")
+		t.Fatal("timed out waiting for callback result — the genuine redirect after a state-mismatch hit was silently dropped")
 	}
 }
 

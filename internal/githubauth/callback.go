@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -108,33 +109,43 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	resultCh := make(chan callbackResult, 1)
 	var once sync.Once
 	mux := http.NewServeMux()
+	// /start (and therefore state, embedded in formHTML's form-action URL)
+	// is served to any requester that can reach this loopback port, not just
+	// the browser this flow opened — so state here is not secret from a
+	// co-resident local process the way it is from a remote/cross-site
+	// attacker. Accepted risk, not an oversight: reading it requires local
+	// code execution on the machine running Pruefer, which is already a
+	// stronger precondition than this flow's threat model (cross-site/CSRF)
+	// defends against — a co-resident attacker with that capability can
+	// already read AppPrivateKeyPath directly, no callback race needed.
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, formHTML)
 	})
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if q.Get("state") == "" {
-			// No state parameter at all — this isn't a plausible attempt at
-			// completing the manifest flow (a genuine GitHub redirect always
-			// echoes state back unchanged), just a stray hit on this ephemeral
-			// port (browser prefetch, an extension, antivirus scanning, or —
-			// more pointedly — a local process trying to smuggle in its own
-			// code without knowing our state). Keying the guard on state alone
-			// (rather than "state and code both absent") matters: a hit
-			// carrying only ?code= with no state would otherwise fall through
-			// to the switch below, fail the state-mismatch check, and once.Do
-			// would permanently consume the single-buffered resultCh with that
-			// error — silently dropping the real GitHub redirect if it arrives
-			// afterward. Respond and keep listening instead.
+		if q.Get("state") == "" || subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(state)) != 1 {
+			// Either no state parameter at all, or one that doesn't match
+			// ours — neither is a plausible attempt at completing this flow
+			// (a genuine GitHub redirect always echoes back our exact
+			// state), so both are just a stray hit on this ephemeral port
+			// (browser prefetch, an extension, antivirus scanning, or a
+			// local process guessing/smuggling a state — see /start's
+			// comment above on that residual risk). Respond and keep
+			// listening rather than triggering once.Do: consuming the
+			// single-buffered resultCh here would permanently drop the real
+			// GitHub redirect if it arrives afterward. This also covers a
+			// hit carrying only ?code= with no state, which would otherwise
+			// fall through to the mismatch case below with the same effect.
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		// From here, state matches ours — this can only plausibly be
+		// GitHub's own redirect completing the flow, so a further problem
+		// (missing code) is a real, terminal failure worth surfacing rather
+		// than a stray hit to ignore.
 		var cbErr error
-		switch {
-		case q.Get("state") != state:
-			cbErr = fmt.Errorf("callback state mismatch (possible CSRF attempt)")
-		case q.Get("code") == "":
+		if q.Get("code") == "" {
 			cbErr = fmt.Errorf("callback missing code parameter")
 		}
 		once.Do(func() {

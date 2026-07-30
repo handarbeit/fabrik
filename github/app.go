@@ -9,11 +9,21 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 )
+
+// ErrAppUnauthorized is returned by appRequest when GitHub responds 401 or
+// 403 to an App-JWT-authenticated call: the JWT was rejected outright,
+// distinct from a transient network failure or 5xx. Together with
+// ErrNotFound (rest.go, reused here for 404), callers can use errors.Is to
+// distinguish "the App's identity was actively rejected" — worth treating as
+// a sign the App may have been deleted — from a transient failure that
+// merely warrants a retry.
+var ErrAppUnauthorized = errors.New("app unauthorized")
 
 // appHTTPTimeout bounds every GitHub App auth-bootstrap HTTP call (JWT-based
 // installation discovery and token minting). These are small, infrequent
@@ -140,6 +150,12 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 		return fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		switch resp.StatusCode {
+		case 401, 403:
+			return fmt.Errorf("GitHub App API returned %d: %s%s: %w", resp.StatusCode, string(body), authErrorHint(resp.StatusCode), ErrAppUnauthorized)
+		case 404:
+			return fmt.Errorf("GitHub App API returned 404: %s: %w", string(body), ErrNotFound)
+		}
 		return fmt.Errorf("GitHub App API returned %d: %s%s", resp.StatusCode, string(body), authErrorHint(resp.StatusCode))
 	}
 	if result == nil {

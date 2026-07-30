@@ -3,6 +3,7 @@ package githubauth
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -147,8 +148,21 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	}
 	slug, err := gh.FetchAppSlug(opts.BaseURL, jwt)
 	if err != nil {
-		// App-identity validation failed against a locally-known AppID: the
-		// App may have been deleted externally.
+		// Only a JWT the App API actively rejected (401/403) or an App ID it
+		// reports as gone (404) is treated as a sign the App may have been
+		// deleted. Any other error — a transport failure, timeout, or a 5xx
+		// — is transient: appRequest doesn't distinguish those from a real
+		// rejection by string alone, and treating them identically would
+		// mean an ordinary network hiccup at startup (the steady-state
+		// restart path for every self-hosted operator, not just first-run)
+		// kicks off a full re-bootstrap or "repair required" error instead
+		// of a retry. Bubble the transient error up unchanged so the caller
+		// (e.g. Pruefer's daemon) can retry Reconcile on its own terms.
+		if !errors.Is(err, gh.ErrAppUnauthorized) && !errors.Is(err, gh.ErrNotFound) {
+			return nil, fmt.Errorf("validating app identity for App ID %d: %w (transient failure, not treated as app deletion — retry)", appID, err)
+		}
+		// App-identity validation was actively rejected against a
+		// locally-known AppID: the App may have been deleted externally.
 		//
 		// If AppID is pinned via opts.AppID (explicit github_app_id config —
 		// the compat-mode path), auto-recreating here would be unsafe: the
@@ -235,6 +249,16 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		byAccount[inst.Account] = inst
 	}
 
+	// repoCache accumulates the "which of this owner's watched repos does
+	// the installation actually grant access to" diagnostic the issue's
+	// credential-model requirement asks the reconciler to persist
+	// (Credentials.InstallationRepoCache) — populated here, from data this
+	// loop already fetches, and saved once discovery completes. Purely a
+	// human-readable cache: Reconcile always re-verifies live against
+	// GitHub on the next run rather than trusting it (see that field's own
+	// doc comment).
+	repoCache := make(map[string][]string)
+
 	// openedInstallBrowser bounds guided-installation browser-opening to at
 	// most once per Reconcile call: WatchedRepos can plausibly span several
 	// owners with no installation at all (e.g. a first run watching repos
@@ -271,8 +295,20 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 				logf("! verifying repo access for owner %q failed: %v", owner, err)
 			}
 			for _, st := range statuses {
-				if !st.Authorized {
+				if st.Authorized {
+					repoCache[owner] = append(repoCache[owner], st.Repo)
+				} else {
 					logf("! %s is not authorized (%s) → %s", st.Repo, st.Reason, st.GrantURL)
+				}
+			}
+		} else {
+			// An "all" installation grants access to every current and
+			// future repo on the account, so every one of owner's watched
+			// repos is authorized — no live per-repo check to make, unlike
+			// the "selected" branch above.
+			for _, spec := range opts.WatchedRepos {
+				if o, _, ok := splitOwnerRepo(spec); ok && o == owner {
+					repoCache[owner] = append(repoCache[owner], spec)
 				}
 			}
 		}
@@ -282,7 +318,33 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		logf("✓ %s authorized", owner)
 	}
 
+	saveInstallationRepoCache(opts.AppStatePath, appID, slug, repoCache, logf)
+
 	return r, nil
+}
+
+// saveInstallationRepoCache persists repoCache into AppStatePath's
+// Credentials.InstallationRepoCache, refreshing AppID/Slug to the identity
+// Reconcile just validated live while preserving every other already-stored
+// field (webhook secret, client ID/secret) untouched. Best-effort: this
+// cache is diagnostics-only (see Credentials.InstallationRepoCache's doc
+// comment) and a write failure here must never fail reconciliation itself.
+func saveInstallationRepoCache(statePath string, appID int64, slug string, repoCache map[string][]string, logf func(string, ...any)) {
+	existing, err := loadCredentials(statePath)
+	if err != nil {
+		// loadOrBootstrapCredentials already validated AppStatePath is
+		// either absent or parseable earlier in this same Reconcile call,
+		// so a failure here would be surprising — log and move on rather
+		// than failing reconciliation over a diagnostics-only cache.
+		logf("could not update installation-repo cache: %v", err)
+		return
+	}
+	existing.AppID = appID
+	existing.Slug = slug
+	existing.InstallationRepoCache = repoCache
+	if err := saveCredentials(statePath, existing); err != nil {
+		logf("could not persist installation-repo cache: %v", err)
+	}
 }
 
 // loadOrBootstrapCredentials implements state-machine steps 1-2. Three

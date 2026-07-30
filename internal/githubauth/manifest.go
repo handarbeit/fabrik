@@ -21,6 +21,15 @@ const defaultGitHubBaseURL = "https://api.github.com"
 // Plan's "no manifest-name config override" decision.
 const defaultAppName = "pruefer"
 
+// defaultAppHomepageURL is the manifest's "url" field — the App's public
+// homepage link, shown on its GitHub App settings page. This is distinct
+// from "redirect_url" (the loopback callback), which stops existing the
+// moment the local manifest-flow server shuts down; reusing it here would
+// leave the created App's homepage permanently dead. No config knob for
+// this, matching the "no manifest-name config override" precedent above —
+// GitHub's own create page lets the user edit it before creating the App.
+const defaultAppHomepageURL = "https://github.com/handarbeit/fabrik"
+
 // manifestHTTPClient is package-level so tests can leave it as the default
 // (they never hit the real GitHub API — only exchangeManifestCode's baseURL
 // parameter is overridden, pointed at an httptest server).
@@ -38,7 +47,7 @@ var manifestHTTPClient = &http.Client{Timeout: 30 * time.Second}
 func buildManifest(redirectURL string) map[string]interface{} {
 	return map[string]interface{}{
 		"name":         defaultAppName,
-		"url":          redirectURL,
+		"url":          defaultAppHomepageURL,
 		"redirect_url": redirectURL,
 		"public":       false,
 		"default_permissions": map[string]string{
