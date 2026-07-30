@@ -91,7 +91,14 @@ func (h *flexHeaders) UnmarshalJSON(data []byte) error {
 		}
 		// Any other per-key shape (null, number, empty array) is skipped
 		// rather than failing the frame; lookupHeader treats a missing key
-		// the same as an empty value.
+		// the same as an empty value. For X-Hub-Signature-256 specifically,
+		// this means a header Hookdeck sent in some unrecognized shape is
+		// indistinguishable downstream from one it never sent at all — both
+		// surface as source.go's "no X-Hub-Signature-256 header" log line,
+		// not "invalid signature". Accepted rather than plumbed through:
+		// the operator-facing fix is the same either way (check Hookdeck's
+		// source config), and the frame must not fail decoding just because
+		// one header looked unusual.
 	}
 	*h = out
 	return nil

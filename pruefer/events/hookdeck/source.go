@@ -312,6 +312,10 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 				return
 			case <-ticker.C:
 				if writeErr := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(s.cfg.writeWait)); writeErr != nil {
+					// Close so the read loop's blocked ReadMessage fails
+					// immediately instead of waiting out the full pongWait
+					// deadline for a connection we already know is broken.
+					conn.Close()
 					return
 				}
 			case <-graceTimer.C:
