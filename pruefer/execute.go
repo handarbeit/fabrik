@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/handarbeit/fabrik/config"
+	"github.com/handarbeit/fabrik/pruefer/events/hookdeck"
 )
 
 // Execute is Pruefer's entry point: loads .env, resolves configuration,
@@ -67,6 +68,24 @@ func Execute() error {
 		Clone:    CloneForReview,
 		Config:   cfg,
 		BotLogin: authSet.BotLogin,
+	}
+
+	if cfg.EventSource == EventSourceHookdeck {
+		apiKey := os.Getenv(cfg.HookdeckAPIKeyEnv)
+		if apiKey == "" {
+			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.api_key_env)", cfg.HookdeckAPIKeyEnv)
+		}
+		webhookSecret := os.Getenv(cfg.HookdeckWebhookSecretEnv)
+		if webhookSecret == "" {
+			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.webhook_secret_env)", cfg.HookdeckWebhookSecretEnv)
+		}
+		daemon.EventSource = hookdeck.NewSource(hookdeck.Config{
+			APIKey:        apiKey,
+			WebhookSecret: webhookSecret,
+			OnHealth:      daemon.HealthHandler(ctx),
+		})
+		logf(0, "poll", "event_source: hookdeck — Hookdeck API key from $%s, webhook secret from $%s\n",
+			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)
 	}
 
 	if useTUI(cfg) {
