@@ -21,29 +21,33 @@ import (
 // an explicit membership check against Config.WatchedRepos is required here
 // even though poll() never needs one.
 //
-// The PR's stripe lock (prLock) is claimed non-blockingly, before the
-// semaphore slot: if a review for this exact PR is already in flight (from
-// either dispatch path), this event is dropped immediately rather than
-// spawning a goroutine that holds a semaphore slot while blocked waiting
-// for that lock. Without this, a burst of duplicate/rapid webhook
-// deliveries for one PR (e.g. several quick synchronize pushes before the
-// first review finishes) could each acquire a slot and then block on the
-// same PR's lock, exhausting the daemon's entire concurrency budget on
-// redundant waits and stalling unrelated PRs. Dropping is safe: the
-// in-flight review already covers this PR, and if a further push follows
-// after it completes, a later event (or the poll-fallback safety net) will
-// trigger a fresh review at the new head SHA.
+// The semaphore slot is acquired first, before anything else — including
+// the PR's stripe lock (prLock) — to match reviewOne/runReview's own
+// acquisition order (semaphore, then prLock inside the spawned goroutine).
+// Acquiring these two resources in opposite orders across the two dispatch
+// paths is a classic AB-BA lock-ordering inversion and a real deadlock risk
+// under semaphore saturation: an event goroutine holding prLock(X) while
+// blocked on the semaphore, racing a poll goroutine that just won a freed
+// slot and then blocks on prLock(X), can — if this pattern recurs across
+// enough distinct PRs to fill every slot — wedge the daemon's entire
+// concurrency budget with no timeout or ctx-based escape on runReview's
+// mu.Lock(). Acquiring the semaphore first in both paths closes that: this
+// path never blocks on prLock while holding a slot (see TryLock below), so
+// it can never be the "poll goroutine" side of the cycle.
 //
-// The semaphore slot itself is still acquired before FetchPRDetails, not
-// just before executeReview — a burst of webhook events for *different*
-// PRs would otherwise fan out an unbounded number of concurrent
-// FetchPRDetails REST calls (one goroutine per event, gated by nothing)
-// before ever touching the daemon's concurrency budget, exactly the
-// budget-bypass the shared semaphore exists to prevent. Acquiring can block
-// arbitrarily long while the budget is full, so this must never be called
-// inline from daemonEventSink.Handle (it is always invoked in its own
-// goroutine there) or it would stall acking the current webhook and
-// reading the next one off the same connection.
+// After the slot is held, the PR's stripe lock is claimed non-blockingly
+// (TryLock, not Lock): if a review for this exact PR is already in flight
+// (from either dispatch path), this event drops immediately — briefly
+// holding, then releasing, the slot it just acquired — rather than blocking
+// on that lock for the duration of the in-flight review. Dropping is safe:
+// the in-flight review already covers this PR, and if a further push
+// follows after it completes, a later event (or the poll-fallback safety
+// net) will trigger a fresh review at the new head SHA.
+//
+// Acquiring the semaphore can block arbitrarily long while the budget is
+// full, so this must never be called inline from daemonEventSink.Handle (it
+// is always invoked in its own goroutine there) or it would stall acking
+// the current webhook and reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
 	client, ok := d.Clients[owner]
 	if !ok {
@@ -55,13 +59,6 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 		return
 	}
 
-	mu := d.prLock(owner, repo, prNumber)
-	if !mu.TryLock() {
-		logf(prNumber, "info", "event for %s/%s#%d: a review is already in flight for this PR — dropping\n", owner, repo, prNumber)
-		return
-	}
-	defer mu.Unlock()
-
 	sem := d.semaphore()
 	select {
 	case sem <- struct{}{}:
@@ -69,6 +66,13 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 		return
 	}
 	defer func() { <-sem }()
+
+	mu := d.prLock(owner, repo, prNumber)
+	if !mu.TryLock() {
+		logf(prNumber, "info", "event for %s/%s#%d: a review is already in flight for this PR — dropping\n", owner, repo, prNumber)
+		return
+	}
+	defer mu.Unlock()
 
 	pr, err := client.FetchPRDetails(owner, repo, prNumber)
 	if err != nil {
