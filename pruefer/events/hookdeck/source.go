@@ -110,9 +110,17 @@ func (s *Source) Run(ctx context.Context, sink events.EventSink) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		err := s.runOnce(ctx, sink)
+		connected, err := s.runOnce(ctx, sink)
 		if ctx.Err() != nil {
 			return nil
+		}
+		// A successful connection (even one that later dropped) means the
+		// prior backoff no longer reflects current reachability — reset it
+		// before applying it below, so a reconnect right after a long
+		// healthy stretch is prompt rather than stuck near maxBackoff from
+		// whatever ramp-up happened before that stretch began.
+		if connected {
+			backoff = s.cfg.minBackoff
 		}
 		s.emitHealth(events.HealthReconnecting, err)
 		select {
@@ -120,22 +128,25 @@ func (s *Source) Run(ctx context.Context, sink events.EventSink) error {
 			return nil
 		case <-time.After(backoff):
 		}
-		backoff *= 2
-		if backoff > s.cfg.maxBackoff {
-			backoff = s.cfg.maxBackoff
+		if !connected {
+			backoff *= 2
+			if backoff > s.cfg.maxBackoff {
+				backoff = s.cfg.maxBackoff
+			}
 		}
 	}
 }
 
 // runOnce creates one Hookdeck CLI session, dials its WebSocket, and reads
-// attempt frames until the connection fails or ctx is cancelled. A nil
-// return means ctx was cancelled (caller stops retrying); a non-nil return
-// is the transport failure that ended this attempt (caller backs off and
-// retries).
-func (s *Source) runOnce(ctx context.Context, sink events.EventSink) error {
+// attempt frames until the connection fails or ctx is cancelled. connected
+// reports whether the WebSocket handshake completed (used by Run to decide
+// whether to reset its backoff), independent of err: a nil err means ctx
+// was cancelled (caller stops retrying), and a non-nil err is the transport
+// failure that ended this attempt (caller backs off and retries).
+func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected bool, err error) {
 	sessionID, err := createSession(s.cfg.HTTPClient, s.cfg.APIBaseURL, s.cfg.APIKey)
 	if err != nil {
-		return fmt.Errorf("creating hookdeck session: %w", err)
+		return false, fmt.Errorf("creating hookdeck session: %w", err)
 	}
 
 	header := http.Header{}
@@ -144,7 +155,7 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) error {
 
 	conn, _, err := s.cfg.Dialer.DialContext(ctx, s.cfg.WSBaseURL, header)
 	if err != nil {
-		return fmt.Errorf("dialing hookdeck websocket: %w", err)
+		return false, fmt.Errorf("dialing hookdeck websocket: %w", err)
 	}
 	defer conn.Close()
 
@@ -168,9 +179,9 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) error {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return true, nil
 			}
-			return fmt.Errorf("reading hookdeck websocket: %w", err)
+			return true, fmt.Errorf("reading hookdeck websocket: %w", err)
 		}
 		s.handleFrame(ctx, sink, conn, msg)
 	}

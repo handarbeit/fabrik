@@ -3,7 +3,6 @@ package pruefer
 import (
 	"context"
 	"strconv"
-	"sync"
 
 	"github.com/handarbeit/fabrik/pruefer/events"
 )
@@ -12,16 +11,20 @@ import (
 // client, fetches the PR's authoritative current state from GitHub — never
 // trusting webhook payload contents as PR state, per the issue's "webhooks
 // as triggers, not source of truth" requirement — and dispatches it through
-// the same concurrency-capped path poll() uses (reviewOne). Any failure to
+// runReview, the same review execution path poll() uses. Any failure to
 // resolve a client or fetch PR details is logged and the event is dropped:
 // non-fatal, since a missed event either gets retried on GitHub's
 // at-least-once redelivery or is caught by the poll-fallback safety net.
 //
-// reviewOne blocks acquiring a semaphore slot before this call returns, which
-// can take arbitrarily long while the daemon's concurrency budget is full —
-// so this must never be called inline from daemonEventSink.Handle (it is
-// always invoked in its own goroutine there) or it would stall acking the
-// current webhook and reading the next one off the same connection.
+// The semaphore slot is acquired here, before FetchPRDetails, not just
+// before runReview — a burst of webhook events would otherwise fan out an
+// unbounded number of concurrent FetchPRDetails REST calls (one goroutine
+// per event, gated by nothing) before ever touching the daemon's
+// concurrency budget, exactly the budget-bypass the shared semaphore exists
+// to prevent. Acquiring can block arbitrarily long while the budget is
+// full, so this must never be called inline from daemonEventSink.Handle (it
+// is always invoked in its own goroutine there) or it would stall acking
+// the current webhook and reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
 	client, ok := d.Clients[owner]
 	if !ok {
@@ -29,19 +32,21 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 		return
 	}
 
+	sem := d.semaphore()
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-sem }()
+
 	pr, err := client.FetchPRDetails(owner, repo, prNumber)
 	if err != nil {
 		logf(prNumber, "warn", "event for %s/%s#%d: fetching PR details: %v — dropping\n", owner, repo, prNumber, err)
 		return
 	}
 
-	// reviewOne's signature is shared with poll()'s multi-PR fan-out, which
-	// needs a caller-owned *sync.WaitGroup to wait on the whole cycle. A
-	// single event has no cycle to wait for, so this WaitGroup is
-	// single-use and never waited on here — reviewOne's own goroutine runs
-	// to completion independently, gated by the daemon's shared semaphore.
-	var wg sync.WaitGroup
-	d.reviewOne(ctx, &wg, client, owner, repo, *pr)
+	d.runReview(ctx, client, owner, repo, *pr)
 }
 
 // reviewTriggerActions are the pull_request webhook actions that should

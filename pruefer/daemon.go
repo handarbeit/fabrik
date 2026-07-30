@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +92,29 @@ type Daemon struct {
 	// via a constructor that could size it upfront.
 	semOnce sync.Once
 	sem     chan struct{}
+
+	// prLocks is a small fixed-size set of stripe mutexes serializing
+	// concurrent review dispatch for the same PR across poll- and
+	// event-triggered paths — see prLock and runReview. A zero Daemon
+	// (struct literal) has a usable zero-value [prLockStripes]sync.Mutex,
+	// so no lazy-init is needed here unlike sem.
+	prLocks [prLockStripes]sync.Mutex
+}
+
+// prLockStripes bounds prLocks to a small fixed size instead of an
+// unbounded per-PR map that would grow for the daemon's entire lifetime.
+// Unrelated PRs occasionally hashing to the same stripe only costs
+// incidental contention (they still fully serialize against each other),
+// never a correctness gap — the property runReview needs is "no two
+// reviews of the *same* PR run concurrently," which holds regardless.
+const prLockStripes = 64
+
+// prLock returns the stripe mutex for owner/repo/prNumber, selected by
+// hashing the PR's identity. See prLocks and runReview.
+func (d *Daemon) prLock(owner, repo string, prNumber int) *sync.Mutex {
+	h := fnv.New32a()
+	fmt.Fprintf(h, "%s/%s#%d", owner, repo, prNumber)
+	return &d.prLocks[h.Sum32()%prLockStripes]
 }
 
 // semaphore returns the daemon's shared concurrency-capped semaphore,
@@ -416,8 +440,7 @@ func (d *Daemon) poll(ctx context.Context) {
 }
 
 // reviewOne dispatches a single PR to ReviewPR through the daemon's shared
-// concurrency-capped semaphore, emitting the same TUI events poll()'s
-// former inline goroutine did. Calls wg.Add(1) itself and guarantees a
+// concurrency-capped semaphore. Calls wg.Add(1) itself and guarantees a
 // matching wg.Done, whether the PR is actually dispatched or ctx is
 // cancelled first — callers must not call wg.Add themselves.
 // Shared by poll() (fan-out per cycle) and ReviewFromEvent (event-triggered,
@@ -425,7 +448,6 @@ func (d *Daemon) poll(ctx context.Context) {
 // the issue's "hand off to the existing concurrency-capped review dispatch"
 // requirement for real rather than just in shape.
 func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHubLister, owner, repo string, pr gh.PRDetails) {
-	repoName := owner + "/" + repo
 	sem := d.semaphore()
 	wg.Add(1)
 	select {
@@ -437,23 +459,50 @@ func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHu
 	go func() {
 		defer wg.Done()
 		defer func() { <-sem }()
-		startedAt := time.Now()
-		d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
-		outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
-		if outcome.Err != nil {
-			logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
-		}
-		errText := ""
-		if outcome.Err != nil {
-			errText = outcome.Err.Error()
-		}
-		d.emit(ptui.ReviewCompletedEvent{
-			Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
-			Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
-			Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
-			Duration: time.Since(startedAt), CompletedAt: time.Now(),
-		})
+		d.runReview(ctx, client, owner, repo, pr)
 	}()
+}
+
+// runReview executes ReviewPR for a single PR, emitting the same TUI events
+// poll()'s former inline goroutine did. Caller must already hold a
+// concurrency-budget semaphore slot for the duration of this call (see
+// reviewOne and ReviewFromEvent) — runReview itself does not touch the
+// semaphore.
+//
+// runReview serializes on the PR's stripe lock (prLock) around the ReviewPR
+// call. Without this, ReviewPR's "check existing reviews, then submit"
+// sequence (review.go's FetchPRReviews/alreadyReviewedAtHead check against
+// a snapshot taken at call start) is a TOCTOU race: before event-triggered
+// dispatch existed, only one poll loop ever ran, so a given PR was reviewed
+// by at most one caller at a time. Now poll()'s per-cycle fan-out and
+// ReviewFromEvent's per-event dispatch can both pick up the same PR at the
+// same head SHA concurrently, both see no existing bot review, and both
+// submit — a duplicate review beyond what ReviewPR's own SHA-idempotency is
+// supposed to prevent. The lock makes the second caller's ReviewPR call
+// observe the first caller's just-submitted review and skip, restoring the
+// single-flight-per-PR property the SHA-idempotency guarantee assumes.
+func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+	repoName := owner + "/" + repo
+	mu := d.prLock(owner, repo, pr.Number)
+	mu.Lock()
+	defer mu.Unlock()
+
+	startedAt := time.Now()
+	d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
+	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
+	if outcome.Err != nil {
+		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
+	}
+	errText := ""
+	if outcome.Err != nil {
+		errText = outcome.Err.Error()
+	}
+	d.emit(ptui.ReviewCompletedEvent{
+		Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
+		Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
+		Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
+		Duration: time.Since(startedAt), CompletedAt: time.Now(),
+	})
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts. Returns ok=false
