@@ -196,7 +196,11 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 		}
 	})
 
-	srv := &http.Server{Handler: mux}
+	// ReadHeaderTimeout guards against a slow-loris-style stray/slow local
+	// connection tying up a server goroutine indefinitely during the
+	// manifest-flow window — cheap insurance even though this listener is
+	// 127.0.0.1-only and short-lived.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln)
 
 	shutdownFn := func() {
