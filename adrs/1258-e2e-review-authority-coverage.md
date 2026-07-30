@@ -1,4 +1,4 @@
-# ADR 1258: e2e coverage for review_authority: authoritative via a bed-local advance-gate variant
+# ADR 1258: e2e coverage for review_authority: authoritative via a per-issue label
 
 **Status:** Accepted
 **Date:** 2026-07-30
@@ -19,8 +19,8 @@ today's suite exercises only the default path.
 
 Two constraints shaped the design:
 
-1. **No production code changes** — this is test-coverage-only work; `engine/reviews.go` and
-   the rest of ADR-1250's shipped behavior are out of scope.
+1. **No production code changes to `engine/reviews.go`** — ADR-1250's shipped gate/predicate
+   behavior is out of scope for this issue.
 2. **No change to the bed's default stage config** — `Review`/`Validate` must stay advisory
    for every existing scenario, and the shared bed runs many `t.Parallel()` scenarios
    concurrently (`E2E_PARALLEL`), so any authoritative-mode mechanism must not leak into or
@@ -33,45 +33,80 @@ from `attemptMergeOnValidate`, and both of that function's callers hard-gate on 
 string `"Validate"` before invoking it — `engine/stages.go` (`if yoloActive && stage.Name ==
 "Validate" && !waitForCI`) and `engine/poll.go` (`if stage.Name == "Validate"`). A third site,
 `engine/pr_terminal_advance.go` (`if stage.Name != "Validate"`), gates Done-advancement the
-same way. No differently-named variant column can exercise `reviewGateBlocksLanding`, and
-flipping the bed's real `Validate` stage to authoritative — even temporarily — would violate
-constraint 2 above and risk corrupting concurrently-running advisory scenarios.
+same way. This holds regardless of which mechanism applies `review_authority: authoritative`
+to an item — no stage/column standing in for `Validate` under a different name can exercise
+`reviewGateBlocksLanding`, and flipping the bed's real `Validate` stage to authoritative — even
+temporarily — would violate constraint 2 above and risk corrupting concurrently-running
+advisory scenarios.
+
+### Revision (2026-07-30): column/stage-variant mechanism rejected in favor of a per-issue label
+
+The first implementation of this issue (PR #1260, initial commits) built the mechanism around
+a new bed-local stage variant and board column named `Review-Authoritative` — a copy of
+`stages/examples/review.yaml` with `review_authority: authoritative` added, plus a matching
+column on `handarbeit/projects/2`, mirroring the `Queued`/`queued.yaml` precedent (ADR-059 D1).
+This was rejected during Validate-stage review for two reasons:
+
+1. **Wrong level of abstraction.** `review_authority` is a property of a stage's *config*, not
+   a distinct *kind* of stage. `Queued` is a real product stage — it ships in the binary as
+   `stages/examples/queued.yaml` with `holding_stage: true` and exists independent of any test
+   concern. `Review-Authoritative` would have been pure test scaffolding masquerading as a
+   pipeline stage, putting a concept on the board (and in `.fabrik/stages/`) that the product
+   itself doesn't have. The `Queued`/`queued.yaml` precedent does not transfer.
+2. **Silent-skip trap.** The column is a one-time, external, operator-applied bed prerequisite.
+   Because the bed had no such column at review time, the skip guard (`requireAuthoritativeBed`)
+   would have caused three of the four scenarios to skip — and the suite would report green
+   having validated zero authoritative behavior. These scenarios exist specifically to gate a
+   release; a vacuous pass is strictly worse than an absent test, since it reads as coverage
+   that isn't there.
+
+The mechanism was reworked to apply authority **per issue via a label**,
+`review-authority:authoritative`, set at seed time as an `extraLabel` to `seedReviewGateItem`
+(the same parameter already used for `fabrik:yolo`). Engine support for reading this label is
+tracked as a separate, decoupled issue — **#1261** — so that engine behavior change and this
+issue's test-coverage change can be reviewed and merged independently. The three authoritative
+scenarios cannot pass until both #1261 and this issue's PR are merged;
+`TestReviewAuthorityAdvisoryRegressionGuard` has no such dependency (it never sets the label)
+and ships green regardless.
 
 ## Decision
 
-**Build the e2e mechanism around `checkReviewGate` only**, via a new bed-local stage variant
-and board column named `Review-Authoritative`: a copy of `stages/examples/review.yaml` with
-`review_authority: authoritative` added and `order: 41` (deliberately far outside the real
-pipeline's 1–9 range, so it is never any real stage's natural successor), plus a matching
-`Review-Authoritative` column on `handarbeit/projects/2`. This is one-time, bed-local operator
-setup — the same pattern already accepted for the merge-train scenarios' `Queued`/
-`queued.yaml` (ADR-059 D1). Scenarios needing it skip gracefully via `requireAuthoritativeBed`
-(mirroring `requireTrainBed`) if the column is absent, so this PR is mergeable independent of
-when the bed is actually updated. Because dispatch is column-name-keyed, a differently-named
-column structurally isolates authoritative scenarios from advisory ones running concurrently
-on the shared bed — no extra guarding needed to satisfy constraint 2.
+**Apply `review_authority: authoritative` per issue via a label, `review-authority:authoritative`,
+against the bed's existing `Review` column/stage (default, advisory config, untouched).** No
+bed-local board column or stage-YAML variant is introduced. `seedReviewGateItem`
+(`tests/e2e/review_authority_helpers.go`) seeds the item directly via the GitHub API
+(`CreateMemberPR`, zero Claude cost) and label-seeds `stage:Review:complete` so the catch-up
+loop's `handleReviewGate` evaluates the gate without ever invoking Claude for that stage — the
+same zero-cost construction precedent as `TestPausedMergedPRRecovery`'s R5. Because the label is
+applied per item rather than encoded in board structure, it isolates cleanly on the shared
+parallel bed: an item without the label runs the ordinary advisory path unaffected, regardless
+of how many authoritative-labeled items are running concurrently.
 
-`reviewGateBlocksLanding`'s authoritative wiring is **not** exercised by this mechanism and
-has no e2e coverage after this issue. This is an accepted, explicitly documented gap — not a
+**No bed prerequisite is required beyond `FABRIK_REVIEWER_TOKEN`.** Removing the column/stage
+mechanism also removes its only skip path — none of the four scenarios skip for lack of bed
+setup; they either run for real or fail loudly if #1261 hasn't landed yet.
+
+`reviewGateBlocksLanding`'s authoritative wiring is **not** exercised by this mechanism and has
+no e2e coverage after this issue. This is an accepted, explicitly documented gap — not a
 silently missing one — because closing it would require either a production code change
-(relaxing the `stage.Name == "Validate"` hardcoding, out of scope per constraint 1) or flipping
-the bed's real `Validate` stage authoritative (out of scope per constraint 2). Consequently,
-scenarios 2 and 3 from the issue are descoped from "merges under yolo" to "gate clears" — they
-assert `fabrik:awaiting-review` disappears and `fabrik:paused` is never applied, not that the
-item actually lands. `reviewGateAuthorityVerdict` itself — the pure predicate both gate
-functions share — is still fully exercised, since it is identical code regardless of which
-caller invokes it; only the landing-gate call site's own wiring around it is unreached.
+(relaxing the `stage.Name == "Validate"` hardcoding) or authoritative-izing the bed's real
+`Validate` stage (violating constraint 2). Consequently, scenarios 2 and 3 from the issue are
+descoped from "merges under yolo" to "gate clears" — they assert `fabrik:awaiting-review`
+disappears and `fabrik:paused` is never applied, not that the item actually lands.
+`reviewGateAuthorityVerdict` itself — the pure predicate both gate functions share — is still
+fully exercised, since it is identical code regardless of which caller invokes it; only the
+landing-gate call site's own wiring around it is unreached.
 
 **Construction is zero-Claude-cost**, reusing two established precedents: `CreateMemberPR`
 (the merge-train helpers' direct-API PR builder) and the R5 pattern from
 `TestPausedMergedPRRecovery` (label-seeding `stage:<Name>:complete` directly so the catch-up
 loop's `handleReviewGate` — gated on `pctx.hasComplete` — evaluates the gate without ever
-invoking Claude for that stage). `seedReviewGateItem` (`tests/e2e/review_authority_helpers.go`)
-wraps this into one call: file issue → add to project → `CreateMemberPR` → `AddLabel
-("stage:<column>:complete")` → `SetIssueStatus`. This documents these scenarios as validating
-gate/settle logic, not the natural `handleStageComplete` stage-completion flow — consistent
-with the R5 precedent it builds on, and cheaper than the ~$1–2.50 full-pipeline scenarios like
-`TestConjunctiveCIReviewGate`.
+invoking Claude for that stage). `seedReviewGateItem` wraps this into one call: file issue
+(with any extra labels, including `review-authority:authoritative` when needed) → add to
+project → `CreateMemberPR` → `AddLabel("stage:<column>:complete")` → `SetIssueStatus`. This
+documents these scenarios as validating gate/settle logic, not the natural
+`handleStageComplete` stage-completion flow — consistent with the R5 precedent it builds on,
+and cheaper than the ~$1–2.50 full-pipeline scenarios like `TestConjunctiveCIReviewGate`.
 
 **No `RequestPRReviewer` call is needed.** `checkReviewGate`'s outer clearing condition
 (`len(outstanding) == 0 && hasReviews`) is satisfied by any submitted review — outstanding
@@ -107,18 +142,29 @@ future reader doesn't assume the native-verdict branch has coverage it doesn't.
 
 ## Consequences
 
-**Advance-gate authoritative coverage is real; landing-gate authoritative coverage is not.**
-Anyone extending this area should read this ADR before assuming `reviewGateBlocksLanding`'s
-authoritative branch is e2e-covered — it isn't, and closing that gap requires either relaxing
-the `Validate`-name hardcoding (a production change, deliberately not made here) or accepting
-the cross-scenario risk of authoritative-izing the bed's real `Validate` stage.
+**Advance-gate authoritative coverage is real (pending #1261); landing-gate authoritative
+coverage is not.** Anyone extending this area should read this ADR before assuming
+`reviewGateBlocksLanding`'s authoritative branch is e2e-covered — it isn't, and closing that
+gap requires either relaxing the `Validate`-name hardcoding (a production change, deliberately
+not made here) or accepting the cross-scenario risk of authoritative-izing the bed's real
+`Validate` stage.
 
-**The `Review-Authoritative` bed variant is a second precedent (alongside `Queued`/
-`queued.yaml`) for "isolate a gate/settle behavior behind a differently-named, bed-local stage
-+ column" as the general e2e strategy for behavior that's stage-scoped in production config but
-must not touch the bed's shared default stages.** Future stage-scoped e2e coverage (e.g. a
-future risk-tiered review policy per #1051/#1177) should reach for this pattern before
-considering a change to the bed's real pipeline stages.
+**Three of the four scenarios have a hard dependency on #1261.** Until the engine reads
+`review-authority:authoritative` and honors it as equivalent to the stage's `review_authority:
+authoritative` config, `TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
+`TestReviewAuthorityClearsOnApproval`, and `TestReviewAuthorityYoloDoesNotBypassBlock` will fail
+(the gate will behave advisorially regardless of the label). This is expected and intentional —
+the two issues are deliberately decoupled so each can be reviewed independently — but it means
+this PR alone does not give green authoritative coverage; #1261 must land too.
+
+**Per-issue label, not board structure, is the general pattern for stage-config-scoped e2e
+coverage that must not touch the bed's shared default stages.** Unlike a bed-local
+column/stage variant, a label requires no external operator setup, cannot silently skip, and
+composes cleanly with concurrent scenarios on the shared bed since it's scoped to the item, not
+the column. Future stage-config-scoped e2e coverage (e.g. a future risk-tiered review policy
+per #1051/#1177) should reach for a label first, and reserve a bed-local stage/column variant
+for cases where the behavior is genuinely a distinct *stage* (like `Queued`), not a config flag
+on an existing one.
 
 **Four new zero-Claude-cost scenarios** (`TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
 `TestReviewAuthorityClearsOnApproval`, `TestReviewAuthorityYoloDoesNotBypassBlock`,
@@ -134,26 +180,32 @@ polls, default 120s, vs. an Action firing on PR-open), added cost (a real Claude
 per test PR on every run), `request_changes_threshold` off by default (would emit COMMENT
 anyway), and coupling (Fabrik's release gate would depend on pruefer's health).
 
-**A `Validate-Authoritative` bed variant instead of `Review-Authoritative`.** Considered first,
-since the issue's scenario 2/3 language ("merges under yolo") more naturally maps to Validate.
-Rejected once the `stage.Name == "Validate"` hardcoding was traced: a variant named anything
-other than `Validate` cannot reach `reviewGateBlocksLanding` regardless of which stage number
-in the pipeline it stands in for, so a `Validate-Authoritative` variant would exercise exactly
-the same `checkReviewGate` code path as `Review-Authoritative` does, with a more misleading
-name (implying landing-gate coverage it doesn't have).
+**A bed-local `Review-Authoritative` stage/column variant** (this issue's original design).
+Rejected during Validate-stage review — see "Revision" in Context above: `review_authority` is
+a stage-config property, not a distinct stage kind, unlike the `Queued`/`queued.yaml` precedent
+it was modeled on; and the column-absent skip path meant three of four scenarios could silently
+skip, letting the suite pass green with zero authoritative coverage exercised. A
+`Validate-Authoritative` variant of the same design was considered and rejected for the
+additional reason that no differently-named stage can reach `reviewGateBlocksLanding` regardless
+(see the `stage.Name == "Validate"` hardcoding above), so it would have exercised the same
+`checkReviewGate` path as a `Review`-based variant while implying landing-gate coverage it
+didn't have.
 
 **A per-issue label override for `review_authority`** (mirroring `model:<name>`/`effort:<level>`/
-`base:<branch>`). Rejected: explicitly out of scope per the issue ("no change to
-`engine/reviews.go` or other production engine code"); `ReviewAuthority` is deliberately
-stage-scoped only (ADR-1250), and adding a label override would be new production behavior,
-not test infrastructure.
+`base:<branch>`). This is the mechanism ultimately adopted — see Decision above. It does
+require a production engine change to read the label (#1261), which is why it's tracked and
+merged as a separate, decoupled issue rather than folded into this test-coverage-only PR;
+`ReviewAuthority` on `stages.Stage` remains stage-scoped per ADR-1250, and the label is an
+independent per-issue override layered on top by #1261, not a change to `ReviewAuthority`'s own
+type or the stage config schema.
 
 ## References
 
 - [ADR-1250: Review authority — advisory vs. authoritative](1250-review-authority-orthogonal-to-autonomy.md) — the shipped behavior this issue adds e2e coverage for.
 - [ADR-1216: Review gate checked at the landing decision](1216-review-gate-at-landing-decision.md) — establishes `reviewGateBlocksLanding`/`attemptMergeOnValidate` as the landing-decision choke point this ADR's gap applies to.
-- [ADR-059: Internal merge train](059-internal-merge-train.md) D1 — the `Queued`/`queued.yaml` bed-variant precedent this issue's `Review-Authoritative` mechanism follows.
+- [ADR-059: Internal merge train](059-internal-merge-train.md) D1 — the `Queued`/`queued.yaml` bed-variant precedent considered and distinguished from this issue's needs (see Revision above).
+- #1261 — engine support for the `review-authority:authoritative` per-issue label; a hard dependency for three of this issue's four scenarios.
 - `tests/e2e/review_authority_helpers.go`, `tests/e2e/review_authority_test.go` — the implementation.
-- `tests/e2e/README.md` §"Additional prerequisites for `TestReviewAuthority*` scenarios" — bed setup instructions.
+- `tests/e2e/README.md` §"Additional prerequisites for `TestReviewAuthority*` scenarios" — reviewer-token requirement and label mechanism.
 - `tests/e2e/paused_merged_pr_recovery_test.go` (R5) — the zero-Claude-cost label-seeded completion precedent this issue's `seedReviewGateItem` builds on.
 - `tests/e2e/mergetrain_helpers.go` (`CreateMemberPR`) — the direct-API PR construction precedent reused as-is.

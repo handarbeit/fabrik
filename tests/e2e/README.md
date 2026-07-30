@@ -243,46 +243,43 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
 
 `TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
 `TestReviewAuthorityClearsOnApproval`, and `TestReviewAuthorityYoloDoesNotBypassBlock`
-cover ADR-1250's `review_authority: authoritative` mode. `TestReviewAuthorityAdvisoryRegressionGuard`
-is the exception — it runs against the existing `Review` column/stage (default,
-untouched config) and needs no bed prerequisite, so it ships green immediately.
+cover ADR-1250's `review_authority: authoritative` mode. All four `TestReviewAuthority*`
+scenarios, including `TestReviewAuthorityAdvisoryRegressionGuard`, run against the bed's
+existing `Review` column/stage (default, untouched config) — **no bed column or stage-YAML
+setup is required**, beyond `FABRIK_REVIEWER_TOKEN` below.
 
-**Why a new column, not the bed's real `Validate`:** `reviewGateBlocksLanding` (the
-landing/auto-merge gate) is only reachable through a stage literally named `Validate` —
-`engine/stages.go`, `engine/poll.go`, and `engine/pr_terminal_advance.go` all hard-gate
-on `stage.Name == "Validate"`. Flipping the bed's real `Validate` stage to authoritative
-(even temporarily) would violate "no change to the bed's default stage config" and risk
-corrupting concurrently-running advisory scenarios on the shared bed. So this bed
-prerequisite targets `checkReviewGate` (the **advance** gate) only, via a differently-named
-column that is structurally isolated from advisory scenarios (dispatch is column-name-keyed).
-See `adrs/1258-e2e-review-authority-coverage.md` for the full rationale, including why
-`reviewGateBlocksLanding`'s authoritative wiring is a documented, accepted e2e gap rather
-than a silently missing one — the three scenarios below therefore assert the gate *clears*
-(`fabrik:awaiting-review` disappears, `fabrik:paused` never applied), not that the item merges.
+**Mechanism: a per-issue label, not a bed column.** Authoritative mode is applied per item
+via the `review-authority:authoritative` label, passed as an extra label at seed time
+(`seedReviewGateItem`'s `extraLabels`). Engine support for that label is tracked separately
+in #1261 — the three authoritative scenarios above cannot pass until both #1261 and this
+issue's PR are merged; `TestReviewAuthorityAdvisoryRegressionGuard` has no such dependency
+and ships green regardless.
 
-20. **`Review-Authoritative` board column** on `handarbeit/projects/2`. Any position is
-    fine — it is never a real stage's natural successor (see next item's `order`).
-21. **`review-authoritative.yaml` stage** in the bed's `.fabrik/stages/`, a copy of
-    `review.yaml` with `review_authority: authoritative` added and `order: 41`
-    (deliberately far outside the real pipeline's 1–9 range):
-    ```yaml
-    name: Review-Authoritative
-    order: 41
-    review_authority: authoritative
-    wait_for_reviews: true
-    # ...remaining fields copied from review.yaml (prompt, skill, model, etc.)
-    ```
-    Restart the test-bed Fabrik instance after adding the column + YAML so the new
-    stage's labels (`stage:Review-Authoritative:complete`, etc.) get seeded and
-    `checkStageColumnAlignment` picks up the new column. The three scenarios needing
-    this skip cleanly (`requireAuthoritativeBed`) if the column is absent, so this PR
-    is safe to merge before the bed is updated.
-22. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
+An earlier design applied authority via a bed-local `Review-Authoritative` board column +
+matching stage YAML (mirroring the `Queued`/`queued.yaml` precedent). That was rejected:
+`review_authority` is a property of a stage's config, not a distinct kind of stage, so it
+doesn't belong on the board as a column name — and requiring a bed prerequisite the operator
+hadn't set up yet meant three of the four scenarios silently skipped, letting the suite go
+green having validated zero authoritative behavior. Tests gating a release should fail loudly
+when they can't run their intended assertion, not pass vacuously. See
+`adrs/1258-e2e-review-authority-coverage.md` for the full rationale.
+
+**Why these scenarios can't cover the landing/auto-merge gate:** `reviewGateBlocksLanding` is
+only reachable through a stage literally named `Validate` — `engine/stages.go`,
+`engine/poll.go`, and `engine/pr_terminal_advance.go` all hard-gate on `stage.Name ==
+"Validate"`. Applying the authority label to an item on `Review` cannot reach that
+stage-name-gated path, and authoritative-izing the bed's real `Validate` stage would violate
+"no change to the bed's default stage config" and risk corrupting concurrently-running
+advisory scenarios on the shared bed. This is a documented, accepted e2e gap — the three
+scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` disappears,
+`fabrik:paused` never applied), not that the item merges.
+
+20. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
     in prerequisite #12 above. All four `TestReviewAuthority*` scenarios skip with an
     instructional message if it is unset; there is no timeout-fallback path here (unlike
     `TestConjunctiveCIReviewGate`) because these scenarios exist specifically to assert
     on a deterministic verdict, not on gate-timeout behavior alone.
-23. **Why the bed reviewer (`claude-review.yml`) stays COMMENT-only, and is not used
+21. **Why the bed reviewer (`claude-review.yml`) stays COMMENT-only, and is not used
     for verdict assertions here**: `.github/workflows/claude-review.yml` submits
     `gh pr review --comment` in both its agent path and its fallback path — it can
     never produce `APPROVE` or `CHANGES_REQUESTED`, so it cannot exercise authoritative
@@ -293,10 +290,10 @@ than a silently missing one — the three scenarios below therefore assert the g
     coupling (Fabrik's release gate depending on pruefer's health). All verdict assertions
     in `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
     deterministic, harness-posted formal reviews from a non-author identity.
-24. **`E2E_TIMEOUT=1h`** is generous for `TestReviewAuthorityBlocksAndPausesOnChangesRequested`
+22. **`E2E_TIMEOUT=1h`** is generous for `TestReviewAuthorityBlocksAndPausesOnChangesRequested`
     in isolation — its wall-clock is `FABRIK_REVIEW_WAIT_TIMEOUT + ~15 min`. Use a short
     bed value (e.g. `FABRIK_REVIEW_WAIT_TIMEOUT=2`) for a fast iteration run.
-25. **Note on scope**: neither test bed repo has a branch-protection review requirement
+23. **Note on scope**: neither test bed repo has a branch-protection review requirement
     configured (only required *status checks* are documented as enrolled), so
     `FetchPRReviewDecision` returns `""` for every scenario here and `reviewGateAuthorityVerdict`
     exercises its Fabrik-computed fallback branch, not GitHub's native `reviewDecision`
@@ -436,9 +433,9 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
 | `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
-| `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 authoritative mode: CHANGES_REQUESTED verdict blocks the gate (fabrik:awaiting-review); verdict never clears → pauses at ReviewWaitTimeout with the authoritative reason in the comment, not the generic "no reviews submitted yet" | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + 15 min | ~$0.05 (no Claude) |
-| `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode: APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
-| `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250 composition guarantee: fabrik:yolo does not bypass an authoritative gate — blocked while CHANGES_REQUESTED stands, clears once approved | Both | 5–10 min | ~$0.03 (no Claude) |
+| `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): CHANGES_REQUESTED verdict blocks the gate (fabrik:awaiting-review); verdict never clears → pauses at ReviewWaitTimeout with the authoritative reason in the comment, not the generic "no reviews submitted yet" | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + 15 min | ~$0.05 (no Claude) |
+| `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
+| `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250 composition guarantee (via `review-authority:authoritative` label, requires #1261): fabrik:yolo does not bypass an authoritative gate — blocked while CHANGES_REQUESTED stands, clears once approved | Both | 5–10 min | ~$0.03 (no Claude) |
 | `TestReviewAuthorityAdvisoryRegressionGuard` | Regression guard: advisory (default) mode still clears on any submitted review regardless of verdict — proves the additive authoritative check didn't narrow the default path | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |

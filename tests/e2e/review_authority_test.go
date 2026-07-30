@@ -14,31 +14,37 @@ import (
 // claude-review.yml bot — for every verdict assertion.
 //
 // Mechanism: all four scenarios seed a member PR directly via the GitHub API
-// (CreateMemberPR, zero Claude cost) and place the issue on a bed-local
-// "Review-Authoritative" column/stage — a copy of review.yaml with
-// review_authority: authoritative added. This exercises checkReviewGate (the
-// advance gate) and its shared pure predicate reviewGateAuthorityVerdict.
+// (CreateMemberPR, zero Claude cost) against the bed's existing Review
+// column/stage (default, advisory config — untouched). Authoritative mode is
+// applied per issue via the "review-authority:authoritative" label passed as
+// an extraLabel to seedReviewGateItem; engine support for that label is
+// #1261 (filed, decoupled from this issue — these scenarios cannot pass
+// until both #1261 and this issue are merged). This exercises checkReviewGate
+// (the advance gate) and its shared pure predicate reviewGateAuthorityVerdict
+// without introducing any bed-local board column or stage-YAML variant — an
+// earlier design that did so was rejected because review_authority is a
+// property of a stage's config, not a distinct kind of stage, and because a
+// bed prerequisite the operator hadn't yet set up would silently skip 3 of
+// the 4 scenarios, letting the suite go green having validated zero
+// authoritative behavior. See adrs/1258-e2e-review-authority-coverage.md.
+//
+// No bed setup is required beyond FABRIK_REVIEWER_TOKEN (see README) — none
+// of these scenarios skip for lack of bed prerequisites.
 //
 // Scope limitation (see adrs/1258-e2e-review-authority-coverage.md): the
 // landing/auto-merge gate (reviewGateBlocksLanding, called only from
 // attemptMergeOnValidate) is reachable ONLY through a stage literally named
 // "Validate" (engine/stages.go, engine/poll.go, engine/pr_terminal_advance.go
-// all hard-gate on stage.Name == "Validate"). Flipping the bed's real
-// Validate stage to authoritative would violate "no change to the bed's
-// default stage config" and risk corrupting concurrently-running advisory
-// scenarios on the shared bed. So scenarios 2/3 below assert the gate
-// *clears* (fabrik:awaiting-review disappears, fabrik:paused never applied),
-// not that the item merges — reviewGateBlocksLanding's wiring around the
-// same shared predicate is a documented, accepted e2e gap, not a silently
-// missing one.
+// all hard-gate on stage.Name == "Validate"). Applying the authority label to
+// an item sitting on Review cannot reach that stage-name-gated path, so
+// scenarios 2/3 below assert the gate *clears* (fabrik:awaiting-review
+// disappears, fabrik:paused never applied), not that the item merges —
+// reviewGateBlocksLanding's wiring around the same shared predicate is a
+// documented, accepted e2e gap, not a silently missing one.
 //
 // All four scenarios only touch checkReviewGate, which has no
 // FABRIK_MERGE_TRAIN branching — they pass identically under both legs of
 // the suite's two-mode gate.
-//
-// Prerequisites: see "Additional prerequisites for TestReviewAuthority*
-// scenarios" in tests/e2e/README.md (Review-Authoritative column + stage
-// YAML). requireAuthoritativeBed skips gracefully if not set up.
 
 // TestReviewAuthorityBlocksAndPausesOnChangesRequested covers scenarios 1 and
 // 5 from issue #1258: authoritative + CHANGES_REQUESTED blocks advancement,
@@ -48,13 +54,15 @@ import (
 // pauses via checkAwaitingReviewTimeout, with the authoritative pause reason
 // naming the verdict rather than the misleading "no reviews submitted yet".
 //
+// Requires #1261 (engine support for the review-authority:authoritative
+// label) to be merged.
+//
 // Wall-clock: ~FABRIK_REVIEW_WAIT_TIMEOUT + 10 min. Use a short bed value
 // (e.g. 2) for a fast iteration run — see README.
 func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
-	requireAuthoritativeBed(t, env)
 
 	reviewerToken := readEnvFileReviewerToken(t, env)
 	if reviewerToken == "" {
@@ -62,7 +70,7 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	}
 	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review-Authoritative", "blocks-pauses")
+	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "blocks-pauses", "review-authority:authoritative")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
@@ -74,10 +82,9 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d", env.RepoAlpha, prNum)
 
 	// Scenario 1: the gate must block — fabrik:awaiting-review appears, and
-	// the item must not advance past Review-Authoritative (stage:*:complete
-	// for whatever stage would come next is n/a here since Review-Authoritative
-	// has no configured successor; the durable, directly-observable signal is
-	// that the gate label is applied and fabrik:paused is not yet present).
+	// the item must not advance past Review (the durable, directly-observable
+	// signal is that the gate label is applied and fabrik:paused is not yet
+	// present).
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
 	t.Logf("fabrik:awaiting-review confirmed on %s#%d — authoritative gate is blocking on CHANGES_REQUESTED", env.RepoAlpha, num)
 
@@ -118,19 +125,21 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 // APPROVED clears the gate. Descoped from "merges" to "gate clears" — see
 // the file-level doc comment on the landing-gate scope limitation.
 //
+// Requires #1261 (engine support for the review-authority:authoritative
+// label) to be merged.
+//
 // Wall-clock: ~2-5 min.
 func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
-	requireAuthoritativeBed(t, env)
 
 	reviewerToken := readEnvFileReviewerToken(t, env)
 	if reviewerToken == "" {
 		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
 	}
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review-Authoritative", "clears-approval")
+	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "clears-approval", "review-authority:authoritative")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
@@ -154,19 +163,21 @@ func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 // and only clears once approved. Descoped from "merges under yolo" to "gate
 // clears" for the same reason as TestReviewAuthorityClearsOnApproval.
 //
+// Requires #1261 (engine support for the review-authority:authoritative
+// label) to be merged.
+//
 // Wall-clock: ~5-10 min.
 func TestReviewAuthorityYoloDoesNotBypassBlock(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
-	requireAuthoritativeBed(t, env)
 
 	reviewerToken := readEnvFileReviewerToken(t, env)
 	if reviewerToken == "" {
 		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
 	}
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review-Authoritative", "yolo-no-bypass", "fabrik:yolo")
+	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "yolo-no-bypass", "review-authority:authoritative", "fabrik:yolo")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
@@ -201,9 +212,8 @@ func TestReviewAuthorityYoloDoesNotBypassBlock(t *testing.T) {
 // TestReviewAuthorityAdvisoryRegressionGuard covers scenario 4: the
 // regression guard proving the additive authoritative check inside
 // checkReviewGate does not leak into advisory (default) mode. Runs against
-// the existing "Review" column/stage (untouched default config), so it ships
-// green regardless of whether the Review-Authoritative bed prerequisite has
-// been set up yet — no requireAuthoritativeBed call.
+// the existing "Review" column/stage with no authority label at all
+// (untouched default config), so it ships green independent of #1261.
 //
 // This test would fail today if the authoritative check were made
 // non-additive (e.g. if it replaced rather than extended the
