@@ -46,11 +46,14 @@ type GitHubEvent struct {
 }
 
 // HealthState describes an EventSource's current transport connectivity.
+// There is deliberately no separate "disconnected but not yet retrying"
+// state: EventSource.Run's contract is to retry every transient failure
+// internally and never return except on ctx cancellation, so a connection
+// loss and the start of its retry are the same transition — Reconnecting.
 type HealthState string
 
 const (
 	HealthConnected    HealthState = "connected"
-	HealthDisconnected HealthState = "disconnected"
 	HealthReconnecting HealthState = "reconnecting"
 )
 
@@ -60,8 +63,8 @@ const (
 type HealthEvent struct {
 	State HealthState
 	At    time.Time
-	// Err is non-empty when State reflects a failure (Disconnected or
-	// Reconnecting following an error); empty on a clean Connected transition.
+	// Err is non-empty when State reflects a failure (a Reconnecting
+	// transition following an error); empty on a clean Connected transition.
 	Err string
 }
 
