@@ -32,6 +32,16 @@ func verifyRepoAccess(baseURL, installToken string, installationID int64, owner 
 	if err != nil {
 		return nil, fmt.Errorf("listing accessible repositories for owner %q's installation: %w", owner, err)
 	}
+	// FetchInstallationRepositories caps at 100 results and only surfaces
+	// truncation via a package-level log line (github/app.go) — this caller
+	// has no other way to know the list it received was incomplete. Without
+	// this check, a watched repo that exists beyond page 1 of a >100-repo
+	// "selected" installation would be reported Authorized: false with a
+	// reason implying GitHub actively excludes it, when the true state is
+	// simply unknown. Re-derived here (rather than threading a return value
+	// through FetchInstallationRepositories) since 100 is that function's own
+	// documented, fixed page size.
+	truncated := len(accessible) == 100
 	// Keyed by lower-cased "owner/repo": GitHub org/user (and repo) names are
 	// case-insensitive, but FetchInstallationRepositories returns each
 	// full_name in its canonical case while repoSpec (below) comes verbatim
@@ -54,9 +64,13 @@ func verifyRepoAccess(baseURL, installToken string, installationID int64, owner 
 			statuses = append(statuses, RepoStatus{Repo: repoSpec, Authorized: true})
 			continue
 		}
+		reason := "repository_selection=selected excludes it"
+		if truncated {
+			reason = "not found in the first 100 accessible repositories returned — the installation may grant access to more than 100 repos, so this could be a pagination gap rather than an actual exclusion; re-run reconciliation to confirm"
+		}
 		statuses = append(statuses, RepoStatus{
 			Repo:     repoSpec,
-			Reason:   "repository_selection=selected excludes it",
+			Reason:   reason,
 			GrantURL: fmt.Sprintf("https://github.com/settings/installations/%d", installationID),
 		})
 	}
