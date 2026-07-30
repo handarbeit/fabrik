@@ -900,6 +900,148 @@ func TestReconcile_AppDeletedExternally_StateFileAppID_ReentersManifestFlow(t *t
 	}
 }
 
+// TestReconcile_SelfHealRecreatedApp_TransientIdentityFailure_RetriesInsteadOfFailing
+// is the regression test for a review finding: after the self-heal branch
+// recreates the App via runManifestFlow, the immediately-following identity
+// check was not retried like the justBootstrapped branch's is — so a
+// transient 401/403/404 right after creation (propagation lag) returned a
+// hard error even though AppStatePath/PEM had already been persisted for the
+// new App. The next Reconcile call would then load that new AppID from
+// state, fail identity validation again, and self-heal a *second* time,
+// producing an orphan App. Reconcile must retry the post-recreation identity
+// check the same way before giving up.
+func TestReconcile_SelfHealRecreatedApp_TransientIdentityFailure_RetriesInsteadOfFailing(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+	statePath := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "old-app"}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	oldSleep := identityValidationSleep
+	identityValidationSleep = func(time.Duration) {}
+	defer func() { identityValidationSleep = oldSleep }()
+
+	var appCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		appCalls++
+		switch appCalls {
+		case 1:
+			// Original App ID 42's identity check: deleted, triggers self-heal.
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"message":"app not found"}`))
+		case 2:
+			// First identity check on the freshly-recreated App: transient
+			// propagation lag, not a second deletion.
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"message":"app not found"}`))
+		default:
+			json.NewEncoder(w).Encode(map[string]interface{}{"slug": "recreated-app"})
+		}
+	})
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	var bootstrapCalls int
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		bootstrapCalls++
+		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey in stub: %v", err)
+		}
+		creds := Credentials{AppID: 999, Slug: "recreated-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("runManifestFlow called %d times, want exactly 1 (retry must not trigger a second self-heal)", bootstrapCalls)
+	}
+	if r.BotLogin() != "recreated-app[bot]" {
+		t.Errorf("BotLogin = %q, want recreated-app[bot]", r.BotLogin())
+	}
+	if appCalls < 3 {
+		t.Errorf("expected at least 3 calls to /app (original failure + recreated-App failure + retry), got %d", appCalls)
+	}
+}
+
+// TestReconcile_SelfHealRecreatedApp_PersistentIdentityFailure_ReturnsErrorNeverDoubleHeals
+// covers the case where the recreated App's identity check never resolves:
+// Reconcile must give up with a distinct, non-"deleted" error rather than
+// falling through to self-heal a second time within the same call.
+func TestReconcile_SelfHealRecreatedApp_PersistentIdentityFailure_ReturnsErrorNeverDoubleHeals(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+	statePath := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "old-app"}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	oldSleep := identityValidationSleep
+	identityValidationSleep = func(time.Duration) {}
+	defer func() { identityValidationSleep = oldSleep }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"app not found"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	var bootstrapCalls int
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		bootstrapCalls++
+		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey in stub: %v", err)
+		}
+		creds := Credentials{AppID: 999, Slug: "recreated-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the recreated App's identity never resolves")
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("runManifestFlow called %d times, want exactly 1 (must never self-heal twice within one Reconcile call)", bootstrapCalls)
+	}
+	if strings.Contains(err.Error(), "may have been deleted") {
+		t.Errorf("error = %v, want it to NOT claim a second deletion — the App was just recreated in this same call", err)
+	}
+	if !strings.Contains(err.Error(), "just created") {
+		t.Errorf("error = %v, want it to explain the App was just created in this run", err)
+	}
+}
+
 // TestReconcile_AppDeletedExternally_PinnedAppID_ReturnsRepairErrorNeverLoops
 // is the regression test for the bug an external review found: when AppID
 // is pinned via explicit config (opts.AppID != 0, e.g. github_app_id in

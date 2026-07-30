@@ -260,9 +260,26 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			if err != nil {
 				return nil, fmt.Errorf("building app JWT after re-creating the App: %w", err)
 			}
+			// Same propagation-lag reasoning as the justBootstrapped branch
+			// above: this App was also just created (by the self-heal path
+			// above, seconds ago), so an immediate 401/403/404 here is more
+			// plausibly lag than a second, near-instant deletion. Without
+			// this retry, a transient failure here would return a hard
+			// error while AppStatePath/PEM have already been persisted for
+			// the new App — the next Reconcile call would then load this
+			// same new AppID from state, fail identity validation again,
+			// and self-heal a *second* time, creating an orphan App.
 			slug, err = gh.FetchAppSlug(opts.BaseURL, jwt)
 			if err != nil {
-				return nil, fmt.Errorf("validating freshly-created App's identity: %w", err)
+				for _, delay := range identityValidationRetryDelays {
+					identityValidationSleep(delay)
+					if slug, err = gh.FetchAppSlug(opts.BaseURL, jwt); err == nil {
+						break
+					}
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("re-created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as a second deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
 			}
 		}
 	}
