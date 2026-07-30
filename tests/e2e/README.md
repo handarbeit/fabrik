@@ -306,8 +306,14 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     (10 min initial block-confirmation wait + `FABRIK_REVIEW_WAIT_TIMEOUT`+10 min for the
     pause wait itself + two trailing 5 min waits for `fabrik:awaiting-input` and the pause
     comment), though it typically completes much faster in practice. With the 15-minute
-    default this worst case is ~45 min, still within `E2E_TIMEOUT=1h`; use a short bed
-    value (e.g. `FABRIK_REVIEW_WAIT_TIMEOUT=2`) for a fast iteration run.
+    default this worst case is ~45 min, still within `E2E_TIMEOUT=1h`. **Do not use a very
+    short value like `FABRIK_REVIEW_WAIT_TIMEOUT=2` here**: `TestReviewAuthorityYoloDoesNotBypassBlock`
+    runs concurrently against the same bed setting and needs the timeout comfortably above
+    ~2 minutes, since its 90s "block persists under yolo" window starts shortly after
+    `fabrik:awaiting-review` first appears — a too-short timeout risks a legitimate
+    review-wait-timeout pause landing inside that window, which the test detects and fails
+    on explicitly (distinct message, not misreported as a yolo bypass) rather than passing.
+    A moderate value (e.g. `FABRIK_REVIEW_WAIT_TIMEOUT=5`) balances both tests' needs.
 24. **Note on scope**: neither test bed repo has a branch-protection review requirement
     configured (only required *status checks* are documented as enrolled), so
     `FetchPRReviewDecision` returns `""` for every scenario here and `reviewGateAuthorityVerdict`
