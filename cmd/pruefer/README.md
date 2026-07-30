@@ -1,10 +1,10 @@
 # Pruefer
 
-Pruefer is a self-hosted PR review daemon. It watches configured GitHub repositories, reviews open pull requests by invoking the `claude` CLI (subscription-backed, not API-metered), and submits a formal comment-only `pull_request_review`.
+Pruefer is a self-hosted PR review daemon. It watches configured GitHub repositories, reviews open pull requests by invoking the `claude` CLI (subscription-backed, not API-metered), and submits a formal `pull_request_review` — a non-blocking comment by default, or a blocking `REQUEST_CHANGES` review when a finding's severity meets a configured threshold (see [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes) below).
 
-It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that wants a review bot) without depending on a hosted third-party reviewer's quota, and without per-token API billing. See [adrs/1113-pruefer-v1-architecture.md](../../adrs/1113-pruefer-v1-architecture.md) for the full architectural rationale.
+It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that wants a review bot) without depending on a hosted third-party reviewer's quota, and without per-token API billing. See [adrs/1113-pruefer-v1-architecture.md](../../adrs/1113-pruefer-v1-architecture.md) for the full architectural rationale and [adrs/1251-pruefer-severity-gated-request-changes.md](../../adrs/1251-pruefer-severity-gated-request-changes.md) for the `REQUEST_CHANGES` amendment.
 
-**V1 scope**: comment-only reviews (`event: COMMENT`). Pruefer never approves a PR and never requests changes — see the ADR for why.
+**Pruefer never approves a PR — ever, under any configuration.** Approval is an accountability decision that must not rest on a bot rubber-stamping itself; this is permanent, not scoped to any toggle. `REQUEST_CHANGES` is opt-in (default off) and computed deterministically in Go from parsed finding severities — never from anything Claude writes in prose, so prompt injection cannot escalate or suppress it.
 
 ## How it works
 
@@ -15,7 +15,7 @@ Every `poll_interval_seconds`, Pruefer lists open, non-draft PRs on each watched
 - Has Pruefer already reviewed this exact head SHA? Skip — **unless** an unprocessed `/pruefer review` comment is on the PR, which forces a fresh review of the current head.
 - Is the diff larger than `max_diff_bytes`? Skip (logged, not truncated).
 
-Otherwise, Pruefer clones the PR's head commit into a temporary directory, invokes `claude` with a read-only tool allowlist to produce a prose summary plus structured findings, and submits it as a formal `pull_request_review` (event `COMMENT`) pinned to that head SHA. Findings that map to a changed line in the diff are posted as line-anchored inline comments in the same request; any finding that can't be anchored (a line the diff doesn't touch) is demoted into the summary body instead of dropping it or failing the whole review. Inline comments are what let Fabrik's review-reinvoke path pick up Pruefer's findings and act on them automatically — see [adrs/1189-pruefer-inline-review-comments.md](../../adrs/1189-pruefer-inline-review-comments.md). On any failure — clone, invocation, or submission — Pruefer posts nothing and logs the failure; the PR is naturally retried on the next poll.
+Otherwise, Pruefer clones the PR's head commit into a temporary directory, invokes `claude` with a read-only tool allowlist to produce a prose summary plus structured findings (each classified with a severity tier), and submits it as a formal `pull_request_review` pinned to that head SHA — `event: COMMENT` by default, or `event: REQUEST_CHANGES` if `request_changes_threshold` is set and a finding meets it (see below). Findings that map to a changed line in the diff are posted as line-anchored inline comments in the same request; any finding that can't be anchored (a line the diff doesn't touch) is demoted into the summary body instead of dropping it or failing the whole review — but still counts toward the severity threshold either way. Inline comments are what let Fabrik's review-reinvoke path pick up Pruefer's findings and act on them automatically — see [adrs/1189-pruefer-inline-review-comments.md](../../adrs/1189-pruefer-inline-review-comments.md). On any failure — clone, invocation, or submission — Pruefer posts nothing and logs the failure; the PR is naturally retried on the next poll.
 
 Review state ("already reviewed at SHA X") is derived from GitHub itself (existing reviews authored by Pruefer's bot identity), not stored locally — a restart never causes a review storm.
 
@@ -67,6 +67,7 @@ max_diff_bytes: 500000
 # excluded_authors: [dependabot]
 # excluded_labels: [skip-review]
 # excluded_paths: ["vendor/**", "*.generated.go"]
+# request_changes_threshold: high  # low, medium, high, or critical — see below
 ```
 
 ### Multi-org installations and the public-App safety property
@@ -109,6 +110,31 @@ The TUI is purely observational — it never changes which PRs get reviewed, whe
 
 Comment `/pruefer review` on any watched PR to force a fresh review of the current head, even if that SHA was already reviewed. Pruefer acknowledges the command with a 👀 reaction when it picks it up and a 🚀 reaction once the review has been submitted — the same idempotency convention Fabrik uses for its own comment processing.
 
+## Severity-gated REQUEST_CHANGES
+
+By default, `request_changes_threshold` is unset and every review submits `event: COMMENT` — byte-for-byte the original behavior. Setting it to one of four ordinal tiers turns on blocking reviews: if any finding's severity ranks at or above the threshold, Pruefer submits `event: REQUEST_CHANGES` instead. This is the setting `review_authority: authoritative` (a per-stage Fabrik YAML field — see [adrs/1250-review-authority-orthogonal-to-autonomy.md](../../adrs/1250-review-authority-orthogonal-to-autonomy.md)) is designed to honor once Pruefer is a repo's sole reviewer.
+
+Severity tiers, in ascending order:
+
+| Tier | Meaning |
+|---|---|
+| `low` | Style, a minor nit, or a suggestion — not a defect. |
+| `medium` | A real defect, but scoped and low-impact. |
+| `high` | A bug or design issue likely to cause incorrect behavior. |
+| `critical` | A security vulnerability, data loss, or severe correctness bug. |
+
+The event is computed **only** from each finding's parsed `severity` field — never from Claude's prose summary or a finding's own `body` text, and never a value Claude (or a malicious PR) can pass as a raw string to the GitHub API. This holds even if the reviewed PR's content tries to inject text like "APPROVE" or "REQUEST_CHANGES" into what Claude reads. `APPROVE` remains structurally unreachable: `github.SubmitPRReview`'s event parameter is a type whose only two constructible values are "submit a comment" and "submit REQUEST_CHANGES" — there is no third construction path, in this package or any other.
+
+An unrecognized or missing severity value on a single finding (e.g. Claude fails to follow the schema) is treated as **below every threshold** — it fails closed toward `COMMENT`, never toward the more disruptive `REQUEST_CHANGES`. By contrast, an unrecognized `request_changes_threshold` **config** value is rejected at startup with an error naming the bad value — a typo'd config setting is a one-time operator mistake worth catching immediately, not a value that should silently match every finding.
+
+### Unblocking a REQUEST_CHANGES review
+
+A `REQUEST_CHANGES` review blocks merges in repos with branch protection requiring resolved reviews. Unblocking it relies on GitHub's own **"Dismiss stale pull request approvals when new commits are pushed"** branch-protection setting — when Fabrik (or a human) pushes a fix, GitHub auto-dismisses the stale review, and Pruefer's next poll re-reviews the new head SHA (clean → `COMMENT`; still bad → `REQUEST_CHANGES` again, independently — Pruefer's decision carries no memory across SHAs).
+
+**This is why resolving inline review threads is not enough on its own**: thread resolution and review dismissal are two different GitHub states. Fabrik's own auto-merge gate already reacts to unresolved threads (#1207), but a `CHANGES_REQUESTED` review's block persists at the branch-protection level regardless of thread state. Enable "dismiss stale reviews on push" in each watched repo's branch protection rule if you use `request_changes_threshold`.
+
+**Not implemented**: Pruefer does not (yet) self-dismiss its own prior `REQUEST_CHANGES` review as a fallback for repos without stale-review dismissal enabled. If a future need for this arises: dismissing a PR review via `PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/dismissals` requires the GitHub App installation to have `pull_requests: write`, **and**, on a protected branch, the App must additionally be included in that branch protection rule's explicit list of actors allowed to dismiss reviews — a separate, per-repo, manually-configured GitHub setting beyond the write permission itself. Self-dismissal is scoped to only ever dismiss Pruefer's own prior review, never another reviewer's.
+
 ## Configuration reference
 
 Precedence, highest to lowest: **flag > environment variable > YAML config file > default.**
@@ -125,6 +151,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--excluded-authors` | `PRUEFER_EXCLUDED_AUTHORS` | `excluded_authors` | (none) | Comma-separated logins |
 | `--excluded-labels` | `PRUEFER_EXCLUDED_LABELS` | `excluded_labels` | (none) | Skip if any label matches |
 | `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns; skip only if **every** touched path matches |
+| `--request-changes-threshold` | `PRUEFER_REQUEST_CHANGES_THRESHOLD` | `request_changes_threshold` | (none — disabled) | `low`, `medium`, `high`, or `critical`; submits `REQUEST_CHANGES` when a finding's severity meets or exceeds this tier. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes). |
 | `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none — required) | |
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | |
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from `watched_repos`) | Legacy pin: set to force every watched repo through one specific installation, regardless of owner |
@@ -133,9 +160,12 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 
-## Out of scope for V1
+## Out of scope
 
-- `APPROVE` / `REQUEST_CHANGES` verdicts.
+- `APPROVE` verdicts — permanently out of scope, under any configuration (see [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes)). `REQUEST_CHANGES` is now in scope, gated behind `request_changes_threshold` (default off).
+- Self-dismissing Pruefer's own `REQUEST_CHANGES` review as a fallback for repos without "dismiss stale reviews on push" enabled — documented as a future option, not implemented.
+- Per-repo severity thresholds — `request_changes_threshold` is global to the daemon instance, like every other Pruefer config field.
+- Risk scoring/rubric (deciding which PRs/repos need what tier of human review) — a distinct, separate concept from per-finding severity.
 - Multi-line (`start_line`) inline comment ranges — single-line anchors only.
 - Non-GitHub forges.
 - Removing `.github/workflows/claude-review.yml` from any repo — that stays until Pruefer is proven in practice.
