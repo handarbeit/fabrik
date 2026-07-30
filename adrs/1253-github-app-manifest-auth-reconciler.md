@@ -41,7 +41,7 @@ No Pruefer-hosted backend is involved at any point — every network call in the
 
 ### 3. Manifest permissions match the existing manual-setup list exactly; no active webhook
 
-The generated manifest (`buildManifest`, `internal/githubauth/manifest.go`) requests exactly `metadata: read`, `pull_requests: write`, `contents: read`, `issues: read` — the same four permissions `cmd/pruefer/README.md`'s manual Setup section has always documented, no more. `hook_attributes.active` is always `false` and no `default_events` are requested: Pruefer V1 is polling-only (ADR-1113 §1, ADR-032), and webhook ingestion is a separate, explicitly out-of-scope future issue this manifest must never enable.
+The generated manifest (`buildManifest`, `internal/githubauth/manifest.go`) requests exactly `metadata: read`, `pull_requests: write`, `contents: read`, `issues: write` — matching `cmd/pruefer/README.md`'s manual Setup section, no more. `issues` is `write`, not `read`: GitHub's Issue Comments API requires `issues: write` to create a reaction (the eyes/rocket acknowledgment `AcknowledgeForceReview`/`MarkForceReviewsProcessed` leave on a `/pruefer review` comment), not just to read comments — a gap found and fixed during Validate after a manifest-flow-bootstrapped App 403'd on every acknowledgment under `issues: read`. `hook_attributes.active` is always `false` and no `default_events` are requested: Pruefer V1 is polling-only (ADR-1113 §1, ADR-032), and webhook ingestion is a separate, explicitly out-of-scope future issue this manifest must never enable.
 
 ### 4. Credential model: PEM at the existing default path, everything else in a new reconciler-owned state file
 
