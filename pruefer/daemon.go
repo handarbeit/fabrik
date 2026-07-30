@@ -112,7 +112,9 @@ func acquireLock(fabrikDir string) (*os.File, error) {
 		return nil, fmt.Errorf("opening lock file %s: %w", lockPath, err)
 	}
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lockFile.Close()
+		if closeErr := lockFile.Close(); closeErr != nil {
+			return nil, fmt.Errorf("another pruefer instance is already running (lock file: %s), and closing our own handle to it also failed: %v", lockPath, closeErr)
+		}
 		return nil, fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
 	}
 	return lockFile, nil

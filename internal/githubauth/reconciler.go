@@ -31,6 +31,16 @@ var identityValidationSleep = time.Sleep
 // policy; each keeps its own error message, since "just created" and "just
 // recreated" warrant different wording.
 func retryIdentityCheckAfterCreation(baseURL string, jwt string) (slug string, err error) {
+	// Seeded non-nil so an empty identityValidationRetryDelays (impossible
+	// today — the package-level slice always has two entries — but not
+	// guaranteed by the type system, and one accidental edit or test
+	// override away) makes the for-range below execute zero times and
+	// fall through to this return, rather than the zero-value nil a bare
+	// `var err error` would leave: both call sites treat a nil error here
+	// as "identity now resolves" and proceed to build a bot identity from
+	// the (also zero-value) slug — a silent, bogus success instead of the
+	// surfaced failure this is supposed to guarantee.
+	err = errors.New("no retry attempts configured (identityValidationRetryDelays is empty)")
 	for _, delay := range identityValidationRetryDelays {
 		identityValidationSleep(delay)
 		if slug, err = gh.FetchAppSlug(baseURL, jwt); err == nil {
