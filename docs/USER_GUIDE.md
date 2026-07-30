@@ -1482,7 +1482,9 @@ If the verdict never resolves — an unfixable review finding, or a required hum
 
 `review_authority` defaults to `advisory` (equivalent to leaving it unset) — existing repos and stages are unaffected until you opt in.
 
-For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode) and [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
+**Per-issue override.** Editing stage YAML opts in every issue on that stage, repo-wide. To make a single high-risk change authoritative (or exempt a single issue from an otherwise-authoritative stage) without touching stage config, apply a `review-authority:advisory` or `review-authority:authoritative` label directly to the issue — it overrides the stage's configured `review_authority` for that issue only. No `review-authority:` label means the stage config governs, unchanged. If you apply both labels to the same issue, Fabrik resolves to `authoritative` (the more restrictive value) and logs a warning; a misspelled or unrecognized value (e.g. `review-authority:Authoritative`) is ignored with a logged warning and falls back to the stage config — it never silently escalates to authoritative. The label only changes the verdict-strictness once the gate is active — `wait_for_reviews: true` on the stage is still required for the gate to engage at all, and `yolo`/`cruise` still never bypass whatever authority resolves to.
+
+For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode), [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md), and [ADR-1261](../adrs/1261-per-issue-review-authority-label-override.md).
 
 ---
 
@@ -2134,11 +2136,15 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:extend-turns` | Pre-grant 2× `max_turns` for every stage invocation while the label is present. Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `fabrik:revalidate` | Force re-entry of the Validate stage. Removes `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, then itself; Validate then re-runs on the current HEAD SHA. Use this to recover from a stuck-Validate state in one action — no need to manually clear individual gate labels. Applied to non-Validate issues: removed with a warning, no work dispatched. Safe to apply while Validate is in-flight — the label is held until the worker exits, then processed normally. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
+| `review-authority:advisory` | Override the stage's configured `review_authority` to `advisory` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
+| `review-authority:authoritative` | Override the stage's configured `review_authority` to `authoritative` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
 | `fabrik:clear-claude-limit` | Clear an active account-wide Claude usage-limit suspension without restarting the engine. Apply to *any* open board item — it does not need to be one already carrying `fabrik:claude-limit`, since the suspension is account-wide, not per-issue. Read and consumed on the next poll: clears the suspension immediately and removes itself. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
 Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
+
+Review authority label precedence: no `review-authority:` label → stage YAML `review_authority` governs. Exactly one recognized label (`advisory` or `authoritative`) → it overrides the stage config for this issue only. Both labels present → resolves to `authoritative` (the more restrictive value) and a warning is logged. A malformed or unrecognized suffix is ignored with a logged warning and falls back to the stage config.
 
 ### Advanced: `base:<branch>` timing
 
@@ -2277,6 +2283,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
 | `fabrik:extend-turns` | Pre-grant 2× max turns budget for every stage while present; auto-extends to 3× when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
 | `base:<branch>` | Override base branch for this issue (e.g. `base:develop`); Fabrik forks from, rebases onto, and targets PRs at this branch |
+| `review-authority:<mode>` | Override the stage's configured `review_authority` for this issue only (`advisory`, `authoritative`); only meaningful alongside `wait_for_reviews: true` |
 
 Dismiss the panel by pressing `?` again or `Esc`.
 
