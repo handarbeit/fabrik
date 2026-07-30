@@ -40,7 +40,8 @@ func shaInvalidationBoardFn(itemNum int, labels []string) func(string, string, i
 // TestSHAInvalidation_ClearsLabelsOnSHAMismatch verifies SC-1: when an item
 // carries stage:Validate:complete, a recorded completion SHA ("sha-N"), and the
 // linked PR's current HEAD SHA is "sha-M" (different), the SHA-invalidation
-// scan removes all four FR-3 labels from GitHub.
+// scan removes all five FR-3 labels from GitHub (including fabrik:rebase-needed,
+// per #1225).
 func TestSHAInvalidation_ClearsLabelsOnSHAMismatch(t *testing.T) {
 	stgs := testStagesForSHAInvalidation()
 	allLabels := []string{
@@ -48,6 +49,7 @@ func TestSHAInvalidation_ClearsLabelsOnSHAMismatch(t *testing.T) {
 		"fabrik:auto-merge-enabled",
 		"fabrik:awaiting-ci",
 		"fabrik:awaiting-review",
+		"fabrik:rebase-needed",
 	}
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: shaInvalidationBoardFn(42, allLabels),
