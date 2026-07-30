@@ -23,6 +23,23 @@ var identityValidationRetryDelays = []time.Duration{250 * time.Millisecond, 750 
 // real.
 var identityValidationSleep = time.Sleep
 
+// retryIdentityCheckAfterCreation re-attempts an identity check that just
+// failed immediately after this exact Reconcile call created or recreated
+// the App (the justBootstrapped and post-self-heal call sites below) —
+// pausing identityValidationRetryDelays between attempts before giving up.
+// Shared so the two call sites can't drift out of sync on the backoff
+// policy; each keeps its own error message, since "just created" and "just
+// recreated" warrant different wording.
+func retryIdentityCheckAfterCreation(baseURL string, jwt string) (slug string, err error) {
+	for _, delay := range identityValidationRetryDelays {
+		identityValidationSleep(delay)
+		if slug, err = gh.FetchAppSlug(baseURL, jwt); err == nil {
+			return slug, nil
+		}
+	}
+	return "", err
+}
+
 // Options configures Reconcile. It mirrors the subset of the caller's own
 // config the reconciler needs — this package must never import pruefer (see
 // doc.go), so callers pass these fields explicitly rather than a
@@ -208,12 +225,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		// only self-heal (re-enter the manifest flow) below when the App
 		// was NOT just created in this call.
 		if justBootstrapped {
-			for _, delay := range identityValidationRetryDelays {
-				identityValidationSleep(delay)
-				if slug, err = gh.FetchAppSlug(opts.BaseURL, jwt); err == nil {
-					break
-				}
-			}
+			slug, err = retryIdentityCheckAfterCreation(opts.BaseURL, jwt)
 			if err != nil {
 				if opts.AppInstallationID != 0 {
 					return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d also still refers to this new App's installation and will need updating if this persists; retry Reconcile", appID, len(identityValidationRetryDelays), err, opts.AppInstallationID)
@@ -269,14 +281,20 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			// the new App — the next Reconcile call would then load this
 			// same new AppID from state, fail identity validation again,
 			// and self-heal a *second* time, creating an orphan App.
+			//
+			// This narrows that window to "propagation lag outlasting
+			// identityValidationRetryDelays across two consecutive Reconcile
+			// calls," not zero: a persisted "just self-heal-created, extend
+			// leniency" fact (e.g. a timestamp in Credentials) could close
+			// it further, but Reconcile's documented triggers are startup,
+			// config change, and explicit drift signals — not a tight
+			// automatic retry loop — so two such calls landing within the
+			// same ~1s propagation-lag window is not a realistic sequence in
+			// practice. Left as a known, accepted residual risk rather than
+			// adding persisted-timestamp state for it.
 			slug, err = gh.FetchAppSlug(opts.BaseURL, jwt)
 			if err != nil {
-				for _, delay := range identityValidationRetryDelays {
-					identityValidationSleep(delay)
-					if slug, err = gh.FetchAppSlug(opts.BaseURL, jwt); err == nil {
-						break
-					}
-				}
+				slug, err = retryIdentityCheckAfterCreation(opts.BaseURL, jwt)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("re-created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as a second deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
