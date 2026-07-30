@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -126,6 +127,9 @@ func TestFetchAppInstallations(t *testing.T) {
 		if r.URL.Path != "/app/installations" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("per_page = %q, want 100", got)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-jwt" {
 			t.Errorf("Authorization = %q, want Bearer test-jwt", got)
 		}
@@ -145,6 +149,46 @@ func TestFetchAppInstallations(t *testing.T) {
 	}
 	if installs[0].ID != 111 || installs[0].Account != "handarbeit" {
 		t.Errorf("installs[0] = %+v", installs[0])
+	}
+}
+
+// TestFetchAppInstallations_WarnsAtCap is the regression test for a review
+// finding: /app/installations was called with no per_page/pagination at
+// all (GitHub's own default page size is only 30), so an App installed on
+// more accounts than fit on one page would silently miss the rest —
+// Reconcile would then treat an already-installed owner beyond page 1 as
+// uninstalled and walk the operator through a spurious guided-install flow.
+// Mirrors TestListOpenPRs_WarnsAtCap's "explicit per_page cap + warn, don't
+// silently truncate" convention (prs.go).
+func TestFetchAppInstallations_WarnsAtCap(t *testing.T) {
+	var warned bool
+	Logf = func(issueNumber int, tag, format string, args ...any) {
+		if tag == "app" {
+			warned = true
+		}
+	}
+	defer func() { Logf = nil }()
+
+	entries := make([]map[string]interface{}, 100)
+	for i := range entries {
+		entries[i] = map[string]interface{}{
+			"id": i + 1, "account": map[string]string{"login": "someorg"},
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(entries)
+	}))
+	defer srv.Close()
+
+	installs, err := FetchAppInstallations(srv.URL, "test-jwt")
+	if err != nil {
+		t.Fatalf("FetchAppInstallations: %v", err)
+	}
+	if len(installs) != 100 {
+		t.Fatalf("expected 100 installations, got %d", len(installs))
+	}
+	if !warned {
+		t.Error("expected a warning when exactly 100 installations are returned (more may exist)")
 	}
 }
 
@@ -177,6 +221,9 @@ func TestFetchInstallationRepositories(t *testing.T) {
 		if r.URL.Path != "/installation/repositories" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("per_page = %q, want 100", got)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer ghs_installation_token" {
 			t.Errorf("Authorization = %q, want Bearer ghs_installation_token", got)
 		}
@@ -201,6 +248,44 @@ func TestFetchInstallationRepositories(t *testing.T) {
 		if repos[i] != want[i] {
 			t.Errorf("repos[%d] = %q, want %q", i, repos[i], want[i])
 		}
+	}
+}
+
+// TestFetchInstallationRepositories_WarnsAtCap is the regression test for a
+// review finding: /installation/repositories was called with no
+// per_page/pagination at all (GitHub's own default page size is only 30),
+// so a "selected"-mode installation granting access to more repos than fit
+// on one page would silently miss the rest — verifyRepoAccess would then
+// report a genuinely-authorized repo beyond page 1 as unauthorized. Mirrors
+// TestListOpenPRs_WarnsAtCap's "explicit per_page cap + warn, don't
+// silently truncate" convention (prs.go).
+func TestFetchInstallationRepositories_WarnsAtCap(t *testing.T) {
+	var warned bool
+	Logf = func(issueNumber int, tag, format string, args ...any) {
+		if tag == "app" {
+			warned = true
+		}
+	}
+	defer func() { Logf = nil }()
+
+	repos := make([]map[string]interface{}, 100)
+	for i := range repos {
+		repos[i] = map[string]interface{}{"full_name": fmt.Sprintf("someorg/repo-%d", i)}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": repos})
+	}))
+	defer srv.Close()
+
+	got, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
+	if err != nil {
+		t.Fatalf("FetchInstallationRepositories: %v", err)
+	}
+	if len(got) != 100 {
+		t.Fatalf("expected 100 repositories, got %d", len(got))
+	}
+	if !warned {
+		t.Error("expected a warning when exactly 100 repositories are returned (more may exist)")
 	}
 }
 
@@ -353,7 +438,7 @@ func TestAppRequest_EmptyBaseURLFallsBackToDefaultBaseURL(t *testing.T) {
 	if _, err := FetchAppInstallations("", "test-jwt"); err != nil {
 		t.Fatalf("FetchAppInstallations: %v", err)
 	}
-	want := defaultBaseURL + "/app/installations"
+	want := defaultBaseURL + "/app/installations?per_page=100"
 	if capturedURL != want {
 		t.Errorf("request URL = %q, want %q (empty baseURL must fall back to defaultBaseURL)", capturedURL, want)
 	}
