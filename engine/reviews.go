@@ -128,7 +128,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// zero reviews stays blocked by the outer condition regardless of mode.
 	var authorityReason string
 	if len(outstanding) == 0 && hasReviews {
-		if stage.ReviewAuthority != "authoritative" {
+		if e.effectiveReviewAuthority(item, stage) != "authoritative" {
 			e.removeAwaitingReviewLabel(owner, repo, item)
 			return false, false, false
 		}
@@ -304,6 +304,87 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 		}
 	}
 	return outstanding, hasReviews
+}
+
+// reviewAuthorityRank lists review-authority modes from least to most
+// restrictive. Iterating from the end returns the more restrictive mode
+// (authoritative > advisory) — mirrors effortLevelRank's "prefer the
+// higher-ranked value" convention, not extractModelOverride's first-wins
+// convention. See #1261.
+var reviewAuthorityRank = []string{"advisory", "authoritative"}
+
+// extractReviewAuthorityOverride scans item labels for "review-authority:<mode>"
+// labels and returns the resolved mode. If multiple recognized labels are
+// present, it resolves to the more restrictive one (authoritative wins) and
+// logs a warning listing all found labels — mirroring extractEffortOverride's
+// "pick deterministically, don't arbitrate" convention rather than
+// extractModelOverride's "first wins" convention, per #1261.
+//
+// A label whose suffix is not exactly "advisory" or "authoritative" (typo,
+// casing, unknown value) is ignored with a logged warning — never a hard
+// failure, never a silent escalation to authoritative.
+//
+// Returns "" when no valid review-authority: label is found (stage config governs).
+func (e *Engine) extractReviewAuthorityOverride(issueNumber int, labels []string) string {
+	const prefix = "review-authority:"
+	found := make(map[string]bool)
+	var malformed []string
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		mode := strings.TrimPrefix(label, prefix)
+		if mode == "advisory" || mode == "authoritative" {
+			found[mode] = true
+		} else {
+			malformed = append(malformed, label)
+		}
+	}
+	if len(malformed) > 0 {
+		e.logf(issueNumber, "warn", "unrecognized review-authority: label(s) %s (must be advisory or authoritative); ignoring\n",
+			strings.Join(malformed, ", "))
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	if len(found) > 1 {
+		all := make([]string, 0, len(found))
+		for m := range found {
+			all = append(all, "review-authority:"+m)
+		}
+		e.logf(issueNumber, "warn", "multiple review-authority: labels found (%s); using more restrictive (authoritative)\n", strings.Join(all, ", "))
+	}
+	// Return the more restrictive mode present.
+	for i := len(reviewAuthorityRank) - 1; i >= 0; i-- {
+		if found[reviewAuthorityRank[i]] {
+			return reviewAuthorityRank[i]
+		}
+	}
+	return ""
+}
+
+// effectiveReviewAuthority resolves the effective review_authority mode for
+// item, applying the per-issue "review-authority:<mode>" label override (#1261)
+// on top of the stage's YAML-configured value. checkReviewGate,
+// reviewGateBlocksLanding, and pauseForReviewTimeout's message-only check all
+// consult this instead of reading stage.ReviewAuthority directly, so the two
+// gates (and the pause message describing them) can never disagree about
+// which mode is in effect for a given issue.
+//
+// Precedence: no review-authority: label on the issue → stage.ReviewAuthority
+// governs. Exactly one recognized label → it overrides the stage config for
+// this issue only. Both labels present → resolves to "authoritative" (logged
+// warning). Malformed/unknown label → ignored (logged warning), falls back to
+// stage config.
+//
+// Returns "", "advisory", or "authoritative" — every existing call site
+// already compares with !=/== "authoritative" only, so "" and "advisory"
+// remain interchangeable exactly as stage.ReviewAuthority == "" is today.
+func (e *Engine) effectiveReviewAuthority(item gh.ProjectItem, stage *stages.Stage) string {
+	if override := e.extractReviewAuthorityOverride(item.Number, item.Labels); override != "" {
+		return override
+	}
+	return stage.ReviewAuthority
 }
 
 // reviewGateAuthorityVerdict is the additive check `review_authority:
@@ -491,7 +572,7 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		// error blocks conservatively — same rationale as the FetchPRReviews/
 		// FetchPRReviewRequests failure handling just above; a transient
 		// GraphQL error must never silently fall back to advisory clearing.
-		if stage.ReviewAuthority == "authoritative" {
+		if e.effectiveReviewAuthority(item, stage) == "authoritative" {
 			reviewDecision, decisionErr := e.readClient.FetchPRReviewDecision(owner, repo, prNumber)
 			if decisionErr != nil {
 				e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewDecision failed: %v\n", decisionErr)
@@ -835,7 +916,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		// checkReviewGate/reviewGateBlocksLanding use, so this line is still
 		// populated on a base:<branch> repo instead of silently omitted.
 		authorityLine := ""
-		if stage.ReviewAuthority == "authoritative" {
+		if e.effectiveReviewAuthority(item, stage) == "authoritative" {
 			owner, repo := itemOwnerRepo(item, e.defaultRepo())
 			prNumber := item.LinkedPRNumber
 			reviews := item.LinkedPRReviews
