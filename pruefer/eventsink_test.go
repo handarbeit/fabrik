@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -309,4 +310,89 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 
 	close(release)
 	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 2 })
+}
+
+// TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock guards
+// against a lock-ordering inversion vs. the poll path: reviewOne/runReview
+// acquire the semaphore first, then block on the PR's stripe lock inside
+// the spawned goroutine. If ReviewFromEvent acquired those two resources in
+// the opposite order (PR lock, then semaphore), it would be a classic AB-BA
+// deadlock risk — under semaphore saturation, an event goroutine holding a
+// PR's lock while blocked on the semaphore can race a poll goroutine that
+// wins a freed slot and then blocks on that same PR's lock, permanently
+// consuming the slot; if this recurs across enough distinct PRs to fill
+// every slot, the whole daemon wedges with no timeout or ctx-based escape.
+//
+// This test holds PR #1's stripe lock directly (simulating some other
+// in-flight review) and saturates the daemon's single concurrency slot
+// with a bystander review of an unrelated PR. If ReviewFromEvent checked
+// the PR lock before the semaphore, its (non-blocking) lock attempt would
+// fail immediately and it would return without ever touching the — fully
+// saturated — semaphore, indistinguishable from this test's perspective.
+// Correct (semaphore-first) ordering instead leaves it blocked queuing for
+// the semaphore until the bystander's slot is freed.
+func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testing.T) {
+	bystanderPR := gh.PRDetails{Number: 99, Author: "bystander", HeadSHA: "shaY"}
+	client := newFakeLister()
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{bystanderPR}
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		started <- struct{}{}
+		<-release
+		return ReviewResult{Text: "mock review"}, nil
+	}}
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+		return "/tmp", func() {}, nil
+	}
+	d := &Daemon{
+		Clients:  map[string]GitHubLister{"owner": client},
+		Claude:   claude,
+		Clone:    clone,
+		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 1},
+		BotLogin: "pruefer-bot[bot]",
+	}
+
+	// Saturate the daemon's single concurrency slot with a bystander review
+	// of an unrelated PR (#99), the same dispatch path poll() itself uses.
+	var wg sync.WaitGroup
+	d.reviewOne(context.Background(), &wg, client, "owner", "repo", bystanderPR)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bystander review never started")
+	}
+
+	// Simulate another in-flight review of PR #1 by holding its stripe lock
+	// directly — the same state runReview would have already established
+	// for a real in-flight review.
+	prLock := d.prLock("owner", "repo", 1)
+	prLock.Lock()
+	defer prLock.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		d.ReviewFromEvent(context.Background(), "owner", "repo", 1)
+		close(done)
+	}()
+
+	// With the only slot saturated, ReviewFromEvent must still be blocked
+	// queuing for the semaphore, not already returned via an immediate
+	// PR-lock failure.
+	select {
+	case <-done:
+		t.Fatal("ReviewFromEvent returned before the semaphore was ever freed — it must be checking the PR lock before the semaphore (the deadlock-prone ordering)")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Free the bystander's slot: ReviewFromEvent should now acquire it,
+	// find PR #1's lock held, drop, and return promptly.
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReviewFromEvent did not return after the semaphore slot was freed")
+	}
+	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 }) // only the bystander submitted
 }
