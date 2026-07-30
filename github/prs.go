@@ -625,22 +625,50 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 	return string(respBody), nil
 }
 
-// SubmitPRReview submits a formal pull_request_review comment (event=COMMENT)
-// against the given commit SHA, optionally with line-anchored inline
-// comments posted in the same request. The event type is hardcoded and never
-// caller-controlled — Pruefer V1 never submits APPROVE or REQUEST_CHANGES
-// verdicts (see ADR-1113). Each comment's side is likewise hardcoded to
-// "RIGHT" — V1 supports only single-line, post-change-side anchors (see
-// adrs/1189-pruefer-inline-review-comments.md). The "comments" key is
-// omitted entirely when comments is empty, preserving the exact body-only
-// wire shape callers relied on before this parameter existed. Returns the
-// numeric review ID.
-func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, comments []ReviewComment) (int, error) {
+// ReviewEvent selects the wire "event" value SubmitPRReview submits. Its
+// field is unexported so no package outside github can construct an
+// arbitrary value — the only way to obtain a ReviewEvent is to copy one of
+// the two values below (or receive the zero value). This is what makes "no
+// APPROVE, ever" a compile-time property rather than a convention: even a
+// future in-package mistake can't smuggle an arbitrary string through, and
+// SubmitPRReview itself additionally normalizes defensively (see below), so
+// the guarantee holds even against a hypothetical bug in this very type's
+// definition. See adrs/1251-pruefer-severity-gated-request-changes.md.
+type ReviewEvent struct{ raw string }
+
+var (
+	// ReviewEventComment submits a non-blocking review comment (GitHub's
+	// default "COMMENT" event) — the only event Pruefer V1 ever submitted.
+	ReviewEventComment = ReviewEvent{raw: "COMMENT"}
+	// ReviewEventRequestChanges submits a blocking "REQUEST_CHANGES" review.
+	// Pruefer computes this Go-side from parsed finding severities — never
+	// from Claude's prose — see pruefer/review.go's decideEvent.
+	ReviewEventRequestChanges = ReviewEvent{raw: "REQUEST_CHANGES"}
+)
+
+// SubmitPRReview submits a formal pull_request_review comment against the
+// given commit SHA, optionally with line-anchored inline comments posted in
+// the same request. event selects COMMENT vs REQUEST_CHANGES — computed
+// Go-side by the caller (see ReviewEvent's doc comment), never derived from
+// Claude's output text. There is no APPROVE path: only a ReviewEvent whose
+// internal string is exactly "REQUEST_CHANGES" escapes the "COMMENT"
+// default below, so even an unexpected/zero ReviewEvent value degrades to
+// the non-blocking event rather than approving or erroring. Each comment's
+// side is likewise hardcoded to "RIGHT" — V1 supports only single-line,
+// post-change-side anchors (see adrs/1189-pruefer-inline-review-comments.md).
+// The "comments" key is omitted entirely when comments is empty, preserving
+// the exact body-only wire shape callers relied on before that parameter
+// existed. Returns the numeric review ID.
+func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event ReviewEvent, comments []ReviewComment) (int, error) {
+	wireEvent := "COMMENT"
+	if event.raw == "REQUEST_CHANGES" {
+		wireEvent = "REQUEST_CHANGES"
+	}
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", c.baseURL, owner, repo, prNumber)
 	reqBody := map[string]interface{}{
 		"commit_id": commitSHA,
 		"body":      body,
-		"event":     "COMMENT",
+		"event":     wireEvent,
 	}
 	if len(comments) > 0 {
 		wireComments := make([]map[string]interface{}, len(comments))

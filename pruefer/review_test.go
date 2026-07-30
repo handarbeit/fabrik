@@ -33,6 +33,7 @@ type submitCall struct {
 	prNumber    int
 	commitSHA   string
 	body        string
+	event       gh.ReviewEvent
 	comments    []gh.ReviewComment
 }
 
@@ -53,13 +54,13 @@ func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PR
 	return f.reviews, nil
 }
 
-func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, comments []gh.ReviewComment) (int, error) {
+func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.submitErr != nil {
 		return 0, f.submitErr
 	}
-	f.submitCalls = append(f.submitCalls, submitCall{owner, repo, prNumber, commitSHA, body, comments})
+	f.submitCalls = append(f.submitCalls, submitCall{owner, repo, prNumber, commitSHA, body, event, comments})
 	return len(f.submitCalls), nil
 }
 
@@ -126,8 +127,122 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit." {
 		t.Errorf("submitCall = %+v", call)
 	}
+	if call.event != gh.ReviewEventComment {
+		t.Errorf("submitCall.event = %+v, want ReviewEventComment (default Config has no threshold set)", call.event)
+	}
 	if outcome.NumTurns != 3 || outcome.CostUSD != 0.05 {
 		t.Errorf("outcome NumTurns/CostUSD = %d/%v, want 3/0.05", outcome.NumTurns, outcome.CostUSD)
+	}
+}
+
+func TestReviewPR_SeverityAboveThreshold_SubmitsRequestChanges(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Found a real problem.\n\n```json\n" +
+			`[{"path": "a.go", "line": 1, "body": "sql injection", "severity": "critical"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{RequestChangesThreshold: SeverityHigh}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	call := client.submitCalls[0]
+	if call.event != gh.ReviewEventRequestChanges {
+		t.Errorf("submitCall.event = %+v, want ReviewEventRequestChanges (critical finding meets the high threshold)", call.event)
+	}
+}
+
+func TestReviewPR_SeverityBelowThreshold_SubmitsComment(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Minor nit.\n\n```json\n" +
+			`[{"path": "a.go", "line": 1, "body": "consider renaming", "severity": "low"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{RequestChangesThreshold: SeverityHigh}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	call := client.submitCalls[0]
+	if call.event != gh.ReviewEventComment {
+		t.Errorf("submitCall.event = %+v, want ReviewEventComment (low finding does not meet the high threshold)", call.event)
+	}
+}
+
+func TestReviewPR_ToggleOff_CriticalFindingStillSubmitsComment(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Found a real problem.\n\n```json\n" +
+			`[{"path": "a.go", "line": 1, "body": "sql injection", "severity": "critical"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	call := client.submitCalls[0]
+	if call.event != gh.ReviewEventComment {
+		t.Errorf("submitCall.event = %+v, want ReviewEventComment (toggle off means always COMMENT regardless of severity)", call.event)
+	}
+}
+
+// TestReviewPR_FixedThenReReviewed_DoesNotReBlock proves the "a fixed-then-
+// re-reviewed SHA does not re-block" acceptance criterion structurally:
+// decideEvent has no memory across calls, so a clean re-review at a new SHA
+// independently produces COMMENT even though the prior SHA's review at the
+// same PR number requested changes. The actual unblock mechanism in
+// production is GitHub's own stale-review dismissal on push (see
+// cmd/pruefer/README.md) — this test only proves Pruefer's own decision
+// carries no cross-call state that could interfere with that.
+func TestReviewPR_FixedThenReReviewed_DoesNotReBlock(t *testing.T) {
+	client := newFakeReviewer()
+	call := 0
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		call++
+		if call == 1 {
+			return ReviewResult{Text: "Bad.\n\n```json\n" +
+				`[{"path": "a.go", "line": 1, "body": "sql injection", "severity": "critical"}]` +
+				"\n```\n"}, nil
+		}
+		return ReviewResult{Text: "Fixed.\n\n```json\n[]\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+	cfg := Config{RequestChangesThreshold: SeverityHigh}
+
+	pr1 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome1 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr1)
+	if !outcome1.Reviewed || outcome1.Err != nil {
+		t.Fatalf("first outcome = %+v, want Reviewed=true, Err=nil", outcome1)
+	}
+
+	pr2 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha2"}
+	outcome2 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr2)
+	if !outcome2.Reviewed || outcome2.Err != nil {
+		t.Fatalf("second outcome = %+v, want Reviewed=true, Err=nil", outcome2)
+	}
+
+	if len(client.submitCalls) != 2 {
+		t.Fatalf("submitCalls = %d, want 2", len(client.submitCalls))
+	}
+	if client.submitCalls[0].event != gh.ReviewEventRequestChanges {
+		t.Errorf("submitCalls[0].event = %+v, want ReviewEventRequestChanges", client.submitCalls[0].event)
+	}
+	if client.submitCalls[1].event != gh.ReviewEventComment {
+		t.Errorf("submitCalls[1].event = %+v, want ReviewEventComment (clean re-review at a new SHA must not inherit the prior block)", client.submitCalls[1].event)
 	}
 }
 

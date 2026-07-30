@@ -47,6 +47,17 @@ type Config struct {
 	ExcludedPaths   []string // glob patterns; a PR is skipped only if ALL touched paths match
 	ExcludedLabels  []string // a PR is skipped if ANY label matches
 
+	// RequestChangesThreshold gates Pruefer's severity-based REQUEST_CHANGES
+	// escalation (see decideEvent in pruefer/review.go). The zero value
+	// ("") means the feature is off: every review submits COMMENT,
+	// byte-for-byte the pre-#1251 behavior. Setting it to one of the four
+	// recognized Severity tiers turns the gate on at that threshold —
+	// LoadConfig fails loud on any other non-empty value (a mistyped
+	// config value is an operator error worth catching at startup, unlike
+	// a per-finding severity from Claude, which fails closed instead; see
+	// severityRank's doc comment).
+	RequestChangesThreshold Severity
+
 	// TUI controls whether Execute launches the bubbletea dashboard. Default
 	// true; -notui / PRUEFER_TUI=0 / config.yaml's `tui: false` disable it,
 	// mirroring cmd/root.go's --notui/FABRIK_TUI convention. Execute further
@@ -68,20 +79,21 @@ type Config struct {
 // optional; pointer types distinguish "absent" from "explicit zero" for
 // numeric fields, mirroring config.ProjectConfig's convention.
 type yamlConfig struct {
-	WatchedRepos      []string `yaml:"watched_repos"`
-	PollIntervalSec   *int     `yaml:"poll_interval_seconds"`
-	Model             string   `yaml:"model"`
-	Effort            string   `yaml:"effort"`
-	ConcurrencyCap    *int     `yaml:"concurrency_cap"`
-	MaxDiffBytes      *int64   `yaml:"max_diff_bytes"`
-	MaxWallTimeSec    *int     `yaml:"max_wall_time_seconds"`
-	ExcludedAuthors   []string `yaml:"excluded_authors"`
-	ExcludedPaths     []string `yaml:"excluded_paths"`
-	ExcludedLabels    []string `yaml:"excluded_labels"`
-	AppID             *int64   `yaml:"github_app_id"`
-	AppPrivateKeyPath string   `yaml:"github_app_private_key_path"`
-	AppInstallationID *int64   `yaml:"github_app_installation_id"`
-	TUI               *bool    `yaml:"tui"`
+	WatchedRepos            []string `yaml:"watched_repos"`
+	PollIntervalSec         *int     `yaml:"poll_interval_seconds"`
+	Model                   string   `yaml:"model"`
+	Effort                  string   `yaml:"effort"`
+	ConcurrencyCap          *int     `yaml:"concurrency_cap"`
+	MaxDiffBytes            *int64   `yaml:"max_diff_bytes"`
+	MaxWallTimeSec          *int     `yaml:"max_wall_time_seconds"`
+	ExcludedAuthors         []string `yaml:"excluded_authors"`
+	ExcludedPaths           []string `yaml:"excluded_paths"`
+	ExcludedLabels          []string `yaml:"excluded_labels"`
+	RequestChangesThreshold string   `yaml:"request_changes_threshold"`
+	AppID                   *int64   `yaml:"github_app_id"`
+	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
+	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
+	TUI                     *bool    `yaml:"tui"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
@@ -103,21 +115,22 @@ func loadYAMLConfig(path string) (yamlConfig, error) {
 
 // flagValues holds the raw values parsed by LoadConfig's flag.FlagSet.
 type flagValues struct {
-	repos             string
-	pollIntervalSec   int
-	model             string
-	effort            string
-	concurrencyCap    int
-	maxDiffBytes      int64
-	maxWallTimeSec    int
-	excludedAuthors   string
-	excludedPaths     string
-	excludedLabels    string
-	appID             int64
-	appPrivateKeyPath string
-	appInstallationID int64
-	configPath        string
-	noTUI             bool
+	repos                   string
+	pollIntervalSec         int
+	model                   string
+	effort                  string
+	concurrencyCap          int
+	maxDiffBytes            int64
+	maxWallTimeSec          int
+	excludedAuthors         string
+	excludedPaths           string
+	excludedLabels          string
+	requestChangesThreshold string
+	appID                   int64
+	appPrivateKeyPath       string
+	appInstallationID       int64
+	configPath              string
+	noTUI                   bool
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -139,6 +152,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.excludedAuthors, "excluded-authors", "", "Comma-separated PR authors to skip")
 	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs to skip (all touched paths must match)")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
+	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
 	fs.StringVar(&fv.appPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's PEM private key")
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
@@ -175,6 +189,9 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedLabels:    yc.ExcludedLabels,
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
 		TUI:               true,
+	}
+	if yc.RequestChangesThreshold != "" {
+		cfg.RequestChangesThreshold = Severity(yc.RequestChangesThreshold)
 	}
 	if yc.TUI != nil {
 		cfg.TUI = *yc.TUI
@@ -239,6 +256,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["excluded-labels"] {
 		cfg.ExcludedLabels = splitCSV(fv.excludedLabels)
 	}
+	if explicit["request-changes-threshold"] {
+		cfg.RequestChangesThreshold = Severity(fv.requestChangesThreshold)
+	}
 	if explicit["github-app-id"] {
 		cfg.AppID = fv.appID
 	}
@@ -250,6 +270,10 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["notui"] {
 		cfg.TUI = !fv.noTUI
+	}
+
+	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
+		return Config{}, fmt.Errorf("request_changes_threshold: %q is not a recognized severity tier (must be one of low, medium, high, critical, or empty to disable)", cfg.RequestChangesThreshold)
 	}
 
 	return cfg, nil
@@ -295,6 +319,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_EXCLUDED_LABELS"); v != "" {
 		cfg.ExcludedLabels = splitCSV(v)
+	}
+	if v := os.Getenv("PRUEFER_REQUEST_CHANGES_THRESHOLD"); v != "" {
+		cfg.RequestChangesThreshold = Severity(v)
 	}
 	if v := os.Getenv("PRUEFER_GITHUB_APP_ID"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {

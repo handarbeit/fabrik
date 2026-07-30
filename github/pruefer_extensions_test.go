@@ -80,7 +80,7 @@ func TestFetchPRDiff(t *testing.T) {
 	}
 }
 
-func TestSubmitPRReview_HardcodesCommentEvent(t *testing.T) {
+func TestSubmitPRReview_ZeroValueEvent_SubmitsComment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("method = %s, want POST", r.Method)
@@ -93,7 +93,7 @@ func TestSubmitPRReview_HardcodesCommentEvent(t *testing.T) {
 			t.Fatalf("decoding request body: %v", err)
 		}
 		if body["event"] != "COMMENT" {
-			t.Errorf("event = %v, want COMMENT (must never be caller-controlled)", body["event"])
+			t.Errorf("event = %v, want COMMENT", body["event"])
 		}
 		if body["commit_id"] != "abc123" {
 			t.Errorf("commit_id = %v, want abc123", body["commit_id"])
@@ -106,7 +106,9 @@ func TestSubmitPRReview_HardcodesCommentEvent(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	id, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", nil)
+	// The zero value of ReviewEvent (not ReviewEventComment/RequestChanges)
+	// must still degrade to COMMENT, never error or escalate.
+	id, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", ReviewEvent{}, nil)
 	if err != nil {
 		t.Fatalf("SubmitPRReview: %v", err)
 	}
@@ -115,11 +117,52 @@ func TestSubmitPRReview_HardcodesCommentEvent(t *testing.T) {
 	}
 }
 
-// SubmitPRReview's signature has no event parameter at all — verified at
-// compile time by the call above passing exactly (owner, repo, prNumber,
-// commitSHA, body, comments). This test additionally guards the wire format
-// so a future refactor can't reintroduce a caller-supplied event without
-// failing TestSubmitPRReview_HardcodesCommentEvent above.
+func TestSubmitPRReview_RequestChangesEvent_SubmitsRequestChanges(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		if body["event"] != "REQUEST_CHANGES" {
+			t.Errorf("event = %v, want REQUEST_CHANGES", body["event"])
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", ReviewEventRequestChanges, nil); err != nil {
+		t.Fatalf("SubmitPRReview: %v", err)
+	}
+}
+
+// TestSubmitPRReview_ArbitraryRawString_NeverEscapesToWire is a white-box
+// (same-package) defense-in-depth regression guard: even a ReviewEvent
+// constructed in-package with an arbitrary internal string — something no
+// package outside github can do, since the field is unexported — still
+// never reaches the wire unless it is exactly "REQUEST_CHANGES". This is
+// what makes "no APPROVE, ever" hold even against a hypothetical future
+// mistake inside this package, not just external misuse. See
+// adrs/1251-pruefer-severity-gated-request-changes.md.
+func TestSubmitPRReview_ArbitraryRawString_NeverEscapesToWire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		if body["event"] != "COMMENT" {
+			t.Errorf("event = %v, want COMMENT (must never be caller-controlled)", body["event"])
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	bogus := ReviewEvent{raw: "APPROVE"}
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", bogus, nil); err != nil {
+		t.Fatalf("SubmitPRReview: %v", err)
+	}
+}
 
 func TestSubmitPRReview_NoComments_OmitsCommentsField(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +178,7 @@ func TestSubmitPRReview_NoComments_OmitsCommentsField(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", nil); err != nil {
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", ReviewEventComment, nil); err != nil {
 		t.Fatalf("SubmitPRReview: %v", err)
 	}
 }
@@ -172,7 +215,7 @@ func TestSubmitPRReview_WithComments_PostsCommentsArray(t *testing.T) {
 		{Path: "engine/claude.go", Line: 954, Body: "finding 1"},
 		{Path: "engine/claude.go", Line: 960, Body: "finding 2"},
 	}
-	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", comments); err != nil {
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", ReviewEventComment, comments); err != nil {
 		t.Fatalf("SubmitPRReview: %v", err)
 	}
 }
@@ -200,7 +243,7 @@ func TestSubmitPRReview_HardcodesRightSide(t *testing.T) {
 
 	c := NewClientWithBaseURL("token", srv.URL)
 	comments := []ReviewComment{{Path: "foo.go", Line: 1, Body: "x"}}
-	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", comments); err != nil {
+	if _, err := c.SubmitPRReview("owner", "repo", 42, "abc123", "review text", ReviewEventComment, comments); err != nil {
 		t.Fatalf("SubmitPRReview: %v", err)
 	}
 }
