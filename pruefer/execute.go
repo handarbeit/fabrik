@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/handarbeit/fabrik/config"
+	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
 )
 
@@ -33,6 +34,12 @@ func Execute() error {
 	if len(cfg.WatchedRepos) == 0 {
 		return fmt.Errorf("no watched repos configured (set watched_repos, PRUEFER_REPOS, or --repos)")
 	}
+
+	// Wire the github package's diagnostic logger so pagination-cap warnings
+	// (e.g. FetchAppInstallations/FetchInstallationRepositories hitting the
+	// 100-result page limit) reach Pruefer's own logf instead of being
+	// silently dropped — mirrors engine.go's gh.Logf wiring.
+	gh.Logf = func(issueNumber int, tag, format string, args ...any) { logf(0, tag, format, args...) }
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
