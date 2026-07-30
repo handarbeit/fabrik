@@ -144,7 +144,7 @@ func (s *Source) Run(ctx context.Context, sink events.EventSink) error {
 // was cancelled (caller stops retrying), and a non-nil err is the transport
 // failure that ended this attempt (caller backs off and retries).
 func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected bool, err error) {
-	sessionID, err := createSession(s.cfg.HTTPClient, s.cfg.APIBaseURL, s.cfg.APIKey)
+	sessionID, err := createSession(ctx, s.cfg.HTTPClient, s.cfg.APIBaseURL, s.cfg.APIKey)
 	if err != nil {
 		return false, fmt.Errorf("creating hookdeck session: %w", err)
 	}

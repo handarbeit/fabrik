@@ -79,6 +79,17 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 		logf(prNumber, "warn", "event for %s/%s#%d: fetching PR details: %v — dropping\n", owner, repo, prNumber, err)
 		return
 	}
+	// Unlike poll() (which only ever sees PRs ListOpenPRs returned, i.e.
+	// open by construction), this path fetches by number regardless of
+	// current state — a webhook can arrive for a PR that's since been
+	// closed or merged (e.g. synchronize immediately followed by merge, or
+	// a stale/delayed delivery). Eligible/ReviewPR don't check PR state, so
+	// without this guard such an event would proceed straight to cloning
+	// and submitting a formal review against a closed/merged PR.
+	if pr.State != "open" || pr.Merged {
+		logf(prNumber, "info", "event for %s/%s#%d: PR is no longer open (state=%s merged=%v) — dropping\n", owner, repo, prNumber, pr.State, pr.Merged)
+		return
+	}
 
 	d.executeReview(ctx, client, owner, repo, *pr)
 }

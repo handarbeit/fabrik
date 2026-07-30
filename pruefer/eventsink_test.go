@@ -31,7 +31,7 @@ func TestDaemonEventSink_PullRequestTriggerActions_DispatchReview(t *testing.T) 
 	for _, action := range []string{"opened", "synchronize", "ready_for_review"} {
 		t.Run(action, func(t *testing.T) {
 			client := newFakeLister()
-			client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+			client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 			d := newTestDaemonForEvents(client)
 			sink := &daemonEventSink{daemon: d}
 
@@ -46,7 +46,7 @@ func TestDaemonEventSink_PullRequestTriggerActions_DispatchReview(t *testing.T) 
 
 func TestDaemonEventSink_PullRequestOtherAction_NoOp(t *testing.T) {
 	client := newFakeLister()
-	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	d := newTestDaemonForEvents(client)
 	sink := &daemonEventSink{daemon: d}
 
@@ -62,7 +62,7 @@ func TestDaemonEventSink_PullRequestOtherAction_NoOp(t *testing.T) {
 
 func TestDaemonEventSink_UnrecognizedEventType_NoOp(t *testing.T) {
 	client := newFakeLister()
-	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	d := newTestDaemonForEvents(client)
 	sink := &daemonEventSink{daemon: d}
 
@@ -76,7 +76,7 @@ func TestDaemonEventSink_UnrecognizedEventType_NoOp(t *testing.T) {
 
 func TestDaemonEventSink_InstallationEvent_TriggersReconciliationPoll(t *testing.T) {
 	client := newFakeLister()
-	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	d := newTestDaemonForEvents(client)
 	sink := &daemonEventSink{daemon: d}
 
@@ -106,7 +106,7 @@ func TestDaemonEventSink_UnknownOwner_DropsWithoutPanic(t *testing.T) {
 // hookdeck/client.go's createSession), not just watched repos.
 func TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview(t *testing.T) {
 	client := newFakeLister()
-	client.prsByRepo["owner/other-repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+	client.prsByRepo["owner/other-repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	d := newTestDaemonForEvents(client) // WatchedRepos: []string{"owner/repo"} only
 	sink := &daemonEventSink{daemon: d}
 
@@ -154,7 +154,7 @@ func TestDaemonEventSink_UnparseableResourceID_DropsWithoutPanic(t *testing.T) {
 // must prevent a second SubmitPRReview call.
 func TestDaemonEventSink_DuplicateDeliverySameSHA_OnlyOneSubmit(t *testing.T) {
 	client := newFakeLister()
-	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	d := newTestDaemonForEvents(client)
 	sink := &daemonEventSink{daemon: d}
 
@@ -186,8 +186,8 @@ func TestDaemonEventSink_DuplicateDeliverySameSHA_OnlyOneSubmit(t *testing.T) {
 func TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation(t *testing.T) {
 	client := newFakeLister()
 	client.prsByRepo["owner/repo"] = []gh.PRDetails{
-		{Number: 1, Author: "alice", HeadSHA: "sha1"},
-		{Number: 2, Author: "alice", HeadSHA: "sha2"},
+		{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"},
+		{Number: 2, Author: "alice", HeadSHA: "sha2", State: "open"},
 	}
 
 	release := make(chan struct{})
@@ -254,8 +254,8 @@ func TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation(t *testi
 func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore(t *testing.T) {
 	client := newFakeLister()
 	client.prsByRepo["owner/repo"] = []gh.PRDetails{
-		{Number: 1, Author: "alice", HeadSHA: "sha1"},
-		{Number: 2, Author: "bob", HeadSHA: "sha2"},
+		{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"},
+		{Number: 2, Author: "bob", HeadSHA: "sha2", State: "open"},
 	}
 
 	release := make(chan struct{})
@@ -312,6 +312,40 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 2 })
 }
 
+// TestDaemonEventSink_ClosedOrMergedPR_DropsWithoutReview guards against a
+// webhook arriving for a PR that's since closed or merged (e.g. synchronize
+// immediately followed by merge, or a stale/delayed delivery). Unlike
+// poll(), which only ever sees PRs ListOpenPRs already filtered to open,
+// ReviewFromEvent fetches by number regardless of current state — and
+// Eligible/ReviewPR do not check PR state themselves — so without an
+// explicit guard this would proceed to clone and submit a formal review
+// against a closed/merged PR.
+func TestDaemonEventSink_ClosedOrMergedPR_DropsWithoutReview(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pr   gh.PRDetails
+	}{
+		{name: "closed", pr: gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", State: "closed"}},
+		{name: "merged", pr: gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", State: "closed", Merged: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newFakeLister()
+			client.detailsByKey["owner/repo#1"] = &tc.pr
+			d := newTestDaemonForEvents(client)
+			sink := &daemonEventSink{daemon: d}
+
+			sink.Handle(context.Background(), events.GitHubEvent{
+				EventType: "pull_request", Action: "synchronize", Owner: "owner", Repo: "repo", ResourceID: "1",
+			})
+
+			time.Sleep(100 * time.Millisecond)
+			if got := client.submitCallCount(); got != 0 {
+				t.Errorf("submitCallCount() = %d, want 0 (a %s PR must be dropped, not reviewed)", got, tc.name)
+			}
+		})
+	}
+}
+
 // TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock guards
 // against a lock-ordering inversion vs. the poll path: reviewOne/runReview
 // acquire the semaphore first, then block on the PR's stripe lock inside
@@ -332,7 +366,7 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 // Correct (semaphore-first) ordering instead leaves it blocked queuing for
 // the semaphore until the bystander's slot is freed.
 func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testing.T) {
-	bystanderPR := gh.PRDetails{Number: 99, Author: "bystander", HeadSHA: "shaY"}
+	bystanderPR := gh.PRDetails{Number: 99, Author: "bystander", HeadSHA: "shaY", State: "open"}
 	client := newFakeLister()
 	client.prsByRepo["owner/repo"] = []gh.PRDetails{bystanderPR}
 

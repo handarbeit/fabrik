@@ -2,6 +2,7 @@ package hookdeck
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,12 +20,17 @@ const DefaultWSBaseURL = "wss://ws.hookdeck.com"
 // createSession creates a new Hookdeck CLI session scoped to apiKey via
 // HTTP Basic auth (username=apiKey, empty password), returning the session
 // ID used as the Websocket-Id dial header.
-func createSession(httpClient *http.Client, baseURL, apiKey string) (string, error) {
+//
+// The request is bound to ctx — like the WebSocket dial that follows it in
+// runOnce — so a hang (dead TCP, slow DNS) during a reconnect attempt can't
+// stall graceful shutdown beyond ctx cancellation; http.Client has no
+// default timeout of its own.
+func createSession(ctx context.Context, httpClient *http.Client, baseURL, apiKey string) (string, error) {
 	reqBody, err := json.Marshal(createSessionRequest{WebhookIDs: []string{}})
 	if err != nil {
 		return "", fmt.Errorf("marshaling cli-session request: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/cli-sessions", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/cli-sessions", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("building cli-session request: %w", err)
 	}
