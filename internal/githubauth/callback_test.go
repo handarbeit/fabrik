@@ -328,3 +328,55 @@ func TestRunManifestCallbackServer_ManifestReceivesAssignedRedirectURL(t *testin
 		t.Errorf("redirectURL = %q, want %q (same port as startURL %q)", gotRedirectURL, wantRedirectURL, startURL)
 	}
 }
+
+// TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly
+// is the regression test for a review finding: once the first state-matching
+// /callback hit has been delivered on the single-buffered result channel,
+// once.Do makes any further state-matching hit (a browser retry/prefetch, or
+// a user double-clicking the redirect) a no-op — previously that fell
+// through to an unadorned empty 200 rather than an explicit response,
+// which could look like a hang to whoever's driving the browser.
+func TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly(t *testing.T) {
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	if err != nil {
+		t.Fatalf("runManifestCallbackServer: %v", err)
+	}
+	defer shutdown()
+
+	state := fetchStartAndExtractState(t, startURL)
+	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state + "&code=testcode123"
+
+	resp1, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback (first): %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Errorf("first callback status = %d, want 200", resp1.StatusCode)
+	}
+
+	select {
+	case res := <-results:
+		if res.err != nil || res.code != "testcode123" {
+			t.Fatalf("unexpected first result: %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first callback result")
+	}
+
+	resp2, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback (duplicate): %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("duplicate callback status = %d, want 200", resp2.StatusCode)
+	}
+	body, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("reading duplicate callback body: %v", err)
+	}
+	if !strings.Contains(string(body), "already completed") {
+		t.Errorf("duplicate callback body = %q, want it to explicitly say the flow already completed", body)
+	}
+}

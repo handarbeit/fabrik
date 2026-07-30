@@ -1196,6 +1196,65 @@ func TestReconcile_JustBootstrapped_PersistentIdentityFailure_ReturnsErrorNeverD
 	}
 }
 
+// TestReconcile_JustBootstrapped_PersistentIdentityFailure_WithPinnedInstallationID_MentionsInstallationID
+// is the regression test for a review finding: when a just-manifest-created
+// App's identity check never resolves AND opts.AppInstallationID is also
+// pinned (a valid, if narrow, config combination — an operator can set
+// github_app_installation_id without github_app_id), the returned error must
+// name the installation-ID mismatch that will also break the next mint
+// attempt, exactly as the sibling opts.AppInstallationID != 0 branch already
+// does for the non-just-bootstrapped case.
+func TestReconcile_JustBootstrapped_PersistentIdentityFailure_WithPinnedInstallationID_MentionsInstallationID(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	statePath := filepath.Join(dir, "app-state.json")
+
+	oldSleep := identityValidationSleep
+	identityValidationSleep = func(time.Duration) {}
+	defer func() { identityValidationSleep = oldSleep }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"app not found"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	var bootstrapCalls int
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		bootstrapCalls++
+		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey in stub: %v", err)
+		}
+		creds := Credentials{AppID: 999, Slug: "brand-new-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		AppInstallationID: 555,
+		WatchedRepos:      nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the just-bootstrapped App's identity never resolves")
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("runManifestFlow called %d times, want exactly 1 (must never double-bootstrap within one Reconcile call)", bootstrapCalls)
+	}
+	if !strings.Contains(err.Error(), "just created") {
+		t.Errorf("error = %v, want it to explain the App was just created in this run", err)
+	}
+	if !strings.Contains(err.Error(), "555") {
+		t.Errorf("error = %v, want it to mention the pinned github_app_installation_id (555) that also needs updating", err)
+	}
+}
+
 func TestReconcile_NoWatchedRepos_MintsNothing(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

@@ -148,7 +148,9 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 		if q.Get("code") == "" {
 			cbErr = fmt.Errorf("callback missing code parameter")
 		}
+		delivered := false
 		once.Do(func() {
+			delivered = true
 			if cbErr != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprintln(w, "Pruefer setup failed: "+cbErr.Error())
@@ -158,6 +160,15 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 			fmt.Fprintln(w, "Pruefer setup received — you can close this tab.")
 			resultCh <- callbackResult{code: q.Get("code")}
 		})
+		if !delivered {
+			// A second state-matching hit (browser retry/prefetch after the
+			// real redirect already completed, or a double-click) — the
+			// single-buffered resultCh has already been filled, so there's
+			// nothing left to deliver. Respond explicitly rather than
+			// falling through to an unadorned empty 200, so this doesn't
+			// look like a hang to whoever's driving the browser.
+			fmt.Fprintln(w, "Pruefer setup already completed — you can close this tab.")
+		}
 	})
 
 	srv := &http.Server{Handler: mux}

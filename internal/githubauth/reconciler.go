@@ -215,6 +215,9 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 				}
 			}
 			if err != nil {
+				if opts.AppInstallationID != 0 {
+					return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d also still refers to this new App's installation and will need updating if this persists; retry Reconcile", appID, len(identityValidationRetryDelays), err, opts.AppInstallationID)
+				}
 				return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
 			}
 		} else if opts.AppInstallationID != 0 {
