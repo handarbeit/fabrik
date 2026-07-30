@@ -53,10 +53,48 @@ type attemptBody struct {
 // original GitHub request headers (X-Hub-Signature-256, X-GitHub-Event,
 // X-GitHub-Delivery).
 type attemptRequest struct {
-	Method     string            `json:"method"`
-	Timeout    int               `json:"timeout"`
-	DataString string            `json:"data_string"`
-	Headers    map[string]string `json:"headers"`
+	Method     string      `json:"method"`
+	Timeout    int         `json:"timeout"`
+	DataString string      `json:"data_string"`
+	Headers    flexHeaders `json:"headers"`
+}
+
+// flexHeaders decodes an attempt frame's forwarded-header map, tolerating
+// either a flat string-per-key shape (the format observed against
+// Hookdeck's current CLI-session protocol) or an http.Header-style
+// array-per-key shape, in case a future Hookdeck revision or an
+// intermediary ever forwards raw multi-value headers that way. A per-key
+// shape surprise must not fail decoding of the whole attempt frame — that
+// would silently drop 100% of event-driven ingestion while transport
+// health still reports connected. lookupHeader only ever needs a single
+// value per header of interest (X-Hub-Signature-256, X-GitHub-Event,
+// X-GitHub-Delivery), none of which GitHub ever sends multi-valued, so the
+// first array element is sufficient.
+type flexHeaders map[string]string
+
+func (h *flexHeaders) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	out := make(flexHeaders, len(raw))
+	for k, v := range raw {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			out[k] = s
+			continue
+		}
+		var arr []string
+		if err := json.Unmarshal(v, &arr); err == nil && len(arr) > 0 {
+			out[k] = arr[0]
+			continue
+		}
+		// Any other per-key shape (null, number, empty array) is skipped
+		// rather than failing the frame; lookupHeader treats a missing key
+		// the same as an empty value.
+	}
+	*h = out
+	return nil
 }
 
 // attemptResponseBody is the payload of an outgoing "attempt_response"

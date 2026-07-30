@@ -379,7 +379,15 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	if !events.VerifySignature([]byte(attempt.Request.DataString), sig, s.cfg.WebhookSecret) {
 		if time.Since(s.lastSigWarnAt) >= sigFailureLogInterval {
 			s.lastSigWarnAt = time.Now()
-			logf("dropping event: invalid GitHub webhook signature (check hookdeck.webhook_secret_env)\n")
+			if sig == "" {
+				// Distinct from "signature present but wrong" below — this
+				// points at Hookdeck's forwarded headers (a missing or
+				// renamed X-Hub-Signature-256), not at a misconfigured
+				// secret, and the two have different fixes.
+				logf("dropping event: no X-Hub-Signature-256 header in forwarded request (check Hookdeck source config)\n")
+			} else {
+				logf("dropping event: invalid GitHub webhook signature (check hookdeck.webhook_secret_env)\n")
+			}
 		}
 		return
 	}
