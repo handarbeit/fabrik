@@ -60,6 +60,11 @@ type fakeAppServer struct {
 	// selectedRepos maps an installation ID to the repos it actually grants
 	// access to, for installations with RepositorySelection == "selected".
 	selectedRepos map[int64][]string
+	// failRepoList, if set, is consulted before every /installation/repositories
+	// response for a given installation ID; returning true fails that
+	// request (simulating a transient listing failure) without affecting
+	// installation-token minting.
+	failRepoList func(installationID int64) bool
 
 	mintCount atomic.Int32
 
@@ -122,6 +127,11 @@ func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpi
 		f.mu.Unlock()
 		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if f.failRepoList != nil && f.failRepoList(instID) {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"simulated repo-list failure"}`))
 			return
 		}
 		repos := f.selectedRepos[instID]

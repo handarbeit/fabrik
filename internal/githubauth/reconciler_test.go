@@ -473,6 +473,50 @@ func TestReconcile_SelectedModeExclusion_SoftStatusNotHardError(t *testing.T) {
 	}
 }
 
+// TestReconcile_RepoVerifyFailure_LogsSkippedNotAuthorized is the regression
+// test for a review finding: when verifyRepoAccess errors (e.g. a transient
+// failure listing /installation/repositories), the minted client is still
+// usable, but the final "✓ owner authorized" log line previously implied
+// repo access had actually been confirmed even though verification was
+// skipped. The log line must say so.
+func TestReconcile_RepoVerifyFailure_LogsSkippedNotAuthorized(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "someorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failRepoList = func(installationID int64) bool { return installationID == 111 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"someorg/repo-one"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail on a repo-verify error, got: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "someorg", "repo-one"); err != nil {
+		t.Errorf("expected the minted client to still be usable despite the verify failure: %v", err)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "someorg") && strings.Contains(l, "authorized") {
+			if !strings.Contains(l, "skipped") {
+				t.Errorf("expected the authorized log line to note verification was skipped, got: %q", l)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an authorized log line for someorg, got: %v", lines())
+	}
+}
+
 // TestReconcile_PopulatesInstallationRepoCache is the regression test for
 // the bug an external review found: Credentials.InstallationRepoCache was
 // defined and round-trip tested but never actually populated by Reconcile,

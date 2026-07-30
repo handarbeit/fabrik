@@ -319,10 +319,17 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			continue
 		}
 
+		// repoVerifyFailed tracks whether the "selected"-mode repo-access
+		// check below errored (e.g. a transient failure listing
+		// /installation/repositories) — the minted token is still usable
+		// either way, but the final "✓ authorized" log line must say so
+		// rather than implying repo access was actually confirmed.
+		repoVerifyFailed := false
 		if inst.RepositorySelection == "selected" {
 			statuses, err := verifyRepoAccess(opts.BaseURL, a.client.Token(), inst.ID, owner, opts.WatchedRepos)
 			if err != nil {
 				logf("! verifying repo access for owner %q failed: %v", owner, err)
+				repoVerifyFailed = true
 			}
 			for _, st := range statuses {
 				if st.Authorized {
@@ -345,7 +352,11 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 
 		r.clients[strings.ToLower(owner)] = a.client
 		r.auths = append(r.auths, a)
-		logf("✓ %s authorized", owner)
+		if repoVerifyFailed {
+			logf("✓ %s authorized (installation token minted; repo-access verification was skipped — see error above)", owner)
+		} else {
+			logf("✓ %s authorized", owner)
+		}
 	}
 
 	saveInstallationRepoCache(opts.AppStatePath, appID, slug, repoCache, logf)
