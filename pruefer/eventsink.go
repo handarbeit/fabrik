@@ -137,6 +137,17 @@ type daemonEventSink struct {
 // every subsequent one, exactly what the issue's "ack the webhook promptly
 // ... never run a review synchronously in the webhook receiver" requirement
 // forbids.
+//
+// This makes the per-event goroutine count itself uncapped — a burst of
+// legitimate events across many distinct PRs can pile up more goroutines
+// than the semaphore currently admits, each blocked waiting for a slot
+// (holding little more than an HTTP round trip's worth of state). Accepted
+// deliberately rather than bounding with a dispatch queue: none of these
+// goroutines can leak (ReviewFromEvent always returns, releasing its
+// goroutine), Go goroutines are cheap relative to the concurrency-capped
+// work behind the semaphore, and Hookdeck's dedupe plus GitHub's own event
+// volume make an unbounded burst an edge case, not the steady state a
+// bounded queue would need to justify its own added complexity.
 func (s *daemonEventSink) Handle(ctx context.Context, ev events.GitHubEvent) {
 	switch {
 	case ev.EventType == "pull_request" && reviewTriggerActions[ev.Action]:
