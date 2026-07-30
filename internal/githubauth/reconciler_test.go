@@ -336,11 +336,20 @@ func TestReconcile_NoCredentialsAtAll_RunsManifestFlow(t *testing.T) {
 	}
 }
 
-func TestReconcile_AppDeletedExternally_ReentersManifestFlow(t *testing.T) {
+// TestReconcile_AppDeletedExternally_StateFileAppID_ReentersManifestFlow
+// covers the safe self-heal case: the AppID came from a prior manifest run
+// (AppStatePath), not from pinned config. Recreating here is safe because
+// the next restart resolves the freshly-created App's ID from AppStatePath
+// with opts.AppID == 0 — no stale config value can shadow it.
+func TestReconcile_AppDeletedExternally_StateFileAppID_ReentersManifestFlow(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "app-private-key.pem")
 	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
 		t.Fatalf("savePrivateKey: %v", err)
+	}
+	statePath := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "old-app"}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
 	}
 
 	var appCalls int
@@ -367,13 +376,17 @@ func TestReconcile_AppDeletedExternally_ReentersManifestFlow(t *testing.T) {
 		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
 			t.Fatalf("savePrivateKey in stub: %v", err)
 		}
-		return Credentials{AppID: 999, Slug: "recreated-app"}, nil
+		creds := Credentials{AppID: 999, Slug: "recreated-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
 	}
 	defer func() { runManifestFlow = oldFlow }()
 
 	logf, lines := newLogCollector()
 	r, err := Reconcile(context.Background(), Options{
-		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
 		WatchedRepos: nil, BaseURL: srv.URL, Logf: logf,
 	})
 	if err != nil {
@@ -393,6 +406,63 @@ func TestReconcile_AppDeletedExternally_ReentersManifestFlow(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a log line explaining why the App creation flow restarted, got: %v", lines())
+	}
+
+	// The regression this guards against: a second Reconcile call (as would
+	// happen on the next process restart) must resolve the *new* AppID from
+	// AppStatePath, not loop into creating yet another App.
+	invoked = false
+	r2, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if invoked {
+		t.Fatal("second Reconcile should find the recreated App's valid credentials and skip the manifest flow entirely")
+	}
+	if r2.BotLogin() != "recreated-app[bot]" {
+		t.Errorf("second Reconcile BotLogin = %q, want recreated-app[bot]", r2.BotLogin())
+	}
+}
+
+// TestReconcile_AppDeletedExternally_PinnedAppID_ReturnsRepairErrorNeverLoops
+// is the regression test for the bug an external review found: when AppID
+// is pinned via explicit config (opts.AppID != 0, e.g. github_app_id in
+// config.yaml), auto-recreating on identity-validation failure is unsafe —
+// config.yaml is never written back to, so the next restart would resolve
+// the same stale, now-deleted AppID again and create yet another orphan App,
+// forever. Reconcile must instead return an explicit repair error and never
+// invoke the manifest flow.
+func TestReconcile_AppDeletedExternally_PinnedAppID_ReturnsRepairErrorNeverLoops(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+		t.Fatalf("savePrivateKey: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"app not found"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when a pinned AppID fails identity validation")
+	}
+	if !strings.Contains(err.Error(), "repair") || !strings.Contains(err.Error(), "github_app_id") {
+		t.Errorf("error = %v, want it to describe a github_app_id repair action, not a silent recreation", err)
 	}
 }
 

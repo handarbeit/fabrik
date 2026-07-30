@@ -114,6 +114,18 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	})
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		if q.Get("state") == "" && q.Get("code") == "" {
+			// Neither parameter a genuine GitHub redirect always carries is
+			// present — this isn't a plausible attempt at completing the
+			// manifest flow at all (e.g. a stray local probe hitting this
+			// ephemeral port: browser prefetch, an extension, antivirus
+			// scanning). resultCh is single-buffered and only ever consumed
+			// once (via once.Do below), so treating this as terminal would
+			// silently drop the real GitHub redirect if it arrives after —
+			// respond and keep listening instead.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		var cbErr error
 		switch {
 		case q.Get("state") != state:

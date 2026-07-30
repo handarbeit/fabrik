@@ -148,11 +148,28 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	slug, err := gh.FetchAppSlug(opts.BaseURL, jwt)
 	if err != nil {
 		// App-identity validation failed against a locally-known AppID: the
-		// App may have been deleted externally. Preserve existing
+		// App may have been deleted externally.
+		//
+		// If AppID is pinned via opts.AppID (explicit github_app_id config —
+		// the compat-mode path), auto-recreating here would be unsafe: the
+		// manifest flow persists the new App's ID only to AppStatePath, but
+		// loadOrBootstrapCredentials always prefers a non-zero opts.AppID
+		// first (config.yaml is never written back to — see Credentials'
+		// doc). The next restart would resolve the same stale, now-deleted
+		// AppID again, fail identity validation again, and silently create
+		// yet another orphan App — every restart, forever. Surface an
+		// explicit repair error instead, naming the fix (update or clear
+		// github_app_id), rather than looping.
+		if opts.AppID != 0 {
+			return nil, fmt.Errorf("github_app_id %d is configured but no longer resolves on GitHub (%w) — it may have been deleted; update or remove github_app_id in config to let first-run setup create a new App (repair required, not auto-recreated)", opts.AppID, err)
+		}
+		// AppID was resolved from the reconciler-owned state file (a prior
+		// manifest run), not pinned by config — safe to self-heal: the next
+		// restart resolves the freshly-created App's ID from AppStatePath
+		// with no stale config value in the way. Preserve existing
 		// non-secret config (RunManifestFlow only overwrites on full
 		// success) and re-enter the manifest flow rather than silently
-		// giving up or creating a duplicate app without telling the
-		// operator — see the issue's "App deleted externally" failure
+		// giving up — see the issue's "App deleted externally" failure
 		// handling requirement.
 		logf("! app identity validation failed for App ID %d (%v) — it may have been deleted; starting App creation again", appID, err)
 		creds, bootErr := runManifestFlow(ctx, ManifestFlowOptions{
