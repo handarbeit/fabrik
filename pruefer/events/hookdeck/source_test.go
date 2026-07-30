@@ -549,3 +549,58 @@ func TestSource_RunOnce_ConnectedAfterFirstFrame(t *testing.T) {
 		t.Fatal("runOnce did not return after the connection was dropped")
 	}
 }
+
+func TestSource_RunOnce_ConnectedAfterGracePeriodWithNoFrames(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+	cfg.aliveGracePeriod = 30 * time.Millisecond
+
+	var mu sync.Mutex
+	var health []events.HealthEvent
+	cfg.OnHealth = func(ev events.HealthEvent) {
+		mu.Lock()
+		health = append(health, ev)
+		mu.Unlock()
+	}
+	src := NewSource(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resultCh := make(chan runOnceResult, 1)
+	go func() {
+		connected, err := src.runOnce(ctx, sink)
+		resultCh <- runOnceResult{connected, err}
+	}()
+
+	conn := m.nextConn(t)
+	// Keep the connection open well past aliveGracePeriod without ever
+	// sending an attempt frame — simulates a genuinely healthy but idle
+	// session (e.g. a quiet period with no forwarded webhooks), which
+	// ReadMessage alone could never distinguish from a handshake that's
+	// about to be dropped.
+	time.Sleep(150 * time.Millisecond)
+	conn.Close()
+
+	select {
+	case res := <-resultCh:
+		if !res.connected {
+			t.Error("connected = false, want true: the connection survived past aliveGracePeriod with no error, so it should be proven alive even without a frame")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not return after the connection was dropped")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, h := range health {
+		if h.State == events.HealthConnected {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no HealthConnected event emitted despite the connection surviving past aliveGracePeriod")
+	}
+}

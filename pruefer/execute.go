@@ -79,6 +79,15 @@ func Execute() error {
 		if webhookSecret == "" {
 			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.webhook_secret_env)", cfg.HookdeckWebhookSecretEnv)
 		}
+		// Route hookdeck's package-level log hook through pruefer's own —
+		// hookdeck can't import pruefer (pruefer imports hookdeck), so
+		// without this its logs would write straight to os.Stderr
+		// unconditionally, bypassing whatever pruefer.Logf is ever wired to
+		// (e.g. a future TUI-safe sink) and diverging from every other
+		// pruefer log line's routing.
+		hookdeck.Logf = func(format string, args ...any) {
+			logf(0, "hookdeck", format, args...)
+		}
 		daemon.EventSource = hookdeck.NewSource(hookdeck.Config{
 			APIKey:        apiKey,
 			WebhookSecret: webhookSecret,

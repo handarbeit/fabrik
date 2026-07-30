@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -30,6 +32,14 @@ const (
 	// GitHub traffic to keep it alive naturally.
 	defaultPongWait   = 60 * time.Second
 	defaultPingPeriod = 30 * time.Second
+
+	// defaultAliveGracePeriod bounds how long a connection must survive
+	// without error before runOnce treats it as proven alive even with zero
+	// received frames — see markConnected in runOnce for why relying on a
+	// frame alone would misclassify a genuinely healthy but idle connection
+	// (e.g. a quiet period with no forwarded webhooks) as never having
+	// connected.
+	defaultAliveGracePeriod = 5 * time.Second
 )
 
 // Config configures a Source.
@@ -83,6 +93,12 @@ type Config struct {
 	// for speed.
 	pongWait   time.Duration
 	pingPeriod time.Duration
+
+	// aliveGracePeriod bounds how long a connection must survive without
+	// error before it's considered proven alive even with zero received
+	// frames. Defaults (5s) when zero; unexported — only tests need to
+	// shrink this for speed.
+	aliveGracePeriod time.Duration
 }
 
 // Source implements events.EventSource against Hookdeck's CLI-session
@@ -127,6 +143,9 @@ func NewSource(cfg Config) *Source {
 	}
 	if cfg.pingPeriod <= 0 {
 		cfg.pingPeriod = defaultPingPeriod
+	}
+	if cfg.aliveGracePeriod <= 0 {
+		cfg.aliveGracePeriod = defaultAliveGracePeriod
 	}
 	return &Source{cfg: cfg, dedupe: events.NewDedupe(0)}
 }
@@ -182,17 +201,12 @@ func (s *Source) Run(ctx context.Context, sink events.EventSink) error {
 
 // runOnce creates one Hookdeck CLI session, dials its WebSocket, and reads
 // attempt frames until the connection fails or ctx is cancelled. connected
-// reports whether the session proved itself alive by successfully reading
-// at least one frame off the WebSocket (used by Run to decide whether to
-// reset its backoff) — a completed handshake alone is not enough evidence,
-// since Hookdeck can accept the handshake and then immediately reject/drop
-// the session (e.g. a stale or invalid API key) without that surfacing as a
-// dial-time error; treating that as "connected" would reset backoff to its
-// floor every cycle and hammer the session-creation REST endpoint at
-// roughly once a second instead of ramping toward maxBackoff like any other
-// hard failure. connected is independent of err: a nil err means ctx was
-// cancelled (caller stops retrying), and a non-nil err is the transport
-// failure that ended this attempt (caller backs off and retries).
+// reports whether the session proved itself alive (see markConnected below
+// for what counts as proof, and why a completed handshake alone does not) —
+// used by Run to decide whether to reset its backoff. connected is
+// independent of err: a nil err means ctx was cancelled (caller stops
+// retrying), and a non-nil err is the transport failure that ended this
+// attempt (caller backs off and retries).
 func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected bool, err error) {
 	// connectCtx bounds session creation plus the WebSocket dial as a
 	// single attempt, independently of ctx (the daemon's long-lived run
@@ -233,14 +247,45 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 
 	// ReadMessage has no context parameter; close the connection out from
 	// under it on ctx cancellation, the standard gorilla/websocket idiom
-	// for context-aware reads. done also stops the ping ticker below, and
-	// prevents this goroutine from leaking past runOnce's return on a
-	// genuine (non-cancellation) read error.
+	// for context-aware reads. done also stops the goroutine below, and
+	// prevents it from leaking past runOnce's return on a genuine
+	// (non-cancellation) read error.
 	done := make(chan struct{})
 	defer close(done)
+
+	// proven reports whether this session has demonstrated itself alive —
+	// either by successfully reading a frame, or by surviving past
+	// aliveGracePeriod without error — used by Run to decide whether to
+	// reset its backoff, and to gate the single HealthConnected emission
+	// below. A completed handshake alone is not enough evidence, since
+	// Hookdeck can accept the handshake and then immediately reject/drop
+	// the session (e.g. a stale or invalid API key) without that surfacing
+	// as a dial-time error; treating that as proven would reset backoff to
+	// its floor every cycle and hammer the session-creation REST endpoint
+	// at roughly once a second instead of ramping toward maxBackoff like
+	// any other hard failure. But requiring a frame forever would also
+	// misclassify a genuinely healthy, merely idle connection (e.g. a
+	// quiet period with no forwarded webhooks — gorilla/websocket handles
+	// ping/pong control frames internally and never surfaces them via
+	// ReadMessage, so an idle session reads nothing at all) as never
+	// having connected, ramping backoff toward maxBackoff on every
+	// reconnect even though nothing was actually wrong. aliveGracePeriod
+	// resolves both: an instant reject can't survive it, but idle-and-
+	// healthy does.
+	var proven atomic.Bool
+	var markConnectedOnce sync.Once
+	markConnected := func() {
+		markConnectedOnce.Do(func() {
+			proven.Store(true)
+			s.emitHealth(events.HealthConnected, nil)
+		})
+	}
+
 	go func() {
 		ticker := time.NewTicker(s.cfg.pingPeriod)
 		defer ticker.Stop()
+		graceTimer := time.NewTimer(s.cfg.aliveGracePeriod)
+		defer graceTimer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -252,31 +297,22 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 				if writeErr := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); writeErr != nil {
 					return
 				}
+			case <-graceTimer.C:
+				markConnected()
 			}
 		}
 	}()
 
-	// HealthConnected is deliberately not emitted right after the dial
-	// above: it fires only once the session proves itself alive by
-	// successfully reading a frame, the same evidence connected's return
-	// value uses. Daemon.HealthHandler treats a HealthConnected transition
-	// as a signal to run a reconciliation poll — emitting it on dial alone
-	// would fire that poll on every handshake-only drop (e.g. a stale API
-	// key), even though the connection never proved itself alive.
-	receivedFrame := false
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {
 				return true, nil
 			}
-			return receivedFrame, fmt.Errorf("reading hookdeck websocket: %w", err)
+			return proven.Load(), fmt.Errorf("reading hookdeck websocket: %w", err)
 		}
 		conn.SetReadDeadline(time.Now().Add(s.cfg.pongWait))
-		if !receivedFrame {
-			receivedFrame = true
-			s.emitHealth(events.HealthConnected, nil)
-		}
+		markConnected()
 		s.handleFrame(ctx, sink, conn, msg)
 	}
 }
