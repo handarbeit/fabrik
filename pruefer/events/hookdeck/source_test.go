@@ -843,3 +843,79 @@ func TestSource_Ack_SetsWriteDeadline(t *testing.T) {
 		}
 	}
 }
+
+// failingWriteConn wraps a net.Conn so Write can be switched, after the
+// fact, into always failing — used to simulate a broken outbound pipe
+// discovered only when the idle ping tries to use it.
+type failingWriteConn struct {
+	net.Conn
+	fail atomic.Bool
+}
+
+func (c *failingWriteConn) Write(b []byte) (int, error) {
+	if c.fail.Load() {
+		return 0, fmt.Errorf("simulated broken pipe")
+	}
+	return c.Conn.Write(b)
+}
+
+// TestSource_PingWriteFailureClosesConnectionPromptly guards against a
+// regression where a failed idle-ping write left conn open: the read loop's
+// blocked ReadMessage would then only fail once the existing pongWait read
+// deadline (up to 60s in production) finally lapsed, instead of failing
+// fast the way a ctx-cancellation already does (which explicitly closes
+// conn). pongWait is set long here specifically so a pass can only mean the
+// ping-failure path itself closed the connection, not the read deadline.
+func TestSource_PingWriteFailureClosesConnectionPromptly(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+	cfg.pongWait = 5 * time.Second
+	cfg.pingPeriod = 20 * time.Millisecond
+	cfg.writeWait = 100 * time.Millisecond
+
+	var wrapped *failingWriteConn
+	var mu sync.Mutex
+	cfg.Dialer = &websocket.Dialer{
+		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			w := &failingWriteConn{Conn: c}
+			mu.Lock()
+			wrapped = w
+			mu.Unlock()
+			return w, nil
+		},
+	}
+	src := NewSource(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan runOnceResult, 1)
+	go func() {
+		connected, err := src.runOnce(ctx, sink)
+		resultCh <- runOnceResult{connected, err}
+	}()
+
+	m.nextConn(t) // handshake completed — dial has returned our wrapped conn
+
+	mu.Lock()
+	wrapped.fail.Store(true)
+	mu.Unlock()
+
+	start := time.Now()
+	select {
+	case res := <-resultCh:
+		if res.err == nil {
+			t.Error("err = nil, want non-nil: a failed ping write should close the connection and surface as a read error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not return after the ping write should have failed and closed the connection")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("runOnce took %s to detect the broken write, want well under pongWait (%s) — a failed ping write must close conn so the read loop fails fast instead of waiting out the read deadline", elapsed, cfg.pongWait)
+	}
+}
