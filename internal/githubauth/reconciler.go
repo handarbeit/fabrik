@@ -234,6 +234,11 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		if !ok {
 			installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
 			logf("! %s has no installation → opening %s …", owner, installURL)
+			if !opts.NoBrowser {
+				if err := openBrowser(installURL); err != nil {
+					logf("could not open browser automatically (%v) — visit the URL above manually", err)
+				}
+			}
 			continue
 		}
 

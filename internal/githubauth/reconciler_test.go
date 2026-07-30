@@ -186,6 +186,14 @@ func TestReconcile_MissingOwnerInstallation_GuidesInstallInsteadOfHardFailing(t 
 	runManifestFlow = failingRunManifestFlow(t)
 	defer func() { runManifestFlow = oldFlow }()
 
+	oldBrowser := openBrowser
+	var openedURL string
+	openBrowser = func(url string) error {
+		openedURL = url
+		return nil
+	}
+	defer func() { openBrowser = oldBrowser }()
+
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
@@ -215,6 +223,39 @@ func TestReconcile_MissingOwnerInstallation_GuidesInstallInsteadOfHardFailing(t 
 	}
 	if !found {
 		t.Errorf("expected a guided-install log line naming notinstalled and a grant URL, got: %v", lines())
+	}
+	wantURL := "https://github.com/apps/pruefer-bot/installations/new"
+	if openedURL != wantURL {
+		t.Errorf("expected guided installation to open the browser to %q, got %q", wantURL, openedURL)
+	}
+}
+
+func TestReconcile_MissingOwnerInstallation_NoBrowserSkipsOpen(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	oldBrowser := openBrowser
+	openBrowser = func(url string) error {
+		t.Error("openBrowser should not be called when NoBrowser is set")
+		return nil
+	}
+	defer func() { openBrowser = oldBrowser }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	logf, _ := newLogCollector()
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"notinstalled/otherrepo"}, BaseURL: srv.URL, NoBrowser: true, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail on a missing owner installation, got: %v", err)
 	}
 }
 
