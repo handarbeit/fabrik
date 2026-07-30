@@ -147,6 +147,18 @@ func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
 	}
 
+	// Confirm the gate genuinely engages (no review submitted yet, so
+	// checkReviewGate's outer hasReviews==false condition blocks and applies
+	// the label unconditionally) before approving. Without this, a poll
+	// racing ahead of SubmitPRReview below could observe the item only after
+	// the approval already exists, clearing on the very first evaluation and
+	// never applying fabrik:awaiting-review at all — the later
+	// WaitForLabelAbsent would then pass trivially without having exercised
+	// the authoritative clearing transition this scenario exists to check.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
+	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
+	t.Logf("fabrik:awaiting-review confirmed on %s#%d before approval — gate is genuinely engaged", env.RepoAlpha, num)
+
 	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "APPROVE")
 	t.Logf("submitted APPROVE review on %s PR #%d", env.RepoAlpha, prNum)
 
@@ -239,6 +251,19 @@ func TestReviewAuthorityAdvisoryRegressionGuard(t *testing.T) {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
 	}
+
+	// Confirm the gate genuinely engages (no review submitted yet, so
+	// checkReviewGate's outer hasReviews==false condition blocks and applies
+	// the label unconditionally, regardless of authority mode) before
+	// submitting the review. Without this, a poll racing ahead of
+	// SubmitPRReview below could observe the item only after the review
+	// already exists, clearing on the very first evaluation and never
+	// applying fabrik:awaiting-review at all — the later WaitForLabelAbsent
+	// would then pass trivially without ever exercising the clearing
+	// transition this regression guard exists to check.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
+	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
+	t.Logf("fabrik:awaiting-review confirmed on %s#%d before review submission — gate is genuinely engaged", env.RepoAlpha, num)
 
 	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
 	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d (advisory Review stage)", env.RepoAlpha, prNum)
