@@ -99,6 +99,12 @@ type Daemon struct {
 	// (struct literal) has a usable zero-value [prLockStripes]sync.Mutex,
 	// so no lazy-init is needed here unlike sem.
 	prLocks [prLockStripes]sync.Mutex
+
+	// pollInFlight coalesces concurrent installation-event-triggered
+	// reconciliation polls — see triggerReconciliationPoll. A zero Daemon
+	// has a usable zero-value atomic.Bool, so no lazy-init is needed here
+	// either.
+	pollInFlight atomic.Bool
 }
 
 // prLockStripes bounds prLocks to a small fixed size instead of an
@@ -388,6 +394,26 @@ func (d *Daemon) effectiveConcurrency() int {
 		return d.Config.ConcurrencyCap
 	}
 	return DefaultConcurrencyCap
+}
+
+// triggerReconciliationPoll starts one poll cycle in its own goroutine,
+// coalescing concurrent requests: a burst of installation/repo-selection
+// events (e.g. an app install across many repos, each a distinct delivery
+// so dedupe doesn't collapse them) would otherwise spawn one redundant
+// full ListOpenPRs sweep per event. Only one poll runs at a time; a
+// trigger that arrives while one is already in flight is dropped — the
+// in-flight poll already re-derives current GitHub state, and any further
+// change is still covered by the next fallback-interval tick or the
+// poll-fallback safety net.
+func (d *Daemon) triggerReconciliationPoll(ctx context.Context) {
+	if !d.pollInFlight.CompareAndSwap(false, true) {
+		logf(0, "poll", "reconciliation poll already in flight — coalescing this trigger\n")
+		return
+	}
+	go func() {
+		defer d.pollInFlight.Store(false)
+		d.poll(ctx)
+	}()
 }
 
 // poll runs one polling cycle across every watched repo, dispatching

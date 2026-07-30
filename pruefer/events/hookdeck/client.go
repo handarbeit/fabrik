@@ -21,10 +21,11 @@ const DefaultWSBaseURL = "wss://ws.hookdeck.com"
 // HTTP Basic auth (username=apiKey, empty password), returning the session
 // ID used as the Websocket-Id dial header.
 //
-// The request is bound to ctx — like the WebSocket dial that follows it in
-// runOnce — so a hang (dead TCP, slow DNS) during a reconnect attempt can't
-// stall graceful shutdown beyond ctx cancellation; http.Client has no
-// default timeout of its own.
+// The request is bound to ctx — runOnce passes a connectCtx bounded by
+// Config.connectTimeout, shared with the WebSocket dial that follows —
+// since http.Client has no default timeout of its own and a hang (dead
+// TCP, slow DNS, a connected-but-non-responding endpoint) would otherwise
+// block indefinitely rather than surfacing as a retryable error.
 func createSession(ctx context.Context, httpClient *http.Client, baseURL, apiKey string) (string, error) {
 	reqBody, err := json.Marshal(createSessionRequest{WebhookIDs: []string{}})
 	if err != nil {

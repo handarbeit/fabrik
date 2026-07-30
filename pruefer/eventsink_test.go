@@ -88,6 +88,36 @@ func TestDaemonEventSink_InstallationEvent_TriggersReconciliationPoll(t *testing
 	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
 }
 
+func TestDaemonEventSink_InstallationEventBurst_CoalescesReconciliationPolls(t *testing.T) {
+	client := newFakeLister()
+	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
+	block := make(chan struct{})
+	client.listOpenPRsBlock = block
+	d := newTestDaemonForEvents(client)
+	sink := &daemonEventSink{daemon: d}
+
+	// Fire a burst of installation events, as a real Hookdeck delivery burst
+	// (e.g. an app install across many repos) would — each a distinct
+	// delivery, so dedupe wouldn't collapse them at the transport layer.
+	// triggerReconciliationPoll's CompareAndSwap runs synchronously within
+	// Handle, so by the time the first call returns, the daemon is already
+	// marked in-flight and every subsequent call in this loop is coalesced.
+	for i := 0; i < 5; i++ {
+		sink.Handle(context.Background(), events.GitHubEvent{EventType: "installation_repositories", Action: "added"})
+	}
+
+	waitUntil(t, 2*time.Second, func() bool { return client.listOpenPRsCallCount() >= 1 })
+	// Give any wrongly-uncoalesced extra poll cycles a chance to start their
+	// own ListOpenPRs call before asserting the negative.
+	time.Sleep(50 * time.Millisecond)
+	if got := client.listOpenPRsCallCount(); got != 1 {
+		t.Errorf("listOpenPRsCallCount() = %d, want 1 (a burst of installation events must coalesce into a single in-flight poll)", got)
+	}
+
+	close(block)
+	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
+}
+
 func TestDaemonEventSink_UnknownOwner_DropsWithoutPanic(t *testing.T) {
 	client := newFakeLister()
 	d := newTestDaemonForEvents(client)

@@ -82,7 +82,11 @@ type mockHookdeckServer struct {
 	// failSessionsUntil, when > 0, makes the cli-sessions handler return a
 	// 500 for the first N calls before succeeding.
 	failSessionsUntil int32
-	conns             chan *websocket.Conn
+	// sessionRequestBlock, when non-nil, makes the cli-sessions handler
+	// block (simulating a TCP-connected-but-non-responding endpoint)
+	// until the channel is received from or closed.
+	sessionRequestBlock <-chan struct{}
+	conns               chan *websocket.Conn
 }
 
 func newMockHookdeckServer(t *testing.T) *mockHookdeckServer {
@@ -90,6 +94,13 @@ func newMockHookdeckServer(t *testing.T) *mockHookdeckServer {
 	m := &mockHookdeckServer{conns: make(chan *websocket.Conn, 10)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/cli-sessions", func(w http.ResponseWriter, r *http.Request) {
+		if m.sessionRequestBlock != nil {
+			select {
+			case <-m.sessionRequestBlock:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		n := atomic.AddInt32(&m.sessionCalls, 1)
 		if n <= atomic.LoadInt32(&m.failSessionsUntil) {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -351,6 +362,79 @@ func TestSource_SessionCreationFailureRetriesWithoutPanic(t *testing.T) {
 	// past failure and Source has retried through the backoff without
 	// panicking.
 	m.nextConn(t)
+}
+
+func TestSource_RunOnce_BoundsHangingSessionCreation(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	neverReleased := make(chan struct{})
+	m.sessionRequestBlock = neverReleased
+	t.Cleanup(func() { close(neverReleased) })
+
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+	cfg.connectTimeout = 100 * time.Millisecond
+	src := NewSource(cfg)
+
+	// A generous outer ctx timeout, well past connectTimeout — if
+	// connectTimeout weren't bounding the session-creation call
+	// independently, runOnce would hang until this ctx expires instead,
+	// which the elapsed-time assertion below would catch.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	connected, err := src.runOnce(ctx, sink)
+	elapsed := time.Since(start)
+
+	if connected {
+		t.Error("connected = true, want false: session creation never completed")
+	}
+	if err == nil {
+		t.Error("err = nil, want non-nil: a hung session-creation call should surface as a timeout error")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("runOnce took %s to return, want well under the 5s outer ctx timeout — connectTimeout (100ms) should have bounded session creation independently", elapsed)
+	}
+}
+
+func TestSource_RunOnce_ReadDeadlineDetectsSilentlyDeadConnection(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+	cfg.pongWait = 100 * time.Millisecond
+	cfg.pingPeriod = 20 * time.Millisecond
+	src := NewSource(cfg)
+
+	// A generous outer ctx timeout — if the read deadline weren't applied,
+	// ReadMessage would block until this ctx expires instead (or forever,
+	// against a real non-responding server), which the elapsed-time
+	// assertion below would catch.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := make(chan runOnceResult, 1)
+	go func() {
+		connected, err := src.runOnce(ctx, sink)
+		resultCh <- runOnceResult{connected, err}
+	}()
+
+	// Accept the WebSocket upgrade but never send anything on it — no
+	// frame, no pong, no close — simulating a connection that died
+	// silently (e.g. a NAT timeout dropping packets with no FIN/RST).
+	m.nextConn(t)
+
+	start := time.Now()
+	select {
+	case res := <-resultCh:
+		if res.err == nil {
+			t.Error("err = nil, want non-nil: a silently-dead connection should surface as a read-deadline error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not return after the read deadline should have elapsed")
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("runOnce took %s to detect the dead connection, want well under the 5s outer ctx timeout — pongWait (100ms) should have bounded it", elapsed)
+	}
 }
 
 type runOnceResult struct {
