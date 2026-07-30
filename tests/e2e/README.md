@@ -239,6 +239,72 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     Alpha's bisect-scenario max (~4 trials) with comfortable margin. Wall-clock:
     ~10–20 min; ~6 trials × 2 required checks ≈ 12 Actions runs.
 
+### Additional prerequisites for `TestReviewAuthority*` scenarios
+
+`TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
+`TestReviewAuthorityClearsOnApproval`, and `TestReviewAuthorityYoloDoesNotBypassBlock`
+cover ADR-1250's `review_authority: authoritative` mode. `TestReviewAuthorityAdvisoryRegressionGuard`
+is the exception — it runs against the existing `Review` column/stage (default,
+untouched config) and needs no bed prerequisite, so it ships green immediately.
+
+**Why a new column, not the bed's real `Validate`:** `reviewGateBlocksLanding` (the
+landing/auto-merge gate) is only reachable through a stage literally named `Validate` —
+`engine/stages.go`, `engine/poll.go`, and `engine/pr_terminal_advance.go` all hard-gate
+on `stage.Name == "Validate"`. Flipping the bed's real `Validate` stage to authoritative
+(even temporarily) would violate "no change to the bed's default stage config" and risk
+corrupting concurrently-running advisory scenarios on the shared bed. So this bed
+prerequisite targets `checkReviewGate` (the **advance** gate) only, via a differently-named
+column that is structurally isolated from advisory scenarios (dispatch is column-name-keyed).
+See `adrs/1258-e2e-review-authority-coverage.md` for the full rationale, including why
+`reviewGateBlocksLanding`'s authoritative wiring is a documented, accepted e2e gap rather
+than a silently missing one — the three scenarios below therefore assert the gate *clears*
+(`fabrik:awaiting-review` disappears, `fabrik:paused` never applied), not that the item merges.
+
+20. **`Review-Authoritative` board column** on `handarbeit/projects/2`. Any position is
+    fine — it is never a real stage's natural successor (see next item's `order`).
+21. **`review-authoritative.yaml` stage** in the bed's `.fabrik/stages/`, a copy of
+    `review.yaml` with `review_authority: authoritative` added and `order: 41`
+    (deliberately far outside the real pipeline's 1–9 range):
+    ```yaml
+    name: Review-Authoritative
+    order: 41
+    review_authority: authoritative
+    wait_for_reviews: true
+    # ...remaining fields copied from review.yaml (prompt, skill, model, etc.)
+    ```
+    Restart the test-bed Fabrik instance after adding the column + YAML so the new
+    stage's labels (`stage:Review-Authoritative:complete`, etc.) get seeded and
+    `checkStageColumnAlignment` picks up the new column. The three scenarios needing
+    this skip cleanly (`requireAuthoritativeBed`) if the column is absent, so this PR
+    is safe to merge before the bed is updated.
+22. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
+    in prerequisite #12 above. All four `TestReviewAuthority*` scenarios skip with an
+    instructional message if it is unset; there is no timeout-fallback path here (unlike
+    `TestConjunctiveCIReviewGate`) because these scenarios exist specifically to assert
+    on a deterministic verdict, not on gate-timeout behavior alone.
+23. **Why the bed reviewer (`claude-review.yml`) stays COMMENT-only, and is not used
+    for verdict assertions here**: `.github/workflows/claude-review.yml` submits
+    `gh pr review --comment` in both its agent path and its fallback path — it can
+    never produce `APPROVE` or `CHANGES_REQUESTED`, so it cannot exercise authoritative
+    mode's blocking or clearing paths. Switching it to a real reviewer bot (e.g. pruefer)
+    was explicitly rejected for issue #1258: non-determinism (verdict depends on Claude's
+    severity classification of a synthetic diff), latency (pruefer polls, default 120s,
+    vs. an Action firing on PR-open), cost (a real Claude invocation per test PR), and
+    coupling (Fabrik's release gate depending on pruefer's health). All verdict assertions
+    in `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
+    deterministic, harness-posted formal reviews from a non-author identity.
+24. **`E2E_TIMEOUT=1h`** is generous for `TestReviewAuthorityBlocksAndPausesOnChangesRequested`
+    in isolation — its wall-clock is `FABRIK_REVIEW_WAIT_TIMEOUT + ~15 min`. Use a short
+    bed value (e.g. `FABRIK_REVIEW_WAIT_TIMEOUT=2`) for a fast iteration run.
+25. **Note on scope**: neither test bed repo has a branch-protection review requirement
+    configured (only required *status checks* are documented as enrolled), so
+    `FetchPRReviewDecision` returns `""` for every scenario here and `reviewGateAuthorityVerdict`
+    exercises its Fabrik-computed fallback branch, not GitHub's native `reviewDecision`
+    branch. A verdict-fetch-failure / unrecognized-`reviewDecision` scenario (issue #1258's
+    optional scenario 6) was excluded for the same reason — producing `REVIEW_REQUIRED` or
+    an unrecognized value would require new branch-protection bed setup, which is not
+    "cheaply expressible" per the issue's own bar for that scenario.
+
 ## Running
 
 The recommended entrypoint is the runner script, which sets sensible defaults:
@@ -370,6 +436,10 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
 | `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
+| `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 authoritative mode: CHANGES_REQUESTED verdict blocks the gate (fabrik:awaiting-review); verdict never clears → pauses at ReviewWaitTimeout with the authoritative reason in the comment, not the generic "no reviews submitted yet" | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + 15 min | ~$0.05 (no Claude) |
+| `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode: APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
+| `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250 composition guarantee: fabrik:yolo does not bypass an authoritative gate — blocked while CHANGES_REQUESTED stands, clears once approved | Both | 5–10 min | ~$0.03 (no Claude) |
+| `TestReviewAuthorityAdvisoryRegressionGuard` | Regression guard: advisory (default) mode still clears on any submitted review regardless of verdict — proves the additive authoritative check didn't narrow the default path | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
@@ -398,6 +468,10 @@ skip of the four Train-only scenarios in the `off` leg.
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 | `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
 | `TestConjunctiveCIReviewGate` | ADR-056 D2 (conjunctive gate joint-clear), #887 (settle-owner), #895 (this scenario), #925 (identity/dual-gate/bot-reviewer redesign) |
+| `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 (`review_authority: authoritative`), #1258 (this scenario), `checkAwaitingReviewTimeout`'s `authorityReason` pause-message path |
+| `TestReviewAuthorityClearsOnApproval` | ADR-1250, #1258 |
+| `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250's yolo/cruise composition guarantee, #1258 |
+| `TestReviewAuthorityAdvisoryRegressionGuard` | ADR-1250 additive-check regression guard, #1258 |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
