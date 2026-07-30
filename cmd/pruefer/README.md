@@ -124,6 +124,7 @@ Pruefer is the deliberate test bed for this pattern before it's ported to Fabrik
 4. Go back to your GitHub App's settings (**Settings → Developer settings → GitHub Apps → your app → General**) and:
    - Check **"Active"** under Webhook.
    - Set the **Webhook URL** to the URL Hookdeck's dashboard shows for your source (Hookdeck forwards from there to Pruefer over a persistent, replay-capable session — no public endpoint needs to run on Pruefer's own host).
+   - **Content type must be `application/json`.** GitHub Apps also offer `application/x-www-form-urlencoded`, which wraps the payload as `payload=<url-encoded JSON>` instead of sending raw JSON — Pruefer's normalizer expects raw JSON and would fail to parse every single delivery if this is set wrong, permanently and silently falling back to poll-only (each failure is logged, but rate-limited to once per 30s, so it's easy to miss). This field defaults to `application/json`, so it only needs attention if something has changed it.
    - Set a **Webhook secret** — generate one yourself (e.g. `openssl rand -hex 32`), enter it here, and set the same value in your environment under whatever variable name you configure via `hookdeck.webhook_secret_env` (default `PRUEFER_GITHUB_WEBHOOK_SECRET`):
      ```
      PRUEFER_GITHUB_WEBHOOK_SECRET=<the same secret you entered in the GitHub App settings>
