@@ -59,7 +59,13 @@ func loadCredentials(path string) (Credentials, error) {
 // parent directory (0700, owner-only) and writing the file itself 0600
 // (owner-only) — this file never holds the App's private key, but it does
 // hold a webhook secret and OAuth client secret, both of which warrant the
-// same handling as the PEM.
+// same handling as the PEM. The write is atomic (see atomicWriteFile):
+// saveInstallationRepoCache calls this on every successful Reconcile, not
+// just first-run bootstrap, so an ordinary process kill/OOM/power loss
+// during a routine restart must never leave a truncated, invalid JSON file
+// behind — that would surface as loadOrBootstrapCredentials's "app state
+// file exists but is corrupt" hard error, turning a routine interruption
+// into a manual-repair incident.
 func saveCredentials(path string, c Credentials) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", path, err)
@@ -68,33 +74,60 @@ func saveCredentials(path string, c Credentials) error {
 	if err != nil {
 		return fmt.Errorf("marshaling app state: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := atomicWriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	// os.WriteFile only applies the mode argument when it creates the file;
-	// an existing file (e.g. re-bootstrap after "App deleted externally")
-	// keeps whatever permissions it already had. Chmod explicitly so this
-	// secret-bearing file is always owner-only regardless of prior state.
-	if err := os.Chmod(path, 0600); err != nil {
-		return fmt.Errorf("tightening permissions on %s: %w", path, err)
 	}
 	return nil
 }
 
 // savePrivateKey writes raw PEM bytes to path, creating any missing parent
 // directory (0700) and writing the file itself 0600 (owner-only) — the
-// minimum protection the issue's credential-model requirement asks for.
+// minimum protection the issue's credential-model requirement asks for. The
+// write is atomic (see atomicWriteFile), for the same torn-write reason as
+// saveCredentials.
 func savePrivateKey(path string, pemBytes []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, pemBytes, 0600); err != nil {
+	if err := atomicWriteFile(path, pemBytes, 0600); err != nil {
 		return fmt.Errorf("writing private key %s: %w", path, err)
 	}
-	// See saveCredentials: os.WriteFile does not tighten permissions on an
-	// already-existing file, and this file holds the App's private key.
-	if err := os.Chmod(path, 0600); err != nil {
-		return fmt.Errorf("tightening permissions on private key %s: %w", path, err)
+	return nil
+}
+
+// atomicWriteFile writes data to a temp file in path's own directory (so
+// the subsequent rename is same-filesystem and therefore atomic), sets perm
+// explicitly rather than relying on umask, and renames it over path. This
+// means a reader (or a concurrent save) never observes a partially-written
+// file: path either still holds its old complete contents or the new
+// complete contents, never something truncated in between — unlike a direct
+// os.WriteFile, which writes in place and can leave a torn file behind if
+// the process is killed mid-write.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	// os.CreateTemp already creates the file 0600 on POSIX, but chmod
+	// explicitly rather than relying on that default — perm is the actual
+	// contract callers depend on, and an existing target file's current
+	// permissions must never leak through to the replacement (unlike plain
+	// os.WriteFile, a rename replaces the file's permissions entirely, so
+	// this is the only place they're set).
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		return fmt.Errorf("setting permissions on temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("renaming temp file into place: %w", err)
 	}
 	return nil
 }

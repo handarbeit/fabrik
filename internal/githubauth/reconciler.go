@@ -482,11 +482,25 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 // If the AppID being reconciled differs from whatever AppID this state
 // file was last saved under, the existing entry belongs to a *different*
 // App entirely (e.g. an operator switched github_app_id to point at a new
-// App while reusing the same AppStatePath) — its WebhookSecret/
-// ClientID/ClientSecret and InstallationRepoCache must not be carried
-// forward under the new AppID, or they'd sit alongside a mismatched
-// identity, e.g. once a future webhook-transport consumer starts reading
-// them keyed on AppID.
+// App while reusing the same AppStatePath, or the self-heal path in
+// Reconcile just recreated the App) — its WebhookSecret/ClientID/
+// ClientSecret and InstallationRepoCache must not be carried forward under
+// the new AppID, or they'd sit alongside a mismatched identity, e.g. once a
+// future webhook-transport consumer starts reading them keyed on AppID.
+//
+// This discard is sound for any AppID mismatch, not just the self-heal
+// case, because every writer of this file sets Credentials.AppID to the
+// exact identity its secrets belong to at write time (saveCredentials
+// callers: RunManifestFlow sets it from the manifest exchange response, and
+// this function sets it to the appID Reconcile just live-validated) — the
+// two are never written independently. So existing.AppID != appID can only
+// mean "whatever secrets are in existing.WebhookSecret/ClientID/
+// ClientSecret belong to a AppID other than the one just authenticated as,"
+// never "these are appID's own secrets, just filed under a stale label."
+// Discarding them therefore never loses the *active* App's own secrets —
+// only ever a previous, now-inactive identity's, which is correct to drop
+// regardless of how the mismatch arose (self-heal, manual config change, or
+// a restored/stale AppStatePath backup).
 func saveInstallationRepoCache(statePath string, appID int64, slug string, repoCache map[string][]string, logf func(string, ...any)) {
 	existing, err := loadCredentials(statePath)
 	if err != nil {

@@ -166,6 +166,63 @@ func TestSavePrivateKey_TightensPermsOnExistingFile(t *testing.T) {
 	}
 }
 
+func TestSaveCredentials_AtomicNoLeftoverTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app-state.json")
+
+	if err := saveCredentials(path, Credentials{AppID: 1}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+	if err := saveCredentials(path, Credentials{AppID: 2}); err != nil {
+		t.Fatalf("saveCredentials (second write): %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "app-state.json" {
+		t.Fatalf("expected exactly one file (app-state.json) after two atomic writes, got %v", entries)
+	}
+}
+
+func TestSaveCredentials_PreservesOldContentOnWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(path, Credentials{AppID: 1, Slug: "original"}); err != nil {
+		t.Fatalf("seeding original saveCredentials: %v", err)
+	}
+
+	// Make the directory read-only so the temp-file rename inside a second
+	// saveCredentials call fails partway through — atomicWriteFile must
+	// leave the original file completely untouched rather than partially
+	// overwritten, since it only ever mutates via a same-directory rename,
+	// never in place.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based read-only directory simulation not reliable on windows")
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod dir read-only: %v", err)
+	}
+	defer os.Chmod(dir, 0700)
+
+	err := saveCredentials(path, Credentials{AppID: 2, Slug: "should-not-land"})
+	if err == nil {
+		t.Fatal("expected saveCredentials to fail against a read-only directory")
+	}
+
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatalf("restoring dir perms: %v", err)
+	}
+	got, err := loadCredentials(path)
+	if err != nil {
+		t.Fatalf("loadCredentials after failed write: %v", err)
+	}
+	if got.AppID != 1 || got.Slug != "original" {
+		t.Errorf("original content was not preserved after a failed atomic write: got %+v", got)
+	}
+}
+
 func TestLoadPrivateKey_MissingFile(t *testing.T) {
 	if _, err := loadPrivateKey(filepath.Join(t.TempDir(), "nope.pem")); err == nil {
 		t.Fatal("expected an error for a missing private key file")
