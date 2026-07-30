@@ -360,6 +360,19 @@ func TestSplitOwnerRepo(t *testing.T) {
 	}
 }
 
+func TestDistinctOwners(t *testing.T) {
+	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
+	want := []string{"a", "b"}
+	if len(got) != len(want) {
+		t.Fatalf("distinctOwners = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("distinctOwners[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	dir := t.TempDir()
 	client := newFakeLister()

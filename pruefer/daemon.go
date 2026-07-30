@@ -216,3 +216,20 @@ func splitOwnerRepo(spec string) (owner, repo string, ok bool) {
 	}
 	return parts[0], parts[1], true
 }
+
+// distinctOwners returns the distinct owners of every well-formed
+// "owner/repo" entry in watchedRepos, in first-seen order. Malformed entries
+// are skipped here — poll() already logs and skips them independently.
+func distinctOwners(watchedRepos []string) []string {
+	seen := make(map[string]bool)
+	var owners []string
+	for _, spec := range watchedRepos {
+		owner, _, ok := splitOwnerRepo(spec)
+		if !ok || seen[owner] {
+			continue
+		}
+		seen[owner] = true
+		owners = append(owners, owner)
+	}
+	return owners
+}
