@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/config"
+	"github.com/handarbeit/fabrik/internal/githubauth"
 )
 
 // Execute is Pruefer's entry point: loads .env, resolves configuration,
@@ -29,35 +29,41 @@ func Execute() error {
 	if err != nil {
 		return err
 	}
-	if cfg.AppID == 0 {
-		return fmt.Errorf("github_app_id is required (set via config file, PRUEFER_GITHUB_APP_ID, or --github-app-id)")
-	}
 	if len(cfg.WatchedRepos) == 0 {
 		return fmt.Errorf("no watched repos configured (set watched_repos, PRUEFER_REPOS, or --repos)")
 	}
 
-	authSet, err := BootstrapMulti(cfg, "")
-	if err != nil {
-		return fmt.Errorf("bootstrapping GitHub App auth: %w", err)
-	}
-	owners := make([]string, 0, len(authSet.Clients))
-	for owner := range authSet.Clients {
-		owners = append(owners, owner)
-	}
-	logf(0, "auth", "authenticated as %s (%d installation(s), owners: %s)\n", authSet.BotLogin, authSet.InstallationCount(), strings.Join(owners, ", "))
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	authSet.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
+	auth, err := githubauth.Reconcile(ctx, githubauth.Options{
+		AppID:             cfg.AppID,
+		AppInstallationID: cfg.AppInstallationID,
+		AppPrivateKeyPath: cfg.AppPrivateKeyPath,
+		AppStatePath:      cfg.AppStatePath,
+		WatchedRepos:      cfg.WatchedRepos,
+		NoBrowser:         cfg.NoBrowser,
+		Logf:              func(format string, args ...any) { logf(0, "auth", format+"\n", args...) },
+	})
+	if err != nil {
+		return fmt.Errorf("reconciling GitHub App auth: %w", err)
+	}
+	logf(0, "auth", "authenticated as %s (%d installation(s))\n", auth.BotLogin(), auth.InstallationCount())
+
+	auth.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
 		prefix := fmt.Sprintf("installation %d: ", installationID)
 		return func(format string, args ...any) {
 			logf(0, "auth", prefix+format, args...)
 		}
 	})
 
-	clients := make(map[string]GitHubLister, len(authSet.Clients))
-	for owner, client := range authSet.Clients {
+	clients := make(map[string]GitHubLister, len(distinctOwners(cfg.WatchedRepos)))
+	for _, owner := range distinctOwners(cfg.WatchedRepos) {
+		client, err := auth.ClientForRepo(ctx, owner, "")
+		if err != nil {
+			logf(0, "warn", "no authorized client for owner %q yet — repos under it will be skipped until reconciled: %v\n", owner, err)
+			continue
+		}
 		clients[owner] = client
 	}
 
@@ -66,7 +72,7 @@ func Execute() error {
 		Claude:   &RealClaudeInvoker{},
 		Clone:    CloneForReview,
 		Config:   cfg,
-		BotLogin: authSet.BotLogin,
+		BotLogin: auth.BotLogin(),
 	}
 
 	if useTUI(cfg) {
