@@ -126,6 +126,9 @@ type Source struct {
 	// processAttempt runs single-threaded off Source's own WebSocket read
 	// loop, so no synchronization is needed to guard it.
 	lastSigWarnAt time.Time
+	// lastNormWarnAt rate-limits the normalization-failure warn log below,
+	// same single-threaded guarantee as lastSigWarnAt.
+	lastNormWarnAt time.Time
 }
 
 // NewSource returns a Source ready to Run, applying defaults for any unset
@@ -362,10 +365,11 @@ func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *w
 	s.ack(conn, attempt)
 }
 
-// sigFailureLogInterval rate-limits the invalid-signature warn log in
-// processAttempt — a misconfigured secret can fail every single delivery,
-// and this is the most security-sensitive check in the pipeline, so it must
-// stay visible without flooding the log on a sustained run of failures.
+// sigFailureLogInterval rate-limits the invalid-signature and
+// normalization-failure warn logs in processAttempt — either can fail every
+// single delivery (a misconfigured secret; a persistent payload-shape
+// mismatch), and both need to stay visible without flooding the log on a
+// sustained run of failures.
 const sigFailureLogInterval = 30 * time.Second
 
 // processAttempt verifies the GitHub signature, normalizes the payload,
@@ -400,6 +404,10 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	eventType := lookupHeader(headers, "X-GitHub-Event")
 	ev, err := normalizeEvent([]byte(attempt.Request.DataString), eventType, deliveryID, time.Now())
 	if err != nil {
+		if time.Since(s.lastNormWarnAt) >= sigFailureLogInterval {
+			s.lastNormWarnAt = time.Now()
+			logf("dropping event: normalizing webhook payload: %v (malformed body, or an unexpected content-type)\n", err)
+		}
 		return
 	}
 

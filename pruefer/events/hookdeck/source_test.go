@@ -473,6 +473,36 @@ func TestSource_ProcessAttempt_DistinguishesMissingFromInvalidSignature(t *testi
 	})
 }
 
+// TestSource_ProcessAttempt_LogsNormalizationFailure guards against a
+// malformed-body (or unexpected-content-type) delivery being dropped with
+// zero logging, unlike every sibling failure path in processAttempt
+// (invalid signature, missing signature header) — a sustained protocol
+// drift here would otherwise silently stop all event-driven ingestion while
+// transport health still reports connected.
+func TestSource_ProcessAttempt_LogsNormalizationFailure(t *testing.T) {
+	logs := captureLogs(t)
+	src := NewSource(Config{WebhookSecret: testWebhookSecret})
+	sink := &recordingSink{}
+	body := []byte("not valid json")
+	src.processAttempt(context.Background(), sink, attemptBody{
+		Request: attemptRequest{
+			DataString: string(body),
+			Headers: map[string]string{
+				"X-Hub-Signature-256": signBody(body, testWebhookSecret),
+				"X-GitHub-Event":      "pull_request",
+				"X-GitHub-Delivery":   "d-malformed-body",
+			},
+		},
+	})
+	if sink.count() != 0 {
+		t.Fatalf("sink.count() = %d, want 0 (malformed body must be dropped)", sink.count())
+	}
+	joined := strings.Join(*logs, "\n")
+	if !strings.Contains(joined, "normalizing webhook payload") {
+		t.Errorf("logs = %v, want a message about the normalization failure", *logs)
+	}
+}
+
 func TestSource_ReconnectsAfterConnectionDrop(t *testing.T) {
 	m := newMockHookdeckServer(t)
 	sink := &recordingSink{}
