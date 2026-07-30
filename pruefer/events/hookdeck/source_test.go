@@ -312,12 +312,20 @@ func TestSource_ReconnectsAfterConnectionDrop(t *testing.T) {
 	runSourceInBackground(t, src, sink)
 
 	conn1 := m.nextConn(t)
+	// HealthConnected only fires once the session proves itself alive by
+	// reading a frame (see source.go's runOnce), so send one here before
+	// dropping the connection — otherwise this connection never counts as
+	// "connected" and the assertion below couldn't distinguish a real
+	// reconnect from a source that never got past the handshake.
+	body1 := prOpenedBody(t, 2)
+	sendAttempt(t, conn1, "attempt-0", "delivery-before-drop", body1, signBody(body1, testWebhookSecret))
+	waitUntilCount(t, sink, 1)
 	conn1.Close() // simulate a connection drop
 
 	conn2 := m.nextConn(t) // Source must reconnect
 	body := prOpenedBody(t, 1)
 	sendAttempt(t, conn2, "attempt-1", "delivery-after-reconnect", body, signBody(body, testWebhookSecret))
-	waitUntilCount(t, sink, 1)
+	waitUntilCount(t, sink, 2)
 
 	waitUntil(t, 2*time.Second, func() bool {
 		mu.Lock()
@@ -380,6 +388,51 @@ func TestSource_RunOnce_NotConnectedOnImmediateDrop(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runOnce did not return after the connection was dropped")
+	}
+}
+
+func TestSource_RunOnce_NoHealthConnectedOnImmediateDrop(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+
+	var mu sync.Mutex
+	var health []events.HealthEvent
+	cfg.OnHealth = func(ev events.HealthEvent) {
+		mu.Lock()
+		health = append(health, ev)
+		mu.Unlock()
+	}
+	src := NewSource(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resultCh := make(chan runOnceResult, 1)
+	go func() {
+		connected, err := src.runOnce(ctx, sink)
+		resultCh <- runOnceResult{connected, err}
+	}()
+
+	// A handshake that's immediately dropped with no frame ever read must
+	// not report HealthConnected — Daemon.HealthHandler treats that
+	// transition as a signal to run a reconciliation poll, which should
+	// only fire once the session has proven itself alive.
+	conn := m.nextConn(t)
+	conn.Close()
+
+	select {
+	case <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not return after the connection was dropped")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, h := range health {
+		if h.State == events.HealthConnected {
+			t.Errorf("got HealthConnected on a handshake-only drop, want none: %+v", health)
+		}
 	}
 }
 

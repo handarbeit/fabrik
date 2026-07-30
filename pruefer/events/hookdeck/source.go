@@ -62,6 +62,11 @@ type Config struct {
 type Source struct {
 	cfg    Config
 	dedupe *events.Dedupe
+
+	// lastSigWarnAt rate-limits the invalid-signature warn log below —
+	// processAttempt runs single-threaded off Source's own WebSocket read
+	// loop, so no synchronization is needed to guard it.
+	lastSigWarnAt time.Time
 }
 
 // NewSource returns a Source ready to Run, applying defaults for any unset
@@ -166,8 +171,6 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 	}
 	defer conn.Close()
 
-	s.emitHealth(events.HealthConnected, nil)
-
 	// ReadMessage has no context parameter; close the connection out from
 	// under it on ctx cancellation, the standard gorilla/websocket idiom
 	// for context-aware reads. done prevents this goroutine from leaking
@@ -182,6 +185,13 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 		}
 	}()
 
+	// HealthConnected is deliberately not emitted right after the dial
+	// above: it fires only once the session proves itself alive by
+	// successfully reading a frame, the same evidence connected's return
+	// value uses. Daemon.HealthHandler treats a HealthConnected transition
+	// as a signal to run a reconciliation poll — emitting it on dial alone
+	// would fire that poll on every handshake-only drop (e.g. a stale API
+	// key), even though the connection never proved itself alive.
 	receivedFrame := false
 	for {
 		_, msg, err := conn.ReadMessage()
@@ -191,7 +201,10 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 			}
 			return receivedFrame, fmt.Errorf("reading hookdeck websocket: %w", err)
 		}
-		receivedFrame = true
+		if !receivedFrame {
+			receivedFrame = true
+			s.emitHealth(events.HealthConnected, nil)
+		}
 		s.handleFrame(ctx, sink, conn, msg)
 	}
 }
@@ -212,12 +225,19 @@ func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *w
 	}
 	var attempt attemptBody
 	if err := json.Unmarshal(frame.Body, &attempt); err != nil {
+		logf("dropping malformed hookdeck attempt frame: %v\n", err)
 		return
 	}
 
 	s.processAttempt(ctx, sink, attempt)
 	s.ack(conn, attempt)
 }
+
+// sigFailureLogInterval rate-limits the invalid-signature warn log in
+// processAttempt — a misconfigured secret can fail every single delivery,
+// and this is the most security-sensitive check in the pipeline, so it must
+// stay visible without flooding the log on a sustained run of failures.
+const sigFailureLogInterval = 30 * time.Second
 
 // processAttempt verifies the GitHub signature, dedupes by delivery ID,
 // normalizes, and — if all of that succeeds — hands the event to sink.
@@ -229,6 +249,10 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	headers := attempt.Request.Headers
 	sig := lookupHeader(headers, "X-Hub-Signature-256")
 	if !events.VerifySignature([]byte(attempt.Request.DataString), sig, s.cfg.WebhookSecret) {
+		if time.Since(s.lastSigWarnAt) >= sigFailureLogInterval {
+			s.lastSigWarnAt = time.Now()
+			logf("dropping event: invalid GitHub webhook signature (check hookdeck.webhook_secret_env)\n")
+		}
 		return
 	}
 
