@@ -432,10 +432,33 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 	})
 }
 
+// hasCIGatePauseComment reports whether item already carries a Fabrik CI-gate
+// pause comment (CI wait timeout or CI-fix cycle limit) for the given stage, so
+// a redundant pauseForCITimeout/pauseForCIFixCycleLimit call — reachable within
+// the same poll when addCompleteLabelAndRemoveCI's two-call label swap races
+// (see settleAwaitingCIScan's doc comment) — does not post a duplicate.
+// Mirrors hasSkippedComment's precedent (no_work_needed_settle.go): match on
+// the stable prose fragment rather than the full message, since cycleCount can
+// differ between the two posts.
+func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
+	timeoutWant := fmt.Sprintf("The CI gate for stage **%s** timed out", stage.Name)
+	cycleWant := fmt.Sprintf("The stage **%s** has been re-invoked to fix CI failures", stage.Name)
+	for _, c := range item.Comments {
+		if strings.Contains(c.Body, timeoutWant) || strings.Contains(c.Body, cycleWant) {
+			return true
+		}
+	}
+	return false
+}
+
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
 // loop elapses. It posts an explanatory comment and applies fabrik:paused +
 // fabrik:awaiting-input.
 func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+	if hasCIGatePauseComment(item, stage) {
+		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already posted this poll — skipping duplicate\n")
+		return
+	}
 	e.logf(item.Number, "ci-timeout", "CI wait timeout elapsed — pausing for human intervention\n")
 
 	msg := fmt.Sprintf(
@@ -452,6 +475,10 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 // pauseForCIFixCycleLimit pauses the issue when the maximum CI-fix
 // re-invocation cycle count is reached.
 func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+	if hasCIGatePauseComment(item, stage) {
+		e.logf(item.Number, "ci-cycles", "CI-gate pause comment already posted this poll — skipping duplicate\n")
+		return
+	}
 	e.logf(item.Number, "ci-cycles", "CI-fix cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(

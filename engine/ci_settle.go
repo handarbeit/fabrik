@@ -47,17 +47,16 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // present) in the same pass. The CI-fix-reinvoke dispatch itself cannot
 // double-fire in that window — dispatchWithCycleLimit's snap.Worker() != nil
 // guard is set synchronously before the reinvoke goroutine starts (reinvoke.go),
-// confirmed by TestSettleAwaitingCIScan_NoDoubleDispatch — but the pause-at-
-// cycle-limit and CI-wait-timeout branches have no equivalent guard and can post
-// a duplicate pause comment in this exact race
-// (TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment
-// pins the current behavior). This is self-healing (the stale
-// fabrik:awaiting-ci is retried and cleared on the very next poll) and, at
-// worst, cosmetic — it does not corrupt state or strand the item, so it is
-// accepted rather than fixed here; closing it fully would require giving the
-// pause paths their own idempotency guard, a change to the shared pauseIssue
-// tail used by 11 other pauseFor*/escalate* callers, out of proportion with
-// this issue's scope.
+// confirmed by TestSettleAwaitingCIScan_NoDoubleDispatch. The pause-at-
+// cycle-limit and CI-wait-timeout branches have no equivalent Worker() guard,
+// but pauseForCITimeout/pauseForCIFixCycleLimit (ci.go) check
+// hasCIGatePauseComment before posting — since the second pass's
+// FetchItemDetails call is a genuinely fresh fetch that repopulates
+// item.Comments, it observes the first pass's already-completed AddComment
+// call and skips the duplicate
+// (TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateComment
+// pins this). This mirrors hasSkippedComment's precedent in
+// no_work_needed_settle.go rather than adding a new idempotency primitive.
 //
 // Closed items are skipped: closed-issue recovery for a merged PR under
 // fabrik:awaiting-ci is already owned by runValidatePRTerminalAdvance (ADR-056
@@ -65,6 +64,14 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // items are skipped: either escalateAwaitingCIOrphanFailure already handled them
 // (marker removed) or an operator is investigating for an unrelated reason and
 // this scan must not fight them.
+//
+// FetchItemDetails runs here with no cooldown, once per fabrik:awaiting-ci item
+// per poll — raised in PR review as a potential new GraphQL cost. It is not new:
+// fabrik:awaiting-ci was already in selectDeepFetchCandidates's cooldown-bypass
+// label list on main before this change (poll.go's hasAwaitingLabel), so these
+// items were already deep-fetched every poll via the main loop. This scan
+// relocates that existing per-poll fetch to its own admission path; it does not
+// add a fetch that wasn't already happening.
 func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoard, advancedItems map[string]bool) {
 	var processed int
 	for _, item := range board.Items {

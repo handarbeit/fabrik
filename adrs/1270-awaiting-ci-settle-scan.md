@@ -121,12 +121,18 @@ routing the item to both paths in the same pass. The CI-fix-reinvoke *dispatch* 
 double-fire in that window — `dispatchWithCycleLimit`'s `snap.Worker() != nil` guard is applied
 synchronously before the reinvoke goroutine starts, so the second pass sees it and skips
 (`TestSettleAwaitingCIScan_NoDoubleDispatch` pins this). The pause-at-cycle-limit and CI-wait-timeout
-branches have no equivalent guard, so this narrow, self-healing race can produce a duplicate pause
-comment — cosmetic, not state-corrupting or stranding —
-(`TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment` pins the
-current behavior). Closing this fully would mean giving `pauseIssue` its own idempotency guard, shared
-by 11 other `pauseFor*`/`escalate*` callers — out of proportion with this issue's scope, and tracked
-here rather than silently claimed away.
+branches had no equivalent guard, so this narrow race could produce a duplicate pause comment.
+
+A follow-up review comment pointed out this was cheap to close without touching `pauseIssue`'s 11 other
+callers: `pauseForCITimeout`/`pauseForCIFixCycleLimit` (`ci.go`) now check `hasCIGatePauseComment(item,
+stage)` before posting, scanning `item.Comments` for the stable prose fragment of an already-posted
+CI-gate pause comment — mirroring `hasSkippedComment`'s precedent in `no_work_needed_settle.go` exactly,
+rather than inventing a new idempotency primitive. This works because each `settleAwaitingCIScan` pass's
+`FetchItemDetails` call is a genuinely fresh GraphQL fetch that repopulates `item.Comments`
+(`github/project.go`'s `applyComments`), so the second pass observes the first pass's already-completed,
+synchronous `AddComment` call. `TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateComment`
+pins this with a mock that simulates persisted comments across both fetches (a mock leaving
+`item.Comments` empty would validate nothing).
 
 ### Why not fix `itemMayNeedWork`'s `HoldingStage`/`Unmanaged` exclusion instead?
 

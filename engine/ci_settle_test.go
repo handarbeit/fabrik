@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -410,7 +411,7 @@ func TestSettleAwaitingCIScan_SkipsPausedAndClosedItems(t *testing.T) {
 	}
 }
 
-// TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment
+// TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateComment
 // is a PR-review regression (pruefer): addCompleteLabelAndRemoveCI (ci.go) adds
 // stage:X:complete and removes fabrik:awaiting-ci via two SEPARATE GitHub API
 // calls. If the removal call fails transiently (rate limit, network blip)
@@ -431,19 +432,28 @@ func TestSettleAwaitingCIScan_SkipsPausedAndClosedItems(t *testing.T) {
 // covers the OTHER branch: with MaxCiFixCycles=0, cycleCount (0) >= maxCycles
 // (0) is true from the first pass, so dispatchWithCycleLimit takes the
 // pause() branch instead of dispatch() — and pauseForCIFixCycleLimit does not
-// set Worker(), so the guard does not protect it. This pins the actual,
-// current, imperfect behavior (two duplicate pause comments in this exact
-// race window) rather than asserting a stronger guarantee than the code
-// provides. The gap is accepted as a narrow, self-healing (the stale
-// fabrik:awaiting-ci is retried and removed on the very next poll),
-// cosmetic-only (no state corruption, no stranding — the issue's core
-// acceptance criteria are unaffected) residual, documented in
-// adrs/1270-awaiting-ci-settle-scan.md rather than silently claimed away. If
-// this count changes, it means dispatchWithCycleLimit's pause branch (or
-// pauseForCITimeout, which has no guard at all) gained or lost idempotency —
-// update this test and the ADR together.
-func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment(t *testing.T) {
+// set Worker(). Before this fix, that branch had no equivalent guard and
+// produced a duplicate pause comment in this exact race; pauseForCIFixCycleLimit
+// (and pauseForCITimeout) now check hasCIGatePauseComment(item, stage) before
+// posting, mirroring the hasSkippedComment precedent in
+// no_work_needed_settle.go. fetchItemDetailsFn here simulates the real
+// mechanism this relies on: each settleAwaitingCIScan pass calls
+// FetchItemDetails, which does a genuinely fresh GraphQL fetch and repopulates
+// item.Comments (github/project.go's applyComments) — so the second pass's
+// fetch reflects the first pass's synchronous, already-completed AddComment
+// call. A mock that left item.Comments empty across both calls (the prior,
+// unrealistic version of this test) would validate nothing.
+func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateComment(t *testing.T) {
 	client := ciFailureSettleClient()
+	var posted []gh.Comment
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+		item.Comments = append([]gh.Comment(nil), posted...)
+		return nil
+	}
+	client.addCommentFn = func(_, _ string, _ int, body string) (int, error) {
+		posted = append(posted, gh.Comment{ID: fmt.Sprintf("C_%d", len(posted)+1), Body: body})
+		return len(posted), nil
+	}
 	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
 	eng.cfg.MaxCiFixCycles = 0 // force the pause-at-limit branch on the very first attempt
 
@@ -466,7 +476,7 @@ func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidual
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if got := len(client.addCommentCalls); got != 2 {
-		t.Errorf("got %d pause comment(s) for the two-pass race window; want exactly 2 (the known, documented, self-healing residual — see adrs/1270-awaiting-ci-settle-scan.md); if this changed, update the ADR and this test's comment together", got)
+	if got := len(client.addCommentCalls); got != 1 {
+		t.Errorf("got %d pause comment(s) for the two-pass race window; want exactly 1 — hasCIGatePauseComment must suppress the second pass's duplicate", got)
 	}
 }
