@@ -1336,6 +1336,43 @@ func TestAttemptMergeOnValidate_Authoritative_ChangesRequested_BlocksAutoMerge(t
 	}
 }
 
+// The FR-2 landing-gate fast path also fires regardless of review_authority,
+// for the same reason as the advance gate (see
+// TestCheckReviewGate_ExpectedReviewersNone_AuthoritativeMode_StillAdvancesImmediately):
+// with nothing requested and nothing reviewed, authoritative mode has no
+// verdict to weigh yet. FetchPRReviewDecision must not be called.
+func TestAttemptMergeOnValidate_Authoritative_ExpectedReviewersNone_StillAdvancesImmediately(t *testing.T) {
+	waitTrue := true
+	none := []string{}
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Fatal("FetchPRReviewDecision must not be called when nothing has been reviewed yet")
+			return "", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MergeTrain = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
+		&stages.Stage{Name: "Validate", WaitForReviews: &waitTrue, ReviewAuthority: "authoritative", ExpectedReviewers: &none})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected enabled=true — expected_reviewers: [] fast-advances the landing gate even in authoritative mode")
+	}
+}
+
 // Once the verdict clears (reviewDecision=APPROVED), the landing decision
 // proceeds exactly as advisory mode would — demonstrating "authoritative +
 // yolo merges as soon as the verdict clears, no human click required".

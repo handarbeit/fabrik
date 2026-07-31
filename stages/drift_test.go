@@ -231,6 +231,149 @@ func TestWarnStageDrift_CompletionNoOpOmitted(t *testing.T) {
 	}
 }
 
+// --- WarnUndeclaredReviewers (FR-7) ---
+
+func TestWarnUndeclaredReviewers_Fires(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "[startup] notice:") {
+		t.Errorf("expected a startup notice, got: %q", got)
+	}
+	if !strings.Contains(got, "Review") {
+		t.Errorf("expected the notice to name the stage, got: %q", got)
+	}
+	if !strings.Contains(got, "expected_reviewers") {
+		t.Errorf("expected the notice to mention expected_reviewers, got: %q", got)
+	}
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("warnings.Load: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Key == "undeclared_reviewers:Review" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected an undeclared_reviewers:Review entry recorded")
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenDeclaredNonEmpty(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	declared := []string{"handarbeit-pruefer"}
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue, ExpectedReviewers: &declared}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice once expected_reviewers is declared, got: %q", got)
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenDeclaredExplicitlyEmpty(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	none := []string{}
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue, ExpectedReviewers: &none}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice for explicit expected_reviewers: [], got: %q", got)
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenWaitForReviewsFalse(t *testing.T) {
+	setWarningsOverride(t)
+	waitFalse := false
+	s := &Stage{Name: "Implement", FilePath: filepath.Join(t.TempDir(), "implement.yaml"), WaitForReviews: &waitFalse}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice when wait_for_reviews is false, got: %q", got)
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenWaitForReviewsNil(t *testing.T) {
+	setWarningsOverride(t)
+	s := &Stage{Name: "Plan", FilePath: filepath.Join(t.TempDir(), "plan.yaml")}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice when wait_for_reviews is unset, got: %q", got)
+	}
+}
+
+// FR-7's core self-limiting requirement: once a declaration (including
+// explicit "none") is added, the previously-recorded entry is cleared, not
+// just left unrenewed.
+func TestWarnUndeclaredReviewers_ClearsOnceDeclared(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue}
+
+	var out1 strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out1)
+	if !strings.Contains(out1.String(), "[startup] notice:") {
+		t.Fatalf("expected initial notice, got: %q", out1.String())
+	}
+
+	entries, _ := warnings.Load()
+	var recordedBefore bool
+	for _, e := range entries {
+		if e.Key == "undeclared_reviewers:Review" {
+			recordedBefore = true
+		}
+	}
+	if !recordedBefore {
+		t.Fatal("expected the entry to be recorded before the declaration is added")
+	}
+
+	// Operator adds a declaration.
+	declared := []string{"handarbeit-pruefer"}
+	s.ExpectedReviewers = &declared
+
+	var out2 strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out2)
+	if got := out2.String(); got != "" {
+		t.Errorf("expected no notice after declaration is added, got: %q", got)
+	}
+
+	entries, _ = warnings.Load()
+	for _, e := range entries {
+		if e.Key == "undeclared_reviewers:Review" {
+			t.Error("expected undeclared_reviewers:Review entry to be cleared once declared, but it is still present")
+		}
+	}
+}
+
+func TestWarnUndeclaredReviewers_EmptyUserStages(t *testing.T) {
+	setWarningsOverride(t)
+
+	var out strings.Builder
+	WarnUndeclaredReviewers(nil, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice for empty userStages, got: %q", got)
+	}
+}
+
 func TestMissingTopLevelKeys_ReturnsMissingKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stage.yaml")
