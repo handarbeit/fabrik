@@ -332,13 +332,24 @@ func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int
 	for {
 		bodies, err := tryPRComments(env, repo, memberPRNum)
 		if err == nil {
+			// Comments come back oldest-first; take the LAST match rather than
+			// the first so a restart-driven repost of the landed comment (or
+			// any other duplicate) yields the most recent — and therefore
+			// authoritative — landing PR number, not a stale one from an
+			// earlier partial run.
+			found := 0
 			for _, b := range bodies {
 				if m := landedPRPattern.FindStringSubmatch(b); m != nil {
 					if n, aerr := strconv.Atoi(m[1]); aerr == nil && n > 0 {
-						return n
+						found = n
 					}
 				}
 			}
+			if found > 0 {
+				return found
+			}
+		} else {
+			t.Logf("waitForLandingPRNumber: transient error reading PR #%d comments on %s: %v (will retry)", memberPRNum, repo, err)
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v) — "+
