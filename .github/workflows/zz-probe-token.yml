@@ -1,0 +1,37 @@
+name: TEMP probe GITHUB_TOKEN collaborator permission
+
+# Temporary probe — verifies whether the automatic GITHUB_TOKEN can call
+# GET /repos/{owner}/{repo}/collaborators/{username}/permission.
+# Deleted before this branch merges.
+
+on:
+  push:
+    branches: [ci/fix-community-routing-membership-check]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe collaborator permission endpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for U in bdueck arbeithand verveguy; do
+            echo "=== $U ==="
+            set +e
+            RAW=$(gh api -i "repos/${REPO}/collaborators/${U}/permission" 2>/tmp/err.log)
+            set -e
+            RAW=$(printf '%s\n' "$RAW" | tr -d '\r')
+            CODE=$(printf '%s\n' "$RAW" | awk 'NR==1 && /^HTTP\// {print $2; exit}')
+            BODY=$(printf '%s\n' "$RAW" | awk 'f{print} !NF{f=1}')
+            echo "HTTP=${CODE:-none}"
+            if [ "$CODE" = "200" ]; then
+              echo "permission=$(echo "$BODY" | jq -r '.permission')"
+            else
+              cat /tmp/err.log
+            fi
+          done
