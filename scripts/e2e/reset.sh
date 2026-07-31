@@ -151,7 +151,7 @@ if [ "${1:-}" = "--worktrees" ]; then
   echo "== removing Fabrik worktrees + bare clones from $TEST_BED =="
   # Stop the Fabrik instance first if running — otherwise it'll keep using the
   # deleted dirs and produce confusing errors.
-  pid=$(ps ax -o pid,command | grep "$TEST_BED/fabrik" | grep -v grep | awk '{print $1}' | head -1)
+  pid=$(ps ax -o pid,command | grep "$TEST_BED/fabrik" | grep -v grep | awk '{print $1}' | head -1) || true
   if [ -n "$pid" ]; then
     echo "  fabrik-test pid $pid is running — stop it before --worktrees" >&2
     exit 1
