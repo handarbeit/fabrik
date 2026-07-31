@@ -1254,6 +1254,99 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 	})
 }
 
+// TestInvokeClaude_FabrikEnvVarsInjected covers #1288: the five FABRIK_*
+// invocation facts injected into the worker environment via buildClaudeEnv.
+// FABRIK_ISSUE/FABRIK_REPO/FABRIK_WORKTREE are derived directly from the
+// issue/workDir InvokeClaude already receives; FABRIK_ROOT/FABRIK_PR come
+// from InvokeOptions (as resolved by the caller's resolveFabrikEnvOpts,
+// covered separately in fabrik_env_test.go). "Absent is absent, never a
+// misleading zero" is asserted directly by checking FABRIK_PR is entirely
+// absent from the env, not merely unequal to some value.
+func TestInvokeClaude_FabrikEnvVarsInjected(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"fabrik env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_fabrikenv","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "Implement it",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+
+	t.Run("all five vars present and correctly valued", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1288, Repo: "acme/widgets", Title: "Fabrik env test"}
+		opts := InvokeOptions{FabrikRoot: "/fabrik/root", PRNumber: 42}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		for _, want := range []string{
+			"FABRIK_ISSUE=1288",
+			"FABRIK_REPO=acme/widgets",
+			"FABRIK_WORKTREE=" + workDir,
+			"FABRIK_ROOT=/fabrik/root",
+			"FABRIK_PR=42",
+		} {
+			if !strings.Contains(env, want) {
+				t.Errorf("expected %q in env, got:\n%s", want, env)
+			}
+		}
+	})
+
+	t.Run("FABRIK_PR absent (never zero) when PRNumber is 0", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1289, Repo: "acme/widgets", Title: "No PR yet"}
+		opts := InvokeOptions{FabrikRoot: "/fabrik/root"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if strings.Contains(env, "FABRIK_PR=") {
+			t.Errorf("expected FABRIK_PR to be entirely absent, got:\n%s", env)
+		}
+		if !strings.Contains(env, "FABRIK_ISSUE=1289") {
+			t.Errorf("expected FABRIK_ISSUE=1289 in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("FABRIK_REPO reflects the item's repo, not a default", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1290, Repo: "other-owner/other-repo", Title: "Multi-repo test"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "FABRIK_REPO=other-owner/other-repo") {
+			t.Errorf("expected FABRIK_REPO=other-owner/other-repo in env, got:\n%s", env)
+		}
+	})
+}
+
 // TestInvokeClaude_GHTokenInjected verifies that the engine's resolved GitHub
 // token (claudeGHToken, set from Config.Token in Engine.New) is injected into
 // the worker's environment as both GH_TOKEN and GITHUB_TOKEN, that the
