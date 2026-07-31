@@ -280,7 +280,18 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	invokeOpts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
+	// Comment processing only ever runs on a stage that has already produced
+	// at least one prior attempt (there's output to comment on), so a
+	// CreateDraftPR stage's PR may already exist — pass resume=true.
+	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage, true)
+	invokeOpts := InvokeOptions{
+		ModelOverride:  modelOverride,
+		EffortOverride: effortOverride,
+		BaseBranch:     baseBranch,
+		FabrikRoot:     fabrikRoot,
+		PRNumber:       prNumber,
+		FabrikRepo:     e.defaultRepo(),
+	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
 	}
