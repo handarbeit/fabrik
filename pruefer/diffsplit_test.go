@@ -1,6 +1,9 @@
 package pruefer
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSplitDiffFiles_MultiFile(t *testing.T) {
 	diff := `diff --git a/a.go b/a.go
@@ -69,6 +72,52 @@ func TestSplitDiffFiles_Empty(t *testing.T) {
 	files, preamble := splitDiffFiles("")
 	if files != nil || preamble != "" {
 		t.Errorf("splitDiffFiles(\"\") = (%+v, %q), want (nil, \"\")", files, preamble)
+	}
+}
+
+// TestSplitDiffFiles_HeaderLookalikeAsRealDiffContent_NotTreatedAsNewFile
+// guards against the failure mode flagged in PR #1279 review: a PR touching
+// a .patch/.diff fixture, or documentation showing an example git-diff
+// header, could contain a line shaped exactly like "diff --git a/... b/...".
+// As it actually appears in a real diff, such a content line is never
+// unprefixed — git's unified-diff format prefixes every hunk content line
+// with "+"/"-"/" ", so the embedded line here renders as
+// "+diff --git a/fake b/fake" (added) — which does not match
+// diffFileHeaderLineRE's anchored "^diff --git a/(.+) b/(.+)$" (the leading
+// "+" breaks the match at position 0). This is why splitDiffFiles treats
+// every literal, unprefixed "diff --git " match as an unconditional file
+// boundary, mirroring validRightAnchors' identical unconditional treatment
+// of the same line shape in diffanchor.go: the prefix invariant, not extra
+// hunk-tracking state, is what keeps this correct for well-formed diffs.
+func TestSplitDiffFiles_HeaderLookalikeAsRealDiffContent_NotTreatedAsNewFile(t *testing.T) {
+	diff := `diff --git a/fixtures/example.patch b/fixtures/example.patch
+index 111..222 100644
+--- a/fixtures/example.patch
++++ b/fixtures/example.patch
+@@ -1,2 +1,2 @@
+-old fixture line
++diff --git a/fake b/fake
+ unchanged context
+diff --git a/b.go b/b.go
+index 333..444 100644
+--- a/b.go
++++ b/b.go
+@@ -1,1 +1,1 @@
+-old2
++new2
+`
+	files, preamble := splitDiffFiles(diff)
+	if preamble != "" {
+		t.Errorf("preamble = %q, want empty", preamble)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files = %+v, want exactly 2 (the prefixed lookalike line must not split fixtures/example.patch in two)", files)
+	}
+	if files[0].Path != "fixtures/example.patch" || files[1].Path != "b.go" {
+		t.Errorf("paths = [%q, %q], want [fixtures/example.patch, b.go]", files[0].Path, files[1].Path)
+	}
+	if !strings.Contains(files[0].Body, "+diff --git a/fake b/fake") {
+		t.Errorf("files[0].Body = %q, want the lookalike line retained as content of fixtures/example.patch", files[0].Body)
 	}
 }
 
