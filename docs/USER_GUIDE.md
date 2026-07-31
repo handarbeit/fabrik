@@ -752,6 +752,24 @@ FABRIK_USER=my-personal-username
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
+### Worker-Injected Environment Variables
+
+The table above lists variables **you** set to configure the engine. Separately, on every Claude worker invocation Fabrik **exports** a small set of facts about that invocation into the worker subprocess's own environment — visible only inside the running worktree, never read back by the engine. This is a supported extension point for repo-side provisioning: a script in your repo (a test-setup hook, a fixture generator, anything invoked from a stage's own Bash tool calls) can key off these to provision or namespace a resource per worktree, per issue, or per PR — a database schema, a port, a container, a preview environment — without guessing at Fabrik's internals. Fabrik only publishes the facts; your repo's scripts own what happens with them.
+
+| Variable | Value | Presence |
+|---|---|---|
+| `FABRIK_ISSUE` | The issue number (bare integer, e.g. `1085`) | Always |
+| `FABRIK_REPO` | The `owner/repo` this invocation belongs to (the **item's** repo — correct for multi-repo setups) | Always |
+| `FABRIK_WORKTREE` | Absolute path to the issue's worktree | Always |
+| `FABRIK_ROOT` | Absolute path to the directory containing `.fabrik/` (config, stages, plugin) | Always |
+| `FABRIK_PR` | The linked pull request number | Only once a PR exists — unset (never `0`) before then |
+
+**Not the same `FABRIK_REPO`.** The `FABRIK_REPO` in this table is a different variable from the `FABRIK_REPO` in the config table above, despite the identical name. The config-table `FABRIK_REPO` is something *you* set before starting Fabrik, to tell the engine which repo to manage. This worker-injected `FABRIK_REPO` is something *Fabrik* sets, per invocation, inside the Claude subprocess only — it names whichever repo the current issue actually belongs to (relevant in multi-repo mode, where the config-table `FABRIK_REPO` is typically omitted entirely). The worker-injected value always wins inside the subprocess regardless of what the launching shell exported, so there is no functional collision — only a naming one worth knowing about if you're scripting against both.
+
+`FABRIK_PR` requires a REST fallback to resolve correctly on a `base:<branch>` repo (GitHub's `closedByPullRequestsReferences` field, which the board-level PR link is normally sourced from, is structurally empty for any PR targeting a non-default base branch) — see `docs/stage-lifecycle.md`'s "Worker Environment: Invocation Facts" section for the full resolution rule, cost-control gating, and the deliberate partial case (merge-train conflict resolution never sets `FABRIK_PR`).
+
+These five names are a compatibility surface — once a repo scripts against them, renaming is a breaking change for that repo. See ADR-1288 for the full design rationale, including why this is scoped to exposing facts rather than a `worktree_created`/`worktree_removed` lifecycle-hook mechanism.
+
 ### Stage YAML Reference
 
 Each stage is a YAML file in your stages directory. The filename is arbitrary; the

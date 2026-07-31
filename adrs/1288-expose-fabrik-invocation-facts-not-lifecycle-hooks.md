@@ -1,0 +1,40 @@
+# ADR 1288: Expose Fabrik invocation facts as env vars, not a lifecycle-hook mechanism
+
+**Status:** Accepted
+**Date:** 2026-07-31
+**Issue:** [#1288](https://github.com/handarbeit/fabrik/issues/1288)
+
+## Context
+
+Fabrik knows several facts about a worker invocation that code running inside the worktree cannot reliably derive for itself: which issue this is, which repo it belongs to (relevant in multi-repo mode), where the worktree lives, where the project root (`fabrikDir`) lives, and which PR (if any) is linked. Before this issue, `buildClaudeEnv` (`engine/claude.go`) published none of these — only `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, `CLAUDE_CODE_EFFORT_LEVEL`, and the GitHub token pair.
+
+This blocked a legitimate class of repo-side automation: anything that needs to provision or namespace a resource per worktree, per issue, or per PR — a database schema, a port, a fixture namespace, a container, a preview environment. Community report #1085 raised this concretely: concurrent Fabrik stages collide on a single shared Postgres schema because nothing in the repo's own test setup can tell one Fabrik worktree from another.
+
+#1085 also proposed a broader mechanism: `worktree_created`/`worktree_removed` lifecycle hooks — scripts Fabrik would invoke at defined points, with their own timeout, executable-check, and pause-on-non-zero-exit semantics. That is a materially larger design surface (a new subsystem, not a data export) and a separate decision with its own tradeoffs (what counts as failure, how long a hook may run, whether it can block the pipeline). This issue deliberately does not implement it.
+
+A second, sharper problem surfaced during scoping: `.fabrik/config.yaml` is tracked in the managed repo, so it exists inside every worktree checkout too. Any tool that walks up from its working directory looking for that file to locate the project root stops at the **worktree**, not the actual root — `.fabrik/plugin/fabrik/skills/fabrik/scripts/lib.sh`'s `fabrik_find_root` is a live, pre-existing illustration of exactly this ambiguity. Exporting the root directly removes the need to walk at all.
+
+## Decision
+
+**Export five facts as environment variables on every Claude worker invocation — expose-the-facts, not a lifecycle hook.** Fabrik publishes what it uniquely knows (`FABRIK_ISSUE`, `FABRIK_REPO`, `FABRIK_WORKTREE`, `FABRIK_ROOT`, `FABRIK_PR`); the consuming repo owns everything else — what it does with the facts, when, what counts as failure for its own script, and how long that may take. This is a strictly smaller, strictly safer surface than a hook mechanism: it cannot itself time out, cannot itself fail an invocation, and adds no new failure mode to the engine. The #1085 hook proposal remains available as later, separate work if a repo's needs outgrow passive facts — this issue does not foreclose it, it just doesn't build it now.
+
+**Five names, deliberately minimal.** `FABRIK_ISSUE` (bare integer), `FABRIK_REPO` (the *item's* `owner/repo`, multi-repo aware — not the engine's configured default), `FABRIK_WORKTREE` (absolute path, the process's working directory), `FABRIK_ROOT` (absolute path to `fabrikDir` — the fix for the walk-up ambiguity above), and `FABRIK_PR` (linked PR number, when one exists). Stage name, base branch, model, and effort level were all considered and deliberately excluded: each one is easy to add later, but every published name is a compatibility commitment once a repo scripts against it, so the initial surface stays small and justified by the one motivating report rather than speculative.
+
+**`FABRIK_ISSUE`/`FABRIK_REPO`/`FABRIK_WORKTREE` are computed directly inside `buildClaudeEnv`** from the `issue`/`workDir` parameters its two callers (`InvokeClaude`, `InvokeClaudeForComments`) already receive — no new plumbing, and textually identical logic at both call sites structurally guarantees they behave the same in either context (the issue's "consistency across invocation paths" requirement).
+
+**`FABRIK_ROOT` and `FABRIK_PR` require `Engine`-only state** (`e.fabrikDir`, `e.readClient`) that the free functions `InvokeClaude`/`InvokeClaudeForComments` don't have. Rather than duplicate resolution logic at each of the three `InvokeOptions`-constructing call sites (stage invocation in `item.go`, comment processing in `comments.go`, merge-train conflict resolution in `merge_train.go`), a single shared helper — `Engine.resolveFabrikEnvOpts` (`engine/repo.go`) — computes both and is called from all three. This makes drift between the call sites a compile-time-visible refactor, not a runtime risk.
+
+**`FABRIK_PR` resolution reuses the review gate's established `base:<branch>` fallback, verbatim.** `item.LinkedPRNumber` (sourced from GraphQL `closedByPullRequestsReferences`) is structurally empty for any PR targeting a non-default base branch — exactly the report's own `base:develop` setup. `resolveFabrikEnvOpts` trusts the board value when non-zero; otherwise, gated on `stage.PostToPR || stage.CreateDraftPR` (true only for stages where a PR could plausibly exist — Implement/Review/Validate in the default set, false for Specify/Research/Plan, so early stages never pay for a lookup that can't succeed), it calls `FetchLinkedPR` via REST and applies the identical open-and-unmerged filter `handleBrokenReviewLinkage` (`reviews.go`) already uses. A failed, nil, or non-open/merged result is "no PR" — logged at warn, never fatal, never delaying the invocation. Reusing this exact pattern (rather than a fresh implementation with possibly different filtering) means `FABRIK_PR` can never show a PR the review gate itself would already discount.
+
+**Absent is absent, never a misleading zero — enforced at one choke point.** `buildClaudeEnv` omits `FABRIK_PR` entirely when the resolved number is `0`; it never emits `FABRIK_PR=0`. Because emission is conditional in exactly one place (`buildClaudeEnv` itself), every caller's "no PR" case (a genuinely absent `InvokeOptions.PRNumber`, a zero-value `InvokeOptions{}` in tests, or the merge-train site's deliberate non-resolution below) collapses to the same correct behavior without needing to be re-checked at each call site.
+
+**Merge-train conflict resolution gets `FABRIK_ROOT` but not `FABRIK_PR`, by design.** `merge_train.go`'s `resolveConflictWithClaude` invocation resolves a merge conflict on a trial branch assembled from multiple members — there is no single PR that invocation is "about," so resolving one would be a lie of omission (which member's PR would it even name?). `FABRIK_ROOT` is still cheap and unambiguous to set here for consistency with the other two call sites.
+
+**No secrets, no behavioral coupling.** These are facts about the invocation, not configuration for it. Nothing in the engine reads or branches on any `FABRIK_*` value described here (this is distinct from `GH_TOKEN`/`GITHUB_TOKEN`, which remain credential injection and are unchanged and out of scope), and no credential is added to this set.
+
+## Consequences
+
+- A repo can now provision per-worktree/per-issue/per-PR resources from its own scripts without inventing ad-hoc discovery logic, and without waiting on the (separate, larger) hook mechanism #1085 proposed.
+- `FABRIK_ROOT` removes the `.fabrik/config.yaml`-in-worktree walk-up ambiguity for any repo-side tool that needs to find the project root.
+- These five names are now a durable compatibility surface: renaming or repurposing any of them is a breaking change for whatever repo-side scripts come to depend on them. Extending the set later (stage name, base branch, model, effort) remains easy and additive — narrowing or renaming does not.
+- The `#1085` hook-mechanism proposal is untouched by this decision and remains a candidate for separate, future work if passive fact-exposure proves insufficient for some repo's needs.

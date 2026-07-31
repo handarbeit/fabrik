@@ -287,6 +287,28 @@ Context files are available in .fabrik-context/
 
 The Claude worker subprocess's environment is assembled as `mergeEnv(os.Environ(), extraEnv)` — the base is the engine process's own environment, with `extraEnv` entries taking precedence on key collision (last-wins). Alongside `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` and `CLAUDE_CODE_EFFORT_LEVEL`, `extraEnv` includes `GH_TOKEN` and `GITHUB_TOKEN`, both set to the engine's resolved GitHub token (`Config.Token`, the same value used for the engine's own `gh.NewClient` calls). This guarantees the worker's `gh` invocations (available via the default `Bash(gh:*)` allowed tool) always authenticate as the same identity as the engine itself, regardless of what `GH_TOKEN`/`GITHUB_TOKEN` the launching shell happens to export. Injection is skipped only when the engine's resolved token is empty, which should not occur in practice since a token is mandatory at startup.
 
+### Worker Environment: Invocation Facts (`FABRIK_*`)
+
+Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects five facts Fabrik uniquely holds about the current invocation, so repo-side scripts running inside the worktree can provision or namespace a resource (a database schema, a port, a fixture namespace, a preview environment) without guessing. This is deliberately **expose-the-facts**, not a lifecycle-hook mechanism: Fabrik publishes what it knows; the consuming repo owns what happens, when, and how (see ADR-1288). No credential is added to this set, and nothing in the engine reads or branches on these variables — they exist solely for repo-side consumption.
+
+| Variable | Value | Presence |
+|---|---|---|
+| `FABRIK_ISSUE` | The issue number (bare integer, e.g. `1085`) | Always |
+| `FABRIK_REPO` | The `owner/repo` this invocation belongs to — the **item's** repo, not the engine's configured default (multi-repo aware) | Always |
+| `FABRIK_WORKTREE` | Absolute path to the issue's worktree (the process's working directory) | Always |
+| `FABRIK_ROOT` | Absolute path to `fabrikDir` (where `.fabrik/` config, stages, and plugin live) | Always |
+| `FABRIK_PR` | The linked pull request number | Only once a PR exists |
+
+`FABRIK_ISSUE`, `FABRIK_REPO`, and `FABRIK_WORKTREE` are derived directly from the `issue`/`workDir` values `buildClaudeEnv`'s callers already hold. `FABRIK_ROOT` and `FABRIK_PR` require `Engine`-only state (`e.fabrikDir`, `e.readClient`) and are resolved once by the shared `Engine.resolveFabrikEnvOpts` helper (`engine/repo.go`), called from every `InvokeOptions`-constructing site — stage invocation (`item.go`), comment processing (`comments.go`), and merge-train conflict resolution (`merge_train.go`, `FABRIK_ROOT` only; see below) — so the worker environment is identical across invocation paths.
+
+**`FABRIK_PR` resolution and the `base:<branch>` case.** The board-sourced `item.LinkedPRNumber` is populated from GraphQL `closedByPullRequestsReferences`, which GitHub leaves structurally empty for a PR targeting a non-default base branch. `resolveFabrikEnvOpts` therefore trusts `item.LinkedPRNumber` when non-zero, and otherwise falls back to `FetchLinkedPR` via REST — the identical fallback pattern the review gate already uses (`handleBrokenReviewLinkage` in `reviews.go`). A result that errors, is `nil`, or isn't an open, unmerged PR is treated as "no PR": non-fatal, logged at warn, and never delaying or failing the invocation.
+
+**Cost control.** The REST fallback is gated on `stage.PostToPR || stage.CreateDraftPR` — a cheap, per-stage-config signal for "a PR could plausibly exist by this stage." In the default stage set this is true for Implement/Review/Validate and false for Specify/Research/Plan, so the early stages that structurally cannot yet have a PR never pay for a lookup that can't succeed.
+
+**Absent is absent, never a misleading zero.** `buildClaudeEnv` omits `FABRIK_PR` entirely when the resolved PR number is `0` — it never emits `FABRIK_PR=0`, which would read as a real PR number to a naive consumer.
+
+**Merge-train conflict resolution is a deliberate partial case.** `merge_train.go`'s inline conflict-resolution invocation (`resolveConflictWithClaude`) sets `FabrikRoot` for consistency but leaves `PRNumber` unset: that invocation resolves a merge conflict on a trial branch, not the member issue's own PR, so there is no single PR for `FABRIK_PR` to name.
+
 ### Output Logging
 
 Each invocation writes one NDJSON stream file to `.fabrik/logs/<owner>-<repo>/issue-<N>/` as `<stage>-<timestamp>-<nanos>.log`. This file is written live during execution (tee'd from Claude's stdout) and is the sole on-disk copy of the stream. Viewable via `cat <file> | fabrik stream-filter | less -R` or through the TUI's `l` key.
