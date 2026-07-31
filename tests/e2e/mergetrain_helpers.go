@@ -305,6 +305,16 @@ var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via 
 // "most recently created" search — it stays correct under t.Parallel()
 // execution where sibling merge-train scenarios land unrelated batches
 // concurrently in the same repo.
+//
+// This does depend on the engine's landed-comment AddComment call succeeding
+// (engine/merge_train.go:1817/:812 log a warn and move on if it fails — it is
+// not retried). That is the same best-effort-comment dependency
+// WaitForIssueComment/WaitForPRCommentContaining already carry for other
+// merge-train e2e scenarios (e.g. the "merge-train — ejected" and "runaway
+// guard tripped" comments), so this is not a new class of flakiness for the
+// suite. On timeout, check the bed log around this member's landing for
+// "warn: could not post landed comment on PR #<memberPRNum>" — if present,
+// the failure is this known-benign comment-post gap, not a stuck landing.
 func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int, timeout time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -320,7 +330,10 @@ func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v)", memberPRNum, repo, err)
+			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v) — "+
+				"if the bed log shows \"warn: could not post landed comment on PR #%d\" around this landing, "+
+				"the engine's best-effort comment post failed transiently (not retried); this is a known, "+
+				"non-regression false failure — re-run the test", memberPRNum, repo, err, memberPRNum)
 		}
 		time.Sleep(10 * time.Second)
 	}
