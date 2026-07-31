@@ -346,6 +346,8 @@ Thirteen distinct event types drive state transitions (§2.1–2.11, §2.13, §2
 
 **Effect:** Can clear the review gate when `len(outstanding) == 0` and at least one non-DISMISSED review exists. A DISMISSED review does not satisfy the `hasReviews` condition. Does not directly trigger a stage invocation.
 
+**The self-review escape hatch.** `hasReviews` does not check the review's author or state beyond "not DISMISSED" — a `COMMENTED` review submitted by the PR author itself satisfies it, even though GitHub forbids a PR author from *approving* their own PR. This is intentional, not an oversight: the advisory gate's real question is "has a human looked at this?", not "has a reviewer approved this?" (see §6.1.1 for the authoritative-mode distinction, which layers an approval requirement on top). On a repo with no reviewer ever requested — no CODEOWNERS, no review bot installed — a self-authored `COMMENTED` review is the supported manual way to clear an otherwise-unsatisfiable gate; `wait_for_reviews: false` is the supported stage-config setting for such a repo going forward. See `docs/USER_GUIDE.md`'s `wait_for_reviews` section for the operator-facing version of this note.
+
 ### 2.4 PR Review Threads with Feedback
 
 **Trigger:** Reviewers leave inline code comments on the linked PR in unresolved review threads. These are real GitHub comments with `DatabaseID`s.
@@ -1358,7 +1360,7 @@ When all outstanding requested reviewers are bots (detected via `ReviewRequest.I
 
 ### 6.1.1 `review_authority`: Verdict-Aware Clearing (Authoritative Mode)
 
-Everything in §6.1 describes **advisory** mode — the default, and the only mode that existed before ADR-1250. Advisory clears the gate on **existence**: `len(outstanding) == 0 && hasReviews`, regardless of what any review actually says. A `CHANGES_REQUESTED` review does not, by itself, block advancement; a required reviewer only needs to *submit*, not *approve*.
+Everything in §6.1 describes **advisory** mode — the default, and the only mode that existed before ADR-1250. Advisory clears the gate on **existence**: `len(outstanding) == 0 && hasReviews`, regardless of what any review actually says. A `CHANGES_REQUESTED` review does not, by itself, block advancement; a required reviewer only needs to *submit*, not *approve*. This is why advisory mode's self-review escape hatch (§2.3) works at all: a `COMMENTED` review from the PR author is existence, not approval, and GitHub permits self-`COMMENT` while forbidding self-approval. Authoritative mode (below) layers an approval requirement on top of existence — on a repo with no reviewer and no branch-protection review requirement, a self-review still clears authoritative mode's own-repo fallback verdict check (the "Fabrik's own fallback" bullet below), since that check only fails on an active `CHANGES_REQUESTED`, not on the reviewer's identity.
 
 `review_authority: authoritative` is a per-stage YAML opt-in (`stages.Stage.ReviewAuthority`, `{"", "advisory", "authoritative"}`, default `""`/advisory) that makes the same clearing branch additionally **verdict-aware**. It is orthogonal to Fabrik's autonomy controls (`yolo`/`cruise`/manual) — autonomy answers "does Fabrik proceed without a human clicking go?"; authority answers "what must be true before proceeding is allowed?" See [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
 

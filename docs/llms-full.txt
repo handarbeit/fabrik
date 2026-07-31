@@ -826,7 +826,10 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   auto-advance to be active. This loop repeats until no reviewers are
                           #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
-                          #   See §3 Pending Reviewer Gate for full details.
+                          #   If this repo has no reviewer to request (no CODEOWNERS, no review
+                          #   bot), set this to false — that is the supported setting rather than
+                          #   waiting on a gate that can never clear on its own. See §3 Pending
+                          #   Reviewer Gate for full details, including the self-review escape hatch.
 review_authority: advisory # Optional: advisory (default) | authoritative. Only meaningful alongside
                           #   wait_for_reviews: true. advisory clears the gate once reviewers have
                           #   responded, whatever they said. authoritative additionally requires no
@@ -1446,6 +1449,21 @@ fabrik --review-wait-timeout=30
 #### Restart Persistence
 
 The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
+
+#### No Reviewer Ever Requested
+
+`wait_for_reviews: true` assumes something will eventually request or submit a review — a human collaborator, CODEOWNERS, or a review bot. On a repo with none of those (a solo maintainer with no CODEOWNERS and no review bot installed, for example), no reviewer is ever requested, so the gate's dual condition can never clear on its own. Since GitHub forbids a PR author from approving their own PR, the gate can look unsatisfiable from the operator's side too.
+
+It isn't: **the gate's actual test is "has a human looked at this?", not "has a reviewer approved this?"** A `COMMENTED` review submitted by the PR author itself satisfies the gate — GitHub permits a self-`COMMENT` even though it forbids self-approval. This is the supported manual way to clear the gate when no other reviewer can respond.
+
+When the timeout elapses with no reviewer ever requested, Fabrik's pause comment says so plainly — it does not claim to have waited on "outstanding reviewers" that don't exist — and lists four ways to resume:
+
+1. Post a review on the PR yourself. A `COMMENTED` self-review satisfies the gate — unless the stage is `authoritative` and the repo requires approving reviews (branch protection reports `REVIEW_REQUIRED`), in which case an approval from another account is needed; see [Authoritative Mode](#authoritative-mode) below.
+2. Set `wait_for_reviews: false` in the stage YAML if this repo has no reviewer. This is the supported setting for a reviewer-less repo going forward, rather than repeatedly hitting this timeout.
+3. Merge the PR manually.
+4. Remove the `fabrik:paused` label to let the engine wait again (useful if a reviewer is actually expected and just hasn't gotten to it yet).
+
+Fabrik deliberately does not try to detect "no reviewer will ever respond" automatically (e.g. by inspecting CODEOWNERS or requested-reviewer history) — that signal can't distinguish "no reviewer exists" from "the reviewer is just slow or down," and guessing wrong in the direction of auto-advancing would merge an unreviewed PR. The gate stays loud-and-conservative; only the messaging tells you honestly what it knows.
 
 #### Authoritative Mode
 
@@ -3320,6 +3338,8 @@ Thirteen distinct event types drive state transitions (§2.1–2.11, §2.13, §2
 
 **Effect:** Can clear the review gate when `len(outstanding) == 0` and at least one non-DISMISSED review exists. A DISMISSED review does not satisfy the `hasReviews` condition. Does not directly trigger a stage invocation.
 
+**The self-review escape hatch.** `hasReviews` does not check the review's author or state beyond "not DISMISSED" — a `COMMENTED` review submitted by the PR author itself satisfies it, even though GitHub forbids a PR author from *approving* their own PR. This is intentional, not an oversight: the advisory gate's real question is "has a human looked at this?", not "has a reviewer approved this?" (see §6.1.1 for the authoritative-mode distinction, which layers an approval requirement on top). On a repo with no reviewer ever requested — no CODEOWNERS, no review bot installed — a self-authored `COMMENTED` review is the supported manual way to clear an otherwise-unsatisfiable gate; `wait_for_reviews: false` is the supported stage-config setting for such a repo going forward. See `docs/USER_GUIDE.md`'s `wait_for_reviews` section for the operator-facing version of this note.
+
 ### 2.4 PR Review Threads with Feedback
 
 **Trigger:** Reviewers leave inline code comments on the linked PR in unresolved review threads. These are real GitHub comments with `DatabaseID`s.
@@ -4332,7 +4352,7 @@ When all outstanding requested reviewers are bots (detected via `ReviewRequest.I
 
 ### 6.1.1 `review_authority`: Verdict-Aware Clearing (Authoritative Mode)
 
-Everything in §6.1 describes **advisory** mode — the default, and the only mode that existed before ADR-1250. Advisory clears the gate on **existence**: `len(outstanding) == 0 && hasReviews`, regardless of what any review actually says. A `CHANGES_REQUESTED` review does not, by itself, block advancement; a required reviewer only needs to *submit*, not *approve*.
+Everything in §6.1 describes **advisory** mode — the default, and the only mode that existed before ADR-1250. Advisory clears the gate on **existence**: `len(outstanding) == 0 && hasReviews`, regardless of what any review actually says. A `CHANGES_REQUESTED` review does not, by itself, block advancement; a required reviewer only needs to *submit*, not *approve*. This is why advisory mode's self-review escape hatch (§2.3) works at all: a `COMMENTED` review from the PR author is existence, not approval, and GitHub permits self-`COMMENT` while forbidding self-approval. Authoritative mode (below) layers an approval requirement on top of existence — on a repo with no reviewer and no branch-protection review requirement, a self-review still clears authoritative mode's own-repo fallback verdict check (the "Fabrik's own fallback" bullet below), since that check only fails on an active `CHANGES_REQUESTED`, not on the reviewer's identity.
 
 `review_authority: authoritative` is a per-stage YAML opt-in (`stages.Stage.ReviewAuthority`, `{"", "advisory", "authoritative"}`, default `""`/advisory) that makes the same clearing branch additionally **verdict-aware**. It is orthogonal to Fabrik's autonomy controls (`yolo`/`cruise`/manual) — autonomy answers "does Fabrik proceed without a human clicking go?"; authority answers "what must be true before proceeding is allowed?" See [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
 

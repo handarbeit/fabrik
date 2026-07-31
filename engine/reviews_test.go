@@ -97,6 +97,51 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 	}
 }
 
+func TestReviewTimeoutReason(t *testing.T) {
+	tests := []struct {
+		name            string
+		outstanding     []string
+		authorityReason string
+		wantContains    []string
+		wantExcludes    []string
+	}{
+		{
+			name:            "authorityReason takes precedence over everything else",
+			outstanding:     []string{"alice"},
+			authorityReason: "review authority is authoritative and CHANGES_REQUESTED is outstanding",
+			wantContains:    []string{"authoritative gate blocking:", "CHANGES_REQUESTED"},
+		},
+		{
+			name:         "outstanding reviewers named when present",
+			outstanding:  []string{"alice", "bob"},
+			wantContains: []string{"pending reviewers:", "alice", "bob"},
+			wantExcludes: []string{"authoritative gate blocking:", "bots"},
+		},
+		{
+			name:         "no reviewers requested states the three known facts, no bot speculation",
+			outstanding:  nil,
+			wantContains: []string{"no reviewers were requested", "no review has been received", "cannot determine whether one is coming"},
+			wantExcludes: []string{"bot", "authoritative gate blocking:", "pending reviewers:"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reviewTimeoutReason(tt.outstanding, tt.authorityReason)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("reviewTimeoutReason(%v, %q) = %q, want substring %q", tt.outstanding, tt.authorityReason, got, want)
+				}
+			}
+			for _, excl := range tt.wantExcludes {
+				if strings.Contains(strings.ToLower(got), strings.ToLower(excl)) {
+					t.Errorf("reviewTimeoutReason(%v, %q) = %q, must not contain %q", tt.outstanding, tt.authorityReason, got, excl)
+				}
+			}
+		})
+	}
+}
+
 // --- review-authority:<mode> label override (#1261) -----------------------
 
 func TestExtractReviewAuthorityOverride(t *testing.T) {
@@ -1400,6 +1445,51 @@ func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 	if !containsAll(body, "copilot-pull-request-reviewer", "bot", "alice", "human") {
 		t.Errorf("pause comment should list reviewers with bot/human tags; got:\n%s", body)
 	}
+	// Regression guard: when reviewers were requested, the message must keep
+	// its existing "outstanding reviewers" wording and must not bleed into
+	// the no-reviewers-requested remedies text (#1268).
+	if !strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("pause comment should still say 'outstanding reviewers' when reviewers were requested; got:\n%s", body)
+	}
+	if strings.Contains(body, "wait_for_reviews: false") {
+		t.Errorf("pause comment should not include the no-reviewers-requested remedies when reviewers were requested; got:\n%s", body)
+	}
+}
+
+// On a timeout where no reviewer was ever requested, the pause comment must
+// not claim to have waited on "outstanding reviewers" and must list the four
+// remedies, including the COMMENTED self-review hatch (#1268).
+func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 42,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true)}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("pause comment must not claim to wait on outstanding reviewers when none were requested; got:\n%s", body)
+	}
+	if !containsAll(body, "COMMENTED", "self-review", "wait_for_reviews: false", "merge", "fabrik:paused") {
+		t.Errorf("pause comment should list the four remedies including the COMMENTED self-review hatch; got:\n%s", body)
+	}
+	// Advisory mode (no ReviewAuthority set): a self-COMMENT is known to
+	// satisfy the gate outright, so the authoritative-mode caveat on remedy
+	// (a) must not appear — stating it here would assert something Fabrik
+	// doesn't actually know to be relevant (#1268 review thread).
+	if strings.Contains(body, "another account") {
+		t.Errorf("pause comment must not qualify the self-review remedy in advisory mode; got:\n%s", body)
+	}
 }
 
 // Authoritative-mode pause messaging must cover REVIEW_REQUIRED, not just an
@@ -1433,6 +1523,13 @@ func TestPauseForReviewTimeout_Authoritative_ReviewRequired_MentionsVerdict(t *t
 	if !strings.Contains(body, "REVIEW_REQUIRED") {
 		t.Errorf("expected pause comment to mention the REVIEW_REQUIRED verdict, got:\n%s", body)
 	}
+	// This is the exact scenario where advice (a)'s unqualified "a COMMENTED
+	// self-review satisfies the gate" would be actively wrong: branch
+	// protection requires an approving review, and a self-COMMENT (GitHub
+	// forbids self-approval) can never produce one (#1268 review thread).
+	if !strings.Contains(body, "another account") {
+		t.Errorf("pause comment must qualify the self-review remedy when authoritative mode requires approving reviews, got:\n%s", body)
+	}
 }
 
 // A FetchPRReviewDecision fetch error in the pause path must be surfaced in
@@ -1462,6 +1559,45 @@ func TestPauseForReviewTimeout_Authoritative_FetchError_MentionsUnreadableVerdic
 	body := client.addCommentCalls[0].body
 	if !strings.Contains(body, "could not be") {
 		t.Errorf("expected pause comment to mention the unreadable verdict, got:\n%s", body)
+	}
+	// The verdict is unknown, not confirmed non-blocking — Fabrik can't rule
+	// out that an approval requirement exists, so the self-review caveat
+	// must still be shown (#1268 review thread).
+	if !strings.Contains(body, "another account") {
+		t.Errorf("pause comment must qualify the self-review remedy when the verdict is unreadable, got:\n%s", body)
+	}
+}
+
+// Authoritative mode with a confirmed non-blocking verdict (no branch
+// protection review requirement configured) is the one case where Fabrik
+// positively knows a self-review will satisfy the gate — the caveat on
+// remedy (a) must not appear here, otherwise the message asserts an
+// authoritative-approval requirement that doesn't exist (#1268 review
+// thread).
+func TestPauseForReviewTimeout_Authoritative_NoRequirement_NoUnqualifiedCaveat(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", nil // no branch-protection review requirement configured
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "another account") {
+		t.Errorf("pause comment must not qualify the self-review remedy when authoritative mode has no active review requirement, got:\n%s", body)
 	}
 }
 
@@ -1504,6 +1640,125 @@ func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_MentionsVerdict(t *t
 	body := client.addCommentCalls[0].body
 	if !strings.Contains(body, "bob requested changes") {
 		t.Errorf("expected pause comment to mention the outstanding CHANGES_REQUESTED verdict resolved via the base:<branch> REST fallback, got:\n%s", body)
+	}
+	// Regression guard (#1268 review thread): bob submitted a review, so
+	// pendingLine is "" (he's no longer a requested reviewer) but a review
+	// did happen — the comment must not claim otherwise.
+	if strings.Contains(body, "no review has been submitted") || strings.Contains(body, "No reviewer was ever requested") {
+		t.Errorf("pause comment must not claim no review was submitted when bob's CHANGES_REQUESTED review exists, got:\n%s", body)
+	}
+}
+
+// A requested reviewer who submits a formal review (e.g. CHANGES_REQUESTED)
+// is dropped from GitHub's requested-reviewers list, so pendingLine goes back
+// to "" even though a review was submitted. This is the default-branch
+// GraphQL path (LinkedPRReviews populated directly, no REST fallback) — the
+// no-reviewers-requested branch must not fire here, since a review did
+// happen and the message would otherwise contradict the appended
+// authorityLine quoting that same review's verdict (#1268 review thread).
+func TestPauseForReviewTimeout_Authoritative_ReviewerRespondedButNotPending_NoFalseClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviewDecision called with PR #77, got #%d", prNumber)
+			}
+			return "", nil // no branch protection configured — exercises Fabrik's own fallback
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+		// LinkedPRReviewRequests intentionally empty: bob already submitted
+		// and is no longer outstanding.
+		LinkedPRReviews: []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED"}},
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "bob requested changes") {
+		t.Errorf("expected pause comment to mention the outstanding CHANGES_REQUESTED verdict, got:\n%s", body)
+	}
+	if strings.Contains(body, "no review has been submitted") || strings.Contains(body, "No reviewer was ever requested") {
+		t.Errorf("pause comment must not claim no review was submitted when bob's CHANGES_REQUESTED review exists, got:\n%s", body)
+	}
+	if strings.Contains(body, "wait_for_reviews: false") {
+		t.Errorf("pause comment should not offer the no-reviewer remedies when a review was actually submitted, got:\n%s", body)
+	}
+	// bob is no longer outstanding (he already responded), so the standard
+	// "waiting for outstanding reviewers" wording is also false here — a
+	// distinct claim from the two checked above (#1268 review thread,
+	// follow-up finding).
+	if strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("pause comment must not claim to wait on outstanding reviewers when bob already responded and nobody is pending, got:\n%s", body)
+	}
+	if !strings.Contains(body, "No reviewer is currently outstanding") {
+		t.Errorf("pause comment should state plainly that nobody is currently outstanding, got:\n%s", body)
+	}
+}
+
+// On a base:<branch> repo in authoritative mode, item.LinkedPRReviews is
+// structurally empty (see comment on the REST-fallback block in
+// pauseForReviewTimeout), so hasReviews must be resolved via a live
+// FetchPRReviews call. If that call fails, the failure must not be silently
+// swallowed into a stale hasReviews=false reading — that would trip the
+// no-reviewers-requested branch and falsely claim "no review has been
+// submitted" even though review state is actually unknown. The gate must
+// fail conservatively, exactly as checkReviewGate's own REST-fallback does
+// (#1268 review thread).
+func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_ReviewFetchFails_NoFalseClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, fmt.Errorf("simulated transient GitHub API failure")
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", nil // no branch protection configured — exercises Fabrik's own fallback
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review", "base:develop"},
+		LinkedPRNumber: 0, // structurally empty on a base:<branch> item
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "No reviewer was ever requested") || strings.Contains(body, "no review has been submitted") {
+		t.Errorf("pause comment must not assert no review was submitted when the review fetch itself failed, got:\n%s", body)
+	}
+	if strings.Contains(body, "wait_for_reviews: false") {
+		t.Errorf("pause comment should not offer the no-reviewer remedies when review state could not be determined, got:\n%s", body)
+	}
+	// Deliberate fallthrough: hasReviews is forced true defensively here (the
+	// fetch failed, so review state is unknown-but-possibly-present), but
+	// authorityLine is "" because the separate, successful reviewDecision
+	// fetch was evaluated against that same stale, empty review list and
+	// came back satisfied. The pendingLine=="" && hasReviews branch requires
+	// authorityLine != "" precisely so it never asserts a submitted review
+	// this ambiguous state can't actually confirm — it falls through to the
+	// standard message instead, an existing imprecision this change doesn't
+	// widen (#1268 review thread, follow-up finding).
+	if !strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("expected the standard fallback wording when review state is ambiguous, got:\n%s", body)
 	}
 }
 

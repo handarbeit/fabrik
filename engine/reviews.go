@@ -692,6 +692,24 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 	return false, true, true
 }
 
+// reviewTimeoutReason builds the log-only reason string for the pause
+// branch of checkAwaitingReviewTimeout. authorityReason, when non-empty,
+// takes precedence: the gate is blocking on an authoritative verdict, not a
+// plain review count. Otherwise, when reviewers are still outstanding, name
+// them. When neither applies, no reviewer was ever requested — state the
+// three things the engine actually knows (no reviewer requested, no review
+// received, can't determine if one is coming) instead of speculating about
+// bots that may not exist on this repo.
+func reviewTimeoutReason(outstanding []string, authorityReason string) string {
+	if authorityReason != "" {
+		return "authoritative gate blocking: " + authorityReason
+	}
+	if len(outstanding) > 0 {
+		return "pending reviewers: " + strings.Join(outstanding, ", ")
+	}
+	return "no reviewers were requested, no review has been received, and Fabrik cannot determine whether one is coming"
+}
+
 // checkAwaitingReviewTimeout implements the fabrik:awaiting-review timeout
 // check: once ReviewWaitTimeout has elapsed since the label was applied, it
 // either fires Phase 1 of the bot-reviewer escalation ladder (re-prompting
@@ -706,8 +724,9 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 // verdict check blocked (see reviewGateAuthorityVerdict) — i.e. outstanding is
 // empty and reviews exist, but the verdict itself isn't satisfied. When set,
 // it is used verbatim as the pause reason instead of the generic
-// "pending reviewers"/"no reviews submitted yet" messages, which would
-// otherwise misleadingly suggest nobody has reviewed at all.
+// "pending reviewers"/"no reviewers were requested" messages built by
+// reviewTimeoutReason, which would otherwise misleadingly suggest nobody has
+// reviewed at all.
 func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
@@ -762,14 +781,7 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 		}
 
 		// Mixed/pure-human or no PR number: existing pause behavior.
-		var reason string
-		if authorityReason != "" {
-			reason = "authoritative gate blocking: " + authorityReason
-		} else if len(outstanding) > 0 {
-			reason = "pending reviewers: " + strings.Join(outstanding, ", ")
-		} else {
-			reason = "no reviews submitted yet (bots may not have responded)"
-		}
+		reason := reviewTimeoutReason(outstanding, authorityReason)
 		e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — %s\n", reason)
 		e.removeAwaitingReviewLabel(owner, repo, item)
 		return false, true, true
@@ -899,11 +911,20 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			stage.Name, botList, prRef, stage.Name, prRef,
 		)
 	} else {
-		// Standard timeout message with named reviewers.
+		// Standard timeout: branches below on whether any reviewer was ever
+		// requested (pendingLine == "" means none was) AND whether any review
+		// has actually been submitted. pendingLine alone is not sufficient:
+		// once a requested reviewer submits a formal review (e.g.
+		// CHANGES_REQUESTED), GitHub drops them from the requested-reviewers
+		// list, so pendingLine goes back to "" even though a review exists.
+		// That combination is reachable in authoritative mode, where the gate
+		// can still be blocking on that review's verdict — see #1268 review
+		// thread.
 		pendingLine := ""
 		if len(reviewerParts) > 0 {
 			pendingLine = "\n\nPending reviewers: " + strings.Join(reviewerParts, ", ")
 		}
+		_, hasReviews := reviewGateOutstanding(item.LinkedPRReviewRequests, item.LinkedPRReviews)
 		// Authoritative-mode context: live-fetch the verdict and reuse the same
 		// reviewGateAuthorityVerdict pure function both gate sites consult, so
 		// this message can never disagree with why the gate is actually
@@ -925,6 +946,17 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 					prNumber = pr.Number
 					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 						reviews = restReviews
+						_, hasReviews = reviewGateOutstanding(nil, reviews)
+					} else {
+						// Conservative, matching checkReviewGate's failure handling:
+						// a transient fetch failure must not leave hasReviews at its
+						// stale item.LinkedPRReviews reading (always empty on this
+						// base:<branch> path) and fall into the no-reviewer-requested
+						// branch below, which would assert "no review has been
+						// submitted" — a claim we can no longer support. Treat review
+						// state as unknown-but-possibly-present instead.
+						e.logf(item.Number, "warn", "pauseForReviewTimeout: FetchPRReviews failed: %v\n", err)
+						hasReviews = true
 					}
 				}
 			}
@@ -944,11 +976,84 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 				}
 			}
 		}
-		msg = fmt.Sprintf(
-			"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
-				"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
-			stage.Name, pendingLine, authorityLine,
-		)
+		if pendingLine == "" && !hasReviews {
+			// No reviewer was ever requested on this PR, and no review has
+			// been submitted either — waiting longer cannot satisfy the gate.
+			// Say so plainly instead of claiming a wait on "outstanding
+			// reviewers" that don't exist, and offer the same remedies as
+			// Phase 2. The !hasReviews check matters: in authoritative mode a
+			// reviewer who submitted a formal review is no longer "pending"
+			// (pendingLine goes back to ""), but a review did happen — that
+			// case must fall through to the other branch below instead of
+			// falsely claiming none was submitted.
+			prRef := "the linked PR"
+			if item.LinkedPRNumber > 0 {
+				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
+			}
+			// The self-review caveat is only true when Fabrik actually knows
+			// (or can't rule out) that a self-COMMENT won't be enough: that's
+			// exactly when authorityLine is non-empty — authoritative mode is
+			// active and currently blocking, whether because branch
+			// protection requires an approval or because the verdict
+			// couldn't be read. When authorityLine is empty (advisory mode,
+			// or authoritative with a confirmed non-blocking verdict), a
+			// self-review is known to satisfy the gate outright, so stating
+			// the caveat would contradict the PR's own "say what Fabrik
+			// actually knows to be true right now" goal (#1268 review
+			// thread).
+			selfReviewCaveat := ""
+			if authorityLine != "" {
+				selfReviewCaveat = ", unless this stage is `authoritative` and the repo requires approving reviews, " +
+					"in which case an approval from another account is needed"
+			}
+			msg = fmt.Sprintf(
+				"🏭 **Fabrik — review wait timeout**\n\n"+
+					"The review gate for stage **%s** timed out. No reviewer was ever requested on %s, and no review "+
+					"has been submitted — Fabrik cannot determine whether one is ever coming.%s\n\n"+
+					"Fabrik has paused this issue. To resume, either:\n"+
+					"- (a) post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
+					"the gate, even though GitHub forbids self-approval%s,\n"+
+					"- (b) set `wait_for_reviews: false` in the %s stage YAML if this repo has no reviewer,\n"+
+					"- (c) merge %s manually, or\n"+
+					"- (d) remove `fabrik:paused` to let the engine wait again.",
+				stage.Name, prRef, authorityLine, prRef, selfReviewCaveat, stage.Name, prRef,
+			)
+		} else if pendingLine == "" && hasReviews && authorityLine != "" {
+			// No reviewer is currently outstanding, but a review does exist —
+			// either a formerly-requested reviewer already responded (and was
+			// dropped from the requested-reviewers list), or a self-review was
+			// submitted by the PR author. Either way, nobody is "outstanding"
+			// right now, so the standard message below (which literally says
+			// "waiting for outstanding reviewers") would be false. Requiring
+			// authorityLine != "" keeps this branch's "does not satisfy" claim
+			// something Fabrik can actually back up: hasReviews can also be
+			// true defensively (the FetchPRReviews-failure fallback above
+			// treats review state as unknown-but-possibly-present, not
+			// confirmed), in which case authorityLine may still be "" if the
+			// separate reviewDecision fetch succeeded against that same stale,
+			// empty review list — falling through to the standard branch below
+			// rather than asserting a submitted review this branch can't
+			// actually confirm (#1268 review thread).
+			prRef := "the linked PR"
+			if item.LinkedPRNumber > 0 {
+				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
+			}
+			msg = fmt.Sprintf(
+				"🏭 **Fabrik — review wait timeout**\n\n"+
+					"The review gate for stage **%s** timed out. No reviewer is currently outstanding on %s — a review "+
+					"has already been submitted, but it does not satisfy this stage's authoritative requirement.%s\n\n"+
+					"Fabrik has paused this issue. Please check the review status on %s, address any outstanding "+
+					"feedback, and then remove the `fabrik:paused` label to resume.",
+				stage.Name, prRef, authorityLine, prRef,
+			)
+		} else {
+			// Standard timeout message with named reviewers — unchanged.
+			msg = fmt.Sprintf(
+				"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
+					"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
+				stage.Name, pendingLine, authorityLine,
+			)
+		}
 	}
 
 	e.pauseIssue(item, msg, pauseOpts{
