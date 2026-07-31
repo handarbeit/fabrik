@@ -290,6 +290,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		BaseBranch:     baseBranch,
 		FabrikRoot:     fabrikRoot,
 		PRNumber:       prNumber,
+		FabrikRepo:     e.defaultRepo(),
 	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]

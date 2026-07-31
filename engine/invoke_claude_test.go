@@ -1256,12 +1256,13 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 
 // TestInvokeClaude_FabrikEnvVarsInjected covers #1288: the five FABRIK_*
 // invocation facts injected into the worker environment via buildClaudeEnv.
-// FABRIK_ISSUE/FABRIK_REPO/FABRIK_WORKTREE are derived directly from the
-// issue/workDir InvokeClaude already receives; FABRIK_ROOT/FABRIK_PR come
-// from InvokeOptions (as resolved by the caller's resolveFabrikEnvOpts,
-// covered separately in fabrik_env_test.go). "Absent is absent, never a
-// misleading zero" is asserted directly by checking FABRIK_PR is entirely
-// absent from the env, not merely unequal to some value.
+// FABRIK_ISSUE/FABRIK_WORKTREE are derived directly from the issue/workDir
+// InvokeClaude already receives; FABRIK_REPO prefers issue.Repo but falls
+// back to opts.FabrikRepo (see the "falls back" subtest below); FABRIK_ROOT/
+// FABRIK_PR come from InvokeOptions (as resolved by the caller's
+// resolveFabrikEnvOpts, covered separately in fabrik_env_test.go). "Absent is
+// absent, never a misleading zero" is asserted directly by checking FABRIK_PR
+// is entirely absent from the env, not merely unequal to some value.
 func TestInvokeClaude_FabrikEnvVarsInjected(t *testing.T) {
 	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
@@ -1332,7 +1333,8 @@ printf '%%s\n' '{"result":"fabrik env test\nFABRIK_STAGE_COMPLETE\n","session_id
 
 	t.Run("FABRIK_REPO reflects the item's repo, not a default", func(t *testing.T) {
 		issue := gh.ProjectItem{Number: 1290, Repo: "other-owner/other-repo", Title: "Multi-repo test"}
-		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		opts := InvokeOptions{FabrikRepo: "should-not-be-used/default-repo"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
 		if err != nil {
 			t.Fatalf("InvokeClaude: %v", err)
 		}
@@ -1343,6 +1345,42 @@ printf '%%s\n' '{"result":"fabrik env test\nFABRIK_STAGE_COMPLETE\n","session_id
 		env := string(data)
 		if !strings.Contains(env, "FABRIK_REPO=other-owner/other-repo") {
 			t.Errorf("expected FABRIK_REPO=other-owner/other-repo in env, got:\n%s", env)
+		}
+		if strings.Contains(env, "should-not-be-used") {
+			t.Errorf("expected opts.FabrikRepo to be ignored when issue.Repo is set, got:\n%s", env)
+		}
+	})
+
+	t.Run("FABRIK_REPO falls back to opts.FabrikRepo when issue.Repo is empty", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1291, Title: "Bare item, no Repo backfilled yet"}
+		opts := InvokeOptions{FabrikRepo: "owner/default-repo"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "FABRIK_REPO=owner/default-repo") {
+			t.Errorf("expected FABRIK_REPO=owner/default-repo (fallback) in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("FABRIK_REPO entirely absent when both issue.Repo and opts.FabrikRepo are empty", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1292, Title: "No repo info at all"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if strings.Contains(env, "FABRIK_REPO=") {
+			t.Errorf("expected FABRIK_REPO to be entirely absent, got:\n%s", env)
 		}
 	})
 }

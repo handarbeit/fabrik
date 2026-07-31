@@ -578,13 +578,17 @@ func commentMaxTurns(stage *stages.Stage) int {
 //   - CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 (adaptive thinking disabled)
 //   - CLAUDE_CODE_EFFORT_LEVEL=high (high thinking effort)
 //
-// FABRIK_* invocation facts (#1288): FABRIK_ISSUE, FABRIK_REPO, and FABRIK_WORKTREE
-// are derived directly from issue/workDir (always present when those are non-zero/
-// non-empty). FABRIK_ROOT and FABRIK_PR come from opts, resolved by the caller's
-// Engine-level resolveFabrikEnvOpts (repo.go) since buildClaudeEnv itself has no
-// access to fabrikDir or the GitHub client. FABRIK_PR is omitted entirely — never
-// emitted as "0" — when opts.PRNumber is 0, so a naive consumer never mistakes
-// "no PR yet" for a real PR number.
+// FABRIK_* invocation facts (#1288): FABRIK_ISSUE and FABRIK_WORKTREE are derived
+// directly from issue.Number/workDir — both are guaranteed non-zero/non-empty on
+// every real invocation (an empty workDir would break the invocation itself, since
+// it also becomes cmd.Dir). FABRIK_REPO prefers issue.Repo, falling back to
+// opts.FabrikRepo (the caller's e.defaultRepo()) only for the rare item that
+// reaches here before a deep-fetch has backfilled issue.Repo, so the "always
+// present" guarantee holds even then. FABRIK_ROOT and FABRIK_PR come from opts,
+// resolved by the caller's Engine-level resolveFabrikEnvOpts (repo.go) since
+// buildClaudeEnv itself has no access to fabrikDir or the GitHub client. FABRIK_PR
+// is omitted entirely — never emitted as "0" — when opts.PRNumber is 0, so a naive
+// consumer never mistakes "no PR yet" for a real PR number.
 func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, opts InvokeOptions) []string {
 	var env []string
 	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
@@ -608,8 +612,12 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	}
 
 	env = append(env, "FABRIK_ISSUE="+strconv.Itoa(issue.Number))
-	if issue.Repo != "" {
-		env = append(env, "FABRIK_REPO="+issue.Repo)
+	fabrikRepo := issue.Repo
+	if fabrikRepo == "" {
+		fabrikRepo = opts.FabrikRepo
+	}
+	if fabrikRepo != "" {
+		env = append(env, "FABRIK_REPO="+fabrikRepo)
 	}
 	if workDir != "" {
 		env = append(env, "FABRIK_WORKTREE="+workDir)

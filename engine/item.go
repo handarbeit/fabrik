@@ -985,6 +985,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		CorrectiveHint: e.consumeStallHint(repoStr, item.Number, stage.Name),
 		FabrikRoot:     fabrikRoot,
 		PRNumber:       prNumber,
+		FabrikRepo:     e.defaultRepo(),
 	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
