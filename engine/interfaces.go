@@ -94,6 +94,14 @@ type InvokeOptions struct {
 	// Set by consumeStallHint when a stall was detected on the stage's previous
 	// incomplete attempt (a turn-capped run followed by one using fewer turns).
 	CorrectiveHint string
+	// FabrikRoot is the absolute path to fabrikDir (where .fabrik/ config, stages,
+	// and plugin live), exported to the worker as FABRIK_ROOT (#1288). Empty means
+	// omit the variable entirely.
+	FabrikRoot string
+	// PRNumber is the resolved linked-PR number, exported to the worker as
+	// FABRIK_PR (#1288). 0 means "no PR" — buildClaudeEnv omits the variable
+	// entirely rather than emitting a misleading FABRIK_PR=0.
+	PRNumber int
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.

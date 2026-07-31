@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // parseOwnerRepo splits a "owner/repo" string into its two components.
@@ -74,4 +75,40 @@ func parseIssueKey(key, defaultOwner, defaultRepo string) (owner, repo string, i
 		return defaultOwner, defaultRepo, n
 	}
 	return o, r, n
+}
+
+// resolveFabrikEnvOpts resolves the two InvokeOptions fields (#1288) that
+// require Engine-only state — FabrikRoot and PRNumber — so every
+// InvokeOptions-constructing call site can compute them identically instead
+// of each independently reimplementing (and risking drift on) the PR
+// resolution logic.
+//
+// PRNumber resolution mirrors handleBrokenReviewLinkage's exact filter
+// (reviews.go): item.LinkedPRNumber is trusted when non-zero; otherwise, and
+// only when a PR could plausibly exist yet (stage.PostToPR || stage.CreateDraftPR
+// — false for Specify/Research/Plan in the default stage set, so those stages
+// never pay for a lookup that can't succeed), FetchLinkedPR is consulted via
+// REST. This is required because closedByPullRequestsReferences (the GraphQL
+// field LinkedPRNumber is sourced from) is structurally empty on a
+// base:<branch> repo. A result that errors, is nil, or isn't an open,
+// unmerged PR is treated as "no PR" — non-fatal, logged at warn, never
+// blocking the invocation — so FABRIK_PR never shows a PR the review gate
+// itself would discount.
+func (e *Engine) resolveFabrikEnvOpts(item gh.ProjectItem, stage *stages.Stage) (fabrikRoot string, prNumber int) {
+	fabrikRoot = e.fabrikDir
+
+	prNumber = item.LinkedPRNumber
+	if prNumber != 0 || !(stage.PostToPR || stage.CreateDraftPR) {
+		return fabrikRoot, prNumber
+	}
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+	if err != nil || pr == nil || pr.Number == 0 || pr.State != "open" || pr.Merged {
+		if err != nil {
+			e.logf(item.Number, "warn", "resolveFabrikEnvOpts: FetchLinkedPR failed: %v\n", err)
+		}
+		return fabrikRoot, 0
+	}
+	return fabrikRoot, pr.Number
 }
