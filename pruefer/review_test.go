@@ -385,6 +385,37 @@ func TestReviewPR_ExcludedPath_Skipped(t *testing.T) {
 	}
 }
 
+// TestReviewPR_ForceReview_AllPathsExcluded_MarksProcessed is the
+// SkipExcludedPath analog of TestReviewPR_ForceReview_StillTooLarge_
+// MarksProcessedWithoutDuplicateNotice: a forced "/pruefer review" against a
+// PR whose every touched path matches excluded_paths must still mark the
+// command processed, not just acknowledged — otherwise there is no notice
+// (unlike the too-large path) to serve as a durable "nothing to do here"
+// signal, and the command would be re-acknowledged and re-skipped on every
+// poll forever.
+func TestReviewPR_ForceReview_AllPathsExcluded_MarksProcessed(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = "diff --git a/docs/readme.md b/docs/readme.md\n+change\n"
+	client.comments = []gh.Comment{{DatabaseID: 1, Body: "/pruefer review"}}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"docs/*"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
+		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath", outcome)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("excluded-path PR must skip before cloning or invoking claude")
+	}
+	reviewComment := client.comments[0]
+	if !reviewComment.HasReaction("EYES") || !reviewComment.HasReaction("ROCKET") {
+		t.Errorf("review command reactions = %+v, want both EYES and ROCKET (seen and processed, even though nothing was reviewable)", reviewComment.Reactions)
+	}
+}
+
 // oversizedDiff builds a two-file diff: a small, always-reviewable
 // engine/claude.go change, plus a "corpus" file whose body alone is
 // bloatBytes long — standing in for the issue's 17 MB JSONL corpus.

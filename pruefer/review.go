@@ -126,6 +126,16 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	kept, excluded := filterExcludedPaths(files, cfg.ExcludedPaths)
 	if len(cfg.ExcludedPaths) > 0 && len(files) > 0 && len(kept) == 0 {
 		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
+		if forceReview {
+			// The forced re-check happened and every touched file is
+			// excluded — there's nothing to review. Mark the command
+			// processed so it isn't re-acknowledged and re-skipped forever;
+			// unlike the too-large path there's no notice to act as the
+			// durable "nothing to do here" signal, so this is the only one.
+			if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
+				logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+			}
+		}
 		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
 	}
 
