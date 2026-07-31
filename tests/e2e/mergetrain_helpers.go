@@ -5,6 +5,8 @@ package e2e
 import (
 	"encoding/base64"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -289,28 +291,71 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 	}
 }
 
-// waitForPRClosedNotMerged polls until the PR reaches a terminal state, up to
-// timeout. Fails immediately on MERGED — for callers that need the stricter
-// "landed via a separate PR, not by GitHub merging this one" contract (e.g.
-// the merge-train's close-not-merge landing of a member's own PR), where
-// waitForPRClosed's permissive CLOSED-or-MERGED semantics would silently
-// accept the wrong outcome.
-func waitForPRClosedNotMerged(t *testing.T, env *Env, repo string, prNumber int, timeout time.Duration) {
+// landedPRPattern matches the engine-posted "landed" comment both landing
+// paths post on the member's OWN PR (engine/merge_train.go: landSingleton's
+// "Landed one-at-a-time via singleton PR #%d." and landMergeTrainBatch's
+// "Landed via batch PR #%d."), capturing the distinct integration/singleton
+// PR number the change actually landed through.
+var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton) PR #(\d+)\.`)
+
+// waitForLandingPRNumber polls the member's own PR comments (memberPRNum) for
+// the engine's "landed via ..." comment and returns the distinct
+// integration/singleton PR number it cites. This is scoped to the specific
+// member PR, so — unlike log scanning or WaitForIntegrationPR's repo-wide
+// "most recently created" search — it stays correct under t.Parallel()
+// execution where sibling merge-train scenarios land unrelated batches
+// concurrently in the same repo.
+//
+// This does depend on the engine's landed-comment AddComment call succeeding
+// (engine/merge_train.go:1817/:812 log a warn and move on if it fails — it is
+// not retried). That is the same best-effort-comment dependency
+// WaitForIssueComment/WaitForPRCommentContaining already carry for other
+// merge-train e2e scenarios (e.g. the "merge-train — ejected" and "runaway
+// guard tripped" comments), so this is not a new class of flakiness for the
+// suite. On timeout, check the bed log around this member's landing for
+// "warn: could not post landed comment on PR #<memberPRNum>" — if present,
+// the failure is this known-benign comment-post gap, not a stuck landing.
+//
+// No test-only fallback covers both landing paths reliably, so none is
+// implemented here — see #1275 (engine-side retry of this AddComment call,
+// the actual fix) for why: closedByPullRequestsReferences on the member
+// issue can't substitute because landSingleton's own landing-PR body says
+// "Lands #%d", not "Closes #%d" (engine/merge_train.go:778), so it never
+// registers as a closing PR reference for that path; and bed-log scanning
+// isn't member-scoped for the batch path's "merged integration PR #%d for
+// %s" (engine/merge_train.go:1786, repo-only — ambiguous under concurrent
+// merge-train activity), even though landSingleton's own log line happens to
+// be ("merged singleton landing PR #%d for #%d", engine/merge_train.go:796).
+func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int, timeout time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-			"--json", "state", "--jq", ".state")
+		bodies, err := tryPRComments(env, repo, memberPRNum)
 		if err == nil {
-			switch strings.TrimSpace(out) {
-			case "CLOSED":
-				return
-			case "MERGED":
-				t.Fatalf("member PR #%d on %s was MERGED, want CLOSED (should land via a separate integration/singleton PR, not by merging the member's own PR)", prNumber, repo)
+			// Comments come back oldest-first; take the LAST match rather than
+			// the first so a restart-driven repost of the landed comment (or
+			// any other duplicate) yields the most recent — and therefore
+			// authoritative — landing PR number, not a stale one from an
+			// earlier partial run.
+			found := 0
+			for _, b := range bodies {
+				if m := landedPRPattern.FindStringSubmatch(b); m != nil {
+					if n, aerr := strconv.Atoi(m[1]); aerr == nil && n > 0 {
+						found = n
+					}
+				}
 			}
+			if found > 0 {
+				return found
+			}
+		} else {
+			t.Logf("waitForLandingPRNumber: transient error reading PR #%d comments on %s: %v (will retry)", memberPRNum, repo, err)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("member PR #%d on %s not closed within %s (last state: %q, err: %v)", prNumber, repo, timeout, strings.TrimSpace(out), err)
+			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v) — "+
+				"if the bed log shows \"warn: could not post landed comment on PR #%d\" around this landing, "+
+				"the engine's best-effort comment post failed transiently (not retried, tracked as #1275); this "+
+				"is a known, non-regression false failure — re-run the test", memberPRNum, repo, err, memberPRNum)
 		}
 		time.Sleep(10 * time.Second)
 	}
@@ -325,7 +370,7 @@ func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 		t.Fatalf("could not read state of integration PR #%d: %v\n%s", prNumber, err, out)
 	}
 	if got := strings.TrimSpace(out); got != "MERGED" {
-		t.Fatalf("integration PR #%d state = %q, want MERGED (batch did not land atomically)", prNumber, got)
+		t.Fatalf("integration/singleton PR #%d state = %q, want MERGED (did not land atomically)", prNumber, got)
 	}
 }
 
