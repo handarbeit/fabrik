@@ -946,6 +946,16 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 						reviews = restReviews
 						_, hasReviews = reviewGateOutstanding(nil, reviews)
+					} else {
+						// Conservative, matching checkReviewGate's failure handling:
+						// a transient fetch failure must not leave hasReviews at its
+						// stale item.LinkedPRReviews reading (always empty on this
+						// base:<branch> path) and fall into the no-reviewer-requested
+						// branch below, which would assert "no review has been
+						// submitted" — a claim we can no longer support. Treat review
+						// state as unknown-but-possibly-present instead.
+						e.logf(item.Number, "warn", "pauseForReviewTimeout: FetchPRReviews failed: %v\n", err)
+						hasReviews = true
 					}
 				}
 			}

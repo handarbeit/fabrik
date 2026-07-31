@@ -1642,6 +1642,51 @@ func TestPauseForReviewTimeout_Authoritative_ReviewerRespondedButNotPending_NoFa
 	}
 }
 
+// On a base:<branch> repo in authoritative mode, item.LinkedPRReviews is
+// structurally empty (see comment on the REST-fallback block in
+// pauseForReviewTimeout), so hasReviews must be resolved via a live
+// FetchPRReviews call. If that call fails, the failure must not be silently
+// swallowed into a stale hasReviews=false reading — that would trip the
+// no-reviewers-requested branch and falsely claim "no review has been
+// submitted" even though review state is actually unknown. The gate must
+// fail conservatively, exactly as checkReviewGate's own REST-fallback does
+// (#1268 review thread).
+func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_ReviewFetchFails_NoFalseClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, fmt.Errorf("simulated transient GitHub API failure")
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", nil // no branch protection configured — exercises Fabrik's own fallback
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review", "base:develop"},
+		LinkedPRNumber: 0, // structurally empty on a base:<branch> item
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "No reviewer was ever requested") || strings.Contains(body, "no review has been submitted") {
+		t.Errorf("pause comment must not assert no review was submitted when the review fetch itself failed, got:\n%s", body)
+	}
+	if strings.Contains(body, "wait_for_reviews: false") {
+		t.Errorf("pause comment should not offer the no-reviewer remedies when review state could not be determined, got:\n%s", body)
+	}
+}
+
 // removeAwaitingReviewLabel also removes the fabrik:bot-reprompted label.
 func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 	client := &mockGitHubClient{}
