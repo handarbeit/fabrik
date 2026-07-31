@@ -1693,6 +1693,16 @@ func TestPauseForReviewTimeout_Authoritative_ReviewerRespondedButNotPending_NoFa
 	if strings.Contains(body, "wait_for_reviews: false") {
 		t.Errorf("pause comment should not offer the no-reviewer remedies when a review was actually submitted, got:\n%s", body)
 	}
+	// bob is no longer outstanding (he already responded), so the standard
+	// "waiting for outstanding reviewers" wording is also false here — a
+	// distinct claim from the two checked above (#1268 review thread,
+	// follow-up finding).
+	if strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("pause comment must not claim to wait on outstanding reviewers when bob already responded and nobody is pending, got:\n%s", body)
+	}
+	if !strings.Contains(body, "No reviewer is currently outstanding") {
+		t.Errorf("pause comment should state plainly that nobody is currently outstanding, got:\n%s", body)
+	}
 }
 
 // On a base:<branch> repo in authoritative mode, item.LinkedPRReviews is
@@ -1737,6 +1747,18 @@ func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_ReviewFetchFails_NoF
 	}
 	if strings.Contains(body, "wait_for_reviews: false") {
 		t.Errorf("pause comment should not offer the no-reviewer remedies when review state could not be determined, got:\n%s", body)
+	}
+	// Deliberate fallthrough: hasReviews is forced true defensively here (the
+	// fetch failed, so review state is unknown-but-possibly-present), but
+	// authorityLine is "" because the separate, successful reviewDecision
+	// fetch was evaluated against that same stale, empty review list and
+	// came back satisfied. The pendingLine=="" && hasReviews branch requires
+	// authorityLine != "" precisely so it never asserts a submitted review
+	// this ambiguous state can't actually confirm — it falls through to the
+	// standard message instead, an existing imprecision this change doesn't
+	// widen (#1268 review thread, follow-up finding).
+	if !strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("expected the standard fallback wording when review state is ambiguous, got:\n%s", body)
 	}
 }
 

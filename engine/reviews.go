@@ -1017,6 +1017,34 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 					"- (d) remove `fabrik:paused` to let the engine wait again.",
 				stage.Name, prRef, authorityLine, prRef, selfReviewCaveat, stage.Name, prRef,
 			)
+		} else if pendingLine == "" && hasReviews && authorityLine != "" {
+			// No reviewer is currently outstanding, but a review does exist —
+			// either a formerly-requested reviewer already responded (and was
+			// dropped from the requested-reviewers list), or a self-review was
+			// submitted by the PR author. Either way, nobody is "outstanding"
+			// right now, so the standard message below (which literally says
+			// "waiting for outstanding reviewers") would be false. Requiring
+			// authorityLine != "" keeps this branch's "does not satisfy" claim
+			// something Fabrik can actually back up: hasReviews can also be
+			// true defensively (the FetchPRReviews-failure fallback above
+			// treats review state as unknown-but-possibly-present, not
+			// confirmed), in which case authorityLine may still be "" if the
+			// separate reviewDecision fetch succeeded against that same stale,
+			// empty review list — falling through to the standard branch below
+			// rather than asserting a submitted review this branch can't
+			// actually confirm (#1268 review thread).
+			prRef := "the linked PR"
+			if item.LinkedPRNumber > 0 {
+				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
+			}
+			msg = fmt.Sprintf(
+				"🏭 **Fabrik — review wait timeout**\n\n"+
+					"The review gate for stage **%s** timed out. No reviewer is currently outstanding on %s — a review "+
+					"has already been submitted, but it does not satisfy this stage's authoritative requirement.%s\n\n"+
+					"Fabrik has paused this issue. Please check the review status on %s, address any outstanding "+
+					"feedback, and then remove the `fabrik:paused` label to resume.",
+				stage.Name, prRef, authorityLine, prRef,
+			)
 		} else {
 			// Standard timeout message with named reviewers — unchanged.
 			msg = fmt.Sprintf(
