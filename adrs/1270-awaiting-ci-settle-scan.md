@@ -112,8 +112,21 @@ CI-fix reinvoke or a double-incremented `CIFixCycles` counter. Since `fabrik:awa
 `stage:X:complete` are mutually exclusive in steady state (the label is cleared in the same call that
 adds the completion label), narrowing the gate to `hasComplete`-only makes the partition exhaustive:
 every `awaiting-ci` item is `!hasComplete`, so it is *always* routed to the dedicated scan and *never*
-to the main loop, until the gate clears. This is a structural guarantee, not a runtime race avoided by
-convention — `TestSettleAwaitingCIScan_NoDoubleDispatch` pins it directly.
+to the main loop, until the gate clears.
+
+**Caveat found in PR review (pruefer):** the partition is exhaustive in steady state only, not
+atomically. `addCompleteLabelAndRemoveCI` adds `stage:X:complete` and removes `fabrik:awaiting-ci` via
+two separate GitHub API calls; if the removal call fails transiently, both labels persist for one poll,
+routing the item to both paths in the same pass. The CI-fix-reinvoke *dispatch* genuinely cannot
+double-fire in that window — `dispatchWithCycleLimit`'s `snap.Worker() != nil` guard is applied
+synchronously before the reinvoke goroutine starts, so the second pass sees it and skips
+(`TestSettleAwaitingCIScan_NoDoubleDispatch` pins this). The pause-at-cycle-limit and CI-wait-timeout
+branches have no equivalent guard, so this narrow, self-healing race can produce a duplicate pause
+comment — cosmetic, not state-corrupting or stranding —
+(`TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment` pins the
+current behavior). Closing this fully would mean giving `pauseIssue` its own idempotency guard, shared
+by 11 other `pauseFor*`/`escalate*` callers — out of proportion with this issue's scope, and tracked
+here rather than silently claimed away.
 
 ### Why not fix `itemMayNeedWork`'s `HoldingStage`/`Unmanaged` exclusion instead?
 

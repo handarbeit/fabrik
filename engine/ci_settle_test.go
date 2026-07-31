@@ -409,3 +409,64 @@ func TestSettleAwaitingCIScan_SkipsPausedAndClosedItems(t *testing.T) {
 		}
 	}
 }
+
+// TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment
+// is a PR-review regression (pruefer): addCompleteLabelAndRemoveCI (ci.go) adds
+// stage:X:complete and removes fabrik:awaiting-ci via two SEPARATE GitHub API
+// calls. If the removal call fails transiently (rate limit, network blip)
+// after the add succeeds, both labels persist simultaneously on GitHub for one
+// poll — which, because hasComplete is computed independently in each
+// admission path, routes the SAME item through both the main catch-up loop
+// (admitted via hasComplete=true) and settleAwaitingCIScan (admitted via
+// fabrik:awaiting-ci still present) in that one poll. Two direct
+// settleAwaitingCIScan calls stand in for "main loop pass, then dedicated scan
+// pass" here — both ultimately just run catchUpPhase1Handlers against the same
+// hasComplete=true phase1Ctx, so this is a faithful proxy without needing to
+// reproduce the exact deepFetchCandidates admission machinery.
+//
+// The CI-fix-reinvoke *dispatch* branch cannot double-fire here —
+// dispatchWithCycleLimit's snap.Worker() != nil guard is applied synchronously
+// before the reinvoke goroutine starts (reinvoke.go), which
+// TestSettleAwaitingCIScan_NoDoubleDispatch already pins directly. This test
+// covers the OTHER branch: with MaxCiFixCycles=0, cycleCount (0) >= maxCycles
+// (0) is true from the first pass, so dispatchWithCycleLimit takes the
+// pause() branch instead of dispatch() — and pauseForCIFixCycleLimit does not
+// set Worker(), so the guard does not protect it. This pins the actual,
+// current, imperfect behavior (two duplicate pause comments in this exact
+// race window) rather than asserting a stronger guarantee than the code
+// provides. The gap is accepted as a narrow, self-healing (the stale
+// fabrik:awaiting-ci is retried and removed on the very next poll),
+// cosmetic-only (no state corruption, no stranding — the issue's core
+// acceptance criteria are unaffected) residual, documented in
+// adrs/1270-awaiting-ci-settle-scan.md rather than silently claimed away. If
+// this count changes, it means dispatchWithCycleLimit's pause branch (or
+// pauseForCITimeout, which has no guard at all) gained or lost idempotency —
+// update this test and the ADR together.
+func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment(t *testing.T) {
+	client := ciFailureSettleClient()
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 0 // force the pause-at-limit branch on the very first attempt
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 27, Repo: "owner/repo", Status: "Validate",
+				// Simulates the label-removal-failed race: both the completion
+				// label (added) and the awaiting-ci marker (removal failed) are
+				// present simultaneously.
+				Labels: []string{"stage:Validate:complete", "fabrik:awaiting-ci"},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if got := len(client.addCommentCalls); got != 2 {
+		t.Errorf("got %d pause comment(s) for the two-pass race window; want exactly 2 (the known, documented, self-healing residual — see adrs/1270-awaiting-ci-settle-scan.md); if this changed, update the ADR and this test's comment together", got)
+	}
+}

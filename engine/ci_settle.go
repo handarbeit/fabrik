@@ -37,7 +37,27 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // admission gate is narrowed to hasComplete-only (see poll.go): since
 // fabrik:awaiting-ci and stage:X:complete are mutually exclusive in steady state,
 // every awaiting-ci item is !hasComplete and therefore always routed here, never
-// to Phase 1, until the gate clears — eliminating any double-dispatch risk.
+// to Phase 1, until the gate clears.
+//
+// This partition is exhaustive only in steady state, not atomically:
+// addCompleteLabelAndRemoveCI (ci.go) adds stage:X:complete and removes
+// fabrik:awaiting-ci via two separate GitHub API calls, so a transient failure
+// of the second call can leave both labels present for one poll, routing the
+// item to both Phase 1 (hasComplete=true) and this scan (fabrik:awaiting-ci
+// present) in the same pass. The CI-fix-reinvoke dispatch itself cannot
+// double-fire in that window — dispatchWithCycleLimit's snap.Worker() != nil
+// guard is set synchronously before the reinvoke goroutine starts (reinvoke.go),
+// confirmed by TestSettleAwaitingCIScan_NoDoubleDispatch — but the pause-at-
+// cycle-limit and CI-wait-timeout branches have no equivalent guard and can post
+// a duplicate pause comment in this exact race
+// (TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_DocumentsResidualDuplicateComment
+// pins the current behavior). This is self-healing (the stale
+// fabrik:awaiting-ci is retried and cleared on the very next poll) and, at
+// worst, cosmetic — it does not corrupt state or strand the item, so it is
+// accepted rather than fixed here; closing it fully would require giving the
+// pause paths their own idempotency guard, a change to the shared pauseIssue
+// tail used by 11 other pauseFor*/escalate* callers, out of proportion with
+// this issue's scope.
 //
 // Closed items are skipped: closed-issue recovery for a merged PR under
 // fabrik:awaiting-ci is already owned by runValidatePRTerminalAdvance (ADR-056
