@@ -662,17 +662,19 @@ func parseNameFlagSupport(helpText string) bool {
 }
 
 // sanitizeSentinelComponent collapses any run of whitespace in s to a single
-// "-", then replaces any ":" with "-". The sentinel must stay a single shell
-// token so a naive `ps | grep` keeps working; no shell is involved in
+// "-", then replaces any ":" or "#" with "-". The sentinel must stay a single
+// shell token so a naive `ps | grep` keeps working; no shell is involved in
 // launching claude (args are passed as an argv slice), so whitespace is the
-// only character that would break that. ":" is additionally replaced because
-// it is the sentinel's own field delimiter (fabrik:<repo>#<issue>:<stage>) —
-// left alone, a stage name containing ":" would make the rendered sentinel
-// ambiguous to split back into fields by position, even though nothing in
-// the engine does so today.
+// only character that would break that. ":" and "#" are additionally replaced
+// because they are the sentinel's own field delimiters
+// (fabrik:<repo>#<issue>:<stage>) — left alone, a stage name containing
+// either (e.g. "Review #2") would make the rendered sentinel ambiguous to
+// split back into fields by position, even though nothing in the engine does
+// so today.
 func sanitizeSentinelComponent(s string) string {
 	joined := strings.Join(strings.Fields(s), "-")
-	return strings.ReplaceAll(joined, ":", "-")
+	joined = strings.ReplaceAll(joined, ":", "-")
+	return strings.ReplaceAll(joined, "#", "-")
 }
 
 // sessionNameSentinel builds the --name value passed to every worker
