@@ -692,22 +692,6 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 	return false, true, true
 }
 
-// checkAwaitingReviewTimeout implements the fabrik:awaiting-review timeout
-// check: once ReviewWaitTimeout has elapsed since the label was applied, it
-// either fires Phase 1 of the bot-reviewer escalation ladder (re-prompting
-// every outstanding bot reviewer), lets an already-fired Phase 1 continue
-// waiting for Phase 2, or pauses for a mixed/pure-human/no-PR-number gate.
-// done=true means the caller should return (blocked, timedOut) directly;
-// done=false means the label wasn't found, was found but the timeout hasn't
-// elapsed yet, or Phase 1 already fired and Phase 2 hasn't timed out yet —
-// the caller falls through to the "still waiting" logging/label-apply tail.
-//
-// authorityReason is non-empty only when the caller's authoritative-mode
-// verdict check blocked (see reviewGateAuthorityVerdict) — i.e. outstanding is
-// empty and reviews exist, but the verdict itself isn't satisfied. When set,
-// it is used verbatim as the pause reason instead of the generic
-// "pending reviewers"/"no reviews submitted yet" messages, which would
-// otherwise misleadingly suggest nobody has reviewed at all.
 // reviewTimeoutReason builds the log-only reason string for the pause
 // branch of checkAwaitingReviewTimeout. authorityReason, when non-empty,
 // takes precedence: the gate is blocking on an authoritative verdict, not a
@@ -726,6 +710,23 @@ func reviewTimeoutReason(outstanding []string, authorityReason string) string {
 	return "no reviewers were requested, no review has been received, and Fabrik cannot determine whether one is coming"
 }
 
+// checkAwaitingReviewTimeout implements the fabrik:awaiting-review timeout
+// check: once ReviewWaitTimeout has elapsed since the label was applied, it
+// either fires Phase 1 of the bot-reviewer escalation ladder (re-prompting
+// every outstanding bot reviewer), lets an already-fired Phase 1 continue
+// waiting for Phase 2, or pauses for a mixed/pure-human/no-PR-number gate.
+// done=true means the caller should return (blocked, timedOut) directly;
+// done=false means the label wasn't found, was found but the timeout hasn't
+// elapsed yet, or Phase 1 already fired and Phase 2 hasn't timed out yet —
+// the caller falls through to the "still waiting" logging/label-apply tail.
+//
+// authorityReason is non-empty only when the caller's authoritative-mode
+// verdict check blocked (see reviewGateAuthorityVerdict) — i.e. outstanding is
+// empty and reviews exist, but the verdict itself isn't satisfied. When set,
+// it is used verbatim as the pause reason instead of the generic
+// "pending reviewers"/"no reviewers were requested" messages built by
+// reviewTimeoutReason, which would otherwise misleadingly suggest nobody has
+// reviewed at all.
 func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
