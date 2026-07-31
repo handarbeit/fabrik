@@ -1483,6 +1483,13 @@ func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) 
 	if !containsAll(body, "COMMENTED", "self-review", "wait_for_reviews: false", "merge", "fabrik:paused") {
 		t.Errorf("pause comment should list the four remedies including the COMMENTED self-review hatch; got:\n%s", body)
 	}
+	// Advisory mode (no ReviewAuthority set): a self-COMMENT is known to
+	// satisfy the gate outright, so the authoritative-mode caveat on remedy
+	// (a) must not appear — stating it here would assert something Fabrik
+	// doesn't actually know to be relevant (#1268 review thread).
+	if strings.Contains(body, "another account") {
+		t.Errorf("pause comment must not qualify the self-review remedy in advisory mode; got:\n%s", body)
+	}
 }
 
 // Authoritative-mode pause messaging must cover REVIEW_REQUIRED, not just an
@@ -1552,6 +1559,45 @@ func TestPauseForReviewTimeout_Authoritative_FetchError_MentionsUnreadableVerdic
 	body := client.addCommentCalls[0].body
 	if !strings.Contains(body, "could not be") {
 		t.Errorf("expected pause comment to mention the unreadable verdict, got:\n%s", body)
+	}
+	// The verdict is unknown, not confirmed non-blocking — Fabrik can't rule
+	// out that an approval requirement exists, so the self-review caveat
+	// must still be shown (#1268 review thread).
+	if !strings.Contains(body, "another account") {
+		t.Errorf("pause comment must qualify the self-review remedy when the verdict is unreadable, got:\n%s", body)
+	}
+}
+
+// Authoritative mode with a confirmed non-blocking verdict (no branch
+// protection review requirement configured) is the one case where Fabrik
+// positively knows a self-review will satisfy the gate — the caveat on
+// remedy (a) must not appear here, otherwise the message asserts an
+// authoritative-approval requirement that doesn't exist (#1268 review
+// thread).
+func TestPauseForReviewTimeout_Authoritative_NoRequirement_NoUnqualifiedCaveat(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "", nil // no branch-protection review requirement configured
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "another account") {
+		t.Errorf("pause comment must not qualify the self-review remedy when authoritative mode has no active review requirement, got:\n%s", body)
 	}
 }
 

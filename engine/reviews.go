@@ -989,18 +989,33 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			if item.LinkedPRNumber > 0 {
 				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
 			}
+			// The self-review caveat is only true when Fabrik actually knows
+			// (or can't rule out) that a self-COMMENT won't be enough: that's
+			// exactly when authorityLine is non-empty — authoritative mode is
+			// active and currently blocking, whether because branch
+			// protection requires an approval or because the verdict
+			// couldn't be read. When authorityLine is empty (advisory mode,
+			// or authoritative with a confirmed non-blocking verdict), a
+			// self-review is known to satisfy the gate outright, so stating
+			// the caveat would contradict the PR's own "say what Fabrik
+			// actually knows to be true right now" goal (#1268 review
+			// thread).
+			selfReviewCaveat := ""
+			if authorityLine != "" {
+				selfReviewCaveat = ", unless this stage is `authoritative` and the repo requires approving reviews, " +
+					"in which case an approval from another account is needed"
+			}
 			msg = fmt.Sprintf(
 				"🏭 **Fabrik — review wait timeout**\n\n"+
 					"The review gate for stage **%s** timed out. No reviewer was ever requested on %s, and no review "+
 					"has been submitted — Fabrik cannot determine whether one is ever coming.%s\n\n"+
 					"Fabrik has paused this issue. To resume, either:\n"+
 					"- (a) post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
-					"the gate, even though GitHub forbids self-approval, unless this stage is `authoritative` and "+
-					"the repo requires approving reviews, in which case an approval from another account is needed,\n"+
+					"the gate, even though GitHub forbids self-approval%s,\n"+
 					"- (b) set `wait_for_reviews: false` in the %s stage YAML if this repo has no reviewer,\n"+
 					"- (c) merge %s manually, or\n"+
 					"- (d) remove `fabrik:paused` to let the engine wait again.",
-				stage.Name, prRef, authorityLine, prRef, stage.Name, prRef,
+				stage.Name, prRef, authorityLine, prRef, selfReviewCaveat, stage.Name, prRef,
 			)
 		} else {
 			// Standard timeout message with named reviewers — unchanged.
