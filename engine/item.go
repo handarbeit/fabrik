@@ -974,7 +974,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		sigTermGrace = -1 // "0s" explicit → skip SIGTERM (sentinel)
 	}
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage)
+	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage, resume)
 	opts := InvokeOptions{
 		ModelOverride:  modelOverride,
 		EffortOverride: effortOverride,

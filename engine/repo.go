@@ -85,21 +85,38 @@ func parseIssueKey(key, defaultOwner, defaultRepo string) (owner, repo string, i
 //
 // PRNumber resolution mirrors handleBrokenReviewLinkage's exact filter
 // (reviews.go): item.LinkedPRNumber is trusted when non-zero; otherwise, and
-// only when a PR could plausibly exist yet (stage.PostToPR || stage.CreateDraftPR
-// — false for Specify/Research/Plan in the default stage set, so those stages
-// never pay for a lookup that can't succeed), FetchLinkedPR is consulted via
+// only when a PR could plausibly exist yet, FetchLinkedPR is consulted via
 // REST. This is required because closedByPullRequestsReferences (the GraphQL
 // field LinkedPRNumber is sourced from) is structurally empty on a
 // base:<branch> repo. A result that errors, is nil, or isn't an open,
 // unmerged PR is treated as "no PR" — non-fatal, logged at warn, never
 // blocking the invocation — so FABRIK_PR never shows a PR the review gate
 // itself would discount.
-func (e *Engine) resolveFabrikEnvOpts(item gh.ProjectItem, stage *stages.Stage) (fabrikRoot string, prNumber int) {
+//
+// "A PR could plausibly exist yet" is stage-config-aware, not just
+// stage-config-based: a stage that itself creates the draft PR
+// (stage.CreateDraftPR, e.g. Implement) has no PR at all on its first
+// attempt — the PR isn't created until after Claude completes — so the
+// fallback only fires there on a resume (a prior attempt already ran and may
+// have created it). A stage that merely posts to an already-existing PR
+// (stage.PostToPR without CreateDraftPR, e.g. Review/Validate) can trust a
+// PR exists from the very first attempt. Without this distinction, every
+// first Implement invocation would burn a REST call that can never succeed —
+// exactly the "network call on every invocation" the issue's cost-control
+// requirement forbids.
+func (e *Engine) resolveFabrikEnvOpts(item gh.ProjectItem, stage *stages.Stage, resume bool) (fabrikRoot string, prNumber int) {
 	fabrikRoot = e.fabrikDir
 
 	prNumber = item.LinkedPRNumber
-	if prNumber != 0 || !(stage.PostToPR || stage.CreateDraftPR) {
+	if prNumber != 0 {
 		return fabrikRoot, prNumber
+	}
+	prCouldExist := stage.PostToPR && !stage.CreateDraftPR
+	if stage.CreateDraftPR && resume {
+		prCouldExist = true
+	}
+	if !prCouldExist {
+		return fabrikRoot, 0
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())

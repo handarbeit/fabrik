@@ -303,7 +303,12 @@ Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects fi
 
 **`FABRIK_PR` resolution and the `base:<branch>` case.** The board-sourced `item.LinkedPRNumber` is populated from GraphQL `closedByPullRequestsReferences`, which GitHub leaves structurally empty for a PR targeting a non-default base branch. `resolveFabrikEnvOpts` therefore trusts `item.LinkedPRNumber` when non-zero, and otherwise falls back to `FetchLinkedPR` via REST — the identical fallback pattern the review gate already uses (`handleBrokenReviewLinkage` in `reviews.go`). A result that errors, is `nil`, or isn't an open, unmerged PR is treated as "no PR": non-fatal, logged at warn, and never delaying or failing the invocation.
 
-**Cost control.** The REST fallback is gated on `stage.PostToPR || stage.CreateDraftPR` — a cheap, per-stage-config signal for "a PR could plausibly exist by this stage." In the default stage set this is true for Implement/Review/Validate and false for Specify/Research/Plan, so the early stages that structurally cannot yet have a PR never pay for a lookup that can't succeed.
+**Cost control.** The REST fallback only fires when a PR could plausibly exist yet, which is both stage-config- and attempt-aware, not stage-config-alone:
+- A stage with neither `PostToPR` nor `CreateDraftPR` (Specify/Research/Plan in the default stage set) never calls the fallback — structurally, no PR can exist yet.
+- A stage that only posts to an already-existing PR (`PostToPR` without `CreateDraftPR`, e.g. Review/Validate) calls the fallback from its very first attempt, since an earlier stage (Implement) already created the PR.
+- A stage that creates its own draft PR (`CreateDraftPR`, e.g. Implement) calls the fallback only on a *resumed* attempt (`resume == true`, i.e. this issue has a prior invocation attempt already on record) — its own first attempt has no PR to find yet, since `ensureDraftPR` only runs after Claude completes. Gating on the stage flags alone (ignoring `resume`) would burn a REST call on every first Implement invocation that can never succeed — exactly the "network call on every invocation" the cost-control requirement forbids.
+
+Comment processing (`comments.go`) always passes `resume = true`: reaching the comment-review path already implies the stage produced at least one prior attempt.
 
 **Absent is absent, never a misleading zero.** `buildClaudeEnv` omits `FABRIK_PR` entirely when the resolved PR number is `0` — it never emits `FABRIK_PR=0`, which would read as a real PR number to a naive consumer.
 
