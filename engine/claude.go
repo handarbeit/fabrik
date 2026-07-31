@@ -489,7 +489,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, resume)
 	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
 
-	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
+	extraEnv := buildClaudeEnv(stage, issue, workDir, opts)
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = effectiveBudget
@@ -523,7 +523,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, true) // resume existing session
 	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir)
 
-	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
+	extraEnv := buildClaudeEnv(stage, issue, workDir, opts)
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = limit
@@ -572,12 +572,31 @@ func commentMaxTurns(stage *stages.Stage) int {
 // buildClaudeEnv returns environment variable overrides to inject into the claude subprocess.
 // Fabrik's values are appended after os.Environ() so they take precedence (last-wins semantics).
 //
-// effortOverride, when non-empty, supersedes stage.EffortLevel.
+// opts.EffortOverride, when non-empty, supersedes stage.EffortLevel.
 //
 // Defaults (when fields are nil/empty):
 //   - CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 (adaptive thinking disabled)
 //   - CLAUDE_CODE_EFFORT_LEVEL=high (high thinking effort)
-func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
+//
+// FABRIK_* invocation facts (#1288): FABRIK_ISSUE and FABRIK_WORKTREE are derived
+// directly from issue.Number/workDir — both are guaranteed non-zero/non-empty on
+// every real invocation (an empty workDir would break the invocation itself, since
+// it also becomes cmd.Dir). FABRIK_REPO prefers issue.Repo, falling back to
+// opts.FabrikRepo (the caller's e.defaultRepo()) only for the rare item that
+// reaches here before a deep-fetch has backfilled issue.Repo, so the "always
+// present" guarantee holds even then. FABRIK_REPO is always added to the returned
+// overrides, even when the resolved value is empty (both sources unset) — unlike
+// FABRIK_ROOT/FABRIK_PR below, omitting it entirely in that case would leave
+// mergeEnv with no override key to strip, letting an ambient FABRIK_REPO already
+// in the engine process's own environment (e.g. the distinct engine-startup-config
+// FABRIK_REPO) leak into the worker unmodified. FABRIK_ROOT and FABRIK_PR come
+// from opts, resolved by the caller's Engine-level resolveFabrikEnvOpts (repo.go)
+// since buildClaudeEnv itself has no access to fabrikDir or the GitHub client.
+// FABRIK_PR is omitted entirely — never emitted as "0" — when opts.PRNumber is 0,
+// so a naive consumer never mistakes "no PR yet" for a real PR number; this is
+// safe because FABRIK_PR's documented contract is conditional presence, unlike
+// FABRIK_REPO's "always."
+func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, opts InvokeOptions) []string {
 	var env []string
 	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
 	// any ambient value from the parent process. Default (nil) disables it.
@@ -587,7 +606,7 @@ func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
 		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=0")
 	}
 	// Set effort level: label override takes precedence, then stage config, then default "high".
-	level := effortOverride
+	level := opts.EffortOverride
 	if level == "" {
 		level = stage.EffortLevel
 	}
@@ -597,6 +616,31 @@ func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
 	if claudeGHToken != "" {
 		env = append(env, "GH_TOKEN="+claudeGHToken, "GITHUB_TOKEN="+claudeGHToken)
+	}
+
+	env = append(env, "FABRIK_ISSUE="+strconv.Itoa(issue.Number))
+	// Always add a FABRIK_REPO entry to overrides, even when the resolved value
+	// is empty (both issue.Repo and opts.FabrikRepo unset — practically
+	// unreachable, but possible in pure multi-repo mode with an unbackfilled
+	// item). mergeEnv only strips a base-env key that appears in overrides; if
+	// FABRIK_REPO were omitted here entirely, an ambient FABRIK_REPO already in
+	// the engine process's own environment (e.g. the distinct engine-startup-config
+	// FABRIK_REPO documented in USER_GUIDE.md) would pass straight through to the
+	// worker unmodified — silently contradicting the "worker-injected value always
+	// wins" guarantee documented there.
+	fabrikRepo := issue.Repo
+	if fabrikRepo == "" {
+		fabrikRepo = opts.FabrikRepo
+	}
+	env = append(env, "FABRIK_REPO="+fabrikRepo)
+	if workDir != "" {
+		env = append(env, "FABRIK_WORKTREE="+workDir)
+	}
+	if opts.FabrikRoot != "" {
+		env = append(env, "FABRIK_ROOT="+opts.FabrikRoot)
+	}
+	if opts.PRNumber != 0 {
+		env = append(env, "FABRIK_PR="+strconv.Itoa(opts.PRNumber))
 	}
 	return env
 }

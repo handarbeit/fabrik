@@ -982,6 +982,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigTermGrace:   sigTermGrace,
 		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
 		CorrectiveHint: e.consumeStallHint(repoStr, item.Number, stage.Name),
+		FabrikRepo:     e.defaultRepo(),
 	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
@@ -1002,6 +1003,14 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 	currentBudget := firstBudget
 	for {
 		opts.MaxTurnsOverride = currentBudget
+		// Re-resolve on every iteration, not just once before the loop: resume
+		// flips to true below (#1288) once the extend-turns loop continues a
+		// session, and resolveFabrikEnvOpts's CreateDraftPR gate is resume-aware
+		// specifically so a PR that came to exist between iterations (e.g. a
+		// human or bot pushed one to fabrik/issue-N while this loop was still
+		// running) is picked up on the next invocation rather than staying
+		// pinned to the pre-loop resolution for the rest of this call.
+		opts.FabrikRoot, opts.PRNumber = e.resolveFabrikEnvOpts(item, stage, resume)
 		var invOutput string
 		var invUsage TokenUsage
 		invOutput, completed, invUsage, err = e.claude.Invoke(ctx, stage, item, nil, resume, workDir, opts)
