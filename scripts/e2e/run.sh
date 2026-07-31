@@ -173,6 +173,18 @@ switch_and_run() {
   local mode="$1"
   shift
   echo "== switching test bed to FABRIK_MERGE_TRAIN=${mode} =="
+  # KNOWN GAP: this restart step has none of the classification/auto-teardown
+  # machinery below — it's a plain `-v` (non-`-json`) run with its own fixed
+  # 3m timeout and no exit-code capture. If the bed fails to come back up
+  # here (e.g. restart hangs), this line's own `-timeout 3m` panic or a
+  # non-zero exit takes down the whole script via `set -e` with no
+  # classification report and no reset.sh call — leaving the bed possibly
+  # stopped or mid-restart with no diagnostics beyond raw `go test -v`
+  # output. Deliberately left as-is: this step is a fast (~seconds), narrow
+  # bed-restart check, not a scenario run, so it's a much smaller exposure
+  # window than the suite invocation below, and extending it the same
+  # machinery would mean auto-tearing-down a bed that may just be mid-restart
+  # rather than actually stuck.
   E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
   echo "== running suite with E2E_TRAIN_MODE=${mode} =="
