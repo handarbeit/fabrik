@@ -828,7 +828,10 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   auto-advance to be active. This loop repeats until no reviewers are
                           #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
-                          #   See §3 Pending Reviewer Gate for full details.
+                          #   If this repo has no reviewer to request (no CODEOWNERS, no review
+                          #   bot), set this to false — that is the supported setting rather than
+                          #   waiting on a gate that can never clear on its own. See §3 Pending
+                          #   Reviewer Gate for full details, including the self-review escape hatch.
 review_authority: advisory # Optional: advisory (default) | authoritative. Only meaningful alongside
                           #   wait_for_reviews: true. advisory clears the gate once reviewers have
                           #   responded, whatever they said. authoritative additionally requires no
@@ -1448,6 +1451,21 @@ fabrik --review-wait-timeout=30
 #### Restart Persistence
 
 The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
+
+#### No Reviewer Ever Requested
+
+`wait_for_reviews: true` assumes something will eventually request or submit a review — a human collaborator, CODEOWNERS, or a review bot. On a repo with none of those (a solo maintainer with no CODEOWNERS and no review bot installed, for example), no reviewer is ever requested, so the gate's dual condition can never clear on its own. Since GitHub forbids a PR author from approving their own PR, the gate can look unsatisfiable from the operator's side too.
+
+It isn't: **the gate's actual test is "has a human looked at this?", not "has a reviewer approved this?"** A `COMMENTED` review submitted by the PR author itself satisfies the gate — GitHub permits a self-`COMMENT` even though it forbids self-approval. This is the supported manual way to clear the gate when no other reviewer can respond.
+
+When the timeout elapses with no reviewer ever requested, Fabrik's pause comment says so plainly — it does not claim to have waited on "outstanding reviewers" that don't exist — and lists four ways to resume:
+
+1. Post a review on the PR yourself. A `COMMENTED` self-review satisfies the gate.
+2. Set `wait_for_reviews: false` in the stage YAML if this repo has no reviewer. This is the supported setting for a reviewer-less repo going forward, rather than repeatedly hitting this timeout.
+3. Merge the PR manually.
+4. Remove the `fabrik:paused` label to let the engine wait again (useful if a reviewer is actually expected and just hasn't gotten to it yet).
+
+Fabrik deliberately does not try to detect "no reviewer will ever respond" automatically (e.g. by inspecting CODEOWNERS or requested-reviewer history) — that signal can't distinguish "no reviewer exists" from "the reviewer is just slow or down," and guessing wrong in the direction of auto-advancing would merge an unreviewed PR. The gate stays loud-and-conservative; only the messaging tells you honestly what it knows.
 
 #### Authoritative Mode
 
