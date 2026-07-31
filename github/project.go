@@ -737,7 +737,6 @@ query($id: ID!) {
       title
       body
       url
-      closed
       author { login }
       labels(first: 20) {
         nodes { name }
@@ -853,10 +852,11 @@ type fetchItemDetailsNode struct {
 }
 
 // FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
-// BlockedBy, and IsClosed fields of a ProjectItem by fetching full item data via
-// individual node queries. This is the "deep" phase of the two-phase fetch approach.
-// If item.Number is zero (e.g., for projects_v2_item.created with only a node_id),
-// it is populated from the GraphQL response.
+// BlockedBy, and (Issue-typed items only) IsClosed fields of a ProjectItem by
+// fetching full item data via individual node queries. This is the "deep" phase
+// of the two-phase fetch approach. If item.Number is zero (e.g., for
+// projects_v2_item.created with only a node_id), it is populated from the
+// GraphQL response.
 func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	vars := map[string]interface{}{
 		"id": item.ID,
@@ -888,7 +888,15 @@ func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	item.Title = node.Title
 	item.Body = node.Body
 	item.URL = node.URL
-	item.IsClosed = node.Closed
+	// IsClosed is documented (types.go) and tested (TestFetchProjectBoard_IsClosed_PRItem,
+	// TestProbeProjectBoard_IsClosed) as always false for PR-typed items; several
+	// callers (e.g. engine/item.go) rely on that invariant without an explicit
+	// !IsPR guard of their own. The `closed` query field above is scoped to the
+	// Issue fragment only (not PullRequest) to match, but guard here too in case
+	// that ever changes.
+	if !item.IsPR {
+		item.IsClosed = node.Closed
+	}
 	if node.Author != nil {
 		item.Author = node.Author.Login
 	}
