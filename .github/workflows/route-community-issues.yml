@@ -3,92 +3,128 @@ name: Route community issues to triage board
 # Automatically place issues opened by non-maintainers onto the public
 # "Fabrik — Triage & Roadmap" board (project #3) at Status = Triage.
 #
-# Issues we (or the Fabrik bot) open are NOT routed here: maintainer/bot issues
-# carry author_association OWNER / MEMBER / COLLABORATOR, which the `if` below
-# excludes. Community issues carry NONE / CONTRIBUTOR / FIRST_TIME_CONTRIBUTOR.
-# Our own work issues continue to be added to the private working board (#1)
-# explicitly, so they never land on the public roadmap.
+# Issues we (or the Fabrik bot) open are NOT routed here. Our own work issues
+# continue to be added to the private working board (#1) explicitly, so they
+# never land on the public roadmap.
+#
+# ---------------------------------------------------------------------------
+# Why the author check is two-layered (do not "simplify" it back to one)
+# ---------------------------------------------------------------------------
+# author_association alone is NOT sufficient to detect maintainers (#1137).
+# It reflects *visible* affiliation only: a maintainer whose org membership is
+# set to private reports NONE, identical to a genuine stranger. That bit us on
+# 2026-07-26, when an org admin with private membership had seven of their own
+# issues misrouted onto this public board.
+#
+# So for the ambiguous NONE case we make one confirming API call. That call is
+# a *repository collaborator permission* lookup, NOT an org-membership lookup
+# (#1248). Rationale:
+#   - It answers the question we actually care about — "is this person a
+#     maintainer of THIS repo?" — rather than the org-shaped proxy for it.
+#   - It needs only repository access, so the automatic GITHUB_TOKEN can make
+#     it. The org-membership endpoint requires read:org/admin:org AND that the
+#     calling account is itself an org member; ADD_TO_PROJECT_PAT had neither,
+#     so every NONE author returned HTTP 403 and the step failed closed. Four
+#     community issues (#1191, #1215, #1218, #1246) were silently not routed
+#     between 2026-07-27 and 2026-07-30 before anyone noticed.
+#   - It still catches the #1137 private-member case: an org owner/admin
+#     reports admin/write here even when author_association says NONE.
+#
+# Permission values admin/write/maintain => maintainer (skip routing).
+# Values read/none => community (route). Anything else is inconclusive and
+# fails closed, loudly — we never guess.
+#
+# Use workflow_dispatch (test_login input) to verify the classifier against any
+# username without having to file a throwaway issue.
 #
 # Requires a repo secret ADD_TO_PROJECT_PAT: a PAT with `project` (write) scope
 # for the handarbeit org — the default GITHUB_TOKEN cannot write org-level
-# Projects. Without the secret the job fails loudly (it never silently no-ops).
-# It also needs `read:org` scope for the membership-confirmation step below
-# (#1137), and its owning account must itself be a member of the org — without
-# either, that step fails closed on every NONE-association author.
-#
-# author_association alone is NOT sufficient to detect maintainers (#1137).
-# It reflects visible affiliation only: a maintainer whose org membership is
-# set to private reports NONE, identical to a genuine stranger. This bit us
-# on 2026-07-26 — an org admin with private membership had seven of their own
-# issues misrouted onto this public board before anyone noticed. Do not
-# "simplify" this workflow back to the association check alone; for a NONE
-# association we make one confirming call to the org-membership API before
-# deciding. OWNER/MEMBER/COLLABORATOR stay a free, correct fast path — the
-# extra call only fires for the ambiguous NONE case, so it stays rare.
+# Projects. It is used ONLY for the project mutations below, never for the
+# author classification, so a scope gap there can no longer break routing.
 
 on:
   issues:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      test_login:
+        description: "GitHub username to classify (dry run — no board changes)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   route:
-    # Community only. OWNER/MEMBER/COLLABORATOR = us or the Fabrik bot → skip.
-    if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}
+    # Fast path: OWNER/MEMBER/COLLABORATOR = us or the Fabrik bot → skip with
+    # no API call at all. Only NONE/CONTRIBUTOR/FIRST_TIME_CONTRIBUTOR reach
+    # the confirming lookup below. Always run for manual dispatch.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}
     runs-on: ubuntu-latest
     steps:
-      # NONE is ambiguous: it covers both genuine non-members and maintainers
-      # with private org membership (#1137). Confirm via the authoritative
-      # membership API rather than trusting the visible-affiliation proxy.
-      # This step is skipped (not run) for any other association value, in
-      # which case its outputs are empty and the routing steps below proceed
-      # unaffected.
-      - name: Confirm org membership for NONE-association authors
-        id: membership
-        if: github.event.issue.author_association == 'NONE'
+      - name: Classify issue author (maintainer vs community)
+        id: classify
         env:
-          GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
-          ORG: handarbeit
-          AUTHOR: ${{ github.event.issue.user.login }}
+          # Deliberately the automatic token: this lookup needs only repo
+          # access, and GITHUB_TOKEN never expires or drifts in scope.
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.inputs.test_login || github.event.issue.user.login }}
+          ASSOC: ${{ github.event.issue.author_association }}
         run: |
           set +e
-          RAW=$(gh api -i "orgs/${ORG}/memberships/${AUTHOR}" 2>/tmp/membership-err.log)
+          RAW=$(gh api -i "repos/${REPO}/collaborators/${AUTHOR}/permission" 2>/tmp/classify-err.log)
           set -e
-          # Strip CR so header/body parsing below isn't tripped up by CRLF.
+          # Strip CR so header/body parsing is not tripped up by CRLF.
           RAW=$(printf '%s\n' "$RAW" | tr -d '\r')
-          # Read the numeric status straight from the HTTP status line — not
-          # from gh's human-readable error text, which is message-format text
-          # that can drift between gh CLI versions (#1137 review feedback).
+          # Read the numeric status from the HTTP status line, not from gh's
+          # human-readable error text (which can drift between CLI versions).
           HTTP_CODE=$(printf '%s\n' "$RAW" | awk 'NR==1 && /^HTTP\// {print $2; exit}')
           BODY=$(printf '%s\n' "$RAW" | awk 'f{print} !NF{f=1}')
 
           if [ "$HTTP_CODE" = "200" ]; then
-            STATE=$(echo "$BODY" | jq -r '.state // "unknown"')
-            ROLE=$(echo "$BODY" | jq -r '.role // "unknown"')
-            echo "Membership check: ${AUTHOR} IS a member of ${ORG} (state=${STATE}, role=${ROLE}) despite author_association=NONE (private membership). Basis: HTTP 200 from /orgs/${ORG}/memberships/${AUTHOR}. Skipping community routing."
-            echo "route=false" >> "$GITHUB_OUTPUT"
-          elif [ "$HTTP_CODE" = "404" ]; then
-            echo "Membership check: ${AUTHOR} is NOT a member of ${ORG}. Basis: HTTP 404 from /orgs/${ORG}/memberships/${AUTHOR}. Routing as community issue."
-            echo "route=true" >> "$GITHUB_OUTPUT"
+            PERM=$(echo "$BODY" | jq -r '.permission // "unknown"')
+            case "$PERM" in
+              admin|write|maintain)
+                echo "Classifier: ${AUTHOR} has '${PERM}' permission on ${REPO} => MAINTAINER. Skipping community routing (author_association was '${ASSOC:-n/a}')."
+                echo "route=false" >> "$GITHUB_OUTPUT"
+                ;;
+              read|none)
+                echo "Classifier: ${AUTHOR} has '${PERM}' permission on ${REPO} => COMMUNITY. Routing to the triage board."
+                echo "route=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::Classifier returned an unrecognized permission value '${PERM}' for ${AUTHOR} on ${REPO} — failing closed rather than guessing. If GitHub added a new permission level, update the case statement in this workflow."
+                echo "route=false" >> "$GITHUB_OUTPUT"
+                exit 1
+                ;;
+            esac
           else
-            echo "Error: membership check for ${AUTHOR} in ${ORG} returned an ambiguous result (HTTP status: ${HTTP_CODE:-none}) — failing closed and skipping routing rather than guessing. Raw output:"
-            cat /tmp/membership-err.log
+            echo "::error::Author classification for ${AUTHOR} on ${REPO} failed (HTTP ${HTTP_CODE:-none}) — failing closed, so this issue was NOT routed to the triage board. Add it manually, then fix the cause. This lookup uses the automatic GITHUB_TOKEN and needs repository read access; a 403/404 here usually means the endpoint or token permissions changed. Raw error:"
+            cat /tmp/classify-err.log
             echo "route=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
+      - name: Report dry-run result
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "Dry run for '${{ github.event.inputs.test_login }}': route=${{ steps.classify.outputs.route }}"
+          echo "No board changes were made."
+
       - name: Add issue to Triage & Roadmap board (project #3)
         id: add
-        if: success() && steps.membership.outputs.route != 'false'
+        if: github.event_name == 'issues' && steps.classify.outputs.route == 'true'
         uses: actions/add-to-project@v2.0.0
         with:
           project-url: https://github.com/orgs/handarbeit/projects/3
           github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
 
       - name: Set Status = Triage
-        if: success() && steps.membership.outputs.route != 'false'
+        if: github.event_name == 'issues' && steps.classify.outputs.route == 'true'
         env:
           GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
           ITEM_ID: ${{ steps.add.outputs.itemId }}
