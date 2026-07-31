@@ -1136,22 +1136,40 @@ func tryPRComments(env *Env, repo string, prNumber int) ([]string, error) {
 // the given substring, or timeout expires.
 func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber int, substring string, timeout time.Duration) {
 	t.Helper()
+	WaitForPRCommentContainingAny(t, env, repo, prNumber, []string{substring}, timeout)
+}
+
+// WaitForPRCommentContainingAny is WaitForPRCommentContaining for assertions
+// that have more than one legitimate wording. It returns as soon as some
+// comment contains ANY of substrings, so a caller can accept several equally
+// correct engine messages instead of pinning the test to whichever one the
+// current bed configuration happens to produce.
+//
+// Matching is case-sensitive, like WaitForPRCommentContaining. Callers wanting
+// case-insensitivity should pass the variants explicitly rather than have this
+// helper fold case silently — some engine messages embed deliberately
+// capitalized GitHub enums (e.g. CHANGES_REQUESTED), and folding would make an
+// assertion that means to pin the enum quietly stop doing so.
+func WaitForPRCommentContainingAny(t *testing.T, env *Env, repo string, prNumber int, substrings []string, timeout time.Duration) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		bodies, err := tryPRComments(env, repo, prNumber)
 		if err != nil {
-			t.Logf("WaitForPRCommentContaining: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
+			t.Logf("WaitForPRCommentContainingAny: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
 			pollSleep(pollBase())
 			continue
 		}
 		for _, b := range bodies {
-			if strings.Contains(b, substring) {
-				return
+			for _, substring := range substrings {
+				if strings.Contains(b, substring) {
+					return
+				}
 			}
 		}
 		pollSleep(pollBase())
 	}
-	t.Fatalf("timed out waiting for PR comment containing %q on %s#%d", substring, repo, prNumber)
+	t.Fatalf("timed out waiting for PR comment containing any of %q on %s#%d", substrings, repo, prNumber)
 }
 
 // tryPRCheckRunConclusions resolves the head SHA of the PR and returns the

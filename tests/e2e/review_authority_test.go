@@ -122,12 +122,28 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 		t.Fatalf("expected issue OPEN after authoritative review timeout, got %s on %s#%d", state, env.RepoAlpha, num)
 	}
 
-	// WaitForPRCommentContaining queries the /issues/<n>/comments REST
+	// WaitForPRCommentContainingAny queries the /issues/<n>/comments REST
 	// endpoint, which is identical for issue and PR numbers on GitHub — the
 	// pause comment is posted on the issue (postComment uses item.Number),
 	// not the PR, so passing the issue number here is correct.
-	WaitForPRCommentContaining(t, env, env.RepoAlpha, num, "requested changes", 5*time.Minute)
-	t.Logf("pause comment names the authoritative verdict (\"requested changes\") on %s#%d", env.RepoAlpha, num)
+	//
+	// The authoritative reason has two equally correct forms, because
+	// reviewGateAuthorityVerdict prefers GitHub's reviewDecision where branch
+	// protection defines a review requirement and falls back to Fabrik's own
+	// computation otherwise (ADR-1250, engine/reviews.go):
+	//
+	//   reviewDecision path (branch protection configured): "reviewDecision=CHANGES_REQUESTED"
+	//   fallback path (no branch-protection review requirement): "<author> requested changes"
+	//
+	// The bed's repos currently DO have a branch-protection review requirement,
+	// so the reviewDecision form is what appears today — asserting only the
+	// fallback wording made this test fail against correct engine behavior.
+	// Accept either: what AC1/AC5 actually require is that the reason names the
+	// CHANGES_REQUESTED verdict at all, rather than falling back to the generic
+	// "no reviews submitted yet" message (asserted negatively just below).
+	WaitForPRCommentContainingAny(t, env, env.RepoAlpha, num,
+		[]string{"reviewDecision=CHANGES_REQUESTED", "requested changes"}, 5*time.Minute)
+	t.Logf("pause comment names the authoritative CHANGES_REQUESTED verdict on %s#%d", env.RepoAlpha, num)
 
 	bodies, err := tryPRComments(env, env.RepoAlpha, num)
 	if err != nil {
