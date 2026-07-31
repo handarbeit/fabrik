@@ -1458,7 +1458,7 @@ It isn't: **the gate's actual test is "has a human looked at this?", not "has a 
 
 When the timeout elapses with no reviewer ever requested, Fabrik's pause comment says so plainly — it does not claim to have waited on "outstanding reviewers" that don't exist — and lists four ways to resume:
 
-1. Post a review on the PR yourself. A `COMMENTED` self-review satisfies the gate.
+1. Post a review on the PR yourself. A `COMMENTED` self-review satisfies the gate — unless the stage is `authoritative` and the repo requires approving reviews (branch protection reports `REVIEW_REQUIRED`), in which case an approval from another account is needed; see [Authoritative Mode](#authoritative-mode) below.
 2. Set `wait_for_reviews: false` in the stage YAML if this repo has no reviewer. This is the supported setting for a reviewer-less repo going forward, rather than repeatedly hitting this timeout.
 3. Merge the PR manually.
 4. Remove the `fabrik:paused` label to let the engine wait again (useful if a reviewer is actually expected and just hasn't gotten to it yet).

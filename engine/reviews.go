@@ -995,7 +995,8 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 					"has been submitted — Fabrik cannot determine whether one is ever coming.%s\n\n"+
 					"Fabrik has paused this issue. To resume, either:\n"+
 					"- (a) post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
-					"the gate, even though GitHub forbids self-approval,\n"+
+					"the gate, even though GitHub forbids self-approval, unless this stage is `authoritative` and "+
+					"the repo requires approving reviews, in which case an approval from another account is needed,\n"+
 					"- (b) set `wait_for_reviews: false` in the %s stage YAML if this repo has no reviewer,\n"+
 					"- (c) merge %s manually, or\n"+
 					"- (d) remove `fabrik:paused` to let the engine wait again.",

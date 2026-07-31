@@ -1516,6 +1516,13 @@ func TestPauseForReviewTimeout_Authoritative_ReviewRequired_MentionsVerdict(t *t
 	if !strings.Contains(body, "REVIEW_REQUIRED") {
 		t.Errorf("expected pause comment to mention the REVIEW_REQUIRED verdict, got:\n%s", body)
 	}
+	// This is the exact scenario where advice (a)'s unqualified "a COMMENTED
+	// self-review satisfies the gate" would be actively wrong: branch
+	// protection requires an approving review, and a self-COMMENT (GitHub
+	// forbids self-approval) can never produce one (#1268 review thread).
+	if !strings.Contains(body, "another account") {
+		t.Errorf("pause comment must qualify the self-review remedy when authoritative mode requires approving reviews, got:\n%s", body)
+	}
 }
 
 // A FetchPRReviewDecision fetch error in the pause path must be surfaced in
