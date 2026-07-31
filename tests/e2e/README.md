@@ -437,8 +437,9 @@ run showed a ~1.55–1.61x contention multiplier under load:
 `TestConjunctiveCIReviewGate` 1335s → 2152s, `TestPausedMergedPRRecovery`
 1382s → 2146s. Applying that multiplier to the heaviest documented
 per-scenario ceilings (`TestCIFixReinvoke` 75–90min, `TestPausedMergedPRRecovery`
-60–90min) puts the contended worst case in the ~120–180min range. `4h` leaves
-~30–60min of margin above that for bed-restart and pipeline-setup overhead.
+60–90min) puts the contended worst case in the ~93–145min range (60min ×
+1.55x low end, 90min × 1.61x high end). `4h` leaves ~95–147min of margin
+above that for bed-restart and pipeline-setup overhead.
 This is a reasoned extrapolation from two paired data points plus one
 partial-kill observation, not a fresh full-suite measurement under the new
 default — treat it as provisional, and re-derive it (repeating this

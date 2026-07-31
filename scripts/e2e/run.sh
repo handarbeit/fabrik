@@ -46,7 +46,7 @@
 # a ~1.55-1.61x contention multiplier under load (TestConjunctiveCIReviewGate
 # 1335s->2152s, TestPausedMergedPRRecovery 1382s->2146s). Applying that factor
 # to the heaviest documented per-scenario ceilings puts the contended worst
-# case in the ~120-180min range; 4h leaves ~30-60min of margin on top. See
+# case in the ~93-145min range; 4h leaves ~95-147min of margin on top. See
 # tests/e2e/README.md's "How the defaults are derived" section for the full
 # arithmetic — this number is provisional and should be revisited after
 # future real runs, not treated as load-bearing precision.
