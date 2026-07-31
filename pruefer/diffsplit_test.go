@@ -95,6 +95,44 @@ index 111..000
 	}
 }
 
+func TestSplitDiffFiles_BinaryFileModified_AmbiguousPath_ResolvedViaBinaryFilesLine(t *testing.T) {
+	// Binary files never get "+++"/"--- " content lines, only "Binary files
+	// ... differ". Same ambiguous-path scenario as the text-diff cases
+	// above, but relying on the new binary-marker-line resolution instead.
+	diff := `diff --git a/foo b/bar.png b/foo b/bar.png
+index 111..222 100644
+Binary files a/foo b/bar.png and b/foo b/bar.png differ
+`
+	files, _ := splitDiffFiles(diff)
+	if len(files) != 1 || files[0].Path != "foo b/bar.png" {
+		t.Errorf("splitDiffFiles(binary modify, ambiguous path) = %+v, want single file keyed as \"foo b/bar.png\"", files)
+	}
+}
+
+func TestSplitDiffFiles_BinaryFileAdded_AmbiguousPath_ResolvedViaDevNullLine(t *testing.T) {
+	diff := `diff --git a/foo b/bar.png b/foo b/bar.png
+new file mode 100644
+index 000..111
+Binary files /dev/null and b/foo b/bar.png differ
+`
+	files, _ := splitDiffFiles(diff)
+	if len(files) != 1 || files[0].Path != "foo b/bar.png" {
+		t.Errorf("splitDiffFiles(binary add, ambiguous path) = %+v, want single file keyed as \"foo b/bar.png\"", files)
+	}
+}
+
+func TestSplitDiffFiles_BinaryFileDeleted_AmbiguousPath_ResolvedViaDevNullLine(t *testing.T) {
+	diff := `diff --git a/foo b/bar.png b/foo b/bar.png
+deleted file mode 100644
+index 111..000
+Binary files a/foo b/bar.png and /dev/null differ
+`
+	files, _ := splitDiffFiles(diff)
+	if len(files) != 1 || files[0].Path != "foo b/bar.png" {
+		t.Errorf("splitDiffFiles(binary delete, ambiguous path) = %+v, want single file keyed as \"foo b/bar.png\"", files)
+	}
+}
+
 func TestSplitDiffFiles_GarbageInput_AllPreamble(t *testing.T) {
 	diff := "x diff content"
 	files, preamble := splitDiffFiles(diff)

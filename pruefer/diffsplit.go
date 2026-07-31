@@ -32,6 +32,25 @@ var (
 	diffRenameToLineRE = regexp.MustCompile(`^rename to (.+)$`)
 )
 
+// diffBinaryAddLineRE and diffBinaryDeleteLineRE match a binary file's
+// "Binary files ... differ" marker line for the add/delete cases, where one
+// side is the literal "/dev/null" — fully unambiguous by construction, like
+// diffNewPathLineRE/diffOldPathLineRE above, since "/dev/null" anchors one
+// end of the match and the other end is the line boundary. Git never emits
+// "+++"/"--- " content lines for a binary file, so these (plus
+// diffBinaryModifyLineRE below) are the only unambiguous path source
+// available for a binary diff block.
+var (
+	diffBinaryAddLineRE    = regexp.MustCompile(`^Binary files /dev/null and b/(.+) differ$`)
+	diffBinaryDeleteLineRE = regexp.MustCompile(`^Binary files a/(.+) and /dev/null differ$`)
+	// diffBinaryModifyLineRE covers a binary file changed in place (no
+	// rename). Its "a/(.+) and b/(.+)" split carries the same class of
+	// greedy-ambiguity as the "diff --git" header line, but keyed on the
+	// far rarer literal substring " and b/" rather than plain " b/" — a
+	// strict improvement, not a full fix; see resolveFilePath.
+	diffBinaryModifyLineRE = regexp.MustCompile(`^Binary files a/(.+) and b/(.+) differ$`)
+)
+
 // splitDiffFiles splits a unified diff (as returned by FetchPRDiff) into its
 // per-file blocks, keyed by the b/-side path exactly like ParseChangedPaths
 // (so renames key by their destination path, consistent with existing
@@ -112,8 +131,19 @@ func splitDiffFiles(diff string) (files []diffFile, preamble string) {
 // "+++"/"--- " lines exist at all) and is only ever emitted by git itself
 // in the pre-hunk metadata area, never derived from file content.
 //
+// A binary file (added, deleted, or modified in place) has none of the
+// above — git emits only a "Binary files ... differ" marker line instead of
+// "+++"/"--- " content lines. diffBinaryAddLineRE/diffBinaryDeleteLineRE
+// cover the add/delete cases unambiguously (one side is the literal
+// "/dev/null"); diffBinaryModifyLineRE covers an in-place binary change,
+// narrowing (but not eliminating — see its own comment) the header's
+// ambiguity for that case. A binary rename is still resolved correctly
+// above via "rename to", since that line is emitted regardless of the
+// renamed file's content type.
+//
 // Falls back to the ambiguous headerPath only when none of those lines are
-// present — e.g. a pure file-mode change with no content or rename delta.
+// present — e.g. a pure file-mode change with no content, rename, or binary
+// delta.
 func resolveFilePath(blockLines []string, headerPath string) string {
 	for _, line := range blockLines {
 		if m := diffNewPathLineRE.FindStringSubmatch(line); m != nil {
@@ -128,6 +158,21 @@ func resolveFilePath(blockLines []string, headerPath string) string {
 	for _, line := range blockLines {
 		if m := diffRenameToLineRE.FindStringSubmatch(line); m != nil {
 			return m[1]
+		}
+	}
+	for _, line := range blockLines {
+		if m := diffBinaryAddLineRE.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	}
+	for _, line := range blockLines {
+		if m := diffBinaryDeleteLineRE.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	}
+	for _, line := range blockLines {
+		if m := diffBinaryModifyLineRE.FindStringSubmatch(line); m != nil {
+			return m[2]
 		}
 	}
 	return headerPath
