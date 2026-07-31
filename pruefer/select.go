@@ -3,6 +3,7 @@ package pruefer
 import (
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -31,24 +32,23 @@ type EligibilityInput struct {
 	BotLogin        string // Pruefer's own review identity, e.g. "pruefer-bot[bot]"
 	ExcludedAuthors []string
 	ExcludedLabels  []string
-	ExcludedPaths   []string // glob patterns (filepath.Match syntax), matched against every changed path
 	// ExistingReviews are the PR's current reviews (any author); Eligible
 	// looks specifically for one authored by BotLogin at PR.HeadSHA.
 	ExistingReviews []gh.PRReview
-	// ChangedPaths is the list of file paths touched by the PR, typically
-	// parsed from its diff via ParseChangedPaths. Empty/nil means "unknown"
-	// — path exclusion never fires when paths aren't available, since
-	// exclusion requires ALL paths to match.
-	ChangedPaths []string
 	// ForceReview is true when an unprocessed "/pruefer review" comment
 	// requests a fresh review of the current head regardless of prior
 	// review state.
 	ForceReview bool
 }
 
-// Eligible reports whether a PR should be reviewed, and if not, why.
+// Eligible reports whether a PR should be reviewed, and if not, why. This is
+// the cheap, pre-diff-fetch check: draft, self-authored, and excluded-
+// author/label only — path exclusion is NOT decided here, since it
+// fundamentally requires per-file diff structure that only exists after
+// FetchPRDiff (see filterExcludedPaths in diffsplit.go, applied by
+// ReviewPR before the diff is measured against MaxDiffBytes).
 // ForceReview overrides only the already-reviewed-at-this-SHA check — draft,
-// self-authored, and excluded-author/label/path checks always apply, since
+// self-authored, and excluded-author/label checks always apply, since
 // "/pruefer review" forces a *fresh* review, not a bypass of every safety
 // check (see adrs/1113-pruefer-v1-architecture.md).
 func Eligible(in EligibilityInput) (bool, SkipReason) {
@@ -70,29 +70,10 @@ func Eligible(in EligibilityInput) (bool, SkipReason) {
 			}
 		}
 	}
-	if len(in.ExcludedPaths) > 0 && allPathsExcluded(in.ChangedPaths, in.ExcludedPaths) {
-		return false, SkipExcludedPath
-	}
 	if !in.ForceReview && alreadyReviewedAtHead(in.ExistingReviews, in.BotLogin, in.PR.HeadSHA) {
 		return false, SkipAlreadyReviewed
 	}
 	return true, ""
-}
-
-// allPathsExcluded reports whether every path in changed matches at least
-// one glob in patterns. Returns false (not excluded) when changed is empty
-// — an unknown diff must never be silently skipped just because path
-// exclusions are configured.
-func allPathsExcluded(changed, patterns []string) bool {
-	if len(changed) == 0 {
-		return false
-	}
-	for _, path := range changed {
-		if !matchesAny(path, patterns) {
-			return false
-		}
-	}
-	return true
 }
 
 func matchesAny(path string, patterns []string) bool {
@@ -166,4 +147,60 @@ func ParseChangedPaths(diff string) []string {
 		out = append(out, m[2])
 	}
 	return out
+}
+
+// PathSize names a single file's contribution to a measured diff, in raw
+// diff bytes (headers and hunk markers included, consistent with how the
+// whole-diff measurement itself counts — see DiffSizeDetail).
+type PathSize struct {
+	Path  string
+	Bytes int64
+}
+
+// dominantPathsLimit caps DiffSizeDetail.DominantPaths so a too-large notice
+// stays actionable even when many small files, rather than one huge one,
+// push a diff over the cap.
+const dominantPathsLimit = 5
+
+// DiffSizeDetail is the structured record of why a diff was measured as
+// over cap, attached to ReviewOutcome.SizeDetail and rendered into the
+// too-large notice (FR-3: "measured size, cap, dominant contributing
+// paths"). OmittedPaths is the union of config-excluded and (if attempted)
+// auto-dropped paths — every path removed before MeasuredBytes was computed
+// for the *reviewed* portion, or every path that was still present when the
+// notice fired, depending on which of ReviewPR's two call sites builds it.
+type DiffSizeDetail struct {
+	MeasuredBytes int64
+	MaxBytes      int64
+	DominantPaths []PathSize
+	OmittedPaths  []string
+}
+
+// buildDiffSizeDetail computes a DiffSizeDetail from the files a size
+// decision was actually measured against (reviewFiles) plus the paths that
+// were removed from consideration (omitted, from exclusion and/or
+// FR-5 trimming). DominantPaths is reviewFiles sorted by Bytes descending,
+// capped to dominantPathsLimit — a pure, deterministic computation from
+// already-parsed diff structure, never from Claude's prose (mirrors
+// decideEvent's same discipline; see adrs/1251-pruefer-severity-gated-request-changes.md).
+func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, omitted []string) DiffSizeDetail {
+	sorted := make([]diffFile, len(reviewFiles))
+	copy(sorted, reviewFiles)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Bytes > sorted[j].Bytes })
+
+	limit := dominantPathsLimit
+	if limit > len(sorted) {
+		limit = len(sorted)
+	}
+	dominant := make([]PathSize, limit)
+	for i := 0; i < limit; i++ {
+		dominant[i] = PathSize{Path: sorted[i].Path, Bytes: sorted[i].Bytes}
+	}
+
+	return DiffSizeDetail{
+		MeasuredBytes: measuredBytes,
+		MaxBytes:      maxBytes,
+		DominantPaths: dominant,
+		OmittedPaths:  omitted,
+	}
 }
