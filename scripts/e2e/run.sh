@@ -107,11 +107,55 @@ TIMEOUT="${E2E_TIMEOUT:-4h}"
 # shared bed (see header + issue #971). Default 4; override with E2E_PARALLEL.
 PARALLEL="${E2E_PARALLEL:-4}"
 
+# report_test_outcomes prints a completed/still-running/never-started
+# breakdown of every top-level test from a `go test -json` log, so a killed
+# run's partial state is legible instead of a bare FAIL indistinguishable
+# from a real regression. The built-in -timeout panic dump only reports tests
+# that were actively executing — a test parked waiting for a free -parallel
+# slot never appears there at all. Classification here is by each test's
+# *last* observed action: pass/fail/skip -> completed; run/cont -> still
+# running at kill time; pause -> never started (queued behind -parallel).
+# Subtests (names containing "/") are folded into their parent's timeline;
+# per-test granularity is what an operator needs, not per-subtest.
+# Non-JSON lines (e.g. `go: downloading ...` progress, a raw panic dump) are
+# skipped rather than aborting the whole report.
+report_test_outcomes() {
+  local jsonlog="$1"
+  jq -R 'fromjson? // empty' "$jsonlog" \
+    | jq -s -r '
+        [ .[] | select(.Test != null and (.Test | contains("/") | not)) ]
+        | group_by(.Test)
+        | map({test: .[0].Test, last: .[-1].Action})
+        | group_by(.last)
+        | map({(.[0].last): (map(.test) | sort)})
+        | add // {}
+        | (.pass // []) as $pass
+        | (.fail // []) as $fail
+        | (.skip // []) as $skip
+        | (((.run // []) + (.cont // [])) | sort) as $running
+        | (.pause // []) as $paused
+        | "completed - pass (\($pass|length)): \($pass|join(", "))\n"
+        + "completed - fail (\($fail|length)): \($fail|join(", "))\n"
+        + "completed - skip (\($skip|length)): \($skip|join(", "))\n"
+        + "still running at kill time (\($running|length)): \($running|join(", "))\n"
+        + "never started - queued behind -parallel cap (\($paused|length)): \($paused|join(", "))"
+      '
+}
+
 # switch_and_run stops the bed, flips FABRIK_MERGE_TRAIN to $1 in its .env,
 # restarts it (via the dedicated TestSwitchTrainMode invocation — a separate
 # `go test` process so the restart completes, bed fully back up, before the
 # suite invocation that follows even starts), then runs the suite with
 # E2E_TRAIN_MODE=$1 exported.
+#
+# The suite invocation runs under `go test -json`, teed to a per-leg log, so
+# a non-zero exit can be classified (report_test_outcomes) and, if it was
+# specifically an E2E_TIMEOUT kill, followed by best-effort teardown — see
+# the header comment. `|| rc=$?` (rather than toggling set -e/+e) is what
+# lets this function inspect the pipeline's exit status without the script
+# aborting first: it's not the last element of an AND/OR list, so `set -e`
+# does not trigger on it, and `pipefail` ensures $? reflects go test's own
+# exit code even though it isn't the last command in the pipeline.
 switch_and_run() {
   local mode="$1"
   shift
@@ -119,8 +163,27 @@ switch_and_run() {
   E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
   echo "== running suite with E2E_TRAIN_MODE=${mode} =="
-  E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -timeout "$TIMEOUT" -parallel "$PARALLEL" \
-    ./tests/e2e/... "$@"
+  local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
+  local rc=0
+  E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -timeout "$TIMEOUT" -parallel "$PARALLEL" \
+      ./tests/e2e/... "$@" 2>&1 \
+    | tee "$jsonlog" \
+    | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
+    || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    echo "== suite FAILED (leg: ${mode}, exit ${rc}) — classifying test outcomes ==" >&2
+    echo "JSON log: $jsonlog" >&2
+    report_test_outcomes "$jsonlog" >&2
+    if grep -q 'panic: test timed out after' "$jsonlog"; then
+      echo "== E2E_TIMEOUT kill detected (leg: ${mode}) — running best-effort teardown ==" >&2
+      "$REPO_ROOT/scripts/e2e/reset.sh" \
+        || echo "warning: automatic teardown failed; run scripts/e2e/reset.sh manually" >&2
+      echo "NOTE: worktrees were NOT cleaned automatically (that requires stopping the bed first)." >&2
+      echo "      Run scripts/e2e/reset.sh --worktrees for full parity before the next release-gate run." >&2
+    fi
+    return "$rc"
+  fi
 }
 
 if [ -n "${E2E_TRAIN_MODE:-}" ]; then
