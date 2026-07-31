@@ -57,6 +57,44 @@ rename to new_name.go
 	}
 }
 
+func TestSplitDiffFiles_PathContainsSpaceBSlash_ResolvedViaUnambiguousLine(t *testing.T) {
+	// "foo b/bar.txt" contains the literal substring " b/", making the
+	// header line's own "diff --git a/X b/Y" split ambiguous — greedily
+	// matching the LAST " b/" occurrence in the line yields the wrong,
+	// truncated path ("bar.txt") if the header's capture groups are trusted
+	// directly. The unambiguous "+++ b/<path>" line must win instead.
+	diff := `diff --git a/foo b/bar.txt b/foo b/bar.txt
+index 111..222 100644
+--- a/foo b/bar.txt
++++ b/foo b/bar.txt
+@@ -1,1 +1,1 @@
+-old
++new
+`
+	files, _ := splitDiffFiles(diff)
+	if len(files) != 1 || files[0].Path != "foo b/bar.txt" {
+		t.Errorf("splitDiffFiles(ambiguous path) = %+v, want single file keyed as \"foo b/bar.txt\"", files)
+	}
+}
+
+func TestSplitDiffFiles_DeletedFileWithAmbiguousPath_ResolvedViaMinusLine(t *testing.T) {
+	// Deletions have no "+++ b/<path>" line ("+++ /dev/null" instead), so
+	// the unambiguous "--- a/<path>" line must be preferred over the
+	// header's own ambiguous split.
+	diff := `diff --git a/foo b/bar.txt b/foo b/bar.txt
+deleted file mode 100644
+index 111..000
+--- a/foo b/bar.txt
++++ /dev/null
+@@ -1,1 +0,0 @@
+-old
+`
+	files, _ := splitDiffFiles(diff)
+	if len(files) != 1 || files[0].Path != "foo b/bar.txt" {
+		t.Errorf("splitDiffFiles(deleted, ambiguous path) = %+v, want single file keyed as \"foo b/bar.txt\"", files)
+	}
+}
+
 func TestSplitDiffFiles_GarbageInput_AllPreamble(t *testing.T) {
 	diff := "x diff content"
 	files, preamble := splitDiffFiles(diff)

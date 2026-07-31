@@ -15,8 +15,22 @@ type diffFile struct {
 	Bytes int64  // len(Body), in raw diff bytes
 }
 
-// diffFileHeaderLineRE matches a single "diff --git a/<path> b/<path>" line.
+// diffFileHeaderLineRE matches a single "diff --git a/<path> b/<path>" line
+// and detects a new file block's start. Its own capture groups are an
+// AMBIGUOUS, greedy a/...b/... split — used only as resolveFilePath's
+// last-resort fallback, never as the primary path source; see
+// resolveFilePath for why.
 var diffFileHeaderLineRE = regexp.MustCompile(`^diff --git a/(.+) b/(.+)$`)
+
+// diffNewPathLineRE, diffOldPathLineRE, and diffRenameToLineRE each match a
+// line whose path is unambiguous by construction — unlike the "diff --git"
+// header line, none of these can contain a second occurrence of their own
+// marker within a legitimate diff line (see resolveFilePath).
+var (
+	diffNewPathLineRE  = regexp.MustCompile(`^\+\+\+ b/(.+)$`)
+	diffOldPathLineRE  = regexp.MustCompile(`^--- a/(.+)$`)
+	diffRenameToLineRE = regexp.MustCompile(`^rename to (.+)$`)
+)
 
 // splitDiffFiles splits a unified diff (as returned by FetchPRDiff) into its
 // per-file blocks, keyed by the b/-side path exactly like ParseChangedPaths
@@ -37,7 +51,7 @@ func splitDiffFiles(diff string) (files []diffFile, preamble string) {
 	}
 
 	var preambleLines []string
-	var curPath string
+	var headerPath string
 	var curLines []string
 	inFile := false
 
@@ -46,13 +60,13 @@ func splitDiffFiles(diff string) (files []diffFile, preamble string) {
 			return
 		}
 		body := strings.Join(curLines, "\n") + "\n"
-		files = append(files, diffFile{Path: curPath, Body: body, Bytes: int64(len(body))})
+		files = append(files, diffFile{Path: resolveFilePath(curLines, headerPath), Body: body, Bytes: int64(len(body))})
 	}
 
 	for _, line := range lines {
 		if m := diffFileHeaderLineRE.FindStringSubmatch(line); m != nil {
 			flush()
-			curPath = m[2]
+			headerPath = m[2]
 			curLines = []string{line}
 			inFile = true
 			continue
@@ -69,6 +83,54 @@ func splitDiffFiles(diff string) (files []diffFile, preamble string) {
 		preamble = strings.Join(preambleLines, "\n") + "\n"
 	}
 	return files, preamble
+}
+
+// resolveFilePath determines a file block's Path, preferring lines that are
+// unambiguous by construction over the "diff --git a/X b/Y" header's own
+// greedy a/...b/... split. That split is ambiguous whenever a path itself
+// contains the literal substring " b/": Go's regexp greedily maximizes the
+// first capture group, which resolves to the LAST " b/" occurrence in the
+// line — not necessarily the true a/-b/ separator — silently truncating
+// headerPath to a suffix of the real path (verified: for a file literally
+// named "foo b/bar.txt", the header line's greedy match yields "bar.txt",
+// not "foo b/bar.txt"). This used to be cosmetic (only ParseChangedPaths
+// relied on it, and only for a since-removed all-or-nothing exclusion
+// check); it is now load-bearing, since a wrong Path can dodge an
+// excluded_paths glob it should have matched, or misattribute bytes in the
+// too-large notice's DominantPaths.
+//
+// "+++ b/<path>" (content changes) and "--- a/<path>" (deletions, where
+// there is no b-side) are each anchored at line-start with their marker
+// consumed by literal characters, not a greedy group — a second occurrence
+// of "+++ b/" or "--- a/" can never appear at the start of another line in
+// the same block: every hunk content line is itself prefixed with a
+// leading +/-/space by the diff format, which shifts any lookalike content
+// out of alignment with these patterns (the same invariant
+// diffFileHeaderLineRE's own boundary-detection already relies on — see
+// TestSplitDiffFiles_HeaderLookalikeAsRealDiffContent_NotTreatedAsNewFile).
+// "rename to <path>" covers a pure rename with no content hunks (so no
+// "+++"/"--- " lines exist at all) and is only ever emitted by git itself
+// in the pre-hunk metadata area, never derived from file content.
+//
+// Falls back to the ambiguous headerPath only when none of those lines are
+// present — e.g. a pure file-mode change with no content or rename delta.
+func resolveFilePath(blockLines []string, headerPath string) string {
+	for _, line := range blockLines {
+		if m := diffNewPathLineRE.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	}
+	for _, line := range blockLines {
+		if m := diffOldPathLineRE.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	}
+	for _, line := range blockLines {
+		if m := diffRenameToLineRE.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	}
+	return headerPath
 }
 
 // pathsOf extracts the Path of each file, in order — used to turn a
