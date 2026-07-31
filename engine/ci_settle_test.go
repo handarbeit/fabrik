@@ -231,6 +231,54 @@ func TestSettleAwaitingCIScan_OrphanColumn_Escalates(t *testing.T) {
 	}
 }
 
+// TestRecordAwaitingCIOrphanRetry_UnlimitedWhenMaxRetriesZero is a PR-review
+// follow-up (pruefer): recordSettleRetry (engine/settle.go) silently no-ops
+// when MaxRetries <= 0, so an orphan-column/deep-fetch-failure item would
+// retry forever without ever escalating. This is not a gap specific to this
+// scan — MaxRetries == 0 is the codebase-wide, documented, tested contract for
+// "unlimited retries, never escalate" (cmd/root.go's `-max-retries` flag help
+// text: "0 = unlimited"; mirrored by
+// TestRecordNonDefaultBaseCloseRetry_UnlimitedWhenMaxRetriesZero and
+// TestRecordMergeTrainMemberCloseRetry_UnlimitedWhenMaxRetriesZero for their
+// own settle scans). This pins the same contract for
+// recordAwaitingCIOrphanRetry, matching that precedent, rather than treating
+// it as a defect to fix here — changing recordSettleRetry's shared semantics
+// would affect four other production settle scans well outside #1270's scope.
+func TestRecordAwaitingCIOrphanRetry_UnlimitedWhenMaxRetriesZero(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Queued", Order: 1, HoldingStage: true},
+		{Name: "Done", Order: 2, CleanupWorktree: true},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxRetries = 0
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 29,
+				Repo:   "owner/repo",
+				Status: "Queued",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	for i := 0; i < 10; i++ {
+		eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("did not expect escalation (fabrik:paused) when MaxRetries == 0")
+		}
+	}
+}
+
 // TestSettleAwaitingCIScan_DeepFetchFailure_Escalates covers the other "gate
 // genuinely cannot be evaluated" case: the item resolves to a real wait_for_ci
 // stage, but FetchItemDetails fails on every settle pass (e.g. permissions,

@@ -78,7 +78,13 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // label list on main before this change (poll.go's hasAwaitingLabel), so these
 // items were already deep-fetched every poll via the main loop. This scan
 // relocates that existing per-poll fetch to its own admission path; it does not
-// add a fetch that wasn't already happening.
+// add a fetch that wasn't already happening. It also still benefits from
+// e.readClient's own internal cache-freshness logic (CacheImpl.FetchItemDetails,
+// boardcache.go) exactly as the old code path did — same function, same
+// cacheIsStale check, regardless of caller. A follow-up PR review comment noted
+// that the old code path's cache-hit-vs-deep-fetch pre-check log line (poll.go)
+// had no equivalent here; added below, matching poll.go's pattern, for the same
+// diagnosability reason this whole scan exists.
 func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoard, advancedItems map[string]bool) {
 	var processed int
 	for _, item := range board.Items {
@@ -95,6 +101,19 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		}
 
 		repo := itemOwnerRepoString(item, e.defaultRepo())
+		// Mirrors selectDeepFetchCandidates's pre-check log line (poll.go) — purely
+		// diagnostic, doesn't gate the call. FetchItemDetails below goes through the
+		// same e.readClient (CacheImpl when caching is enabled), whose own internal
+		// freshness check (boardcache.go's cacheIsStale) decides cache-hit vs. real
+		// GraphQL fetch identically regardless of caller; this scan gets that for
+		// free. Without this line, an operator diagnosing a stall (this issue's own
+		// motivating scenario) would see "processed N item(s)" but no visibility
+		// into whether each item's fetch was a cache hit or a live API call.
+		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, item.UpdatedAt) {
+			e.logf(item.Number, "awaiting-ci-settle", "reading details from cache\n")
+		} else {
+			e.logf(item.Number, "awaiting-ci-settle", "deep-fetching details from GitHub\n")
+		}
 		if err := e.readClient.FetchItemDetails(&item); err != nil {
 			e.logf(item.Number, "awaiting-ci-settle", "could not deep-fetch item details: %v — will retry next poll\n", err)
 			e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})
