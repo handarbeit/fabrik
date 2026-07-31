@@ -514,6 +514,37 @@ func TestReviewPR_OverCap_PostsOneNoticeAndSkip(t *testing.T) {
 	}
 }
 
+// TestReviewPR_OverCap_CommentsFetchFailed_DoesNotPostNotice covers a PR
+// review finding: if FetchIssueComments fails, ReviewPR must not treat that
+// failure as "no notice exists yet" when deciding whether to post one — a
+// transient fetch error must never risk a duplicate too-large notice for the
+// same head SHA. The over-cap skip itself still happens (that determination
+// doesn't depend on comments), but no comment is posted this poll.
+func TestReviewPR_OverCap_CommentsFetchFailed_DoesNotPostNotice(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	client.fetchErr = fmt.Errorf("transient GitHub API error")
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 50}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge", outcome)
+	}
+	if outcome.SizeDetail == nil {
+		t.Fatal("outcome.SizeDetail = nil, want a populated detail")
+	}
+	if client.addCommentCallCount() != 0 {
+		t.Errorf("AddComment called %d times, want 0 — a failed comments fetch must not be treated as proof no notice exists", client.addCommentCallCount())
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("over-cap PR must skip before cloning or invoking claude")
+	}
+}
+
 // TestReviewPR_OverCap_RepolledSameSHA_DoesNotDuplicateNotice covers FR-4:
 // once a too-large notice exists for a head SHA, a later poll must not
 // re-fetch the diff, re-measure, or post a second notice.

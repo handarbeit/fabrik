@@ -73,10 +73,13 @@ type ReviewOutcome struct {
 // still doesn't fit does not duplicate that notice, but does mark the
 // "/pruefer review" command processed so it isn't retried forever.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
-	comments, err := client.FetchIssueComments(owner, repo, pr.Number)
-	if err != nil {
-		logf(pr.Number, "warn", "fetching comments for %s/%s#%d: %v\n", owner, repo, pr.Number, err)
-		comments = nil // fail open: no pending force-review, no known prior too-large notice this round
+	comments, commentsErr := client.FetchIssueComments(owner, repo, pr.Number)
+	if commentsErr != nil {
+		logf(pr.Number, "warn", "fetching comments for %s/%s#%d: %v\n", owner, repo, pr.Number, commentsErr)
+		comments = nil // fail open for force-review detection only: not fatal to the poll cycle, and
+		// self-correcting once comments are fetchable again. The too-large-notice path below does NOT
+		// fail open on this same error — see the commentsErr check guarding client.AddComment — since
+		// treating a fetch failure as "no notice exists" there could post a duplicate for this head SHA.
 	}
 	forceReview := len(pendingReviewComments(comments)) > 0
 
@@ -162,6 +165,17 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 					// the existing notice for this head SHA already says
 					// so; don't post a second one for the same SHA.
 					logf(pr.Number, "select", "not re-posting too-large notice for %s/%s#%d — one already exists at head %s\n", owner, repo, pr.Number, pr.HeadSHA)
+				} else if commentsErr != nil {
+					// The comments fetch at the top of ReviewPR failed, so
+					// noticeAlreadyExists is a guess (nil comments always
+					// evaluate to "not noticed"), not a fact. Posting here
+					// could duplicate an existing notice for this exact head
+					// SHA — skip and let a future poll, once comments are
+					// fetchable again, make the real determination. This
+					// relies on a single Pruefer instance polling a given
+					// PR at a time (see AddComment call below); a concurrent
+					// second poller could still race past this guard.
+					logf(pr.Number, "warn", "skipping too-large notice post for %s/%s#%d: comments fetch failed earlier, can't confirm no notice already exists at head %s\n", owner, repo, pr.Number, pr.HeadSHA)
 				} else if _, addErr := client.AddComment(owner, repo, pr.Number, buildTooLargeNoticeBody(detail, pr.HeadSHA)); addErr != nil {
 					logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, addErr)
 				}
