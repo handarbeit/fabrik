@@ -114,7 +114,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 		}
 		b.WriteString(" -- . ")
 		for _, p := range req.ExcludedPaths {
-			fmt.Fprintf(&b, "':(exclude)%s' ", p)
+			fmt.Fprintf(&b, "%s ", singleQuoteShell(":(exclude)"+p))
 		}
 		b.WriteString("`. Note in your summary that these paths were omitted from review:\n\n")
 		for _, p := range req.ExcludedPaths {
@@ -141,6 +141,15 @@ func buildReviewPrompt(req ReviewRequest) string {
 	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only.\n\n")
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
 	return b.String()
+}
+
+// singleQuoteShell escapes s for safe embedding inside a single-quoted shell
+// string. req.ExcludedPaths entries are PR-controlled (parsed off diff
+// headers), so without this a path containing a single quote could break out
+// of the pathspec example's quoting and inject arbitrary shell/git arguments
+// into the command the prompt tells Claude to run verbatim.
+func singleQuoteShell(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // buildReviewArgs constructs the claude CLI argument list for a review
