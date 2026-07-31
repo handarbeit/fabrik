@@ -86,11 +86,20 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // had no equivalent here; added below, matching poll.go's pattern, for the same
 // diagnosability reason this whole scan exists.
 func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoard, advancedItems map[string]bool) {
-	var processed int
+	// examined counts every fabrik:awaiting-ci item this scan looked at, whether
+	// or not it reached the CI gate; gateReached counts only those that made it
+	// through to catchUpPhase1Handlers. Kept separate (PR review, pruefer): a
+	// poll where every item is retrying in the orphan-column or
+	// deep-fetch-failure branches would otherwise log "processed 0 item(s)",
+	// which reads as "nothing is happening" on exactly the kind of poll an
+	// operator diagnosing a stall (this issue's own motivating scenario) most
+	// needs visibility into.
+	var examined, gateReached int
 	for _, item := range board.Items {
 		if !hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:paused") || item.IsClosed {
 			continue
 		}
+		examined++
 
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		isWaitForCI := stage != nil && stage.WaitForCI != nil && *stage.WaitForCI
@@ -107,8 +116,20 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// freshness check (boardcache.go's cacheIsStale) decides cache-hit vs. real
 		// GraphQL fetch identically regardless of caller; this scan gets that for
 		// free. Without this line, an operator diagnosing a stall (this issue's own
-		// motivating scenario) would see "processed N item(s)" but no visibility
+		// motivating scenario) would see "examined N item(s)" but no visibility
 		// into whether each item's fetch was a cache hit or a live API call.
+		//
+		// item.UpdatedAt here is from the single board snapshot fetched once at the
+		// top of poll() — not re-queried mid-poll. If something earlier in this same
+		// poll (e.g. runValidatePRTerminalAdvance, which runs before this scan)
+		// mutated this exact item on GitHub without this board snapshot reflecting
+		// it, IsItemCacheFresh could read a now-stale cache as fresh (PR review,
+		// pruefer). Confirmed pre-existing and identical, not new here:
+		// selectDeepFetchCandidates's own equivalent check (poll.go) uses the exact
+		// same single-snapshot board.Items[i].UpdatedAt, so this is a property of
+		// poll()'s one-snapshot-per-cycle architecture as a whole, not something
+		// introduced by this scan. Accepted as-is — closing it would mean re-fetching
+		// UpdatedAt mid-poll, which no part of poll() currently does anywhere.
 		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, item.UpdatedAt) {
 			e.logf(item.Number, "awaiting-ci-settle", "reading details from cache\n")
 		} else {
@@ -180,10 +201,10 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			// place that reaches it for them.
 			e.runCatchUpPhase2(ctx, board, item, stage, advancedItems)
 		}
-		processed++
+		gateReached++
 	}
-	if processed > 0 {
-		e.logf(0, "awaiting-ci-settle", "processed %d fabrik:awaiting-ci item(s)\n", processed)
+	if examined > 0 {
+		e.logf(0, "awaiting-ci-settle", "examined %d fabrik:awaiting-ci item(s), %d reached the CI gate\n", examined, gateReached)
 	}
 }
 

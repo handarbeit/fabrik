@@ -2070,7 +2070,7 @@ With that fix, this scan's original design intent now holds: landing an item at 
 
 **No double-dispatch.** The main catch-up loop's per-item admission gate was narrowed to `hasComplete`-only as part of this fix (§6.5.1). Since `fabrik:awaiting-ci` and `stage:X:complete` are mutually exclusive in steady state, an item is always routed to exactly one of the two paths per poll — never both — so `CIFixCycles`/worker dispatch can never double-fire for the same item in the same poll.
 
-**Diagnosability.** Every pass logs under the `awaiting-ci-settle` tag: a stray-column skip names the column and the reason it can't host the CI gate; a summary line reports how many `fabrik:awaiting-ci` items were processed when the count is non-zero. This directly addresses the issue's own root-cause complaint — an 80-minute silence with no log line explaining why the item wasn't progressing.
+**Diagnosability.** Every pass logs under the `awaiting-ci-settle` tag: a cache-hit/deep-fetch pre-check line per item (mirroring `selectDeepFetchCandidates`'s poll.go pattern); a stray-column skip names the column and the reason it can't host the CI gate. A summary line reports two counts when non-zero — items *examined* (every `fabrik:awaiting-ci` item the scan looked at, including ones stuck in the orphan-column/deep-fetch-failure retry branches) and items that *reached the CI gate* (made it through to `catchUpPhase1Handlers`) — kept separate so a poll where every item is retrying without reaching the gate doesn't read as "0 items, nothing happening." This directly addresses the issue's own root-cause complaint — an 80-minute silence with no log line explaining why the item wasn't progressing.
 
 **State transitions:**
 

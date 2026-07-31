@@ -156,11 +156,16 @@ class's counter.
 ### Why is the scan diagnostics-first?
 
 The issue's own root-cause complaint was an 80-minute silence with no log line explaining why the item
-wasn't progressing. Every settle pass logs under the `awaiting-ci-settle` tag: a stray-column skip
-names the column and the reason it can't host the CI gate; a summary line reports how many
-`fabrik:awaiting-ci` items were processed when the count is non-zero. This directly satisfies the
-issue's fourth Requirement (a skipped-evaluation log line, and why) independent of whichever structural
-fix ultimately closes the gap for a given field recurrence.
+wasn't progressing. Every settle pass logs under the `awaiting-ci-settle` tag: a cache-hit/deep-fetch
+pre-check line per item; a stray-column skip names the column and the reason it can't host the CI gate.
+A summary line reports two separate counts when non-zero: items *examined* (every `fabrik:awaiting-ci`
+item looked at, including ones retrying in the orphan-column/deep-fetch-failure branches) and items that
+*reached the CI gate* (made it through to `catchUpPhase1Handlers`). These were originally a single
+`processed` count that only incremented on gate-reaching items — a PR review comment (pruefer) pointed
+out this could log "processed 0 item(s)" on a poll where every item was actively retrying, undercutting
+the diagnosability goal; split into two counts to fix it. This directly satisfies the issue's fourth
+Requirement (a skipped-evaluation log line, and why) independent of whichever structural fix ultimately
+closes the gap for a given field recurrence.
 
 ### Why does a `FetchItemDetails` failure retry-then-escalate through the same path as an orphan column?
 
