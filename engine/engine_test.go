@@ -198,6 +198,13 @@ func TestNewWithDeps(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	skipIfNoGit(t)
+	// New() runs the real claudeNameFlagSupported probe against whatever
+	// claude binary (if any) is on the test runner's PATH; save/restore so
+	// that environment-dependent result doesn't leak into later tests in
+	// this package's test binary.
+	origSupported := claudeNameFlagSupported
+	defer func() { claudeNameFlagSupported = origSupported }()
+
 	cfg := Config{
 		Owner: "o",
 		Repo:  "r",
@@ -224,6 +231,11 @@ func TestNew(t *testing.T) {
 
 func TestNew_WiresMergeStrategy(t *testing.T) {
 	skipIfNoGit(t)
+	// See TestNew: save/restore claudeNameFlagSupported so the real,
+	// environment-dependent probe New() runs doesn't leak into later tests.
+	origSupported := claudeNameFlagSupported
+	defer func() { claudeNameFlagSupported = origSupported }()
+
 	cfg := Config{
 		Owner:             "o",
 		Repo:              "r",
