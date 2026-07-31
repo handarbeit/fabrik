@@ -910,7 +910,8 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			stage.Name, botList, prRef, stage.Name, prRef,
 		)
 	} else {
-		// Standard timeout message with named reviewers.
+		// Standard timeout: branches below on whether any reviewer was ever
+		// requested (pendingLine == "" means none was).
 		pendingLine := ""
 		if len(reviewerParts) > 0 {
 			pendingLine = "\n\nPending reviewers: " + strings.Join(reviewerParts, ", ")
@@ -955,11 +956,35 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 				}
 			}
 		}
-		msg = fmt.Sprintf(
-			"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
-				"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
-			stage.Name, pendingLine, authorityLine,
-		)
+		if pendingLine == "" {
+			// No reviewer was ever requested on this PR — waiting longer cannot
+			// satisfy the gate. Say so plainly instead of claiming a wait on
+			// "outstanding reviewers" that don't exist, and offer the same
+			// remedies as Phase 2.
+			prRef := "the linked PR"
+			if item.LinkedPRNumber > 0 {
+				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
+			}
+			msg = fmt.Sprintf(
+				"🏭 **Fabrik — review wait timeout**\n\n"+
+					"The review gate for stage **%s** timed out. No reviewer was ever requested on %s, and no review "+
+					"has been submitted — Fabrik cannot determine whether one is ever coming.%s\n\n"+
+					"Fabrik has paused this issue. To resume, either:\n"+
+					"- (a) post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
+					"the gate, even though GitHub forbids self-approval,\n"+
+					"- (b) set `wait_for_reviews: false` in the %s stage YAML if this repo has no reviewer,\n"+
+					"- (c) merge %s manually, or\n"+
+					"- (d) remove `fabrik:paused` to let the engine wait again.",
+				stage.Name, prRef, authorityLine, prRef, stage.Name, prRef,
+			)
+		} else {
+			// Standard timeout message with named reviewers — unchanged.
+			msg = fmt.Sprintf(
+				"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
+					"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
+				stage.Name, pendingLine, authorityLine,
+			)
+		}
 	}
 
 	e.pauseIssue(item, msg, pauseOpts{

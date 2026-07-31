@@ -1445,6 +1445,44 @@ func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 	if !containsAll(body, "copilot-pull-request-reviewer", "bot", "alice", "human") {
 		t.Errorf("pause comment should list reviewers with bot/human tags; got:\n%s", body)
 	}
+	// Regression guard: when reviewers were requested, the message must keep
+	// its existing "outstanding reviewers" wording and must not bleed into
+	// the no-reviewers-requested remedies text (#1268).
+	if !strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("pause comment should still say 'outstanding reviewers' when reviewers were requested; got:\n%s", body)
+	}
+	if strings.Contains(body, "wait_for_reviews: false") {
+		t.Errorf("pause comment should not include the no-reviewers-requested remedies when reviewers were requested; got:\n%s", body)
+	}
+}
+
+// On a timeout where no reviewer was ever requested, the pause comment must
+// not claim to have waited on "outstanding reviewers" and must list the four
+// remedies, including the COMMENTED self-review hatch (#1268).
+func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 42,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true)}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "outstanding reviewers") {
+		t.Errorf("pause comment must not claim to wait on outstanding reviewers when none were requested; got:\n%s", body)
+	}
+	if !containsAll(body, "COMMENTED", "self-review", "wait_for_reviews: false", "merge", "fabrik:paused") {
+		t.Errorf("pause comment should list the four remedies including the COMMENTED self-review hatch; got:\n%s", body)
+	}
 }
 
 // Authoritative-mode pause messaging must cover REVIEW_REQUIRED, not just an
