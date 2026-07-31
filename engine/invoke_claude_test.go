@@ -1752,3 +1752,296 @@ printf '%s\n' '{"result":"comment done","session_id":"sess_cmt_pathological","nu
 		t.Errorf("ReadSessionID(\"\", 910, \"\") = %q, want %q — write/read path basename mismatch", got, "sess_cmt_pathological")
 	}
 }
+
+// TestParseNameFlagSupport covers the pure --help-text parser in isolation,
+// per Plan task 1.
+func TestParseNameFlagSupport(t *testing.T) {
+	tests := []struct {
+		name     string
+		helpText string
+		want     bool
+	}{
+		{
+			name:     "help text with --name <name>",
+			helpText: "Usage: claude [options]\n\n  -n, --name <name>  Set a display name for this session\n  -p, --print        Print mode\n",
+			want:     true,
+		},
+		{
+			name:     "help text without --name",
+			helpText: "Usage: claude [options]\n\n  -p, --print  Print mode\n  --model <model>  Set the model\n",
+			want:     false,
+		},
+		{
+			name:     "empty help text",
+			helpText: "",
+			want:     false,
+		},
+		{
+			name:     "help text mentions 'name' in unrelated prose but not the flag form",
+			helpText: "  --model <model>  Set the model name to use\n",
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseNameFlagSupport(tt.helpText); got != tt.want {
+				t.Errorf("parseNameFlagSupport(%q) = %v, want %v", tt.helpText, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProbeClaudeNameFlagSupport covers the subprocess-driving half of the
+// capability probe using a fake claude binary on PATH, per Plan task 2. The
+// fail-safe direction (return false) must hold for every non-happy-path.
+func TestProbeClaudeNameFlagSupport(t *testing.T) {
+	t.Run("fake claude --help exits 0 and advertises --name", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeClaude := filepath.Join(binDir, "claude")
+		script := "#!/bin/sh\nprintf '%s\\n' '  -n, --name <name>  Set a display name for this session'\nexit 0\n"
+		if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+		if got := probeClaudeNameFlagSupport(); !got {
+			t.Error("probeClaudeNameFlagSupport() = false, want true for a --help output advertising --name <name>")
+		}
+	})
+
+	t.Run("fake claude --help exits non-zero", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeClaude := filepath.Join(binDir, "claude")
+		script := "#!/bin/sh\nprintf '%s\\n' 'error: unknown command'\nexit 1\n"
+		if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+		if got := probeClaudeNameFlagSupport(); got {
+			t.Error("probeClaudeNameFlagSupport() = true, want false when claude --help exits non-zero")
+		}
+	})
+
+	t.Run("fake claude --help exits 0 but does not mention --name", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeClaude := filepath.Join(binDir, "claude")
+		script := "#!/bin/sh\nprintf '%s\\n' '  -p, --print  Print mode'\nexit 0\n"
+		if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+		if got := probeClaudeNameFlagSupport(); got {
+			t.Error("probeClaudeNameFlagSupport() = true, want false when --help doesn't advertise --name")
+		}
+	})
+
+	t.Run("no claude binary on PATH", func(t *testing.T) {
+		// An empty, isolated PATH guarantees exec.LookPath("claude") fails
+		// regardless of what's installed on the host running this test.
+		t.Setenv("PATH", t.TempDir())
+
+		if got := probeClaudeNameFlagSupport(); got {
+			t.Error("probeClaudeNameFlagSupport() = true, want false when claude is not on PATH")
+		}
+	})
+}
+
+// TestSessionNameSentinel covers sentinel construction, per Plan task 4:
+// normal inputs, the empty-repo fallback, whitespace collapsing in the stage
+// name, and determinism across repeated calls.
+func TestSessionNameSentinel(t *testing.T) {
+	tests := []struct {
+		name      string
+		repo      string
+		issueNum  int
+		stageName string
+		want      string
+	}{
+		{
+			name:      "normal owner/repo/issue/stage",
+			repo:      "handarbeit/fabrik",
+			issueNum:  1284,
+			stageName: "Implement",
+			want:      "fabrik:handarbeit/fabrik#1284:Implement",
+		},
+		{
+			name:      "empty repo falls back to unknown/repo",
+			repo:      "",
+			issueNum:  42,
+			stageName: "Research",
+			want:      "fabrik:unknown/repo#42:Research",
+		},
+		{
+			name:      "stage name with internal spaces collapsed",
+			repo:      "acme/widgets",
+			issueNum:  7,
+			stageName: "Custom Stage Name",
+			want:      "fabrik:acme/widgets#7:Custom-Stage-Name",
+		},
+		{
+			name:      "stage name with tabs and newlines collapsed",
+			repo:      "acme/widgets",
+			issueNum:  8,
+			stageName: "Weird\tStage\nName",
+			want:      "fabrik:acme/widgets#8:Weird-Stage-Name",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionNameSentinel(tt.repo, tt.issueNum, tt.stageName)
+			if got != tt.want {
+				t.Errorf("sessionNameSentinel(%q, %d, %q) = %q, want %q", tt.repo, tt.issueNum, tt.stageName, got, tt.want)
+			}
+			if strings.ContainsAny(got, " \t\n") {
+				t.Errorf("sessionNameSentinel(%q, %d, %q) = %q contains whitespace, must stay a single token", tt.repo, tt.issueNum, tt.stageName, got)
+			}
+		})
+	}
+
+	t.Run("deterministic across repeated calls", func(t *testing.T) {
+		first := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement")
+		for i := 0; i < 5; i++ {
+			if got := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement"); got != first {
+				t.Errorf("sessionNameSentinel produced %q on call %d, want deterministic %q", got, i, first)
+			}
+		}
+	})
+}
+
+// TestBuildClaudeArgs_NameFlag verifies --name <sentinel> is present with the
+// expected value when the capability probe reports support, per Plan task 7.
+func TestBuildClaudeArgs_NameFlag(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Implement"}
+	sessionName := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement")
+	args := buildClaudeArgs(stage, "", "", 0, false, "", sessionName)
+
+	found := false
+	for i, a := range args {
+		if a == "--name" {
+			found = true
+			if i+1 >= len(args) || args[i+1] != sessionName {
+				t.Fatalf("expected --name %s, got %v", sessionName, args)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected --name in args, got %v", args)
+	}
+}
+
+// TestBuildClaudeArgs_NameFlagOmittedWhenUnsupported verifies --name is
+// omitted entirely when the capability probe reports no support, even though
+// a non-empty sessionName is supplied — per Plan task 7 and the issue's
+// critical backward-compatibility requirement.
+func TestBuildClaudeArgs_NameFlagOmittedWhenUnsupported(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = false
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Implement"}
+	sessionName := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement")
+	args := buildClaudeArgs(stage, "", "", 0, false, "", sessionName)
+
+	for i, a := range args {
+		if a == "--name" {
+			t.Fatalf("did not expect --name in args when claudeNameFlagSupported is false, got %v (at index %d)", args, i)
+		}
+	}
+}
+
+// TestBuildClaudeArgs_NameFlagOmittedWhenSessionNameEmpty verifies --name is
+// omitted when no sentinel is supplied, regardless of capability support —
+// buildClaudeArgs never invents a name on its own.
+func TestBuildClaudeArgs_NameFlagOmittedWhenSessionNameEmpty(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Implement"}
+	args := buildClaudeArgs(stage, "", "", 0, false, "", "")
+
+	for i, a := range args {
+		if a == "--name" {
+			t.Fatalf("did not expect --name in args when sessionName is empty, got %v (at index %d)", args, i)
+		}
+	}
+}
+
+// TestBuildClaudeArgs_NameFlagWithResume verifies --name and --resume both
+// appear simultaneously without either being dropped, per Plan task 8 — the
+// issue's "must not disturb session resume" requirement, resolved by Plan to
+// pass --name unconditionally on resume once the capability probe passes.
+func TestBuildClaudeArgs_NameFlagWithResume(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Plan"}
+	sessionName := sessionNameSentinel("handarbeit/fabrik", 1284, "Plan")
+	args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "", sessionName)
+
+	var gotResumeID, gotName string
+	for i, a := range args {
+		if a == "--resume" && i+1 < len(args) {
+			gotResumeID = args[i+1]
+		}
+		if a == "--name" && i+1 < len(args) {
+			gotName = args[i+1]
+		}
+	}
+	if gotResumeID != "sess_xyz" {
+		t.Errorf("expected --resume sess_xyz, got args %v", args)
+	}
+	if gotName != sessionName {
+		t.Errorf("expected --name %s, got args %v", sessionName, args)
+	}
+}
+
+// TestInvokeClaude_NameFlagInArgv is an end-to-end check (through InvokeClaude,
+// not the unexported buildClaudeArgs directly) that a real invocation with a
+// populated issue.Repo produces the documented sentinel in argv when the
+// capability probe is forced on.
+func TestInvokeClaude_NameFlagInArgv(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_name","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "implement",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 1284, Title: "T", Repo: "handarbeit/fabrik"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	want := "--name fabrik:handarbeit/fabrik#1284:Implement"
+	if !strings.Contains(argsStr, want) {
+		t.Errorf("expected %q in args, got: %q", want, argsStr)
+	}
+}
