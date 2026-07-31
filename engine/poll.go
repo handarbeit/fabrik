@@ -986,14 +986,18 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
 	//
-	// Phase 1 (unconditional): for every non-paused, non-cleanup item with a
-	// stage:<X>:complete label OR fabrik:awaiting-ci (on a wait_for_ci stage),
-	// run dependency check, review gate, CI gate, and review reinvoke regardless
-	// of yolo/cruise/auto_advance. This ensures inline PR review thread comments
-	// (Copilot, Gemini, human inline) are addressed on all issues, and that the
-	// CI gate is evaluated every poll cycle during CI await.
+	// Phase 1 (unconditional): for every non-paused, non-cleanup item with
+	// stage:<X>:complete, run dependency check, review gate, CI gate, and review
+	// reinvoke regardless of yolo/cruise/auto_advance. This ensures inline PR
+	// review thread comments (Copilot, Gemini, human inline) are addressed on all
+	// issues. fabrik:awaiting-ci items are handled separately by
+	// settleAwaitingCIScan (#1270), not here — see its doc comment.
 	//
-	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance.
+	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance. Shared
+	// with settleAwaitingCIScan via runCatchUpPhase2 so the ADR-1216 same-poll
+	// joint-clearing handoff (CI gate clears → landing decision reached in the same
+	// pass) still applies to awaiting-ci items now that they route through the
+	// dedicated scan instead of this loop.
 	for _, item := range deepFetchCandidates {
 		// Skip paused items in both phases.
 		if hasLabel(item.Labels, "fabrik:paused") {
@@ -1005,12 +1009,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		hasComplete := hasLabel(item.Labels, completeLabel)
-		hasAwaitingCI := hasLabel(item.Labels, "fabrik:awaiting-ci")
-		// Admit items with fabrik:awaiting-ci on a wait_for_ci stage even when
-		// stage:X:complete is absent — handleStageComplete now defers the
-		// completion label until checkCIGate confirms CI is green (R4).
-		isWaitForCI := stage.WaitForCI != nil && *stage.WaitForCI
-		if !hasComplete && !(hasAwaitingCI && isWaitForCI) {
+		// fabrik:awaiting-ci items are NOT admitted here (#1270): CI-gate
+		// evaluation for a not-yet-complete awaiting-ci item is owned exclusively
+		// by settleAwaitingCIScan, which is sourced directly from board.Items and
+		// therefore immune to whatever silently excluded awaiting-ci items from
+		// this admission-gated path in the field. Since fabrik:awaiting-ci and
+		// stage:X:complete are mutually exclusive in steady state, every
+		// awaiting-ci item is !hasComplete and is routed there, never here, until
+		// the gate clears — so this plain hasComplete check never double-dispatches
+		// against the dedicated scan.
+		if !hasComplete {
+			if hasLabel(item.Labels, "fabrik:awaiting-ci") {
+				e.logf(item.Number, "poll", "awaiting-ci item owned by dedicated settle scan, not Phase 1\n")
+			}
 			continue
 		}
 
@@ -1039,55 +1050,20 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 
-		// Phase 2: gated stage advancement.
-		// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
-		isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
-		if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
-			continue
-		}
-		// cruise and yolo labels override auto_advance:false on individual stages;
-		// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
-		if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
-			continue
-		}
-
-		if stage.Name == "Validate" {
-			// auto-merge is yolo-only — cruise and auto_advance:true stop here.
-			yoloActive := e.cfg.Yolo || hasYoloLabel(item)
-			if !yoloActive {
-				continue
-			}
-			// Items with fabrik:auto-merge-enabled are already in the GitHub
-			// auto-merge convergence flow; checkAutoMergeConvergence (Phase 1)
-			// monitors them and advances to Done when the PR merges.
-			if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
-				continue
-			}
-			_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
-			if mergeErr != nil {
-				e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
-			}
-			// Auto-merge enabled (or failed); Done advancement is handled by
-			// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
-			continue
-		}
-		if newComments := e.findNewComments(item); len(newComments) > 0 {
-			e.logf(item.Number, "advance", "skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
-			continue
-		}
-		if err := e.advanceToNextStage(board, item, stage); err != nil {
-			e.logf(item.Number, "warn", "could not advance: %v\n", err)
-		}
-		// Mark as advanced so the defer doesn't re-cache the old updatedAt.
-		// Board column moves don't bump updatedAt, so re-caching would
-		// make the item look "unchanged" on the next poll.
-		advancedItems[issueKey(item, e.defaultRepo())] = true
+		e.runCatchUpPhase2(ctx, board, item, stage, advancedItems)
 	}
 
 	// Single-owner PR terminal advance: the authoritative path for all
 	// "Validate-stage PR merged → advance to Done" transitions (ADR-056 D2).
 	// Runs regardless of which gate label is present; no label negation required.
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
+
+	// Awaiting-CI settle scan (#1270): the sole per-poll evaluator of the CI gate
+	// for open, not-yet-complete fabrik:awaiting-ci items. Runs over the raw board
+	// snapshot, not deepFetchCandidates — the whole point is independence from the
+	// itemMayNeedWork/selectDeepFetchCandidates/Phase-1-admission-gate pipeline
+	// that field evidence showed can silently exclude these items.
+	e.settleAwaitingCIScan(ctx, board, advancedItems)
 
 	// No-work-needed settle scan: retries the outstanding Done-move/close for any
 	// item carrying fabrik:awaiting-done, independent of item.Status. Runs over
@@ -1226,6 +1202,60 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	}, nil
 }
 
+// runCatchUpPhase2 performs the gated stage-advancement step for an item that
+// passed Phase 1 unclaimed: yolo/cruise/auto_advance-gated advancement to the
+// next stage, or (at Validate) yolo-gated auto-merge enablement via
+// attemptMergeOnValidate. Shared by the main per-item catch-up loop (for items
+// with stage:X:complete already present) and settleAwaitingCIScan (#1270, for
+// fabrik:awaiting-ci items whose CI gate cleared on this exact poll pass) so the
+// ADR-1216 same-poll joint-clearing handoff — CI clears → the landing decision
+// must be reached immediately, not deferred to the next poll — applies
+// regardless of which of the two owns a given item's admission this poll.
+func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, advancedItems map[string]bool) {
+	// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
+	isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
+	if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
+		return
+	}
+	// cruise and yolo labels override auto_advance:false on individual stages;
+	// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
+	if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		return
+	}
+
+	if stage.Name == "Validate" {
+		// auto-merge is yolo-only — cruise and auto_advance:true stop here.
+		yoloActive := e.cfg.Yolo || hasYoloLabel(item)
+		if !yoloActive {
+			return
+		}
+		// Items with fabrik:auto-merge-enabled are already in the GitHub
+		// auto-merge convergence flow; checkAutoMergeConvergence (Phase 1)
+		// monitors them and advances to Done when the PR merges.
+		if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
+			return
+		}
+		_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
+		if mergeErr != nil {
+			e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
+		}
+		// Auto-merge enabled (or failed); Done advancement is handled by
+		// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
+		return
+	}
+	if newComments := e.findNewComments(item); len(newComments) > 0 {
+		e.logf(item.Number, "advance", "skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
+		return
+	}
+	if err := e.advanceToNextStage(board, item, stage); err != nil {
+		e.logf(item.Number, "warn", "could not advance: %v\n", err)
+	}
+	// Mark as advanced so the defer doesn't re-cache the old updatedAt.
+	// Board column moves don't bump updatedAt, so re-caching would
+	// make the item look "unchanged" on the next poll.
+	advancedItems[issueKey(item, e.defaultRepo())] = true
+}
+
 // dispatchCandidates checks each deep-fetch candidate against itemNeedsWork and
 // the in-flight worker guard, then dispatches a goroutine per admitted item,
 // gated on an available e.sem slot. It aborts early (without blocking further)
@@ -1344,7 +1374,11 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// An item is eligible for deep-fetch evaluation if:
 		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
 		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
-		//   (c) it has a bypass label (awaiting-ci, awaiting-review, or rebase-needed need per-poll eval), OR
+		//   (c) it has a bypass label (awaiting-review or rebase-needed need per-poll
+		//       eval; fabrik:awaiting-ci does NOT — as of #1270 it is evaluated by the
+		//       dedicated settleAwaitingCIScan, sourced from board.Items directly and
+		//       independent of this pre-filter, so bypassing it here would only force a
+		//       redundant deep-fetch with no functional benefit), OR
 		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed), OR
 		//   (e) it is not yet recorded in the engine store (first poll / fresh startup).
 		// Items with an active CooldownAt but no other signal are suppressed.
@@ -1373,7 +1407,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:rebase-needed") || hasLabel(item.Labels, "fabrik:awaiting-review") || hasLabel(item.Labels, "fabrik:auto-merge-enabled") || hasLabel(item.Labels, "fabrik:revalidate")
+			hasAwaitingLabel := hasLabel(item.Labels, "fabrik:rebase-needed") || hasLabel(item.Labels, "fabrik:awaiting-review") || hasLabel(item.Labels, "fabrik:auto-merge-enabled") || hasLabel(item.Labels, "fabrik:revalidate")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())
