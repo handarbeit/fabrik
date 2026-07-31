@@ -505,6 +505,20 @@ completed one. A normal scenario `FAIL` does **not** trigger this — an
 operator debugging a real regression needs the board/issue state left
 intact.
 
+This runs immediately and unattended, without giving an operator a chance to
+inspect the stranded PRs/issues first — worth knowing if you're debugging why
+a scenario hung rather than just re-running the gate. In practice, the two
+most useful artifacts for that survive teardown anyway: the classification
+report above (printed *before* teardown runs) already names the exact
+still-running/never-started tests, and `close_open_issues_in`/
+`close_open_prs_in` **close** rather than delete — their full comment
+history, labels, and timeline stay inspectable afterward via
+`gh issue view --repo <alpha|beta> <n>` / `gh pr view --repo <alpha|beta> <n>`
+even after this teardown runs. What does *not* survive: `close_open_prs_in`
+deletes each PR's head branch, and `drain_board` deletes (not just moves)
+every project-board item, so board-column position at kill time is lost
+unless you happened to capture it live.
+
 **Worktrees are the one exception — they are not auto-cleaned.** The only
 worktree-cleanup path (`scripts/e2e/reset.sh --worktrees`) nukes *all*
 worktrees and bare clones bed-wide and requires stopping the bed first; it

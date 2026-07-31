@@ -162,7 +162,13 @@ report_test_outcomes() {
 # lets this function inspect the pipeline's exit status without the script
 # aborting first: it's not the last element of an AND/OR list, so `set -e`
 # does not trigger on it, and `pipefail` ensures $? reflects go test's own
-# exit code even though it isn't the last command in the pipeline.
+# exit code even though it isn't the last command in the pipeline. The
+# report_test_outcomes call below is guarded with `|| echo warning...` for
+# the same reason: it's a standalone statement under `set -e`, so an
+# unguarded jq failure there (e.g. an unexpected future `go test -json`
+# schema change) would abort the script before ever reaching the
+# timeout-panic check and auto-teardown that follow it — silently
+# defeating the hardening this function exists to provide.
 switch_and_run() {
   local mode="$1"
   shift
@@ -181,7 +187,8 @@ switch_and_run() {
   if [ "$rc" -ne 0 ]; then
     echo "== suite FAILED (leg: ${mode}, exit ${rc}) — classifying test outcomes ==" >&2
     echo "JSON log: $jsonlog" >&2
-    report_test_outcomes "$jsonlog" >&2
+    report_test_outcomes "$jsonlog" >&2 \
+      || echo "warning: failed to classify test outcomes (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
     if grep -q 'panic: test timed out after' "$jsonlog"; then
       echo "== E2E_TIMEOUT kill detected (leg: ${mode}) — running best-effort teardown ==" >&2
       "$REPO_ROOT/scripts/e2e/reset.sh" \
