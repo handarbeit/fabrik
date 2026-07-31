@@ -39,12 +39,44 @@
 #   If you hit a failure here, check/reset the bed's .env mode before
 #   assuming it's still in its prior state.
 #
+# Timeout (E2E_TIMEOUT, default 4h): raised from the original 90m after a
+# real two-mode gate run was killed mid-run — TestCIFixReinvokeCycleLimit was
+# still executing at 1h26m, already past its own documented 30-60min ceiling,
+# when the 90m wall clock hit. Paired off/on timings for two scenarios showed
+# a ~1.55-1.61x contention multiplier under load (TestConjunctiveCIReviewGate
+# 1335s->2152s, TestPausedMergedPRRecovery 1382s->2146s). Applying that factor
+# to the heaviest documented per-scenario ceilings puts the contended worst
+# case in the ~120-180min range; 4h leaves ~30-60min of margin on top. See
+# tests/e2e/README.md's "How the defaults are derived" section for the full
+# arithmetic — this number is provisional and should be revisited after
+# future real runs, not treated as load-bearing precision.
+#
 # Parallelism cap (E2E_PARALLEL, default 4): 16 of the 17 e2e tests are
 # t.Parallel(), but they all drive ONE shared Fabrik bed (5 workers by default)
 # against ONE shared board + API budget. Go's default -parallel is GOMAXPROCS
 # (~8-12 cores), which oversubscribes the bed and produces cascading timeouts
 # even though each scenario passes standalone. Capping -parallel keeps the bed
-# from being flooded. See issue #971 and tests/e2e/README.md.
+# from being flooded. See issue #971 and tests/e2e/README.md. Kept at 4 rather
+# than lowered further: the bed has 5 workers so 4 already reserves headroom,
+# and the available contention data doesn't clearly indict 4 itself (the "on"
+# leg simply has more real work — 17 scenarios vs 13, since Train-only
+# scenarios skip near-instantly under "off"). A scenario failing purely from
+# bed starvation is instead addressed by the timeout increase above, which
+# gives a starved scenario enough wall-clock room to actually finish.
+#
+# Timeout/failure reporting and teardown-on-kill: the suite invocation below
+# runs `go test -json`, tees the stream to a per-leg log under $TMPDIR, and
+# on a non-zero exit classifies every top-level test by its last observed
+# action into completed (pass/fail/skip), still-running (was executing when
+# killed), and never-started (queued behind -parallel, never got a slot) —
+# the built-in `-timeout` panic dump only reports the "still-running" half.
+# If the log shows Go's own timeout-panic text, this was a wall-clock kill
+# specifically (not a normal scenario FAIL), and the script automatically
+# runs scripts/e2e/reset.sh (the non---worktrees form) as best-effort
+# teardown, since a killed run's t.Cleanup calls never execute. Worktrees are
+# NOT auto-cleaned (the only worktree-cleanup path is a destructive full-bed
+# nuke requiring the bed to be stopped first) — see tests/e2e/README.md's
+# "Teardown on kill" section for the remaining manual step.
 #
 # Prerequisites (one-time setup):
 #   - ~/dev/fabrik-test/ exists with .env (FABRIK_TOKEN for @arbeithand)
@@ -66,8 +98,10 @@ if [ "${1:-}" = "--clean" ]; then
   echo "== reset complete; starting run =="
 fi
 
-# Default timeout — generous because scenarios can wait on Claude for minutes.
-TIMEOUT="${E2E_TIMEOUT:-90m}"
+# Default timeout — generous because scenarios can wait on Claude for
+# minutes, and a full two-mode gate run under contention needs headroom above
+# the heaviest single-scenario ceilings (see header comment for derivation).
+TIMEOUT="${E2E_TIMEOUT:-4h}"
 
 # Cap concurrent scenarios so the full suite doesn't oversubscribe the single
 # shared bed (see header + issue #971). Default 4; override with E2E_PARALLEL.
