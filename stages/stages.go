@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -101,6 +102,29 @@ type Stage struct {
 	// computation otherwise). Only meaningful when WaitForReviews is also true.
 	// See ADR-1250.
 	ReviewAuthority string `yaml:"review_authority,omitempty"`
+
+	// ExpectedReviewers declares unrequested reviewers (e.g. self-submitting
+	// review bots like Pruefer, Gemini, CodeRabbit) that are expected to post a
+	// review on the PR without ever appearing in GitHub's formal review-request
+	// mechanism. Only meaningful alongside WaitForReviews. Three states:
+	//   - nil (key absent): undeclared — unchanged default behavior (FR-5). The
+	//     gate waits the full ReviewWaitTimeout for a self-submitting bot,
+	//     exactly as it does today.
+	//   - non-nil, empty (`expected_reviewers: []`): explicitly declares that no
+	//     unrequested reviewer is expected. When nothing is requested either,
+	//     the gate advances immediately instead of waiting (FR-2) — a reviewer
+	//     actually requested on the PR is still honored regardless.
+	//   - non-nil, non-empty: the declared identities. The gate's bot-escalation
+	//     ladder (Phase 1 re-prompt, Phase 2 pause) becomes reachable for these
+	//     names while none has responded (FR-3). The gate's own clearing
+	//     condition is unchanged and is not restricted to a declared name: it
+	//     clears on any non-DISMISSED review from any author once nothing is
+	//     outstanding, so an unrelated review can clear it before any declared
+	//     reviewer ever responds.
+	// Each identity must be a bare, mention-resolvable handle: no leading "@"
+	// and no trailing "[bot]" suffix (case-insensitive) — see
+	// validateExpectedReviewers (FR-8).
+	ExpectedReviewers *[]string `yaml:"expected_reviewers,omitempty"`
 
 	// CIFixSkill names the plugin skill to invoke for CI-fix re-invocations.
 	// When absent, falls back to CommentSkill.
@@ -247,6 +271,59 @@ func parseNonNegativeDuration(stageName, fieldLabel, raw string) (time.Duration,
 	return d, nil
 }
 
+// expectedReviewerNormalize collapses a declared identity to the form used
+// for duplicate detection: case-insensitive, with any "copilot*" prefix
+// collapsed to "copilot" — mirroring engine.botMentionHandle's mention-surface
+// collapse (duplicated here, not imported, because stages must not depend on
+// engine). A trailing "[bot]" suffix is not stripped here because
+// validateExpectedReviewers already rejects it on a declared identity before
+// this runs.
+func expectedReviewerNormalize(name string) string {
+	if strings.HasPrefix(strings.ToLower(name), "copilot") {
+		return "copilot"
+	}
+	return strings.ToLower(name)
+}
+
+// validateExpectedReviewers trims each declared identity and rejects any
+// entry that would not resolve as a live GitHub @mention (FR-8): empty after
+// trimming, a leading "@" (the declaration is a bare handle, not mention
+// syntax), or a trailing "[bot]" suffix (case-insensitive) — GitHub's REST
+// API reports self-submitting bot review authors with this suffix (e.g.
+// "handarbeit-pruefer[bot]"), but "@handarbeit-pruefer[bot]" does not resolve
+// as a mention. A malformed identity fails stage load entirely (not just a
+// warning) so a typo can't silently mean "this bot is never notified."
+//
+// Also rejects two entries that normalize (expectedReviewerNormalize) to the
+// same reviewer — e.g. "copilot"+"Copilot", or the same name declared twice.
+// Left undetected, a duplicate isn't a no-op: declaredReviewersOutstanding
+// preserves it, so Phase 1 re-prompts the same bot twice in one cycle and the
+// timeout message lists it twice — a duplicate is malformed in the same way
+// as the other rejected forms.
+func validateExpectedReviewers(stageName string, names []string) ([]string, error) {
+	out := make([]string, 0, len(names))
+	seen := make(map[string]string, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, fmt.Errorf("stage %q: expected_reviewers entry must not be empty", stageName)
+		}
+		if strings.HasPrefix(name, "@") {
+			return nil, fmt.Errorf("stage %q: expected_reviewers entry %q must not start with \"@\" — declare the bare handle", stageName, name)
+		}
+		if strings.HasSuffix(strings.ToLower(name), "[bot]") {
+			return nil, fmt.Errorf("stage %q: expected_reviewers entry %q must not end with \"[bot]\" — it would not resolve as an @mention; declare the bare handle instead", stageName, name)
+		}
+		key := expectedReviewerNormalize(name)
+		if prior, dup := seen[key]; dup {
+			return nil, fmt.Errorf("stage %q: expected_reviewers entries %q and %q refer to the same reviewer — declare it once", stageName, prior, name)
+		}
+		seen[key] = name
+		out = append(out, name)
+	}
+	return out, nil
+}
+
 func loadOne(path string) (*Stage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -282,6 +359,14 @@ func loadOne(path string) (*Stage, error) {
 	validReviewAuthorities := map[string]bool{"": true, "advisory": true, "authoritative": true}
 	if !validReviewAuthorities[s.ReviewAuthority] {
 		return nil, fmt.Errorf("stage %q: invalid review_authority %q (must be one of: advisory, authoritative)", s.Name, s.ReviewAuthority)
+	}
+
+	if s.ExpectedReviewers != nil {
+		validated, err := validateExpectedReviewers(s.Name, *s.ExpectedReviewers)
+		if err != nil {
+			return nil, err
+		}
+		s.ExpectedReviewers = &validated
 	}
 
 	if s.MaxWallTimeRaw != "" {

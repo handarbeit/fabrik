@@ -838,6 +838,18 @@ review_authority: advisory # Optional: advisory (default) | authoritative. Only 
                           #   outstanding CHANGES_REQUESTED review and required approvals satisfied.
                           #   yolo/cruise never bypass an authoritative gate — they still control
                           #   timing, not whether the gate is open. See §3 Authoritative Mode.
+expected_reviewers:       # Optional. Declares unrequested reviewers (self-submitting review bots
+  - handarbeit-pruefer    #   like Pruefer, Gemini, CodeRabbit) expected to review PRs from this
+                          #   stage without ever appearing in GitHub's requested-reviewer list.
+                          #   Only meaningful alongside wait_for_reviews: true. Absent (default):
+                          #   unchanged behavior — Fabrik waits the full FABRIK_REVIEW_WAIT_TIMEOUT
+                          #   for a self-submitting bot exactly as before this key existed.
+                          #   Declared with one or more names: the bot re-prompt ladder engages for
+                          #   them, satisfied when any one responds. expected_reviewers: [] (empty
+                          #   list): declares explicitly that no unrequested reviewer runs here —
+                          #   the gate advances immediately when nothing is requested either,
+                          #   instead of waiting out the timeout. See §3 Declaring Expected
+                          #   Reviewers for full details, including the required identity format.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
                           #   Validate+yolo) on CI checks passing on the PR head. At
                           #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
@@ -1504,6 +1516,48 @@ If the verdict never resolves — an unfixable review finding, or a required hum
 
 For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode), [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md), and [ADR-1261](../adrs/1261-per-issue-review-authority-label-override.md).
 
+#### Declaring Expected Reviewers
+
+Every real-world review bot — Pruefer, Gemini, CodeRabbit, Copilot — is **unrequested**: it polls or receives a webhook and posts a review directly, without ever being formally requested as a reviewer on the PR. From the gate's point of view, "a bot is a few minutes away from reviewing" and "no bot is coming, ever" look identical: no requested reviewer, no review yet. Left alone, the gate has to wait out the full timeout to find out which one it was — which is exactly what happens on a solo-maintainer repo with no bots configured at all (every issue burns the full wait before pausing for no reason).
+
+`expected_reviewers` tells Fabrik, per stage, which unrequested reviewers (if any) to expect:
+
+```yaml
+name: Review
+order: 4
+wait_for_reviews: true
+expected_reviewers:
+  - handarbeit-pruefer
+```
+
+**Three states:**
+
+| Setting | Meaning |
+|---|---|
+| *(absent — default)* | Unchanged behavior: Fabrik waits the full `FABRIK_REVIEW_WAIT_TIMEOUT` for a self-submitting bot, exactly as before this key existed. Safe to leave as-is; nothing breaks. |
+| `expected_reviewers: []` | Explicitly declares that **no** unrequested reviewer runs on this repo. If nothing is requested either, Fabrik advances immediately instead of waiting out the timeout — the advance is logged, not silent. A reviewer actually requested on the PR is still honored regardless; this only narrows waiting for *unrequested* reviewers, it does not disable `wait_for_reviews`. |
+| `expected_reviewers: [name, ...]` | One or more declared reviewers. Declaring them makes the bot re-prompt ladder (Phase 1/2) reachable while nothing has been requested and nothing has been reviewed. Re-prompts and timeout messages name them by name. |
+
+**What "any one" actually means.** The gate's underlying clearing condition — no reviewer left outstanding, and at least one non-`DISMISSED` review exists — is unchanged by this feature (out of scope; see [State Machine §6.1](state-machine.md#61-two-phase-review-gate)). That condition is satisfied by a review from **any** author, not specifically one of the declared names. In the common case this means any one declared reviewer responding clears the gate (that's the point of declaring more than one — see #1071), but an unrelated human or bot review landing first clears it too. `expected_reviewers` governs the re-prompt ladder and timeout messaging — not all having to respond, and not requiring the response to come specifically from a declared name — it does not change the clearing check itself.
+
+**Identity format.** A declared name must be a bare, `@`-mentionable handle: no leading `@`, and no trailing `[bot]` suffix — even though that suffix is exactly what GitHub's REST API reports as the bot's actual review author (e.g. Pruefer's is literally `<slug>[bot]`). Fabrik strips the suffix internally when matching a declaration against a live review, so declare the bare form:
+
+```yaml
+expected_reviewers:
+  - handarbeit-pruefer     # correct — matches both "handarbeit-pruefer" and "handarbeit-pruefer[bot]"
+  # - handarbeit-pruefer[bot]   # WRONG — @handarbeit-pruefer[bot] does not resolve as a mention
+```
+
+A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fails Fabrik's startup entirely, with an error naming the offending stage and value — a typo here fails loudly at startup, not silently at 3am.
+
+**Declaring a bot does not vouch for it.** If you declare `expected_reviewers: [some-bot]` and `some-bot` is not actually installed on the repo, Fabrik still runs the full re-prompt-then-timeout sequence and pauses, naming `some-bot` as the reviewer that never responded — a declaration only tells Fabrik who to expect, never that the reviewer is guaranteed to show up.
+
+**What changes once you declare a name.** The existing bot re-prompt ladder (§Label Lifecycle above, `fabrik:bot-reprompted`) — previously reachable only for a formally-*requested* bot reviewer, which none of the bots people actually run ever are — becomes reachable: at `1× FABRIK_REVIEW_WAIT_TIMEOUT`, Fabrik posts an `@<name> just checking in` comment directly on the PR (there is no formal review request to re-send for a reviewer that was never requested) and applies `fabrik:bot-reprompted`; if still no response after another full timeout window, Fabrik pauses for human input, naming the reviewer. With multiple declared reviewers, the pause message reports per-reviewer status, e.g. `` Expected reviewers: `handarbeit-pruefer` reviewed; `gemini-code-assist` did not respond ``.
+
+**Startup notice.** On every startup, Fabrik prints a one-line notice for each `wait_for_reviews: true` stage that has not declared `expected_reviewers` — informational only, never blocking. Add a declaration (even an explicit `expected_reviewers: []`) and the notice disappears on the next startup.
+
+**Interaction with `review_authority: authoritative`.** The immediate-advance path for `expected_reviewers: []` fires regardless of `review_authority`. This is deliberate, not an oversight: authoritative mode weighs an existing review's verdict (approvals, `CHANGES_REQUESTED`) — see [Authoritative Mode](#authoritative-mode) — and that weighing only ever runs once at least one review has been submitted. When nothing is requested, nothing has been reviewed, and the stage has explicitly declared that no unrequested reviewer is coming, there is no verdict for authoritative mode to weigh; gating the advance on `review_authority` would just wait out the timeout every cycle for a review that, by the stage's own declaration, will never arrive — recreating the exact stall this feature exists to eliminate. If you need branch-protection review requirements enforced even when Fabrik expects no reviewer, configure that requirement on the repository itself (GitHub still blocks the actual merge); `expected_reviewers` and `review_authority` govern Fabrik's own wait/verdict bookkeeping, not GitHub's merge protection.
+
 ---
 
 ### CI Gate and CI-Fix Workflow
@@ -2127,7 +2181,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
-| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode) |
+| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |

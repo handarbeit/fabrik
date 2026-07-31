@@ -96,10 +96,12 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// item.LinkedPRReviewRequests/LinkedPRReviews are always empty regardless of the
 	// PR's actual review state. Fetch reviews/requests directly via REST, keyed on the
 	// PR number handleBrokenReviewLinkage already resolved. See #1046/#1047/#1050.
+	var fetchFailed bool
 	if itemHasBaseLabel(item) && prNumber > 0 {
 		restReviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
 		restRequests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
-		if reviewsErr != nil || requestsErr != nil {
+		fetchFailed = reviewsErr != nil || requestsErr != nil
+		if fetchFailed {
 			// Conservative: treat a partial failure as no-data rather than trusting
 			// whichever call succeeded — a false len(outstanding)==0 read could
 			// falsely clear the gate while real outstanding reviewers are unknown.
@@ -116,6 +118,52 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	outstanding, hasReviews := reviewGateOutstanding(reviewRequests, reviews)
+
+	// FR-2 fast path: nothing requested, nothing reviewed yet, and the stage
+	// explicitly declared expected_reviewers: [] (no unrequested reviewer is
+	// expected). Placed after handleBrokenReviewLinkage/REST-fallback PR
+	// resolution above, so it never fires on unconfirmed PR linkage. Recorded
+	// in the trail (not silent) per FR-2 — this is the only "gate cleared"
+	// exit that gets its own distinct log line, since it is the one clearing
+	// path an operator might not expect. Gated on !fetchFailed, mirroring
+	// reviewGateBlocksLanding's identical guard: a REST fetch failure already
+	// zeroed reviewRequests/reviews above, which would otherwise look
+	// identical to "genuinely nothing requested or reviewed" — advancing on
+	// unknown review state would be exactly the fail-open regression
+	// FR-6/FR-5 guard against. Also gated on prNumber > 0: handleBrokenReviewLinkage
+	// returns (paused=false, prNumber=0) whenever FetchLinkedPR errors, finds no PR
+	// on the branch, or finds one that isn't open/is merged (see
+	// TestCheckReviewGate_BrokenLinkage_NoPRFound_FallsThrough) — a real, reachable
+	// state distinct from "a PR exists and genuinely has nothing requested or
+	// reviewed". Without this guard, an item declaring expected_reviewers: [] would
+	// fast-advance past a not-yet-resolved PR, the same fail-open shape the
+	// !fetchFailed guard exists to prevent, just reached via a different route.
+	// reviewGateBlocksLanding does not need the equivalent guard explicitly here:
+	// its own "no PR" branch (:583-585) already returns before prNumber is ever used
+	// to fetch reviews, so it can never reach its fast-path call with prNumber == 0.
+	if !fetchFailed && prNumber > 0 && reviewGateFastAdvance(outstanding, hasReviews, stage.ExpectedReviewers) {
+		e.logf(item.Number, "awaiting-review", "expected_reviewers declared none expected and nothing was requested — advancing immediately\n")
+		e.removeAwaitingReviewLabel(owner, repo, item)
+		return false, false, false
+	}
+
+	var declaredReviewers []string
+	if stage.ExpectedReviewers != nil {
+		declaredReviewers = *stage.ExpectedReviewers
+	}
+	// On a fetch failure, reviews is nil — "no matching review found" would be
+	// indistinguishable from "review state unknown", so every declared
+	// reviewer would read as outstanding purely from stale/unknown data. That
+	// can flip reviewGateAllBots to true and fire a spurious Phase 1 @mention
+	// re-prompt for a bot that may already have reviewed. Skip the
+	// computation entirely on fetchFailed (declaredOutstanding stays nil) —
+	// the gate still blocks via the generic "waiting for initial review
+	// submission" path below, it just doesn't manufacture a false ladder
+	// trigger from a transient API error.
+	var declaredOutstanding []string
+	if !fetchFailed {
+		declaredOutstanding = declaredReviewersOutstanding(declaredReviewers, reviews)
+	}
 
 	// Gate clears when all outstanding requested reviewers have responded
 	// AND at least one non-DISMISSED review exists. This catches both human
@@ -148,8 +196,10 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		}
 	}
 
-	// Determine if all outstanding reviewers are bots. Used by Phase 1/2 logic.
-	allBots := reviewGateAllBots(reviewRequests, outstanding)
+	// Determine if all outstanding reviewers are bots (or, when nothing was
+	// formally requested, whether a declared reviewer is still outstanding).
+	// Used by Phase 1/2 logic.
+	allBots := reviewGateAllBots(reviewRequests, outstanding, declaredOutstanding)
 
 	// Find the fabrik:bot-reprompted label (idempotency guard for Phase 1 and
 	// timing anchor for Phase 2).
@@ -172,7 +222,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Still waiting. Check the fabrik:awaiting-review timeout (Phase 1
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
-	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted, authorityReason); done {
+	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, declaredOutstanding, allBots, reprompted, authorityReason); done {
 		return blocked, timedOut, false
 	}
 
@@ -180,6 +230,8 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		e.logf(item.Number, "awaiting-review", "authoritative gate still blocking: %s\n", authorityReason)
 	} else if len(outstanding) > 0 {
 		e.logf(item.Number, "awaiting-review", "waiting for reviewers: %s\n", strings.Join(outstanding, ", "))
+	} else if len(declaredOutstanding) > 0 {
+		e.logf(item.Number, "awaiting-review", "waiting for declared reviewer(s): %s\n", strings.Join(declaredOutstanding, ", "))
 	} else {
 		e.logf(item.Number, "awaiting-review", "waiting for initial review submission (no reviewers requested; bot reviewers may still be processing)\n")
 	}
@@ -304,6 +356,31 @@ func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRRev
 		}
 	}
 	return outstanding, hasReviews
+}
+
+// reviewGateFastAdvance reports whether the FR-2 fast path fires: nothing is
+// outstanding (no requested reviewer left to respond) and no review has been
+// submitted yet, and the stage explicitly declared expected_reviewers: []
+// (no unrequested reviewer is expected on this PR). A reviewer actually
+// requested on the PR (non-empty outstanding) or an already-submitted review
+// always takes precedence over the declaration — expected_reviewers only
+// narrows waiting for *unrequested* reviewers; it never bypasses
+// wait_for_reviews for a reviewer GitHub is genuinely tracking. An undeclared
+// stage (expected == nil) never fast-advances, preserving FR-5's default.
+//
+// Deliberately independent of review_authority: this path only ever fires
+// when hasReviews is false, and authoritative mode's verdict-weighing
+// (reviewGateAuthorityVerdict) only ever runs once hasReviews is true — there
+// is no verdict to weigh yet. Gating this on review_authority would make an
+// authoritative stage wait out the full timeout every cycle for a review
+// the stage's own declaration says will never come, recreating the exact
+// stall (#1080) this feature exists to eliminate. See
+// docs/USER_GUIDE.md#declaring-expected-reviewers.
+func reviewGateFastAdvance(outstanding []string, hasReviews bool, expected *[]string) bool {
+	if len(outstanding) > 0 || hasReviews {
+		return false
+	}
+	return expected != nil && len(*expected) == 0
 }
 
 // reviewAuthorityRank lists review-authority modes from least to most
@@ -565,6 +642,20 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// Same clearing condition as checkReviewGate, via the same shared pure
 	// function, so the two gate sites can never disagree on "outstanding".
 	outstanding, hasReviews := reviewGateOutstanding(requests, reviews)
+
+	// FR-2 fast path, same shared pure function checkReviewGate uses so the
+	// advance gate and the landing gate can never disagree on when it fires
+	// (including its deliberate independence from review_authority — see
+	// reviewGateFastAdvance's doc comment). Gated on !fetchFailed: a fetch
+	// failure already zeroed reviews/requests above, which would otherwise
+	// look identical to "genuinely nothing requested or reviewed" —
+	// advancing a landing on unknown review state would be exactly the
+	// fail-open regression FR-6/FR-5 guard against.
+	if !fetchFailed && reviewGateFastAdvance(outstanding, hasReviews, stage.ExpectedReviewers) {
+		e.logf(item.Number, "awaiting-review", "landing decision on PR #%d — expected_reviewers declared none expected and nothing was requested — proceeding immediately\n", prNumber)
+		return false
+	}
+
 	if len(outstanding) == 0 && hasReviews {
 		// Authoritative mode: additive check, same reviewGateAuthorityVerdict
 		// pure function checkReviewGate uses, so the advance gate and the
@@ -643,10 +734,20 @@ func (e *Engine) holdLandingForReview(item gh.ProjectItem, format string, args .
 	return true
 }
 
-// reviewGateAllBots reports whether every outstanding requested reviewer is a
-// bot (false when there are no outstanding reviewers at all).
-func reviewGateAllBots(reviewRequests []gh.ReviewRequest, outstanding []string) bool {
-	allBots := len(outstanding) > 0
+// reviewGateAllBots reports whether the bot-escalation ladder (Phase 1/2)
+// should be reachable: either every outstanding *requested* reviewer is a
+// bot, or — when nothing was formally requested — at least one *declared*
+// expected_reviewers identity is still unmatched (declaredOutstanding). The
+// declared-reviewer branch only activates when outstanding is empty: a
+// reviewer GitHub is actually tracking always takes precedence over a
+// declaration, so this never changes behavior for a formally requested
+// reviewer (declaredOutstanding is ignored whenever outstanding is
+// non-empty).
+func reviewGateAllBots(reviewRequests []gh.ReviewRequest, outstanding, declaredOutstanding []string) bool {
+	if len(outstanding) == 0 {
+		return len(declaredOutstanding) > 0
+	}
+	allBots := true
 	for _, rr := range reviewRequests {
 		if rr.Login != "" && !rr.IsBot {
 			allBots = false
@@ -696,16 +797,21 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 // branch of checkAwaitingReviewTimeout. authorityReason, when non-empty,
 // takes precedence: the gate is blocking on an authoritative verdict, not a
 // plain review count. Otherwise, when reviewers are still outstanding, name
-// them. When neither applies, no reviewer was ever requested — state the
-// three things the engine actually knows (no reviewer requested, no review
-// received, can't determine if one is coming) instead of speculating about
-// bots that may not exist on this repo.
-func reviewTimeoutReason(outstanding []string, authorityReason string) string {
+// them. Next, a declared-but-unrequested reviewer (expected_reviewers, #1283)
+// that hasn't responded is named. When none of those apply, no reviewer was
+// ever requested or declared — state the three things the engine actually
+// knows (no reviewer requested, no review received, can't determine if one
+// is coming) instead of speculating about bots that may not exist on this
+// repo.
+func reviewTimeoutReason(outstanding, declaredOutstanding []string, authorityReason string) string {
 	if authorityReason != "" {
 		return "authoritative gate blocking: " + authorityReason
 	}
 	if len(outstanding) > 0 {
 		return "pending reviewers: " + strings.Join(outstanding, ", ")
+	}
+	if len(declaredOutstanding) > 0 {
+		return "declared reviewer(s) not yet responded: " + strings.Join(declaredOutstanding, ", ")
 	}
 	return "no reviewers were requested, no review has been received, and Fabrik cannot determine whether one is coming"
 }
@@ -713,21 +819,31 @@ func reviewTimeoutReason(outstanding []string, authorityReason string) string {
 // checkAwaitingReviewTimeout implements the fabrik:awaiting-review timeout
 // check: once ReviewWaitTimeout has elapsed since the label was applied, it
 // either fires Phase 1 of the bot-reviewer escalation ladder (re-prompting
-// every outstanding bot reviewer), lets an already-fired Phase 1 continue
-// waiting for Phase 2, or pauses for a mixed/pure-human/no-PR-number gate.
-// done=true means the caller should return (blocked, timedOut) directly;
-// done=false means the label wasn't found, was found but the timeout hasn't
-// elapsed yet, or Phase 1 already fired and Phase 2 hasn't timed out yet —
-// the caller falls through to the "still waiting" logging/label-apply tail.
+// every outstanding bot reviewer — both formally requested ones, via a
+// DELETE+POST request mutation, and declared-but-unrequested ones, via a
+// direct @mention comment with no request to mutate), lets an already-fired
+// Phase 1 continue waiting for Phase 2, or pauses for a mixed/pure-human/
+// no-PR-number gate. done=true means the caller should return (blocked,
+// timedOut) directly; done=false means the label wasn't found, was found but
+// the timeout hasn't elapsed yet, or Phase 1 already fired and Phase 2
+// hasn't timed out yet — the caller falls through to the "still waiting"
+// logging/label-apply tail.
+//
+// declaredOutstanding lists the declared expected_reviewers identities that
+// have not yet been matched to a review (see declaredReviewersOutstanding).
+// It only drives Phase 1 behavior when allBots is true via the
+// declared-reviewer branch of reviewGateAllBots (i.e. outstanding is empty)
+// — see that function's doc comment for why a formally requested reviewer
+// always takes precedence.
 //
 // authorityReason is non-empty only when the caller's authoritative-mode
 // verdict check blocked (see reviewGateAuthorityVerdict) — i.e. outstanding is
 // empty and reviews exist, but the verdict itself isn't satisfied. When set,
 // it is used verbatim as the pause reason instead of the generic
-// "pending reviewers"/"no reviewers were requested" messages built by
-// reviewTimeoutReason, which would otherwise misleadingly suggest nobody has
-// reviewed at all.
-func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
+// "pending reviewers"/"declared reviewer(s) not yet responded"/"no reviewers
+// were requested" messages built by reviewTimeoutReason, which would
+// otherwise misleadingly suggest nobody has reviewed at all.
+func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding, declaredOutstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -746,13 +862,23 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 		}
 		// 1× timeout elapsed.
 		if allBots && item.LinkedPRNumber > 0 && !reprompted {
-			// Phase 1: re-prompt all outstanding bot reviewers.
+			// Phase 1: re-prompt all outstanding bot reviewers. Iterates
+			// outstanding (already correctly resolved by checkReviewGate:
+			// GraphQL-sourced item.LinkedPRReviewRequests on a default-branch
+			// repo, REST-sourced on a base:<branch> repo where
+			// item.LinkedPRReviewRequests is structurally empty — see the
+			// comment at the top of checkReviewGate) rather than re-deriving
+			// from item.LinkedPRReviewRequests directly, which would silently
+			// no-op this entire mutation loop (and the declared-reviewer
+			// dedup below, which also depends on requestedLogins) on a
+			// base:<branch> repo even though allBots/outstanding correctly
+			// identified an outstanding formally-requested bot.
 			var repromptedLogins []string
-			for _, rr := range item.LinkedPRReviewRequests {
-				if rr.Login == "" {
+			requestedLogins := outstanding
+			for _, login := range outstanding {
+				if login == "" {
 					continue
 				}
-				login := rr.Login
 				if err := e.client.DeleteReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
 					e.logf(item.Number, "warn", "phase 1: could not delete review request for %s: %v\n", login, err)
 				}
@@ -769,6 +895,44 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 				}
 				repromptedLogins = append(repromptedLogins, login)
 			}
+			// Declared-but-unrequested reviewers (FR-3/declaration semantics
+			// point 2): there is no GitHub review request to delete/re-add, so
+			// that mutation is skipped entirely for this path — post the
+			// @mention comment directly. The mention text is run through
+			// botMentionHandle, same as the formally-requested path above
+			// (:854) — a declared identity is FR-8-validated to be a plausible
+			// bare handle, but "plausible" isn't "resolves as an @mention":
+			// e.g. a declared "copilot-pull-request-reviewer" is a valid App
+			// slug that passes validateExpectedReviewers and correctly matches
+			// a live "copilot-pull-request-reviewer[bot]" review author via
+			// reviewerIdentityMatches' copilot-prefix collapse, but GitHub only
+			// resolves the mention as "@copilot". Skip any name already
+			// re-prompted above via the formal request path, so a reviewer
+			// that happens to be both requested and declared isn't mentioned
+			// twice in one cycle. Matched via reviewerIdentityMatches (not raw
+			// string equality) — a declared "copilot" and a requested login
+			// "copilot-pull-request-reviewer[bot]" refer to the same reviewer,
+			// the same login-form mismatch reviewerIdentityMatches exists to
+			// reconcile everywhere else in this file.
+			for _, name := range declaredOutstanding {
+				alreadyPrompted := false
+				for _, login := range requestedLogins {
+					if reviewerIdentityMatches(name, login) {
+						alreadyPrompted = true
+						break
+					}
+				}
+				if alreadyPrompted {
+					continue
+				}
+				msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", botMentionHandle(name))
+				if dbID, err := e.client.AddComment(owner, repo, item.LinkedPRNumber, msg); err != nil {
+					e.logf(item.Number, "warn", "phase 1: could not post re-prompt comment for declared reviewer %s: %v\n", name, err)
+				} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+					e.logf(item.Number, "warn", "phase 1: could not add 🚀 to re-prompt comment: %v\n", reactErr)
+				}
+				repromptedLogins = append(repromptedLogins, name)
+			}
 			e.applyLabelAdd(item, botRepromptedLabel, false)
 			e.logf(item.Number, "review-gate", "phase 1: re-prompted bot reviewer(s): %s\n", strings.Join(repromptedLogins, ", "))
 			return true, false, true
@@ -781,7 +945,7 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 		}
 
 		// Mixed/pure-human or no PR number: existing pause behavior.
-		reason := reviewTimeoutReason(outstanding, authorityReason)
+		reason := reviewTimeoutReason(outstanding, declaredOutstanding, authorityReason)
 		e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — %s\n", reason)
 		e.removeAwaitingReviewLabel(owner, repo, item)
 		return false, true, true
@@ -857,8 +1021,60 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 // If item.Labels contains the fabrik:bot-reprompted label (the pre-cleanup snapshot
 // captured before checkReviewGate removed it), Phase 2 context is detected and a
 // more specific "after re-prompt" message is posted.
+// resolvedReviewData returns item.LinkedPRNumber/LinkedPRReviews when already
+// populated, falling back to a live REST fetch otherwise. item.LinkedPRNumber
+// (and LinkedPRReviews with it) is always 0/empty for a base:<branch> item —
+// closedByPullRequestsReferences is structurally empty there — so this is the
+// steady-state resolution path on such a repo, not an edge case. Shared by
+// pauseForReviewTimeout's authoritative-mode and expected_reviewers status
+// messaging so the two can never disagree about which reviews exist.
+func (e *Engine) resolvedReviewData(item gh.ProjectItem) (prNumber int, reviews []gh.PRReview) {
+	prNumber = item.LinkedPRNumber
+	reviews = item.LinkedPRReviews
+	if prNumber == 0 {
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
+			prNumber = pr.Number
+			if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
+				reviews = restReviews
+			}
+		}
+	}
+	return prNumber, reviews
+}
+
 func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "review-timeout", "review wait timeout elapsed — pausing for human intervention\n")
+
+	// FR-4: when the stage declared one or more expected_reviewers, report
+	// per-reviewer status ("Pruefer reviewed; Gemini did not") so a partial
+	// response is diagnosable — unconditional on which branch below fires
+	// (Phase 2 / mixed / generic), since a declared reviewer's status matters
+	// regardless of why the pause happened. declaredOutstandingNames (the
+	// subset that never responded) is reused below to fold declared-but-
+	// unrequested reviewers into the Phase 2 "after re-prompt" detection,
+	// which otherwise only sees LinkedPRReviewRequests (always empty for a
+	// declared-only reviewer).
+	var expectedReviewersLine string
+	var declaredOutstandingNames []string
+	if stage.ExpectedReviewers != nil && len(*stage.ExpectedReviewers) > 0 {
+		_, resolvedReviews := e.resolvedReviewData(item)
+		declared := *stage.ExpectedReviewers
+		declaredOutstandingNames = declaredReviewersOutstanding(declared, resolvedReviews)
+		outstanding := make(map[string]bool, len(declaredOutstandingNames))
+		for _, name := range declaredOutstandingNames {
+			outstanding[name] = true
+		}
+		statuses := make([]string, 0, len(declared))
+		for _, name := range declared {
+			if outstanding[name] {
+				statuses = append(statuses, fmt.Sprintf("`%s` did not respond", name))
+			} else {
+				statuses = append(statuses, fmt.Sprintf("`%s` reviewed", name))
+			}
+		}
+		expectedReviewersLine = "\n\nExpected reviewers: " + strings.Join(statuses, "; ")
+	}
 
 	// Build pending-reviewer list with bot/human tags for the pause comment.
 	var reviewerParts []string
@@ -876,7 +1092,9 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 	// Detect Phase 2 context: checkReviewGate removed the label from GitHub but
 	// item.Labels is the pre-cleanup snapshot, so the label is still present here.
 	// Derive bot logins from LinkedPRReviewRequests (bots haven't responded, so
-	// they're still in the requests list).
+	// they're still in the requests list) — plus any declared-but-unrequested
+	// reviewer still outstanding (declaredOutstandingNames), which never
+	// appears in LinkedPRReviewRequests at all.
 	var repromptedLogins []string
 	for _, l := range item.Labels {
 		if l == botRepromptedLabel {
@@ -885,6 +1103,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 					repromptedLogins = append(repromptedLogins, rr.Login)
 				}
 			}
+			repromptedLogins = append(repromptedLogins, declaredOutstandingNames...)
 			break
 		}
 	}
@@ -902,13 +1121,13 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		msg = fmt.Sprintf(
 			"🏭 **Fabrik — review wait timeout (after bot re-prompt)**\n\n"+
 				"The review gate for stage **%s** timed out waiting for %s (bot). "+
-				"A re-prompt was sent, but no review was submitted in the additional waiting window.\n\n"+
+				"A re-prompt was sent, but no review was submitted in the additional waiting window.%s\n\n"+
 				"Fabrik has paused this issue. To resume, either:\n"+
 				"- (a) post a review on %s yourself,\n"+
 				"- (b) remove `wait_for_reviews: true` from the %s stage YAML if bot reviews are unreliable on this repo,\n"+
 				"- (c) merge %s manually, or\n"+
 				"- (d) remove `fabrik:paused` to let the engine cycle through another re-prompt + wait.",
-			stage.Name, botList, prRef, stage.Name, prRef,
+			stage.Name, botList, expectedReviewersLine, prRef, stage.Name, prRef,
 		)
 	} else {
 		// Standard timeout: branches below on whether any reviewer was ever
@@ -976,16 +1195,23 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 				}
 			}
 		}
-		if pendingLine == "" && !hasReviews {
-			// No reviewer was ever requested on this PR, and no review has
-			// been submitted either — waiting longer cannot satisfy the gate.
-			// Say so plainly instead of claiming a wait on "outstanding
-			// reviewers" that don't exist, and offer the same remedies as
-			// Phase 2. The !hasReviews check matters: in authoritative mode a
-			// reviewer who submitted a formal review is no longer "pending"
-			// (pendingLine goes back to ""), but a review did happen — that
-			// case must fall through to the other branch below instead of
-			// falsely claiming none was submitted.
+		if pendingLine == "" && !hasReviews && len(declaredOutstandingNames) == 0 {
+			// No reviewer was ever requested on this PR, none was declared
+			// (expected_reviewers, #1283) either, and no review has been
+			// submitted — waiting longer cannot satisfy the gate. Say so
+			// plainly instead of claiming a wait on "outstanding reviewers"
+			// that don't exist, and offer the same remedies as Phase 2. The
+			// !hasReviews check matters: in authoritative mode a reviewer who
+			// submitted a formal review is no longer "pending" (pendingLine
+			// goes back to ""), but a review did happen — that case must
+			// fall through to the other branch below instead of falsely
+			// claiming none was submitted. The declaredOutstandingNames
+			// check matters for the same reason: a declared-but-unrequested
+			// reviewer that hasn't responded yet is a case Fabrik *can* name
+			// (see the standard branch below, which surfaces it via
+			// expectedReviewersLine) — asserting here that "Fabrik cannot
+			// determine whether one is ever coming" would contradict the
+			// operator's own declaration.
 			prRef := "the linked PR"
 			if item.LinkedPRNumber > 0 {
 				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
@@ -1041,17 +1267,21 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			msg = fmt.Sprintf(
 				"🏭 **Fabrik — review wait timeout**\n\n"+
 					"The review gate for stage **%s** timed out. No reviewer is currently outstanding on %s — a review "+
-					"has already been submitted, but it does not satisfy this stage's authoritative requirement.%s\n\n"+
+					"has already been submitted, but it does not satisfy this stage's authoritative requirement.%s%s\n\n"+
 					"Fabrik has paused this issue. Please check the review status on %s, address any outstanding "+
 					"feedback, and then remove the `fabrik:paused` label to resume.",
-				stage.Name, prRef, authorityLine, prRef,
+				stage.Name, prRef, authorityLine, expectedReviewersLine, prRef,
 			)
 		} else {
-			// Standard timeout message with named reviewers — unchanged.
+			// Standard timeout message with named reviewers, plus per-declared-
+			// reviewer status (expectedReviewersLine, FR-4) when the stage
+			// declared expected_reviewers — this is also where a declared
+			// reviewer that never got a Phase 1 re-prompt (e.g. the PR number
+			// wasn't resolved yet at the earlier timeout check) is surfaced.
 			msg = fmt.Sprintf(
-				"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s\n\n"+
+				"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.%s%s%s\n\n"+
 					"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
-				stage.Name, pendingLine, authorityLine,
+				stage.Name, pendingLine, authorityLine, expectedReviewersLine,
 			)
 		}
 	}
@@ -1108,4 +1338,55 @@ func botMentionHandle(login string) string {
 		return "copilot"
 	}
 	return login
+}
+
+// stripBotSuffix removes a trailing "[bot]" (case-insensitive) from login.
+// GitHub's REST API reports a self-submitting bot's review author with this
+// suffix (e.g. "handarbeit-pruefer[bot]"), while its GraphQL API and its live
+// @mention surface both omit it. A declared expected_reviewers identity is
+// validated at load time (FR-8) to never carry the suffix, so this is only
+// ever meaningful on the live PRReview.Author side of a match.
+func stripBotSuffix(login string) string {
+	if strings.HasSuffix(strings.ToLower(login), "[bot]") {
+		return login[:len(login)-len("[bot]")]
+	}
+	return login
+}
+
+// reviewerIdentityMatches reports whether a declared expected_reviewers
+// identity refers to the same reviewer as a live review author. Both sides
+// are normalized the same way — trailing "[bot]" stripped, then the existing
+// copilot-* mention collapse applied — before a case-insensitive compare, so
+// a declared "handarbeit-pruefer" matches both the GraphQL-sourced author
+// "handarbeit-pruefer" and the REST-sourced "handarbeit-pruefer[bot]", and a
+// declared "copilot" matches the actual login
+// "copilot-pull-request-reviewer[bot]".
+func reviewerIdentityMatches(declared, author string) bool {
+	return strings.EqualFold(botMentionHandle(stripBotSuffix(declared)), botMentionHandle(stripBotSuffix(author)))
+}
+
+// declaredReviewersOutstanding returns the subset of declared identities that
+// have not yet been matched (via reviewerIdentityMatches) to a non-DISMISSED
+// review in reviews. A DISMISSED review does not count as a response — the
+// same rule reviewGateOutstanding applies to hasReviews. Returns nil when
+// declared is empty (explicit "none expected", or the caller passed an
+// undeclared stage's zero value).
+func declaredReviewersOutstanding(declared []string, reviews []gh.PRReview) []string {
+	var outstanding []string
+	for _, name := range declared {
+		matched := false
+		for _, r := range reviews {
+			if r.State == "DISMISSED" {
+				continue
+			}
+			if reviewerIdentityMatches(name, r.Author) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			outstanding = append(outstanding, name)
+		}
+	}
+	return outstanding
 }

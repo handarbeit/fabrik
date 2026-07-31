@@ -125,6 +125,46 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 	})
 }
 
+// WarnUndeclaredReviewers emits a self-limiting startup notice (FR-7) for
+// each stage with wait_for_reviews: true and no expected_reviewers
+// declaration. Informational only, never blocking — existing deployments
+// keep running unchanged (FR-5), since an omitted declaration is a
+// behaviorally identical no-op. Deliberately distinct from WarnStageDrift/
+// FilterNoOpKeys, which stays correctly silent here by design: drift answers
+// "is this config outdated?" (no — omission IS the documented default),
+// while this notice answers "is this config under-specified?" (yes — the
+// operator hasn't told Fabrik which unrequested reviewers, if any, to
+// expect). Uses the same warnings.Record/warnings.Clear self-limiting idiom
+// as WarnStageDrift, keyed per stage name, so the notice disappears the
+// moment a declaration — including an explicit expected_reviewers: [] — is
+// added, without requiring any permanent state of its own.
+func WarnUndeclaredReviewers(userStages []*Stage, w io.Writer) {
+	for _, s := range userStages {
+		key := "undeclared_reviewers:" + s.Name
+		if s.WaitForReviews == nil || !*s.WaitForReviews || s.ExpectedReviewers != nil {
+			_ = warnings.Clear(key)
+			continue
+		}
+
+		fmt.Fprintf(w, "[startup] notice: stage %q has wait_for_reviews: true but no expected_reviewers declaration — "+
+			"self-submitting review bots (e.g. Pruefer, Gemini, CodeRabbit) never appear as a requested reviewer, so "+
+			"the bot re-prompt ladder cannot engage for them until declared. See docs/USER_GUIDE.md.\n", s.Name)
+		_ = warnings.Record(warnings.Entry{
+			Key:   key,
+			Type:  "undeclared_reviewers",
+			Title: fmt.Sprintf("%s has wait_for_reviews but no expected_reviewers declaration", s.Name),
+			Detail: fmt.Sprintf(
+				"Stage %q sets wait_for_reviews: true but does not declare expected_reviewers. Self-submitting "+
+					"review bots (Pruefer, Gemini, CodeRabbit, ...) never appear in GitHub's requested-reviewer "+
+					"list, so the bot re-prompt ladder cannot engage until you declare which reviewer(s) are "+
+					"expected — or declare expected_reviewers: [] if none are.\n\n"+
+					"Fix: add expected_reviewers to %s (see docs/USER_GUIDE.md).",
+				s.Name, s.FilePath,
+			),
+		})
+	}
+}
+
 // driftTitle builds the one-line warnings-panel title for a stage-drift entry.
 // It names the missing keys (not just their count) so the summary is actionable
 // without drilling into the detail view.
