@@ -184,6 +184,22 @@ now satisfy.
   different combination might fit more code. Sufficient for the motivating
   case (one dominant offender) and any future need for smarter selection is
   separable follow-up.
+- **Known, tracked gap: git's C-quoted diff header form is unhandled.**
+  `diffsplit.go`'s file-boundary and path-resolution regexes all match git's
+  unquoted `diff --git a/<path> b/<path>` header. Under the default
+  `core.quotepath=true`, a touched file whose path contains a space, double
+  quote, backslash, or non-ASCII byte makes git emit a C-quoted header
+  instead (`diff --git "a/foo bar" "b/foo bar"`), which none of those
+  regexes match. That file's entire block — headers, hunks, everything —
+  falls into `splitDiffFiles`'s `preamble`, which per its own contract can
+  never be excluded via `excluded_paths` or auto-dropped by `trimToFit`: an
+  operator who adds such a path to `excluded_paths` gets no protection from
+  it, and its bytes still count toward `MaxDiffBytes` under a `DominantPaths`
+  list that never names the actual file. This is the same silent-signal
+  failure class this ADR exists to close, reached through a different diff
+  shape — accepted as a follow-up rather than closed here (see
+  `diffFileHeaderLineRE`'s doc comment and the "Known limitations" note in
+  `cmd/pruefer/README.md`).
 
 ## Related Work
 
