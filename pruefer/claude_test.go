@@ -260,6 +260,32 @@ func TestRealClaudeInvoker_Review_ContextCancelKillsProcess(t *testing.T) {
 	}
 }
 
+func TestBuildReviewPrompt_NoExcludedPaths_NoOutOfScopeSection(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{Owner: "o", Repo: "r", PRNumber: 1})
+	if strings.Contains(prompt, "Out of scope for this review") {
+		t.Errorf("prompt contains an out-of-scope section with no ExcludedPaths set:\n%s", prompt)
+	}
+}
+
+func TestBuildReviewPrompt_ExcludedPaths_AddsOutOfScopeSection(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{
+		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main",
+		ExcludedPaths: []string{"packages/evals/corpus/quality-bench-corpus.jsonl"},
+	})
+	if !strings.Contains(prompt, "Out of scope for this review") {
+		t.Fatalf("prompt missing out-of-scope section:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "packages/evals/corpus/quality-bench-corpus.jsonl") {
+		t.Errorf("prompt does not name the excluded path:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, ":(exclude)packages/evals/corpus/quality-bench-corpus.jsonl") {
+		t.Errorf("prompt does not instruct excluding the path via a git pathspec:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "main...HEAD") {
+		t.Errorf("prompt's pathspec example must still reference the base branch comparison:\n%s", prompt)
+	}
+}
+
 func TestMockClaudeInvoker_RecordsCalls(t *testing.T) {
 	m := &mockClaudeInvoker{}
 	req := ReviewRequest{PRNumber: 7}

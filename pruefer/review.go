@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -36,6 +37,11 @@ type ReviewOutcome struct {
 	Err      error      // non-nil on a genuine failure (clone, claude invocation, API call)
 	NumTurns int        // set iff Reviewed; turns used by the claude invocation
 	CostUSD  float64    // set iff Reviewed; cost of the claude invocation
+	// SizeDetail is set iff Skipped and Reason == SkipDiffTooLarge from a
+	// fresh measurement (not the pre-diff-fetch "already noticed" skip,
+	// which returns before any measurement exists). Mirrors the too-large
+	// notice's own content — see notice.go's buildTooLargeNoticeBody.
+	SizeDetail *DiffSizeDetail
 }
 
 // ReviewPR runs the full per-PR pipeline: on-demand-comment detection,
@@ -49,15 +55,23 @@ type ReviewOutcome struct {
 // state is derived from GitHub itself, not persisted locally.
 //
 // Cheap checks (draft, self-authored, excluded author/label, already-
-// reviewed-at-SHA) run before any diff fetch; only a PR that passes those
-// triggers the FetchPRDiff call used for the size guard and path exclusion,
-// so a skip never costs an extra network round-trip.
+// reviewed-at-SHA, already-noticed-too-large-at-this-SHA) run before any
+// diff fetch; only a PR that passes those triggers the FetchPRDiff call
+// used for the size guard and path exclusion, so a skip never costs an
+// extra network round-trip. Configured path exclusions are applied to the
+// diff, per file, BEFORE it is measured against MaxDiffBytes (FR-1) — an
+// excluded file can no longer consume the size budget or suppress review of
+// everything else. If exclusion alone isn't enough, ReviewPR makes one
+// best-effort attempt to drop the largest remaining file(s) and review the
+// rest (FR-5); only if that still doesn't fit does it post a one-per-head-
+// SHA notice comment and skip (FR-2/FR-3), rather than failing silently.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
-	forceReview, err := PendingForceReview(client, owner, repo, pr.Number)
+	comments, err := client.FetchIssueComments(owner, repo, pr.Number)
 	if err != nil {
-		logf(pr.Number, "warn", "checking for /pruefer review command on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
-		forceReview = false // not fatal to the poll cycle — treat as no forced review this round
+		logf(pr.Number, "warn", "fetching comments for %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+		comments = nil // fail open: no pending force-review, no known prior too-large notice this round
 	}
+	forceReview := len(pendingReviewComments(comments)) > 0
 
 	reviews, err := client.FetchPRReviews(owner, repo, pr.Number)
 	if err != nil {
@@ -77,17 +91,48 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		return ReviewOutcome{Skipped: true, Reason: reason}
 	}
 
+	if alreadyNoticedTooLarge(comments, pr.HeadSHA) {
+		logf(pr.Number, "select", "skipping %s/%s#%d: already noticed as too-large at head %s — not re-fetching the diff\n", owner, repo, pr.Number, pr.HeadSHA)
+		return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
+	}
+
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("fetching diff: %w", err)}
 	}
-	if cfg.MaxDiffBytes > 0 && int64(len(diff)) > cfg.MaxDiffBytes {
-		logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, len(diff), cfg.MaxDiffBytes)
-		return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
-	}
-	if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(ParseChangedPaths(diff), cfg.ExcludedPaths) {
+
+	files, preamble := splitDiffFiles(diff)
+	preambleBytes := int64(len(preamble))
+
+	kept, excluded := filterExcludedPaths(files, cfg.ExcludedPaths)
+	if len(cfg.ExcludedPaths) > 0 && len(files) > 0 && len(kept) == 0 {
 		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
 		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
+	}
+
+	reviewFiles := kept
+	omittedPaths := pathsOf(excluded)
+
+	if cfg.MaxDiffBytes > 0 {
+		measured := preambleBytes
+		for _, f := range kept {
+			measured += f.Bytes
+		}
+		if measured > cfg.MaxDiffBytes {
+			trimmedKept, trimmedDropped, fits := trimToFit(kept, preambleBytes, cfg.MaxDiffBytes)
+			if fits {
+				logf(pr.Number, "select", "trimmed oversized diff for %s/%s#%d: dropping %d file(s) to review the rest\n", owner, repo, pr.Number, len(trimmedDropped))
+				reviewFiles = trimmedKept
+				omittedPaths = append(omittedPaths, pathsOf(trimmedDropped)...)
+			} else {
+				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, kept, pathsOf(excluded))
+				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after exclusions, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, measured, cfg.MaxDiffBytes)
+				if _, addErr := client.AddComment(owner, repo, pr.Number, buildTooLargeNoticeBody(detail, pr.HeadSHA)); addErr != nil {
+					logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, addErr)
+				}
+				return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge, SizeDetail: &detail}
+			}
+		}
 	}
 
 	if forceReview {
@@ -105,19 +150,20 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	result, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
-		WorkDir: dir, MaxWallTime: cfg.MaxWallTime,
+		WorkDir: dir, MaxWallTime: cfg.MaxWallTime, ExcludedPaths: omittedPaths,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
 		return ReviewOutcome{Err: fmt.Errorf("claude review invocation: %w", err)}
 	}
 
+	reviewedDiff := reconstructDiff(reviewFiles)
 	summary, findings := parseReviewFindings(result.Text)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
-	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
-	body := buildReviewBody(summary, demoted)
+	reviewComments, demoted := partitionFindings(findings, validRightAnchors(reviewedDiff))
+	body := buildReviewBody(summary, demoted, omittedPaths)
 
-	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
+	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, reviewComments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
 	}
 
@@ -129,6 +175,21 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
 	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD}
+}
+
+// reconstructDiff concatenates files' Body blocks back into a single unified
+// diff covering only the files actually reviewed — used for validRightAnchors
+// so a demoted/anchored finding can never reference a file ReviewPR excluded
+// or auto-dropped before Claude ever saw it. For an unfiltered PR this
+// reconstructs byte-identical to the original FetchPRDiff output (see
+// TestSplitDiffFiles_MultiFile), so existing anchor behavior is unchanged
+// when no exclusion or trimming occurred.
+func reconstructDiff(files []diffFile) string {
+	var b strings.Builder
+	for _, f := range files {
+		b.WriteString(f.Body)
+	}
+	return b.String()
 }
 
 // decideEvent computes the review event to submit, deterministically, from

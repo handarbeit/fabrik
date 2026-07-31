@@ -81,7 +81,7 @@ func TestParseReviewFindings_IgnoresNonJSONFence(t *testing.T) {
 }
 
 func TestBuildReviewBody_NoDemoted_ReturnsSummaryUnchanged(t *testing.T) {
-	got := buildReviewBody("All good, minor nit inline.", nil)
+	got := buildReviewBody("All good, minor nit inline.", nil, nil)
 	if got != "All good, minor nit inline." {
 		t.Errorf("got %q", got)
 	}
@@ -91,7 +91,7 @@ func TestBuildReviewBody_DemotedFindings_AppendedUnderHeading(t *testing.T) {
 	demoted := []ReviewFinding{
 		{Path: "vendor/lib.go", Line: 12, Body: "not part of this PR's diff"},
 	}
-	got := buildReviewBody("Reviewed the change.", demoted)
+	got := buildReviewBody("Reviewed the change.", demoted, nil)
 	want := "Reviewed the change.\n\n## Additional findings (could not anchor to diff)\n\n**vendor/lib.go:12**: not part of this PR's diff"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -100,7 +100,7 @@ func TestBuildReviewBody_DemotedFindings_AppendedUnderHeading(t *testing.T) {
 
 func TestBuildReviewBody_EmptySummary_DemotedFindings_NoLeadingBlankLines(t *testing.T) {
 	demoted := []ReviewFinding{{Path: "a.go", Line: 1, Body: "finding"}}
-	got := buildReviewBody("", demoted)
+	got := buildReviewBody("", demoted, nil)
 	want := "## Additional findings (could not anchor to diff)\n\n**a.go:1**: finding"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -112,9 +112,33 @@ func TestBuildReviewBody_MultipleDemotedFindings(t *testing.T) {
 		{Path: "a.go", Line: 1, Body: "finding A"},
 		{Path: "b.go", Line: 2, Body: "finding B"},
 	}
-	got := buildReviewBody("Summary.", demoted)
+	got := buildReviewBody("Summary.", demoted, nil)
 	want := "Summary.\n\n## Additional findings (could not anchor to diff)\n\n**a.go:1**: finding A\n\n**b.go:2**: finding B"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestBuildReviewBody_OmittedPaths_AppendedUnderHeading(t *testing.T) {
+	got := buildReviewBody("Reviewed the rest.", nil, []string{"packages/evals/corpus/quality-bench-corpus.jsonl"})
+	want := "Reviewed the rest.\n\n## Omitted from this review\n- `packages/evals/corpus/quality-bench-corpus.jsonl`"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestBuildReviewBody_DemotedAndOmitted_BothSectionsPresent(t *testing.T) {
+	demoted := []ReviewFinding{{Path: "a.go", Line: 1, Body: "finding"}}
+	got := buildReviewBody("Summary.", demoted, []string{"big.jsonl"})
+	want := "Summary.\n\n## Additional findings (could not anchor to diff)\n\n**a.go:1**: finding\n\n## Omitted from this review\n- `big.jsonl`"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestBuildReviewBody_EmptyOmittedPaths_NoSection(t *testing.T) {
+	got := buildReviewBody("Summary.", nil, []string{})
+	if got != "Summary." {
+		t.Errorf("got %q, want unchanged summary for empty (non-nil) omittedPaths", got)
 	}
 }

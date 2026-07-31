@@ -63,6 +63,14 @@ type ReviewRequest struct {
 	Effort      string
 	WorkDir     string        // ephemeral clone directory; claude's cwd
 	MaxWallTime time.Duration // 0 = no wall-time cap
+	// ExcludedPaths lists paths ReviewPR has already excluded from its own
+	// size measurement (via config exclusion or FR-5's auto-trim) that
+	// Claude must also exclude from its own `git diff`. Claude re-derives
+	// its diff itself rather than consuming the Go-fetched diff text (see
+	// buildReviewPrompt), so telling Go what to skip is not enough on its
+	// own — without this, an excluded oversized file would still blow
+	// Claude's context even though the Go-side size gate passed.
+	ExcludedPaths []string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -97,6 +105,22 @@ func buildReviewPrompt(req ReviewRequest) string {
 	b.WriteString("The PR's head commit is already checked out in your working directory. Use git (diff, log, show, blame, grep, status), Read, Grep, and Glob to inspect the change and any surrounding code you need for context — you have no write access and no other tools.\n\n")
 	if req.BaseBranch != "" {
 		fmt.Fprintf(&b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
+	}
+	if len(req.ExcludedPaths) > 0 {
+		b.WriteString("## Out of scope for this review\n\n")
+		b.WriteString("The following path(s) are excluded from this review — too large to review productively, or explicitly configured out of scope. Do not read or diff their content; exclude them from your own `git diff` with a pathspec, e.g. `git diff")
+		if req.BaseBranch != "" {
+			fmt.Fprintf(&b, " %s...HEAD", req.BaseBranch)
+		}
+		b.WriteString(" -- . ")
+		for _, p := range req.ExcludedPaths {
+			fmt.Fprintf(&b, "':(exclude)%s' ", p)
+		}
+		b.WriteString("`. Note in your summary that these paths were omitted from review:\n\n")
+		for _, p := range req.ExcludedPaths {
+			fmt.Fprintf(&b, "- %s\n", p)
+		}
+		b.WriteString("\n")
 	}
 	if req.Body != "" {
 		b.WriteString("## PR description\n\n")

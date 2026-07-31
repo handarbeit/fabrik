@@ -13,10 +13,14 @@ const reviewCommand = "/pruefer review"
 
 // GitHubCommenter is the subset of *github.Client's comment/reaction methods
 // this file needs. A narrow interface — rather than depending on the full
-// client — keeps these functions testable without HTTP mocking.
+// client — keeps these functions testable without HTTP mocking. AddComment
+// (posting a new issue/PR-conversation comment) backs notice.go's too-large
+// notice — distinct from AddCommentReaction, which only reacts to an
+// existing comment.
 type GitHubCommenter interface {
 	FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error)
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
+	AddComment(owner, repo string, issueNumber int, body string) (int, error)
 }
 
 // isReviewCommand reports whether body contains the /pruefer review
@@ -26,22 +30,33 @@ func isReviewCommand(body string) bool {
 	return strings.Contains(strings.ToLower(body), reviewCommand)
 }
 
-// unprocessedReviewCommands returns the "/pruefer review" comments on
-// owner/repo#prNumber that have not yet been marked processed (no ROCKET
-// reaction) — the same 👀/🚀 reaction-based idempotency convention Fabrik
-// uses for its own comment processing (see engine/comments.go).
-func unprocessedReviewCommands(client GitHubCommenter, owner, repo string, prNumber int) ([]gh.Comment, error) {
-	comments, err := client.FetchIssueComments(owner, repo, prNumber)
-	if err != nil {
-		return nil, err
-	}
+// pendingReviewComments filters an already-fetched comment list down to
+// unprocessed "/pruefer review" commands (no ROCKET reaction yet) — the same
+// 👀/🚀 reaction-based idempotency convention Fabrik uses for its own comment
+// processing (see engine/comments.go). Pure: takes the comment list rather
+// than fetching it, so ReviewPR can fetch comments once and reuse the same
+// slice for both this check and notice.go's alreadyNoticedTooLarge, instead
+// of paying a second FetchIssueComments round-trip per PR per poll.
+func pendingReviewComments(comments []gh.Comment) []gh.Comment {
 	var out []gh.Comment
 	for _, c := range comments {
 		if isReviewCommand(c.Body) && !c.HasReaction("ROCKET") {
 			out = append(out, c)
 		}
 	}
-	return out, nil
+	return out
+}
+
+// unprocessedReviewCommands fetches owner/repo#prNumber's comments and
+// returns the unprocessed "/pruefer review" commands among them. A thin
+// fetch-then-filter wrapper around pendingReviewComments for callers that
+// don't already have a comment list in hand.
+func unprocessedReviewCommands(client GitHubCommenter, owner, repo string, prNumber int) ([]gh.Comment, error) {
+	comments, err := client.FetchIssueComments(owner, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	return pendingReviewComments(comments), nil
 }
 
 // PendingForceReview reports whether owner/repo#prNumber has an unprocessed

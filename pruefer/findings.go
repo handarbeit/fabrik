@@ -58,26 +58,40 @@ func parseReviewFindings(text string) (summary string, findings []ReviewFinding)
 	return summary, parsed
 }
 
-// buildReviewBody assembles the final review body from the prose summary
-// plus any findings that could not be anchored to the diff. Demoted
-// findings are appended under an explicit heading, each rendered as
-// "**path:line**: body" — kept visually distinct from the summary so they
-// read as identifiable findings rather than blending into ambient prose,
-// even though (like all body text) they remain unconsumable by Fabrik's
-// inline-comment-only review-reinvoke path.
-func buildReviewBody(summary string, demoted []ReviewFinding) string {
-	if len(demoted) == 0 {
-		return summary
+// buildReviewBody assembles the final review body from the prose summary,
+// any findings that could not be anchored to the diff, and any paths that
+// were omitted from this review entirely (config-excluded or FR-5
+// auto-dropped). Demoted findings are appended under an explicit heading,
+// each rendered as "**path:line**: body" — kept visually distinct from the
+// summary so they read as identifiable findings rather than blending into
+// ambient prose, even though (like all body text) they remain unconsumable
+// by Fabrik's inline-comment-only review-reinvoke path. omittedPaths is
+// additive-only: an empty/nil slice produces byte-identical output to
+// before this parameter existed, preserving every prior exact-string
+// assertion.
+func buildReviewBody(summary string, demoted []ReviewFinding, omittedPaths []string) string {
+	parts := make([]string, 0, 3)
+	if summary != "" {
+		parts = append(parts, summary)
 	}
 
-	var findingsBlock strings.Builder
-	findingsBlock.WriteString("## Additional findings (could not anchor to diff)")
-	for _, f := range demoted {
-		fmt.Fprintf(&findingsBlock, "\n\n**%s:%d**: %s", f.Path, f.Line, f.Body)
+	if len(demoted) > 0 {
+		var findingsBlock strings.Builder
+		findingsBlock.WriteString("## Additional findings (could not anchor to diff)")
+		for _, f := range demoted {
+			fmt.Fprintf(&findingsBlock, "\n\n**%s:%d**: %s", f.Path, f.Line, f.Body)
+		}
+		parts = append(parts, findingsBlock.String())
 	}
 
-	if summary == "" {
-		return findingsBlock.String()
+	if len(omittedPaths) > 0 {
+		var omittedBlock strings.Builder
+		omittedBlock.WriteString("## Omitted from this review")
+		for _, p := range omittedPaths {
+			fmt.Fprintf(&omittedBlock, "\n- `%s`", p)
+		}
+		parts = append(parts, omittedBlock.String())
 	}
-	return summary + "\n\n" + findingsBlock.String()
+
+	return strings.Join(parts, "\n\n")
 }

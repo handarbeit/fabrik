@@ -385,6 +385,203 @@ func TestReviewPR_ExcludedPath_Skipped(t *testing.T) {
 	}
 }
 
+// oversizedDiff builds a two-file diff: a small, always-reviewable
+// engine/claude.go change, plus a "corpus" file whose body alone is
+// bloatBytes long — standing in for the issue's 17 MB JSONL corpus.
+func oversizedDiff(bloatBytes int) string {
+	small := `diff --git a/engine/claude.go b/engine/claude.go
+index 1111111..2222222 100644
+--- a/engine/claude.go
++++ b/engine/claude.go
+@@ -952,2 +952,3 @@ func classify() {
+ line952
+ line953
++line954
+`
+	corpus := "diff --git a/corpus/data.jsonl b/corpus/data.jsonl\n" +
+		"index 3333333..4444444 100644\n" +
+		"--- a/corpus/data.jsonl\n" +
+		"+++ b/corpus/data.jsonl\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+" + strings.Repeat("x", bloatBytes) + "\n"
+	return small + corpus
+}
+
+// TestReviewPR_ExcessEntirelyInExcludedPath_ReviewsNotSkipped is the
+// FR-1 acceptance case: a diff whose over-cap bytes are entirely inside a
+// configured excluded_paths glob must be reviewed, not skipped — the
+// operator's escape hatch must be reachable, not dead code shadowed by a
+// whole-diff size measurement running first.
+func TestReviewPR_ExcessEntirelyInExcludedPath_ReviewsNotSkipped(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed the small change."}, nil
+	}}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"corpus/**"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (excess is entirely in an excluded path)", outcome)
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 {
+		t.Errorf("clone/claude calls = %d/%d, want 1/1", cloneCalls.Load(), claude.callCount())
+	}
+	if client.addCommentCallCount() != 0 {
+		t.Error("expected no too-large notice — the diff reviews cleanly once the corpus file is excluded")
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 || len(calls[0].ExcludedPaths) != 1 || calls[0].ExcludedPaths[0] != "corpus/data.jsonl" {
+		t.Errorf("ReviewRequest.ExcludedPaths = %v, want [corpus/data.jsonl]", calls[0].ExcludedPaths)
+	}
+	call := client.submitCalls[0]
+	if !strings.Contains(call.body, "Omitted from this review") || !strings.Contains(call.body, "corpus/data.jsonl") {
+		t.Errorf("submitted body = %q, want an Omitted-from-this-review section naming corpus/data.jsonl", call.body)
+	}
+}
+
+// TestReviewPR_OverCap_PostsOneNoticeAndSkip proves FR-2/FR-3: an over-cap
+// diff with nothing configured to exclude it gets exactly one PR comment
+// naming the size, cap, and dominant path, and Skipped/SkipDiffTooLarge.
+func TestReviewPR_OverCap_PostsOneNoticeAndSkip(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	// Cap so small even the small file plus preamble can't fit once the
+	// corpus file is dropped by FR-5's trim — forces the notice path.
+	cfg := Config{MaxDiffBytes: 50}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge", outcome)
+	}
+	if outcome.SizeDetail == nil {
+		t.Fatal("outcome.SizeDetail = nil, want a populated detail")
+	}
+	if outcome.SizeDetail.MaxBytes != 50 {
+		t.Errorf("SizeDetail.MaxBytes = %d, want 50", outcome.SizeDetail.MaxBytes)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("over-cap PR must skip before cloning or invoking claude")
+	}
+	if client.addCommentCallCount() != 1 {
+		t.Fatalf("AddComment called %d times, want exactly 1", client.addCommentCallCount())
+	}
+	notice := client.addedCalls[0].body
+	if !strings.Contains(notice, "corpus/data.jsonl") {
+		t.Errorf("notice = %q, want the dominant path named", notice)
+	}
+	if !strings.Contains(notice, diffTooLargeMarker("sha1")) {
+		t.Errorf("notice = %q, want the per-SHA idempotency marker embedded", notice)
+	}
+}
+
+// TestReviewPR_OverCap_RepolledSameSHA_DoesNotDuplicateNotice covers FR-4:
+// once a too-large notice exists for a head SHA, a later poll must not
+// re-fetch the diff, re-measure, or post a second notice.
+func TestReviewPR_OverCap_RepolledSameSHA_DoesNotDuplicateNotice(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 50}
+
+	first := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	if !first.Skipped || first.Reason != SkipDiffTooLarge {
+		t.Fatalf("first outcome = %+v, want Skipped with SkipDiffTooLarge", first)
+	}
+	if client.addCommentCallCount() != 1 {
+		t.Fatalf("after first poll, AddComment called %d times, want 1", client.addCommentCallCount())
+	}
+	firstDiffCalls := client.diffCallCount()
+
+	second := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	if !second.Skipped || second.Reason != SkipDiffTooLarge {
+		t.Fatalf("second outcome = %+v, want Skipped with SkipDiffTooLarge", second)
+	}
+	if client.addCommentCallCount() != 1 {
+		t.Errorf("after second poll, AddComment called %d times, want still 1 (no duplicate notice)", client.addCommentCallCount())
+	}
+	if client.diffCallCount() != firstDiffCalls {
+		t.Errorf("second poll fetched the diff again (calls %d -> %d) — FR-4 requires recognizing the existing notice before FetchPRDiff", firstDiffCalls, client.diffCallCount())
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("neither poll should clone or invoke claude for a diff that never fits")
+	}
+}
+
+// TestReviewPR_TrimsLargestFileAndReviewsRest is the FR-5 best-effort case:
+// no excluded_paths configured, but dropping the single oversized file
+// brings the rest under cap, so ReviewPR reviews the remainder and reports
+// the dropped file as omitted rather than skipping wholesale.
+func TestReviewPR_TrimsLargestFileAndReviewsRest(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed what fit."}, nil
+	}}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	// Small file diff block is ~140 bytes; cap sits between that and the
+	// combined (small+corpus) total, so trimming the corpus file alone fits.
+	cfg := Config{MaxDiffBytes: 500}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (trimming the oversized file should let the rest review)", outcome)
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 {
+		t.Errorf("clone/claude calls = %d/%d, want 1/1", cloneCalls.Load(), claude.callCount())
+	}
+	if client.addCommentCallCount() != 0 {
+		t.Error("expected no too-large notice — FR-5's trim succeeded")
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 || len(calls[0].ExcludedPaths) != 1 || calls[0].ExcludedPaths[0] != "corpus/data.jsonl" {
+		t.Errorf("ReviewRequest.ExcludedPaths = %v, want [corpus/data.jsonl] (auto-dropped)", calls[0].ExcludedPaths)
+	}
+	call := client.submitCalls[0]
+	if !strings.Contains(call.body, "Omitted from this review") || !strings.Contains(call.body, "corpus/data.jsonl") {
+		t.Errorf("submitted body = %q, want an Omitted-from-this-review section naming the auto-dropped file", call.body)
+	}
+}
+
+// TestReviewPR_TrimExhausted_StillOverCap_NoticesAndSkips covers the case
+// where even dropping every file leaves the diff over cap (e.g. the
+// remaining "small" content, plus diff overhead, is itself larger than the
+// configured cap) — FR-5 is explicitly best-effort, not a replacement for
+// the notice path.
+func TestReviewPR_TrimExhausted_StillOverCap_NoticesAndSkips(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 10} // even the small file's diff block alone exceeds this
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge", outcome)
+	}
+	if claude.callCount() != 0 {
+		t.Error("expected no claude invocation when trimming cannot bring the diff under cap")
+	}
+	if client.addCommentCallCount() != 1 {
+		t.Errorf("AddComment called %d times, want exactly 1", client.addCommentCallCount())
+	}
+}
+
 func TestReviewPR_ClaudeFailure_PostsNothing(t *testing.T) {
 	client := newFakeReviewer()
 	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
