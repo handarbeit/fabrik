@@ -1026,3 +1026,115 @@ FABRIK_SPAWN_CHILD_END
 		}
 	}
 }
+
+// ---- #1263 regression: prose mentions must not destroy real blocks ----
+
+// TestParseSpawnBlocks_ProseMentionDoesNotConsumeRealBlock reproduces the
+// production failure from e2e TestCrossRepoSpawn (parent fabrik-test-alpha#3796).
+// The Plan both described the marker in a markdown checklist AND emitted a real
+// block. The backticked mention carried a slash-containing token
+// ("handarbeit/fabrik-test-beta`"), so the pre-fix "contains a slash" check
+// accepted it as a block opener; the parser then ran to the real END, consumed
+// the authentic block as the phantom's content, failed the TITLE: check, and
+// dropped it — yielding zero blocks and a silent no-op spawn.
+func TestParseSpawnBlocks_ProseMentionDoesNotConsumeRealBlock(t *testing.T) {
+	body := "## Approach\n" +
+		"\n" +
+		"1. Plan (this stage) emits a `FABRIK_SPAWN_CHILD_BEGIN` block scoped to the beta-side work.\n" +
+		"\n" +
+		"### Task checklist\n" +
+		"\n" +
+		"- [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN handarbeit/fabrik-test-beta` block (this stage) scoping the function + test\n" +
+		"\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN handarbeit/fabrik-test-beta\n" +
+		"TITLE: Add HelloIssue3796() greeting function\n" +
+		"\n" +
+		"## Problem\n" +
+		"\n" +
+		"Beta-side half of the cross-repo spawn regression test.\n" +
+		"FABRIK_SPAWN_CHILD_END\n"
+
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected exactly 1 block (the real one), got %d — a prose mention consumed it", len(blocks))
+	}
+	b := blocks[0]
+	if b.Repo != "handarbeit/fabrik-test-beta" {
+		t.Errorf("repo: got %q, want %q", b.Repo, "handarbeit/fabrik-test-beta")
+	}
+	if b.Title != "Add HelloIssue3796() greeting function" {
+		t.Errorf("title: got %q, want %q", b.Title, "Add HelloIssue3796() greeting function")
+	}
+	if !strings.Contains(b.Body, "Beta-side half") {
+		t.Errorf("body should carry the real block's content, got: %q", b.Body)
+	}
+}
+
+// TestParseSpawnBlocks_ProseMentionAtLineStartRejected covers the variant the
+// leading-whitespace tolerance could otherwise let through: the marker opens
+// the line, but trailing prose follows the repo token. Real blocks carry the
+// repo and nothing else.
+func TestParseSpawnBlocks_ProseMentionAtLineStartRejected(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/repo is the marker you emit to spawn a child.
+TITLE: Not a real block
+FABRIK_SPAWN_CHILD_END
+`
+	if blocks := ParseSpawnBlocks(body); len(blocks) != 0 {
+		t.Fatalf("expected 0 blocks for a prose line with trailing text, got %d", len(blocks))
+	}
+}
+
+// TestParseSpawnBlocks_BacktickedRepoRejected pins the specific token shape that
+// defeated the old "contains a slash" validation.
+func TestParseSpawnBlocks_BacktickedRepoRejected(t *testing.T) {
+	body := "FABRIK_SPAWN_CHILD_BEGIN handarbeit/fabrik-test-beta`\nTITLE: Phantom\nFABRIK_SPAWN_CHILD_END\n"
+	if blocks := ParseSpawnBlocks(body); len(blocks) != 0 {
+		t.Fatalf("expected 0 blocks for a backtick-suffixed repo, got %d", len(blocks))
+	}
+}
+
+// TestParseSpawnBlocks_IndentedBlockParses documents the deliberate tolerance:
+// a real block nested under a list item still parses. Only trailing content
+// after the repo disqualifies a line, not leading whitespace.
+func TestParseSpawnBlocks_IndentedBlockParses(t *testing.T) {
+	body := `
+  FABRIK_SPAWN_CHILD_BEGIN owner/child
+  TITLE: Indented but genuine
+  Body text here.
+  FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	if blocks[0].Repo != "owner/child" {
+		t.Errorf("repo: got %q, want %q", blocks[0].Repo, "owner/child")
+	}
+	if blocks[0].Title != "Indented but genuine" {
+		t.Errorf("title: got %q, want %q", blocks[0].Title, "Indented but genuine")
+	}
+}
+
+// TestParseSpawnBlocks_MalformedBlockDoesNotSwallowNext ensures a block that
+// fails the TITLE: check does not re-open scanning inside its own content and
+// consume the following well-formed block.
+func TestParseSpawnBlocks_MalformedBlockDoesNotSwallowNext(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/first
+no title line here, so this block is malformed
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/second
+TITLE: Second child
+Second body.
+FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block (the well-formed second), got %d", len(blocks))
+	}
+	if blocks[0].Repo != "owner/second" {
+		t.Errorf("repo: got %q, want %q", blocks[0].Repo, "owner/second")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -11,6 +12,19 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+const (
+	spawnBeginMarker = "FABRIK_SPAWN_CHILD_BEGIN"
+	spawnEndMarker   = "FABRIK_SPAWN_CHILD_END"
+)
+
+// spawnRepoRE matches a well-formed "owner/repo" spawn target.
+//
+// Deliberately stricter than the "contains a slash" check it replaces (#1263):
+// a Plan that mentions the marker inside markdown prose produces a token like
+// "handarbeit/fabrik-test-beta`" — trailing backtick included — which contains
+// a slash and so used to be accepted as a real spawn target.
+var spawnRepoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // errPreImplementDeferred signals that preImplement could not conclusively
 // resolve the stage:Plan:complete-but-no-Plan-comment inconsistency (#982) on
@@ -27,71 +41,100 @@ type SpawnBlock struct {
 	Body  string
 }
 
+// spawnBeginRepo returns the target repo declared by line when line is a
+// genuine FABRIK_SPAWN_CHILD_BEGIN marker line, or "" when it is not one.
+//
+// A marker line must consist of nothing but the marker and a well-formed
+// owner/repo. That strictness is the fix for #1263: before it, the marker was
+// located with a bare strings.Index anywhere in the body, so a Plan that
+// mentioned the marker in prose — e.g. a markdown checklist item
+//
+//	- [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN owner/repo` block scoping the child work
+//
+// — was treated as a real block opener. The parser then ran forward to the
+// *real* END marker, swallowed the authentic block as that phantom block's
+// content, failed the TITLE: check, and discarded it. The genuine spawn was
+// destroyed by the sentence describing it, and preImplement reported "nothing
+// to spawn" with no error.
+//
+// Leading whitespace is tolerated so a block nested in a list still parses;
+// trailing content after the repo is not, since that is the shape prose takes.
+func spawnBeginRepo(line string) string {
+	trimmed := strings.TrimSpace(strings.TrimRight(line, "\r"))
+	if !strings.HasPrefix(trimmed, spawnBeginMarker) {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimPrefix(trimmed, spawnBeginMarker))
+	if len(fields) != 1 || !spawnRepoRE.MatchString(fields[0]) {
+		return ""
+	}
+	return fields[0]
+}
+
+// isSpawnEndLine reports whether line is a standalone END marker, applying the
+// same own-line rule as spawnBeginRepo so a prose mention of the END marker
+// cannot truncate a real block early.
+func isSpawnEndLine(line string) bool {
+	return strings.TrimSpace(strings.TrimRight(line, "\r")) == spawnEndMarker
+}
+
+// logUnparsedSpawnMarkers reports the case where a Plan comment contains the
+// BEGIN marker text but no well-formed block parsed out of it. Both that case
+// and "the Plan declared no children" return (false, nil) from preImplement,
+// and before #1263 they were indistinguishable in the logs too — so a spawn
+// that silently failed to happen looked exactly like a spawn that was never
+// requested. Called from both the direct and the recovery path.
+func (e *Engine) logUnparsedSpawnMarkers(number int, planBody string) {
+	if !strings.Contains(planBody, spawnBeginMarker) {
+		return
+	}
+	e.logf(number, "spawn", "pre-Implement: Plan comment mentions %s but no well-formed block parsed — "+
+		"each marker must stand on its own line, as %q ... %q; not spawning children\n",
+		spawnBeginMarker, spawnBeginMarker+" owner/repo", spawnEndMarker)
+}
+
 // ParseSpawnBlocks scans body for all FABRIK_SPAWN_CHILD_BEGIN/END pairs and
 // returns the parsed spawn blocks in order. Malformed or incomplete pairs are
-// silently skipped. The BEGIN marker must be followed by the target repo on
-// the same line: "FABRIK_SPAWN_CHILD_BEGIN owner/repo". The first non-empty
-// line after BEGIN is the TITLE: line; the body starts after the blank line
-// following the title.
+// skipped.
+//
+// Both markers must stand on their own line — the same convention
+// FABRIK_STAGE_COMPLETE follows (stageCompleteRE in engine/claude.go) and that
+// CLAUDE.md states for markers generally. The BEGIN line carries the target
+// repo: "FABRIK_SPAWN_CHILD_BEGIN owner/repo". The first non-empty line inside
+// the block is the TITLE: line; the body is everything after it.
 func ParseSpawnBlocks(body string) []SpawnBlock {
-	const beginPrefix = "FABRIK_SPAWN_CHILD_BEGIN"
-	const endMarker = "FABRIK_SPAWN_CHILD_END"
-
 	var blocks []SpawnBlock
-	remaining := body
-	for {
-		beginIdx := strings.Index(remaining, beginPrefix)
-		if beginIdx == -1 {
-			break
-		}
+	lines := strings.Split(body, "\n")
 
-		// Extract the rest of the BEGIN line to get the repo argument.
-		lineEnd := strings.IndexByte(remaining[beginIdx:], '\n')
-		var beginLine, afterBegin string
-		if lineEnd == -1 {
-			beginLine = remaining[beginIdx:]
-			afterBegin = ""
-		} else {
-			beginLine = remaining[beginIdx : beginIdx+lineEnd]
-			afterBegin = remaining[beginIdx+lineEnd+1:]
-		}
-
-		// BEGIN line must be exactly "FABRIK_SPAWN_CHILD_BEGIN owner/repo".
-		// Strip trailing \r if present (CRLF files).
-		beginLine = strings.TrimRight(beginLine, "\r")
-		repo := ""
-		if parts := strings.Fields(strings.TrimPrefix(beginLine, beginPrefix)); len(parts) > 0 {
-			repo = parts[0]
-		}
-
-		if repo == "" || !strings.Contains(repo, "/") {
-			// Malformed — advance past this BEGIN and keep scanning.
-			remaining = remaining[beginIdx+len(beginPrefix):]
+	for i := 0; i < len(lines); i++ {
+		repo := spawnBeginRepo(lines[i])
+		if repo == "" {
 			continue
 		}
 
-		endIdx := strings.Index(afterBegin, endMarker)
-		if endIdx == -1 {
-			// No matching END — stop scanning.
+		end := -1
+		for j := i + 1; j < len(lines); j++ {
+			if isSpawnEndLine(lines[j]) {
+				end = j
+				break
+			}
+		}
+		if end == -1 {
+			// No matching END — nothing further can be well-formed.
 			break
 		}
 
-		blockContent := afterBegin[:endIdx]
-
-		// Advance remaining past this full block.
-		remaining = afterBegin[endIdx+len(endMarker):]
-
-		// Parse TITLE: from the first non-empty line.
-		title, blockBody := parseTitleAndBody(blockContent)
-		if title == "" {
-			continue // malformed block
+		if title, blockBody := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title != "" {
+			blocks = append(blocks, SpawnBlock{
+				Repo:  repo,
+				Title: title,
+				Body:  blockBody,
+			})
 		}
 
-		blocks = append(blocks, SpawnBlock{
-			Repo:  repo,
-			Title: title,
-			Body:  blockBody,
-		})
+		// Resume after this block's END whether or not it was well-formed, so a
+		// malformed block cannot re-open scanning inside its own content.
+		i = end
 	}
 	return blocks
 }
@@ -207,6 +250,7 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 
 	blocks := ParseSpawnBlocks(planComment.Body)
 	if len(blocks) == 0 {
+		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)
 		return false, nil
 	}
 
@@ -259,6 +303,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 	blocks := ParseSpawnBlocks(planComment.Body)
 	if len(blocks) == 0 {
 		e.logf(item.Number, "spawn", "pre-Implement: live re-read recovered Plan comment with no spawn blocks — nothing to spawn\n")
+		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)
 		return false, nil
 	}
 

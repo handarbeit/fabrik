@@ -4699,6 +4699,8 @@ FABRIK_SPAWN_CHILD_END
 
 These blocks persist in the Plan stage comment — they are data, not consumed-and-stripped signals. The `preImplement` engine step reads them from the most-recent Plan comment body at Implement dispatch time.
 
+**Own-line requirement (enforced by `ParseSpawnBlocks`):** Both markers must stand on their own line, the same convention `FABRIK_STAGE_COMPLETE` follows. On the BEGIN line the target repo must be the only trailing token and a well-formed `owner/repo`; the END line must carry nothing else. Leading whitespace is tolerated, so a block nested under a list item still parses — trailing prose after the repo is not. A marker occurring inside prose (for example a backticked mention in the Plan's own task checklist) is therefore ignored, and cannot consume, truncate, or suppress a genuine block later in the same comment. Until this was enforced, such a mention silently destroyed the real block and the spawn simply did not happen (#1263). When a BEGIN-looking line is present but no well-formed block parses, `preImplement` now logs that fact rather than returning the same silent "nothing to spawn" result as a Plan that declared no children.
+
 **Code path:** `processItem()` → Implement stage dispatch → `preImplement()` (in `engine/spawn.go`)
 
 **Idempotency guard:** If the parent issue has `fabrik:children-spawned`, `preImplement` returns immediately (no-op). Manual removal of this label (and closing of orphaned children) is required to trigger a fresh spawn. This guard runs before the recovery path below and must remain first — recovery must never bypass it, or repeated deferred-retry cycles risk double-spawning.
