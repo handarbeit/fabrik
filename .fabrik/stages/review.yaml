@@ -9,6 +9,8 @@ max_wall_time: "60m"
 post_to_pr: true
 mark_pr_ready_on_complete: true
 wait_for_reviews: true
+expected_reviewers:
+  - handarbeit-pruefer
 kill_grace:
   sigint: 10s
   sigterm: 10s

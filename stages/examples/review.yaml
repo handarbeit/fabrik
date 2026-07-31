@@ -7,6 +7,19 @@ max_turns: 50
 post_to_pr: true
 mark_pr_ready_on_complete: true
 wait_for_reviews: true
+# expected_reviewers declares unrequested reviewers (e.g. self-submitting review
+# bots like Pruefer, Gemini, CodeRabbit) expected to review PRs from this stage
+# without ever appearing in GitHub's requested-reviewer list. Declaring this
+# activates the bot re-prompt ladder and lets the gate advance immediately when
+# nothing is requested and nothing is expected, instead of waiting the full
+# timeout. Left undeclared here since which bots run is repo-specific — a
+# generic template can't guess it. See docs/USER_GUIDE.md.
+#
+# expected_reviewers:
+#   - my-review-bot     # bare handle only: no leading "@", no trailing "[bot]"
+#
+# Or, if no unrequested reviewer runs on this repo:
+# expected_reviewers: []
 kill_grace:
   sigint: 10s
   sigterm: 10s

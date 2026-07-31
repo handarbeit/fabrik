@@ -99,11 +99,12 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 
 func TestReviewTimeoutReason(t *testing.T) {
 	tests := []struct {
-		name            string
-		outstanding     []string
-		authorityReason string
-		wantContains    []string
-		wantExcludes    []string
+		name                string
+		outstanding         []string
+		declaredOutstanding []string
+		authorityReason     string
+		wantContains        []string
+		wantExcludes        []string
 	}{
 		{
 			name:            "authorityReason takes precedence over everything else",
@@ -118,24 +119,37 @@ func TestReviewTimeoutReason(t *testing.T) {
 			wantExcludes: []string{"authoritative gate blocking:", "bots"},
 		},
 		{
-			name:         "no reviewers requested states the three known facts, no bot speculation",
+			name:                "declared-but-unrequested reviewer named when outstanding is empty",
+			declaredOutstanding: []string{"pruefer-bot"},
+			wantContains:        []string{"declared reviewer(s) not yet responded", "pruefer-bot"},
+			wantExcludes:        []string{"authoritative gate blocking:", "pending reviewers:", "no reviewers were requested"},
+		},
+		{
+			name:                "requested reviewer takes precedence over declared",
+			outstanding:         []string{"alice"},
+			declaredOutstanding: []string{"pruefer-bot"},
+			wantContains:        []string{"pending reviewers:", "alice"},
+			wantExcludes:        []string{"declared reviewer(s)", "pruefer-bot"},
+		},
+		{
+			name:         "no reviewers requested or declared states the three known facts, no bot speculation",
 			outstanding:  nil,
 			wantContains: []string{"no reviewers were requested", "no review has been received", "cannot determine whether one is coming"},
-			wantExcludes: []string{"bot", "authoritative gate blocking:", "pending reviewers:"},
+			wantExcludes: []string{"bot", "authoritative gate blocking:", "pending reviewers:", "declared reviewer(s)"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := reviewTimeoutReason(tt.outstanding, tt.authorityReason)
+			got := reviewTimeoutReason(tt.outstanding, tt.declaredOutstanding, tt.authorityReason)
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {
-					t.Errorf("reviewTimeoutReason(%v, %q) = %q, want substring %q", tt.outstanding, tt.authorityReason, got, want)
+					t.Errorf("reviewTimeoutReason(%v, %v, %q) = %q, want substring %q", tt.outstanding, tt.declaredOutstanding, tt.authorityReason, got, want)
 				}
 			}
 			for _, excl := range tt.wantExcludes {
 				if strings.Contains(strings.ToLower(got), strings.ToLower(excl)) {
-					t.Errorf("reviewTimeoutReason(%v, %q) = %q, must not contain %q", tt.outstanding, tt.authorityReason, got, excl)
+					t.Errorf("reviewTimeoutReason(%v, %v, %q) = %q, must not contain %q", tt.outstanding, tt.declaredOutstanding, tt.authorityReason, got, excl)
 				}
 			}
 		})
@@ -1492,6 +1506,91 @@ func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) 
 	}
 }
 
+// FR-4: multiple declared reviewers with a partial response — the pause
+// message must report per-reviewer status so the gap is diagnosable.
+func TestPauseForReviewTimeout_ExpectedReviewers_PartialResponse_ReportsPerReviewerStatus(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "handarbeit-pruefer[bot]", State: "COMMENTED"},
+		},
+	}
+	declared := []string{"handarbeit-pruefer", "gemini-code-assist"}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !containsAll(body, "`handarbeit-pruefer` reviewed", "`gemini-code-assist` did not respond") {
+		t.Errorf("pause comment should report per-reviewer status; got:\n%s", body)
+	}
+}
+
+// FR-4/FR-6: a declared reviewer that's never installed still times out, naming
+// the bot — the message must not imply "no reviewer was ever requested" (the
+// stale, pre-declaration framing this issue supersedes).
+func TestPauseForReviewTimeout_ExpectedReviewers_NeverResponds_NamesBot(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews:        nil,
+	}
+	declared := []string{"nonexistent-reviewer"}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "`nonexistent-reviewer` did not respond") {
+		t.Errorf("pause comment should name the absent declared reviewer; got:\n%s", body)
+	}
+}
+
+// FR-4: the Phase 2 "(after bot re-prompt)" message flavor must also fire for
+// a declared-but-unrequested reviewer, not just a formally requested one —
+// LinkedPRReviewRequests is always empty for a declared-only reviewer, so the
+// Phase 2 detection must fold in declaredOutstandingNames too.
+func TestPauseForReviewTimeout_ExpectedReviewers_Phase2_UsesReprompFlavor(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review", "fabrik:bot-reprompted"},
+		LinkedPRReviewRequests: nil, // declared-only reviewer never appears here
+		LinkedPRReviews:        nil,
+	}
+	declared := []string{"handarbeit-pruefer"}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "after bot re-prompt") {
+		t.Errorf("expected the Phase 2 re-prompt message flavor to fire for a declared reviewer; got:\n%s", body)
+	}
+	if !strings.Contains(body, "handarbeit-pruefer") {
+		t.Errorf("expected the declared reviewer to be named in the Phase 2 message; got:\n%s", body)
+	}
+}
+
 // Authoritative-mode pause messaging must cover REVIEW_REQUIRED, not just an
 // active CHANGES_REQUESTED review — it live-fetches the verdict via
 // reviewGateAuthorityVerdict rather than scanning only for CHANGES_REQUESTED.
@@ -1917,6 +2016,514 @@ func TestCheckReviewGate_BotPhase1_NonCopilot_MentionsLogin(t *testing.T) {
 	}
 }
 
+// --- expected_reviewers (declared unrequested reviewers) pure-function tests ---
+
+func TestStripBotSuffix(t *testing.T) {
+	cases := []struct{ login, want string }{
+		{"handarbeit-pruefer[bot]", "handarbeit-pruefer"},
+		{"handarbeit-pruefer[BOT]", "handarbeit-pruefer"},
+		{"handarbeit-pruefer[Bot]", "handarbeit-pruefer"},
+		{"handarbeit-pruefer", "handarbeit-pruefer"},
+		{"copilot-pull-request-reviewer[bot]", "copilot-pull-request-reviewer"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := stripBotSuffix(tc.login); got != tc.want {
+			t.Errorf("stripBotSuffix(%q) = %q, want %q", tc.login, got, tc.want)
+		}
+	}
+}
+
+func TestReviewerIdentityMatches(t *testing.T) {
+	cases := []struct {
+		declared, author string
+		want             bool
+	}{
+		// Real-world Pruefer shape: declared without suffix, REST-sourced author with it.
+		{"handarbeit-pruefer", "handarbeit-pruefer[bot]", true},
+		// GraphQL-sourced author never carries the suffix.
+		{"handarbeit-pruefer", "handarbeit-pruefer", true},
+		// Case-insensitive.
+		{"Handarbeit-Pruefer", "handarbeit-pruefer[bot]", true},
+		// Copilot: declared canonical mention handle vs. the real login.
+		{"copilot", "copilot-pull-request-reviewer[bot]", true},
+		{"copilot", "copilot-pull-request-reviewer", true},
+		// Unrelated identities must not match.
+		{"handarbeit-pruefer", "gemini-code-assist", false},
+		{"handarbeit-pruefer", "handarbeit-pruefer2[bot]", false},
+	}
+	for _, tc := range cases {
+		if got := reviewerIdentityMatches(tc.declared, tc.author); got != tc.want {
+			t.Errorf("reviewerIdentityMatches(%q, %q) = %v, want %v", tc.declared, tc.author, got, tc.want)
+		}
+	}
+}
+
+func TestDeclaredReviewersOutstanding(t *testing.T) {
+	t.Run("no reviews — all declared outstanding", func(t *testing.T) {
+		got := declaredReviewersOutstanding([]string{"handarbeit-pruefer", "gemini-code-assist"}, nil)
+		want := []string{"handarbeit-pruefer", "gemini-code-assist"}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("one declared reviewer responds — only the other remains outstanding", func(t *testing.T) {
+		reviews := []gh.PRReview{
+			{Author: "handarbeit-pruefer[bot]", State: "COMMENTED"},
+		}
+		got := declaredReviewersOutstanding([]string{"handarbeit-pruefer", "gemini-code-assist"}, reviews)
+		if len(got) != 1 || got[0] != "gemini-code-assist" {
+			t.Errorf("got %v, want [gemini-code-assist]", got)
+		}
+	})
+
+	t.Run("DISMISSED review does not count as a response", func(t *testing.T) {
+		reviews := []gh.PRReview{
+			{Author: "handarbeit-pruefer[bot]", State: "DISMISSED"},
+		}
+		got := declaredReviewersOutstanding([]string{"handarbeit-pruefer"}, reviews)
+		if len(got) != 1 || got[0] != "handarbeit-pruefer" {
+			t.Errorf("got %v, want [handarbeit-pruefer] (DISMISSED must not clear)", got)
+		}
+	})
+
+	t.Run("empty declared list returns nil", func(t *testing.T) {
+		if got := declaredReviewersOutstanding(nil, []gh.PRReview{{Author: "x", State: "APPROVED"}}); got != nil {
+			t.Errorf("got %v, want nil", got)
+		}
+	})
+}
+
+func TestReviewGateFastAdvance(t *testing.T) {
+	none := []string{}
+	declared := []string{"handarbeit-pruefer"}
+	cases := []struct {
+		name        string
+		outstanding []string
+		hasReviews  bool
+		expected    *[]string
+		want        bool
+	}{
+		{"undeclared stage never fast-advances", nil, false, nil, false},
+		{"declared none, nothing requested, nothing reviewed — advances", nil, false, &none, true},
+		{"declared none but a reviewer is requested — still waits", []string{"alice"}, false, &none, false},
+		{"declared none but a review already exists — not the fast path's job", nil, true, &none, false},
+		{"declared reviewers (non-empty) never fast-advance", nil, false, &declared, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reviewGateFastAdvance(tc.outstanding, tc.hasReviews, tc.expected); got != tc.want {
+				t.Errorf("reviewGateFastAdvance(%v, %v, %v) = %v, want %v", tc.outstanding, tc.hasReviews, tc.expected, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReviewGateAllBots_DeclaredBranch(t *testing.T) {
+	t.Run("outstanding empty, declared reviewer outstanding — allBots true", func(t *testing.T) {
+		if !reviewGateAllBots(nil, nil, []string{"handarbeit-pruefer"}) {
+			t.Error("expected allBots true when a declared reviewer is still outstanding")
+		}
+	})
+	t.Run("outstanding empty, nothing declared outstanding — allBots false", func(t *testing.T) {
+		if reviewGateAllBots(nil, nil, nil) {
+			t.Error("expected allBots false when nothing is outstanding at all")
+		}
+	})
+	t.Run("outstanding non-empty ignores declaredOutstanding — unchanged behavior", func(t *testing.T) {
+		requests := []gh.ReviewRequest{{Login: "alice", IsBot: false}}
+		if reviewGateAllBots(requests, []string{"alice"}, []string{"handarbeit-pruefer"}) {
+			t.Error("expected allBots false — a human requested reviewer must not be masked by a declared bot")
+		}
+		requests = []gh.ReviewRequest{{Login: "some-bot", IsBot: true}}
+		if !reviewGateAllBots(requests, []string{"some-bot"}, nil) {
+			t.Error("expected allBots true — requested-reviewer classification unchanged when nothing is declared")
+		}
+	})
+}
+
+// --- expected_reviewers integration tests (checkReviewGate) ---
+
+// FR-2: nothing requested, nothing reviewed, expected_reviewers: [] declared — gate advances immediately.
+func TestCheckReviewGate_ExpectedReviewersNone_AdvancesImmediately(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews:        nil,
+	}
+	none := []string{}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
+
+	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+
+	if blocked || timedOut || terminated {
+		t.Errorf("expected (false, false, false) fast-advance, got (%v, %v, %v)", blocked, timedOut, terminated)
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected no fabrik:awaiting-review label applied on fast-advance, got %d label add(s)", len(client.addLabelCalls))
+	}
+}
+
+// FR-2 exception: expected_reviewers: [] still waits for a reviewer actually requested on the PR.
+func TestCheckReviewGate_ExpectedReviewersNone_ReviewerRequested_StillWaits(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "alice", IsBot: false},
+		},
+		LinkedPRReviews: nil,
+	}
+	none := []string{}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked — a requested reviewer takes precedence over expected_reviewers: []")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// The FR-2 fast path fires regardless of review_authority: with nothing
+// requested, nothing reviewed, and expected_reviewers: [] declared, there is
+// no verdict for authoritative mode to weigh yet (reviewGateAuthorityVerdict
+// only ever runs once hasReviews is true) — gating the advance on
+// review_authority would just wait out the timeout for a review the
+// declaration says will never arrive. FetchPRReviewDecision must not be
+// called on this path.
+func TestCheckReviewGate_ExpectedReviewersNone_AuthoritativeMode_StillAdvancesImmediately(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			t.Fatal("FetchPRReviewDecision must not be called when nothing has been reviewed yet")
+			return "", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews:        nil,
+	}
+	none := []string{}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none, ReviewAuthority: "authoritative"}
+
+	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+
+	if blocked || timedOut || terminated {
+		t.Errorf("expected (false, false, false) fast-advance under authoritative mode, got (%v, %v, %v)", blocked, timedOut, terminated)
+	}
+}
+
+// Regression test: the FR-2 fast path must not fire when no PR has been
+// resolved at all. handleBrokenReviewLinkage returns (paused=false,
+// prNumber=0) — falling through to normal gate logic rather than pausing —
+// whenever FetchLinkedPR errors, finds nothing on the branch, or finds a PR
+// that isn't open/is merged (see TestCheckReviewGate_BrokenLinkage_
+// NoPRFound_FallsThrough, which exercises the identical no-PR shape). In that
+// state outstanding/hasReviews read empty/false simply because there is no PR
+// to read yet, not because a real PR genuinely has nothing requested or
+// reviewed. Without the prNumber > 0 guard, a stage declaring
+// expected_reviewers: [] would fast-advance past a not-yet-resolved PR
+// entirely — the same fail-open shape the !fetchFailed guard exists to
+// prevent, just reached via a different route (no PR at all, rather than a
+// failed fetch for a PR that does exist).
+func TestCheckReviewGate_ExpectedReviewersNone_NoPRResolved_DoesNotFastAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil // no PR on branch yet
+		},
+	}
+	eng := reviewTestEngine(t, client)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 0,
+	}
+	none := []string{}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
+
+	blocked, _, terminated := eng.checkReviewGate(board, item, stage)
+
+	if terminated {
+		t.Error("expected not terminated — no PR found should fall through to normal logic, not pause")
+	}
+	if !blocked {
+		t.Error("expected still blocked — the fast path must not fire when no PR has been resolved (prNumber == 0)")
+	}
+}
+
+// FR-3/acceptance: the exact real-world shape (empty LinkedPRReviewRequests, declared
+// identity) reaches Phase 1, posts an @mention comment directly, applies
+// fabrik:bot-reprompted, and performs NO request-mutation calls (there is nothing to
+// mutate for a reviewer that was never formally requested).
+func TestCheckReviewGate_DeclaredReviewer_EmptyReviewRequests_Phase1PostsMentionDirectly(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: nil, // real self-submitting bots never appear here
+		LinkedPRReviews:        nil,
+	}
+	declared := []string{"handarbeit-pruefer"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked after Phase 1 re-prompt")
+	}
+	if timedOut {
+		t.Error("expected not timedOut after Phase 1 (still blocked)")
+	}
+
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected NO DeleteReviewRequest calls (nothing to mutate for a declared reviewer), got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 0 {
+		t.Errorf("expected NO AddReviewRequest calls (nothing to mutate for a declared reviewer), got %d", len(client.addReviewRequestCalls))
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 PR @mention comment, got %d", len(client.addCommentCalls))
+	}
+	if client.addCommentCalls[0].issueNumber != 42 {
+		t.Errorf("expected comment on PR #42, got #%d", client.addCommentCalls[0].issueNumber)
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "@handarbeit-pruefer") {
+		t.Errorf("expected @handarbeit-pruefer in reprompt comment body, got: %q", client.addCommentCalls[0].body)
+	}
+
+	var foundReprompted bool
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:bot-reprompted" {
+			foundReprompted = true
+		}
+	}
+	if !foundReprompted {
+		t.Error("expected fabrik:bot-reprompted label to be added — the first production-reachable use of this label")
+	}
+}
+
+// Regression test: a declared identity that is a valid bare handle (passes
+// validateExpectedReviewers, matches the live review author fine via
+// reviewerIdentityMatches' copilot-prefix collapse) is not necessarily the
+// same string GitHub resolves as a live @mention. "copilot-pull-request-
+// reviewer" is exactly this case — a plausible App-slug declaration that
+// clears the gate correctly but, before this fix, was mentioned verbatim as
+// "@copilot-pull-request-reviewer" (which does not resolve) instead of
+// "@copilot" (which does), silently defeating the notification this whole
+// feature exists to send. No formal review request exists here at all, so
+// this exercises only the declared-only Phase 1 loop, not the dedup-skip
+// path covered by the adjacent "AlsoFormallyRequested" test.
+func TestCheckReviewGate_DeclaredReviewer_MentionUsesCanonicalHandle(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: nil, // real self-submitting bots never appear here
+		LinkedPRReviews:        nil,
+	}
+	declared := []string{"copilot-pull-request-reviewer"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked after Phase 1 re-prompt")
+	}
+	if timedOut {
+		t.Error("expected not timedOut after Phase 1 (still blocked)")
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 PR @mention comment, got %d", len(client.addCommentCalls))
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "@copilot") {
+		t.Errorf("expected @copilot (the canonical, mention-resolvable handle) in reprompt comment body, got: %q", client.addCommentCalls[0].body)
+	}
+	if strings.Contains(client.addCommentCalls[0].body, "@copilot-pull-request-reviewer") {
+		t.Errorf("mention must use the canonical handle, not the raw declared identity verbatim, got: %q", client.addCommentCalls[0].body)
+	}
+}
+
+// A reviewer that is both formally requested (under GitHub's login form) and
+// separately declared in expected_reviewers (under its mention-resolvable
+// form) is the same reviewer — Phase 1 must re-prompt it once, not twice.
+// Regression test for a login-form mismatch in the dedup check: it used to
+// compare the declared identity against the raw requested login with plain
+// case-insensitive equality, which never matches "copilot" against
+// "copilot-pull-request-reviewer[bot]".
+func TestCheckReviewGate_DeclaredReviewer_AlsoFormallyRequested_NotDoubleReprompted(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot-pull-request-reviewer", IsBot: true},
+		},
+		LinkedPRReviews: nil,
+	}
+	declared := []string{"copilot"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked after Phase 1 re-prompt")
+	}
+	if timedOut {
+		t.Error("expected not timedOut after Phase 1 (still blocked)")
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 @mention comment (requested and declared forms are the same reviewer), got %d: %v", len(client.addCommentCalls), client.addCommentCalls)
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "@copilot") {
+		t.Errorf("expected @copilot in reprompt comment body, got: %q", client.addCommentCalls[0].body)
+	}
+}
+
+// FR-3 any-of-N: with two declared reviewers, one submitting (under the REST-sourced
+// [bot]-suffixed author form) clears the gate naturally without waiting for the other.
+func TestCheckReviewGate_MultipleDeclaredReviewers_AnyOneResponds_Clears(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "handarbeit-pruefer[bot]", State: "COMMENTED"},
+		},
+	}
+	declared := []string{"handarbeit-pruefer", "gemini-code-assist"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected gate to clear once any one declared reviewer has responded")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on natural clear")
+	}
+}
+
+// FR-6: a declared reviewer that never appears must still time out (Phase 2), naming
+// the bot — a declaration is not evidence the reviewer exists.
+func TestCheckReviewGate_DeclaredReviewer_NeverResponds_Phase2PausesNamingBot(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-15 * time.Minute)
+	repromptedApplied := time.Now().Add(-10 * time.Minute) // 10 min > 5 min timeout → Phase 2
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		if labelName == "fabrik:bot-reprompted" {
+			return repromptedApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review", "fabrik:bot-reprompted"},
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews:        nil, // declared bot ("not installed") never shows up
+	}
+	declared := []string{"nonexistent-reviewer"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked on Phase 2 (should return false, true)")
+	}
+	if !timedOut {
+		t.Error("expected timedOut == true on Phase 2")
+	}
+
+	removedLabels := make(map[string]bool)
+	for _, call := range client.removeLabelCalls {
+		removedLabels[call.labelName] = true
+	}
+	if !removedLabels["fabrik:bot-reprompted"] || !removedLabels["fabrik:awaiting-review"] {
+		t.Error("expected both fabrik:bot-reprompted and fabrik:awaiting-review removed in Phase 2")
+	}
+}
+
 // Broken-linkage guard: PR exists on branch but LinkedPRNumber == 0 → pause instead of loop.
 func TestCheckReviewGate_BrokenLinkage_PRFound_Pauses(t *testing.T) {
 	client := &mockGitHubClient{
@@ -2219,6 +2826,79 @@ func TestCheckReviewGate_NonDefaultBase_RESTOutstandingReviewer_Blocks(t *testin
 	}
 }
 
+// Regression test: Phase 1's formal-request mutation loop (DELETE/POST
+// review request + @mention comment) must fire for a REST-resolved
+// outstanding bot reviewer on a base:<branch> repo, where
+// item.LinkedPRReviewRequests is structurally empty. The loop used to
+// iterate item.LinkedPRReviewRequests directly instead of the
+// already-REST-resolved outstanding slice checkReviewGate threads through,
+// so it silently no-opped here even though allBots/outstanding correctly
+// detected the outstanding bot.
+func TestCheckReviewGate_NonDefaultBase_BotPhase1_Reprompts(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "copilot-pull-request-reviewer", IsBot: true}}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop", "fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked after Phase 1 re-prompt")
+	}
+	if timedOut {
+		t.Error("expected not timedOut after Phase 1 (still blocked)")
+	}
+
+	if len(client.deleteReviewRequestCalls) != 1 {
+		t.Errorf("expected 1 DeleteReviewRequest call, got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 1 {
+		t.Errorf("expected 1 AddReviewRequest call, got %d", len(client.addReviewRequestCalls))
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 PR @mention comment, got %d", len(client.addCommentCalls))
+	}
+	if client.addCommentCalls[0].issueNumber != 77 {
+		t.Errorf("expected comment on PR #77, got #%d", client.addCommentCalls[0].issueNumber)
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "@copilot") {
+		t.Errorf("expected @copilot in reprompt comment body, got: %q", client.addCommentCalls[0].body)
+	}
+
+	var foundReprompted bool
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:bot-reprompted" {
+			foundReprompted = true
+		}
+	}
+	if !foundReprompted {
+		t.Error("expected fabrik:bot-reprompted label to be added")
+	}
+}
+
 // A transient REST error on either the reviews or requested-reviewers endpoint must
 // not falsely clear the gate — treat the poll as no-data-available and stay blocked,
 // retrying on the next poll.
@@ -2256,6 +2936,110 @@ func TestCheckReviewGate_NonDefaultBase_RESTFetchError_StaysBlocked(t *testing.T
 	}
 	if timedOut {
 		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// A REST fetch failure must never be indistinguishable from "genuinely
+// nothing requested or reviewed" for the FR-2 fast path: a stage that
+// declares expected_reviewers: [] must NOT fast-advance while the actual
+// review state is unknown, mirroring reviewGateBlocksLanding's identical
+// !fetchFailed guard. Regression test for a gap where checkReviewGate's fast
+// path had no such guard at all.
+func TestCheckReviewGate_NonDefaultBase_RESTFetchError_ExpectedReviewersNone_DoesNotFastAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, fmt.Errorf("transient GitHub API error")
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	none := []string{}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked on a REST fetch failure even though expected_reviewers: [] is declared — a fetch failure must never look like 'nothing requested, nothing expected'")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+	if len(client.addLabelCalls) != 0 {
+		for _, l := range client.addLabelCalls {
+			if l.labelName != "fabrik:awaiting-review" {
+				t.Errorf("unexpected label applied on fetch failure: %s", l.labelName)
+			}
+		}
+	}
+}
+
+// A REST fetch failure must not manufacture a false "declared reviewer never
+// responded" reading either: with reviews unknown (nil), every declared
+// identity would otherwise look outstanding, which can flip
+// reviewGateAllBots to true and fire a spurious Phase 1 @mention re-prompt
+// for a bot that may already have reviewed. Sets up the timeout-elapsed
+// state (mirroring TestCheckReviewGate_NonDefaultBase_BotPhase1_Reprompts)
+// to prove Phase 1 does NOT fire from fetch-failure-derived data alone.
+func TestCheckReviewGate_NonDefaultBase_RESTFetchError_DeclaredReviewers_NoSpuriousReprompt(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, fmt.Errorf("transient GitHub API error")
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return nil, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop", "fabrik:awaiting-review"},
+		LinkedPRNumber: 77, // must be >0 for Phase 1 to be reachable at all — see checkAwaitingReviewTimeout's item.LinkedPRNumber > 0 guard
+	}
+	declared := []string{"handarbeit-pruefer"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
+
+	eng.checkReviewGate(board, item, stage)
+
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected NO @mention re-prompt comment from fetch-failure-derived data, got %d", len(client.addCommentCalls))
+	}
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:bot-reprompted" {
+			t.Error("expected fabrik:bot-reprompted NOT to be applied purely from a REST fetch failure")
+		}
 	}
 }
 

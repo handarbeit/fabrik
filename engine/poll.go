@@ -118,13 +118,17 @@ func (e *Engine) Run() error {
 		}()
 	}
 
-	// Emit stage-config drift warnings to both stderr (visible at startup) and
-	// fabrik.log (durable for post-mortems). Without the log copy, recurrences
-	// of "same drift bit us again" are invisible from the persistent log alone.
+	// Emit stage-config drift warnings, and the FR-7 undeclared-expected_reviewers
+	// notice, to both stderr (visible at startup) and fabrik.log (durable for
+	// post-mortems). Without the log copy, recurrences of "same drift bit us
+	// again" are invisible from the persistent log alone.
 	if e.logFile != nil {
-		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, io.MultiWriter(os.Stderr, e.logFile))
+		w := io.MultiWriter(os.Stderr, e.logFile)
+		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
+		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
+		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
