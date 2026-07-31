@@ -103,6 +103,89 @@ func TestExtensionLoop_ProgressDetected(t *testing.T) {
 	}
 }
 
+// TestExtensionLoop_ReResolvesFabrikPR covers #1288: resolveFabrikEnvOpts must be
+// re-evaluated on every extend-turns loop iteration, not just once before the loop.
+// On a CreateDraftPR stage's first (resume=false) attempt no PR can exist yet, so
+// FABRIK_PR/opts.PRNumber must be 0 — but if that attempt hits the turn cap with
+// progress, the loop resumes (resume=true) for a second attempt within the *same*
+// runInvocationWithExtension call, and a PR may now exist (e.g. created externally
+// on the fabrik/issue-N branch while the loop was running). If resolveFabrikEnvOpts
+// were only called once before the loop (the pre-fix behavior), opts.PRNumber would
+// stay pinned at 0 for the rest of the call even after resume flips to true.
+func TestExtensionLoop_ReResolvesFabrikPR(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, State: "open"}, nil
+		},
+	}
+
+	callCount := 0
+	var firstOpts, secondOpts InvokeOptions
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				firstOpts = opts
+				cmd := exec.Command("git", "commit", "--allow-empty", "-m", "progress commit")
+				cmd.Dir = workDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git commit in mock failed: %s: %v", out, err)
+				}
+				return "output-from-ext1\n", false, TokenUsage{TurnsUsed: 10, InputTokens: 100}, nil
+			case 2:
+				secondOpts = opts
+				return "output-from-ext2\nFABRIK_STAGE_COMPLETE\n", true, TokenUsage{TurnsUsed: 8, InputTokens: 80}, nil
+			default:
+				t.Errorf("unexpected invocation #%d", callCount)
+				return "", false, TokenUsage{}, nil
+			}
+		},
+	}
+
+	stagesList := implementStages(10)
+	stagesList[0].CreateDraftPR = true
+	stagesList[0].PostToPR = true
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     stagesList,
+		},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 6,
+		Title:  "Re-resolve FABRIK_PR Test",
+		Status: "Implement",
+		ItemID: "PVTI_6",
+	}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Fatalf("expected 2 claude invocations, got %d", callCount)
+	}
+	if firstOpts.PRNumber != 0 {
+		t.Errorf("first invocation (resume=false, CreateDraftPR stage): expected PRNumber=0, got %d", firstOpts.PRNumber)
+	}
+	if secondOpts.PRNumber != 99 {
+		t.Errorf("second invocation (resume=true after extend-turns): expected PRNumber=99 (re-resolved), got %d", secondOpts.PRNumber)
+	}
+}
+
 // TestExtensionLoop_NoProgress verifies that when the first invocation hits max_turns
 // but no git progress is detected, the engine does NOT perform a second invocation.
 func TestExtensionLoop_NoProgress(t *testing.T) {
