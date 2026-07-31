@@ -143,6 +143,18 @@ names the column and the reason it can't host the CI gate; a summary line report
 issue's fourth Requirement (a skipped-evaluation log line, and why) independent of whichever structural
 fix ultimately closes the gap for a given field recurrence.
 
+### Why does a `FetchItemDetails` failure retry-then-escalate through the same path as an orphan column?
+
+Initially the scan only counted retries for the orphan-column case, leaving a persistently failing
+deep-fetch (permissions, a deleted issue node, sustained API errors) to log a warning and retry forever
+with no escalation. That is itself an instance of the issue's own "gate genuinely cannot be evaluated"
+case — the scan can never reach `checkCIGate` for such an item either — so during review it was folded
+into the same `__awaiting_ci_orphan__` counter and `escalateAwaitingCIOrphanFailure` path, mirroring
+`escalateNoWorkNeededFailure`'s precedent of one counter covering multiple failure causes with a
+generic message. `escalateAwaitingCIOrphanFailure` re-resolves the item's current stage at escalation
+time so the posted comment names whichever cause is actually current, rather than always claiming a
+stray column even when the item is sitting on a perfectly valid `wait_for_ci` stage.
+
 ## Consequences
 
 **Positive:**

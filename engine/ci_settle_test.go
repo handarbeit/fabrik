@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -155,6 +156,72 @@ func TestSettleAwaitingCIScan_OrphanColumn_Escalates(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected escalation comment to name the stray column, got: %v", client.addCommentCalls)
+	}
+}
+
+// TestSettleAwaitingCIScan_DeepFetchFailure_Escalates covers the other "gate
+// genuinely cannot be evaluated" case: the item resolves to a real wait_for_ci
+// stage, but FetchItemDetails fails on every settle pass (e.g. permissions,
+// a deleted issue node, sustained API errors), so the scan can never reach
+// checkCIGate for it. This must retry-then-escalate exactly like the
+// orphan-column case, not retry silently forever — and the escalation comment
+// must describe the fetch failure, not falsely claim a stray board column.
+func TestSettleAwaitingCIScan_DeepFetchFailure_Escalates(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("simulated persistent GraphQL failure")
+		},
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxRetries = 2
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 25,
+				Repo:   "owner/repo",
+				Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	for i := 0; i < eng.cfg.MaxRetries; i++ {
+		eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	pausedAdded := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	markerRemoved := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			markerRemoved = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused to be added after MaxRetries settle failures on a persistent deep-fetch failure")
+	}
+	if !markerRemoved {
+		t.Error("expected fabrik:awaiting-ci to be removed on escalation")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected an explanatory escalation comment to be posted")
+	}
+	found := false
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 25 && strings.Contains(c.body, "fetched from GitHub") && !strings.Contains(c.body, "wait_for_ci`") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected escalation comment to describe the fetch failure (not a stray-column claim), got: %v", client.addCommentCalls)
 	}
 }
 

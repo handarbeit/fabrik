@@ -64,6 +64,14 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		if err := e.readClient.FetchItemDetails(&item); err != nil {
 			e.logf(item.Number, "awaiting-ci-settle", "could not deep-fetch item details: %v — will retry next poll\n", err)
 			e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})
+			// A repeatedly failing deep-fetch is itself a "gate genuinely cannot be
+			// evaluated" case (the issue's own example is PR-linkage loss, but any
+			// persistent fetch failure — permissions, a deleted issue node, sustained
+			// API errors — has the same shape: this scan can never reach checkCIGate
+			// for the item). Route it through the same retry/escalate counter as the
+			// orphan-column case so it surfaces as a pause + comment after MaxRetries
+			// rather than retrying silently forever.
+			e.recordAwaitingCIOrphanRetry(item)
 			continue
 		}
 		e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: item})
@@ -113,26 +121,44 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 }
 
 // recordAwaitingCIOrphanRetry increments the in-memory retry counter for a
-// fabrik:awaiting-ci item stranded on a board column with no wait_for_ci stage.
+// fabrik:awaiting-ci item the scan could not settle this pass — either it sits
+// on a board column with no wait_for_ci stage, or a repeated FetchItemDetails
+// failure prevented the scan from ever reaching checkCIGate for it. Both are
+// "the gate genuinely cannot be evaluated" cases from the item's own
+// perspective, so they share one counter and one escalation path, mirroring
+// escalateNoWorkNeededFailure's single generic-message counter for its own
+// multiple failure causes (board-move failure vs. issue-close failure).
 // Escalates via escalateAwaitingCIOrphanFailure once e.cfg.MaxRetries is reached.
 func (e *Engine) recordAwaitingCIOrphanRetry(item gh.ProjectItem) {
 	e.recordSettleRetry(item, awaitingCIOrphanRetryStage, e.escalateAwaitingCIOrphanFailure)
 }
 
 // escalateAwaitingCIOrphanFailure is called when a fabrik:awaiting-ci item has
-// sat on a non-wait_for_ci column for MaxRetries settle passes without moving
-// back to a stage where the CI gate can be evaluated. Pauses the issue, removes
-// the fabrik:awaiting-ci marker (retry suppression is no longer needed once
-// fabrik:paused takes over), and posts an explanatory comment naming the stray
-// column and the manual recovery step — mirroring
-// escalateNonDefaultBaseCloseFailure/escalateMergeTrainMemberCloseFailure.
+// gone MaxRetries settle passes without the scan reaching a checkCIGate
+// evaluation for it — either it never resolved to a wait_for_ci stage, or
+// FetchItemDetails kept failing. Pauses the issue, removes the
+// fabrik:awaiting-ci marker (retry suppression is no longer needed once
+// fabrik:paused takes over), and posts an explanatory comment describing
+// whichever cause is current at escalation time and the matching manual
+// recovery step — mirroring escalateNonDefaultBaseCloseFailure/
+// escalateMergeTrainMemberCloseFailure.
 func (e *Engine) escalateAwaitingCIOrphanFailure(item gh.ProjectItem) {
-	e.logf(item.Number, "escalate", "fabrik:awaiting-ci item stranded off a wait_for_ci stage %d time(s) — pausing issue\n", e.cfg.MaxRetries)
+	e.logf(item.Number, "escalate", "fabrik:awaiting-ci item could not be settled %d time(s) — pausing issue\n", e.cfg.MaxRetries)
 
 	e.escalateSettle(item, "fabrik:awaiting-ci", awaitingCIOrphanRetryStage, func(item gh.ProjectItem) {
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		isWaitForCI := stage != nil && stage.WaitForCI != nil && *stage.WaitForCI
+		var problem, fix string
+		if stage == nil || !isWaitForCI || stage.HoldingStage || stage.Unmanaged || stage.CleanupWorktree {
+			problem = fmt.Sprintf("sits at board column %q, which has no `wait_for_ci` stage — the CI gate cannot be evaluated here", item.Status)
+			fix = "move the issue back to the `wait_for_ci` stage it was awaiting CI for (e.g. `Validate`)"
+		} else {
+			problem = "could not be fetched from GitHub on repeated settle attempts, so its CI status could not be checked (see the engine log for the specific fetch error)"
+			fix = "resolve the underlying GitHub API access issue for this repository/issue"
+		}
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — awaiting-ci settle failed**\n\nThis issue carries `fabrik:awaiting-ci` but sits at board column %q, which has no `wait_for_ci` stage — the CI gate cannot be evaluated here. This has persisted for %d settle attempt(s). The issue has been paused.\n\nManual fix: move the issue back to the `wait_for_ci` stage it was awaiting CI for (e.g. `Validate`), then remove the `fabrik:paused` label.",
-			item.Status, e.cfg.MaxRetries,
+			"🏭 **Fabrik — awaiting-ci settle failed**\n\nThis issue carries `fabrik:awaiting-ci` but %s. This has persisted for %d settle attempt(s). The issue has been paused.\n\nManual fix: %s, then remove the `fabrik:paused` label.",
+			problem, e.cfg.MaxRetries, fix,
 		)
 		e.postItemComment(item, comment, true)
 	})
