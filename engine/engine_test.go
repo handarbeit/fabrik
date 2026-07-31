@@ -198,6 +198,15 @@ func TestNewWithDeps(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	skipIfNoGit(t)
+	// New() runs the real claudeNameFlagSupported probe. Save/restore so the
+	// result doesn't leak into later tests in this package's test binary, and
+	// isolate PATH to a directory with no claude binary so the probe fails
+	// fast via exec.LookPath rather than depending on (or waiting up to the
+	// probe's 5s timeout on) whatever happens to be installed on the runner.
+	origSupported := claudeNameFlagSupported
+	defer func() { claudeNameFlagSupported = origSupported }()
+	t.Setenv("PATH", t.TempDir())
+
 	cfg := Config{
 		Owner: "o",
 		Repo:  "r",
@@ -224,6 +233,13 @@ func TestNew(t *testing.T) {
 
 func TestNew_WiresMergeStrategy(t *testing.T) {
 	skipIfNoGit(t)
+	// See TestNew: save/restore claudeNameFlagSupported and isolate PATH so
+	// the real probe New() runs is deterministic and fast rather than
+	// depending on whatever claude binary happens to be on the runner's PATH.
+	origSupported := claudeNameFlagSupported
+	defer func() { claudeNameFlagSupported = origSupported }()
+	t.Setenv("PATH", t.TempDir())
+
 	cfg := Config{
 		Owner:             "o",
 		Repo:              "r",
