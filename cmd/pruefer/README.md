@@ -11,13 +11,19 @@ It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that w
 Every `poll_interval_seconds`, Pruefer lists open, non-draft PRs on each watched repo and, for each one, checks:
 
 - Is the PR authored by Pruefer's own bot identity? Skip (GitHub rejects self-review anyway).
-- Does an excluded author/label/path match? Skip.
+- Does an excluded author or label match? Skip.
 - Has Pruefer already reviewed this exact head SHA? Skip — **unless** an unprocessed `/pruefer review` comment is on the PR, which forces a fresh review of the current head.
-- Is the diff larger than `max_diff_bytes`? Skip (logged, not truncated).
+- Has Pruefer already posted a diff-too-large notice for this exact head SHA (see below)? Skip immediately, without re-fetching the diff.
+
+Only once a PR passes those cheap checks does Pruefer fetch its diff, and it applies size handling **per file**, not to the diff as a whole:
+
+1. Any path matching `excluded_paths` is filtered out of the diff *before* anything is measured against `max_diff_bytes` — an excluded file can never consume the size budget or suppress review of the rest, no matter how large it is on its own. If every touched file is excluded, the PR is skipped (nothing left to review).
+2. If what remains still exceeds `max_diff_bytes`, Pruefer makes one best-effort attempt to drop the largest remaining file(s) and review everything else — the review (and the `git diff` Claude itself runs in the cloned worktree) explicitly excludes those paths, and the submitted review body names them under "Omitted from this review."
+3. If even that doesn't bring the diff under cap, Pruefer posts **one PR comment per head SHA** stating the measured size, the cap, and the largest contributing paths, then skips — this is the only case where a PR simply isn't reviewed, and it is always visible on the PR itself, never only in local logs. Re-polling the same head SHA recognizes the existing notice and does not re-fetch the diff or post a duplicate.
 
 Otherwise, Pruefer clones the PR's head commit into a temporary directory, invokes `claude` with a read-only tool allowlist to produce a prose summary plus structured findings (each classified with a severity tier), and submits it as a formal `pull_request_review` pinned to that head SHA — `event: COMMENT` by default, or `event: REQUEST_CHANGES` if `request_changes_threshold` is set and a finding meets it (see below). Findings that map to a changed line in the diff are posted as line-anchored inline comments in the same request; any finding that can't be anchored (a line the diff doesn't touch) is demoted into the summary body instead of dropping it or failing the whole review — but still counts toward the severity threshold either way. Inline comments are what let Fabrik's review-reinvoke path pick up Pruefer's findings and act on them automatically — see [adrs/1189-pruefer-inline-review-comments.md](../../adrs/1189-pruefer-inline-review-comments.md). On any failure — clone, invocation, or submission — Pruefer posts nothing and logs the failure; the PR is naturally retried on the next poll.
 
-Review state ("already reviewed at SHA X") is derived from GitHub itself (existing reviews authored by Pruefer's bot identity), not stored locally — a restart never causes a review storm.
+Review state ("already reviewed at SHA X", "already noticed too-large at SHA X") is derived from GitHub itself (existing reviews authored by Pruefer's bot identity, and Pruefer's own prior comments), not stored locally — a restart never causes a review storm or a duplicate notice.
 
 ## Setup
 
@@ -146,11 +152,11 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--model` | `PRUEFER_MODEL` | `model` | `sonnet` | Claude model |
 | `--effort` | `PRUEFER_EFFORT` | `effort` | `medium` | `low`, `medium`, `high`, or `max` |
 | `--concurrency` | `PRUEFER_CONCURRENCY` | `concurrency_cap` | `3` | Max simultaneous `claude` invocations |
-| `--max-diff-bytes` | `PRUEFER_MAX_DIFF_BYTES` | `max_diff_bytes` | `500000` | PRs with a larger diff are skipped, not truncated |
+| `--max-diff-bytes` | `PRUEFER_MAX_DIFF_BYTES` | `max_diff_bytes` | `500000` | Measured after `excluded_paths` filtering; if still over cap, the largest remaining file(s) are dropped and the rest reviewed where possible, otherwise the PR is skipped (never truncated) and a one-per-head-SHA PR comment explains why — see "How it works" above |
 | `--max-wall-time` | `PRUEFER_MAX_WALL_TIME` | `max_wall_time_seconds` | `0` (no cap) | Seconds; caps a single `claude` review invocation's wall-clock duration on top of the fixed 15-minute inactivity watchdog |
 | `--excluded-authors` | `PRUEFER_EXCLUDED_AUTHORS` | `excluded_authors` | (none) | Comma-separated logins |
 | `--excluded-labels` | `PRUEFER_EXCLUDED_LABELS` | `excluded_labels` | (none) | Skip if any label matches |
-| `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns; skip only if **every** touched path matches |
+| `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns; matching files are filtered out of the diff before size measurement and review (per-file, not whole-diff) — the PR is skipped only if **every** touched file matches |
 | `--request-changes-threshold` | `PRUEFER_REQUEST_CHANGES_THRESHOLD` | `request_changes_threshold` | (none — disabled) | `low`, `medium`, `high`, or `critical`; submits `REQUEST_CHANGES` when a finding's severity meets or exceeds this tier. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes). |
 | `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none — required) | |
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | |
