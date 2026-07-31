@@ -1887,6 +1887,13 @@ func TestSessionNameSentinel(t *testing.T) {
 			stageName: "Weird\tStage\nName",
 			want:      "fabrik:acme/widgets#8:Weird-Stage-Name",
 		},
+		{
+			name:      "stage name with colon replaced to avoid delimiter collision",
+			repo:      "acme/widgets",
+			issueNum:  9,
+			stageName: "Review: Final",
+			want:      "fabrik:acme/widgets#9:Review--Final",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
