@@ -74,6 +74,15 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			e.recordAwaitingCIOrphanRetry(item)
 			continue
 		}
+		// Capture prior-poll merge-queue membership BEFORE ItemDeepFetched
+		// overwrites the store (ADR-058 D4 OQ-3) — mirrors selectDeepFetchCandidates
+		// in poll.go exactly. checkAutoMergeConvergence (reached via
+		// handleAutoMergeConvergence in the shared catchUpPhase1Handlers chain
+		// below) uses this to detect the poll-native "left the merge queue" edge;
+		// reading it from the store after ItemDeepFetched would always see the
+		// just-overwritten current value and silently lose the edge.
+		priorSnap, priorErr := e.store.Get(repo, item.Number)
+		priorInQueue := priorErr == nil && priorSnap.LinkedPR() != nil && priorSnap.LinkedPR().IsInMergeQueue
 		e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: item})
 
 		// A concurrent clear between the shallow board read above and this deep-fetch
@@ -95,6 +104,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			stage:         stage,
 			hasComplete:   hasLabel(item.Labels, completeLabel),
 			advancedItems: advancedItems,
+			priorInQueue:  priorInQueue,
 		}
 		claimed := false
 		for _, h := range catchUpPhase1Handlers {

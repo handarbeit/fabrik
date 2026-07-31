@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -91,6 +92,76 @@ func TestSettleAwaitingCIScan_NoDoubleDispatch(t *testing.T) {
 	snap, _ := eng.store.Get("owner/repo", 21)
 	if got := snap.CIFixCycles("Validate"); got != 1 {
 		t.Errorf("CIFixCycles(Validate) = %d; want exactly 1 — Phase 1's narrowed admission gate and settleAwaitingCIScan must never both dispatch for the same item in the same poll", got)
+	}
+}
+
+// TestSettleAwaitingCIScan_LeftMergeQueue_ReEnqueues is a PR-review regression
+// (pruefer): an item admitted into this scan can also carry
+// fabrik:auto-merge-enabled in a merge-queue-enabled repo. handleAutoMergeConvergence's
+// ejection-recovery ladder (merge_gate.go) needs pctx.priorInQueue — the item's
+// PREVIOUS-poll merge-queue membership — to detect the poll-native "left the
+// queue" edge. Before this fix, settleAwaitingCIScan built phase1Ctx without
+// ever setting priorInQueue, so it always read false, silently losing the edge
+// and leaving a cleanly-ejected PR stuck waiting for the queue forever instead
+// of re-enqueuing — a narrower instance of the exact stranding-bug class #1270
+// exists to close. This seeds the store with IsInMergeQueue=true (prior poll),
+// simulates the PR having left the queue clean this poll (no LastEnqueuedSHA
+// recorded, so only the leftQueue edge — not the SHA-change clause — can
+// explain a re-enqueue), and asserts the re-enqueue fires.
+func TestSettleAwaitingCIScan_LeftMergeQueue_ReEnqueues(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", HeadSHA: "abc12345", AutoMergeEnabled: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Fresh fetch: PR left the merge queue this poll (ejected); repo still
+			// has the merge queue enabled.
+			item.LinkedPRNumber = 10
+			item.LinkedPRIsMergeQueueEnabled = true
+			item.LinkedPRIsInMergeQueue = false
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxEnqueueCycles = 5
+
+	// Seed the store: the item WAS in the merge queue last poll. LinkedPRNumber
+	// must be set — applyProjectItem's LinkedPR sync block (internal/itemstate/
+	// project_apply.go) is gated on it being non-zero, otherwise IsInMergeQueue
+	// never reaches the snapshot at all.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 30,
+		FreshState: gh.ProjectItem{
+			Number: 30, Repo: "owner/repo",
+			LinkedPRNumber:              10,
+			LinkedPRIsMergeQueueEnabled: true,
+			LinkedPRIsInMergeQueue:      true,
+		},
+	})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 30,
+				Repo:   "owner/repo",
+				Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci", "fabrik:auto-merge-enabled"},
+			},
+		},
+	}
+
+	eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected 1 re-enqueue on the poll-native left-queue edge, got %d — priorInQueue was not threaded into settleAwaitingCIScan's phase1Ctx", len(client.enqueuePullRequestCalls))
+	}
+	if client.enqueuePullRequestCalls[0].expectedHeadOID != "abc12345" {
+		t.Errorf("re-enqueue used SHA %q, want abc12345", client.enqueuePullRequestCalls[0].expectedHeadOID)
 	}
 }
 
@@ -222,6 +293,88 @@ func TestSettleAwaitingCIScan_DeepFetchFailure_Escalates(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected escalation comment to describe the fetch failure (not a stray-column claim), got: %v", client.addCommentCalls)
+	}
+}
+
+// TestSettleAwaitingCIScan_MixedCauseRetries_EscalateAtCombinedMaxRetries
+// covers the shared-counter design decision (pruefer review): orphan-column
+// and deep-fetch-failure retries both key off the SAME
+// __awaiting_ci_orphan__ counter, so they must accumulate toward one combined
+// MaxRetries threshold rather than each cause getting its own independent
+// budget. This alternates the item between an orphan column (no wait_for_ci
+// stage) and a valid wait_for_ci stage with a persistently failing
+// FetchItemDetails across settle passes, and asserts escalation fires at
+// exactly MaxRetries combined attempts (not 2×MaxRetries) — with the
+// escalation comment describing whichever cause is current on the final pass
+// (here, the fetch failure), not the earlier orphan-column cause.
+func TestSettleAwaitingCIScan_MixedCauseRetries_EscalateAtCombinedMaxRetries(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("simulated persistent GraphQL failure")
+		},
+	}
+	stgs := []*stages.Stage{{Name: "Queued", Order: 1, HoldingStage: true}}
+	stgs = append(stgs, ciSettleWaitForCIStages()...)
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxRetries = 4
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 26,
+				Repo:   "owner/repo",
+				Status: "Queued",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	// Alternate cause each pass: orphan column, deep-fetch failure, orphan
+	// column, deep-fetch failure — 4 combined attempts total.
+	statuses := []string{"Queued", "Validate", "Queued", "Validate"}
+	for _, status := range statuses {
+		board.Items[0].Status = status
+		eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	pausedAdded := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Fatal("expected fabrik:paused after 4 combined orphan-column + deep-fetch-failure attempts (MaxRetries=4) — the two causes must share one counter")
+	}
+
+	markerRemoved := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			markerRemoved = true
+		}
+	}
+	if !markerRemoved {
+		t.Error("expected fabrik:awaiting-ci to be removed on escalation")
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 escalation comment at the combined MaxRetries threshold, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	// The final pass's cause was the deep-fetch failure (item was on Validate,
+	// a real wait_for_ci stage) — the comment must describe that, not the
+	// earlier orphan-column cause, proving escalateAwaitingCIOrphanFailure
+	// re-resolves the current stage rather than remembering the first cause
+	// that incremented the shared counter.
+	if !strings.Contains(body, "fetched from GitHub") {
+		t.Errorf("expected escalation comment to describe the current (deep-fetch-failure) cause, got: %q", body)
+	}
+	if strings.Contains(body, "Queued") {
+		t.Errorf("escalation comment must not claim the stray-column cause once the final pass resolved to a valid wait_for_ci stage, got: %q", body)
 	}
 }
 
