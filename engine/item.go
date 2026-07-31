@@ -974,6 +974,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		sigTermGrace = -1 // "0s" explicit → skip SIGTERM (sentinel)
 	}
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage)
 	opts := InvokeOptions{
 		ModelOverride:  modelOverride,
 		EffortOverride: effortOverride,
@@ -982,6 +983,8 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigTermGrace:   sigTermGrace,
 		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
 		CorrectiveHint: e.consumeStallHint(repoStr, item.Number, stage.Name),
+		FabrikRoot:     fabrikRoot,
+		PRNumber:       prNumber,
 	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which

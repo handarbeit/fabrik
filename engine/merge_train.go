@@ -499,7 +499,11 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 
 		// Conflict — classify against the declared generated-file set and resolve.
 		e.logf(member.item.Number, "merge-train", "merge conflict for #%d: %s — resolving\n", member.item.Number, strings.TrimSpace(string(mergeOut)))
-		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride}
+		// PRNumber is deliberately left unset here (#1288): this invocation resolves a
+		// merge conflict on the trial branch, not the member's own PR, so there's no
+		// single "the PR" for FABRIK_PR to name. FabrikRoot is still cheap and correct
+		// to set for consistency with the other two InvokeOptions call sites.
+		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir}
 		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, opts)
 		if resolved {
 			survivors = append(survivors, member)

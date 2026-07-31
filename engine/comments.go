@@ -280,7 +280,14 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	invokeOpts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
+	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage)
+	invokeOpts := InvokeOptions{
+		ModelOverride:  modelOverride,
+		EffortOverride: effortOverride,
+		BaseBranch:     baseBranch,
+		FabrikRoot:     fabrikRoot,
+		PRNumber:       prNumber,
+	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
 	}
