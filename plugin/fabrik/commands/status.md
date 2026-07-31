@@ -23,17 +23,17 @@ Scope the match to **this project's absolute plugin-dir path**, not just the rel
 
 ```bash
 FABRIK_PLUGIN_DIR="$(pwd)/.fabrik/plugin"
-ps aux | grep -F -- "--plugin-dir $FABRIK_PLUGIN_DIR" | grep -v grep
+ps aux | grep -F -- "--plugin-dir $FABRIK_PLUGIN_DIR " | grep -v grep
 ```
 
-Use `$(pwd)`, not `realpath`/`pwd -P` — Fabrik itself derives this path from `os.Getwd()` without resolving symlinks, so a symlink-resolving form could produce a path that no longer textually matches what a running worker actually passed on its command line. Use `grep -F` (fixed string), not an interpolated regex, so the path's literal characters can't be misread as regex metacharacters.
+Use `$(pwd)`, not `realpath`/`pwd -P` — Fabrik itself derives this path from `os.Getwd()` without resolving symlinks, so a symlink-resolving form could produce a path that no longer textually matches what a running worker actually passed on its command line. Use `grep -F` (fixed string), not an interpolated regex, so the path's literal characters can't be misread as regex metacharacters. The trailing space in the pattern is required, not cosmetic: without it, a fixed-string match is a *prefix* match, and one project's plugin-dir path can be a literal prefix of another's (e.g. a dev `--plugin-dir` override of `.fabrik/plugin` vs `.fabrik/plugin-workflows`, both documented in `docs/USER_GUIDE.md`) — the trailing space anchors on the argument boundary that always follows `--plugin-dir <value>` in Fabrik's actual argv (`--resume`, `--model`, or `--max-turns` always come next; see `buildClaudeArgs` in `engine/claude.go`), so a same-prefix-different-suffix path can no longer false-match.
 
 Two distinct edge cases, handled differently — don't conflate them:
 
 - **`.fabrik/plugin` doesn't exist for this project**: Fabrik never emits `--plugin-dir` in this case (the flag is guarded by `claudePluginDir != ""`), so the detector above correctly finds zero matches. Report "0 workers running" — this is a "detects nothing" outcome, not an error, and there is no fallback to apply.
-- **`$(pwd)` can't be resolved**: fall back to a relative match, `ps aux | grep -F -- "--plugin-dir .fabrik/plugin" | grep -v grep`, and the summary **must** state the caveat: "other Fabrik instances on this host may be included." Only use this fallback when the absolute path itself is unavailable — never as a default.
+- **`$(pwd)` can't be resolved**: fall back to a relative match, `ps aux | grep -F -- "--plugin-dir .fabrik/plugin " | grep -v grep` (same trailing-space boundary, same reason), and the summary **must** state the caveat: "other Fabrik instances on this host may be included." Only use this fallback when the absolute path itself is unavailable — never as a default.
 
-Each match line contains the worker's working directory in the args (`--add-dir` or `cwd` via `lsof` if needed); cross-reference with worktree paths in step 4 to associate workers to issues. A matched worker whose working directory cannot be cross-referenced to a worktree in this project must be reported as **unassociated** — never silently attributed to an issue.
+Each match line may contain the worker's working directory in the args, but only conditionally: `applyWorktreeBoundary` (`engine/boundary.go`) rewrites bare `Edit`/`Write` entries to `--allowedTools Edit(<workDir>/**)` / `Write(<workDir>/**)`, and only when the worker is not unrestricted (no `fabrik:yolo`/`cruise` label) and the stage isn't `read_only`. There is no `--add-dir` flag anywhere in Fabrik's invocation — for unrestricted workers and read-only stages, no working directory appears in argv at all, and `cwd` via `lsof` is the *only* way to recover it, not a rare fallback. Cross-reference whatever working directory you do recover with worktree paths in step 4 to associate workers to issues. A matched worker whose working directory cannot be cross-referenced to a worktree in this project must be reported as **unassociated** — never silently attributed to an issue.
 
 ## 3. Fetch the project board
 
