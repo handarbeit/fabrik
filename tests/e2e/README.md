@@ -83,6 +83,13 @@ parallel-4 run is ~1,900 pts/hour, plus ~480 for the engine — roughly 2x
 headroom. `gh project item-add` / `item-edit` are one-shot mutations and are
 fine as-is.
 
+`E2E_PARALLEL`'s default of 4 is the same value #971 originally picked, but is
+now re-justified against this budget math rather than carried over
+unrevisited — see "How the timeout/parallelism defaults are derived" below.
+Raising `E2E_PARALLEL` (or raising `E2E_TIMEOUT` while holding parallelism
+fixed, which widens the window of concurrent activity) should be re-checked
+against this ~2x headroom before changing either default.
+
 Once board reads were cheap, the residual cost became the issue/PR wait-helpers
 (`gh issue view --json`, `gh pr list --json` — also GraphQL, ~1 pt each) polling
 on behalf of a dozen parallel scenarios. Those run on `pollBase()`, default 30s,
@@ -111,11 +118,11 @@ gh api rate_limit --jq '.resources.graphql'
    `TestCIFixReinvokeCycleLimit` only). The test skips with an instructional
    message if the value is `> 3`. After editing `.env`, restart the test-bed
    Fabrik instance so the new value takes effect.
-7. **`E2E_TIMEOUT=3h`** when running `TestCIFixReinvoke` in isolation — the
-   inner waits alone total ~75–90 min, which exceeds the default `90m` budget
-   once pipeline setup overhead is included:
+7. The default `E2E_TIMEOUT=4h` already covers `TestCIFixReinvoke` run in
+   isolation (inner waits alone total ~75–90 min). Use a *smaller* override
+   to fail faster while iterating on just this scenario, e.g.:
    ```bash
-   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestCIFixReinvoke
+   E2E_TIMEOUT=1h scripts/e2e/run.sh -run TestCIFixReinvoke
    ```
 
 ### Additional prerequisites for `TestPausedMergedPRRecovery`
@@ -124,10 +131,12 @@ gh api rate_limit --jq '.resources.graphql'
    `fabrik:awaiting-review`, `fabrik:paused`, and `fabrik:awaiting-input` are
    production labels that must exist. `AddLabel` fatals immediately if a label is
    absent — create them manually in the repo if needed.
-9. **`E2E_TIMEOUT=3h`** when running `TestPausedMergedPRRecovery` in isolation —
-   three sequential cruise pipelines (Specify → Implement each) total ~60–90 min:
+9. The default `E2E_TIMEOUT=4h` already covers `TestPausedMergedPRRecovery`
+   run in isolation (three sequential cruise pipelines, Specify → Implement
+   each, total ~60–90 min). Use a *smaller* override to fail faster while
+   iterating on just this scenario, e.g.:
    ```bash
-   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
+   E2E_TIMEOUT=1h30m scripts/e2e/run.sh -run TestPausedMergedPRRecovery
    ```
 
 ### Additional prerequisites for `TestConjunctiveCIReviewGate`
@@ -180,9 +189,11 @@ gh api rate_limit --jq '.resources.graphql'
       second identity to request, so it remains exposed to the
       `gemini-code-assist` bot clearing the gate before the timeout fires
       (residual flakiness, not fixed by this redesign — see #925).
-13. **`E2E_TIMEOUT=2h`** when running this test in isolation:
+13. The default `E2E_TIMEOUT=4h` already covers this test run in isolation
+    (worst case ~60–90 min for the approval path). Use a *smaller* override
+    to fail faster while iterating on just this scenario, e.g.:
     ```bash
-    E2E_TIMEOUT=2h scripts/e2e/run.sh -run TestConjunctiveCIReviewGate
+    E2E_TIMEOUT=1h30m scripts/e2e/run.sh -run TestConjunctiveCIReviewGate
     ```
 
 ### Additional prerequisites for the merge-train scenarios (ADR-059)
@@ -223,8 +234,10 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     The bisection test skips this check indirectly — if the guard is absent the
     combined batch is green and no bisection occurs, failing the `bisecting`
     log-line wait; run it only after the guard is enrolled.
-18. **`E2E_TIMEOUT=2h`** (happy/bisect) or **`E2E_TIMEOUT=3h`** (restart — two
-    sequential landings) when running these in isolation.
+18. The default `E2E_TIMEOUT=4h` already covers these run in isolation
+    (happy/bisect: 20–40 min; restart — two sequential landings: 25–50 min).
+    Use a *smaller* override to fail faster while iterating, e.g.
+    `E2E_TIMEOUT=1h`.
 19. **`train-poison-guard` required check on `fabrik-test-beta`** — only for
     `TestMergeTrainRunawayGuardPausesBatch`. Commit
     `tests/e2e/testdata/train-poison-guard.yml` to `handarbeit/fabrik-test-beta`
@@ -301,8 +314,9 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     coupling (Fabrik's release gate depending on pruefer's health). All verdict assertions
     in `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
     deterministic, harness-posted formal reviews from a non-author identity.
-23. **`E2E_TIMEOUT=1h`** covers `TestReviewAuthorityBlocksAndPausesOnChangesRequested`
-    in isolation — its worst-case wall-clock is `FABRIK_REVIEW_WAIT_TIMEOUT + ~30 min`
+23. The default `E2E_TIMEOUT=4h` already covers
+    `TestReviewAuthorityBlocksAndPausesOnChangesRequested` in isolation — its
+    worst-case wall-clock is `FABRIK_REVIEW_WAIT_TIMEOUT + ~30 min`
     (10 min initial block-confirmation wait + `FABRIK_REVIEW_WAIT_TIMEOUT`+10 min for the
     pause wait itself + two trailing 5 min waits for `fabrik:awaiting-input` and the pause
     comment), though it typically completes much faster in practice. With the 15-minute
@@ -339,7 +353,9 @@ scripts/e2e/run.sh -run 'Smoke|NoWork'
 ```
 
 Anything after the script name is passed through to `go test`. Override the
-overall test timeout with `E2E_TIMEOUT` (default `90m`).
+overall test timeout with `E2E_TIMEOUT` (default `4h`) — see "How the
+timeout/parallelism defaults are derived" and "Timeout & failure reporting"
+below for what backs that number and what happens if it's still hit.
 
 The `e2e` build tag keeps all of this out of the default `go test ./...` run.
 
@@ -405,12 +421,112 @@ interval is jittered ±20% (see `pollSleep` in `harness.go`) so concurrent
 scenarios' polls desynchronize instead of converging into lockstep bursts
 against the shared API budget (see #1104).
 
+#### How the timeout/parallelism defaults are derived
+
+Both `E2E_TIMEOUT=4h` and `E2E_PARALLEL=4` are backed by data already
+committed in this file and by a real two-mode gate run, not chosen
+arbitrarily — they're documented here so future drift (new scenarios, bed
+resizing, GitHub API changes) is visible and the numbers can be revisited
+deliberately rather than silently going stale.
+
+**`E2E_TIMEOUT`: 90m → 4h.** A real two-mode gate run was killed by the
+original 90m timeout while `TestCIFixReinvokeCycleLimit` was still executing
+at 1h26m26s — already past its own documented 30–60min ceiling (see the
+per-scenario table below). Two scenarios with paired off/on timings from that
+run showed a ~1.55–1.61x contention multiplier under load:
+`TestConjunctiveCIReviewGate` 1335s → 2152s, `TestPausedMergedPRRecovery`
+1382s → 2146s. Applying that multiplier to the heaviest documented
+per-scenario ceilings (`TestCIFixReinvoke` 75–90min, `TestPausedMergedPRRecovery`
+60–90min) puts the contended worst case in the ~120–180min range. `4h` leaves
+~30–60min of margin above that for bed-restart and pipeline-setup overhead.
+This is a reasoned extrapolation from two paired data points plus one
+partial-kill observation, not a fresh full-suite measurement under the new
+default — treat it as provisional, and re-derive it (repeating this
+arithmetic with fresh paired timings) after any run that gets meaningfully
+closer to 4h than the numbers above predict.
+
+**`E2E_PARALLEL`: kept at 4, not lowered.** The available contention data
+doesn't clearly indict 4 as an oversubscribed cap: the bed has 5 workers, so
+4 already reserves headroom, and the "on" leg's slowdown is at least partly
+explained by it having strictly more real work to do (17 scenarios vs. 13 —
+the four Train-only scenarios skip near-instantly under "off"), not
+necessarily by 4 being too high a concurrency cap. The one scenario failure
+plausibly linked to bed starvation in the observed run
+(`TestReviewAuthorityClearsOnApproval` timing out waiting for
+`fabrik:awaiting-review` alongside a 5½-minute processing gap in the bed log)
+is explicitly unconfirmed — its sibling `TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
+same helper, same assertion, passed in the same leg. Lowering `E2E_PARALLEL`
+without stronger evidence would itself be an unmeasured, guessed change, and
+risks masking real `t.Parallel()` interleaving defects for no demonstrated
+benefit. Instead, the risk this requirement is aimed at — a scenario failing
+purely because it was bed-starved — is addressed by the timeout increase
+above: a starved scenario now has enough wall-clock room to actually finish
+rather than racing a too-tight deadline. See `E2E_PARALLEL=2` /
+`E2E_PARALLEL=6` above for the documented escape hatches if you observe a
+repeated starvation pattern in practice.
+
+#### Timeout & failure reporting
+
+On a non-zero exit, `run.sh` classifies every top-level test by the last
+action it emitted in the `go test -json` stream, and prints a labeled report
+before failing:
+
+```
+== suite FAILED (leg: off, exit 1) — classifying test outcomes ==
+JSON log: /tmp/fabrik-e2e-off-12345.json
+completed - pass (11): TestBaseBranchPipeline, TestBlockedOnInput, ...
+completed - fail (0):
+completed - skip (2): TestMergeTrainHappyPathLanding, TestMergeTrainRestartSafety
+still running at kill time (2): TestCIFixReinvokeCycleLimit, TestConjunctiveCIReviewGate
+never started - queued behind -parallel cap (2): TestConvergenceRace, TestCruiseFullPipeline
+```
+
+This distinguishes three states a bare `FAIL` can't: **completed** (actually
+ran to pass/fail/skip), **still running at kill time** (executing when the
+process died — the only state Go's own built-in `-timeout` panic dump
+reports), and **never started** (parked waiting for a free `-parallel` slot,
+which the built-in panic dump omits entirely). The full JSON log is kept for
+follow-up debugging at the path printed above.
+
+#### Teardown on kill
+
+A run killed by `E2E_TIMEOUT` (or an external signal) skips every in-flight
+scenario's `t.Cleanup` — this is a hard Go-runtime constraint (the timeout
+panic fires from a separate timer goroutine that crashes the whole process
+before any test goroutine's deferred cleanup runs; an external signal doesn't
+invoke Go-level defers at all), not something fixable in the test code.
+
+When `run.sh` detects Go's own timeout-panic text in the JSON log (i.e. this
+was specifically an `E2E_TIMEOUT` kill, not a normal scenario failure), it
+automatically runs `scripts/e2e/reset.sh` (the plain form) as best-effort
+teardown — closing stray PRs/issues, deleting leftover `fabrik/*` branches,
+and draining the board, so the next run starts no dirtier than after a
+completed one. A normal scenario `FAIL` does **not** trigger this — an
+operator debugging a real regression needs the board/issue state left
+intact.
+
+**Worktrees are the one exception — they are not auto-cleaned.** The only
+worktree-cleanup path (`scripts/e2e/reset.sh --worktrees`) nukes *all*
+worktrees and bare clones bed-wide and requires stopping the bed first; it
+cannot be scoped to just the interrupted run's artifacts, and running a
+destructive full-bed operation automatically from a kill-detection path would
+risk firing against a bed that isn't actually safe to stop at that moment.
+If a run was killed by `E2E_TIMEOUT`, run this manually before the next
+release-gate run if you need full parity with a completed run:
+
+```bash
+# stop the test-bed Fabrik instance first, then:
+scripts/e2e/reset.sh --worktrees
+```
+
 ### Reset between runs
 
 **Run this as part of test prep** — before a clean suite, so the bed starts from a
 known-empty state. Stale closed issues linger as **project-board items** and leftover
 `fabrik/*` branches otherwise pollute the next run's merge-train snapshots and make
-results hard to read.
+results hard to read. `run.sh` also runs the plain form of this automatically on a
+detected `E2E_TIMEOUT` kill — see "Teardown on kill" above; a manual run is still
+needed after such a kill if you want worktrees cleaned up too.
 
 ```bash
 scripts/e2e/reset.sh             # full clean: PRs + issues + branches + board items (alpha + beta)
@@ -452,7 +568,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestBaseBranchPipeline` | `base:<branch>` non-default base branch: throwaway branch created off main, PR targets it (not main), pipeline does not falsely pause at end of Implement, review gate clears via the base-independent REST feed | Both | 35–55 min | $0.80–2.00 |
 | `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | Both | 75–90 min | $1.00–3.00 |
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
-| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
+| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); covered by the default `E2E_TIMEOUT=4h` | $1.50–4.50 |
 | `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
 | `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): CHANGES_REQUESTED verdict blocks the gate (fabrik:awaiting-review); verdict never clears → pauses at ReviewWaitTimeout with the authoritative reason in the comment, not the generic "no reviews submitted yet" | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + 30 min (worst case) | ~$0.05 (no Claude) |
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
@@ -464,10 +580,11 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | Train-only (on) | 10–20 min | low (no Claude) |
 
 Approximate single-mode suite total: ~615 min wall-clock, $10.30–30 in Claude
-tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests
-should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted
-above). A full two-mode gate run is roughly double this, minus the near-instant
-skip of the four Train-only scenarios in the `off` leg.
+tokens. A full two-mode gate run is roughly double this, minus the
+near-instant skip of the four Train-only scenarios in the `off` leg — the
+default `E2E_TIMEOUT=4h` and the contention data behind it (see "How the
+timeout/parallelism defaults are derived" above) assume this full two-mode
+shape, not just the single-mode total.
 
 ### Regression coverage map
 
