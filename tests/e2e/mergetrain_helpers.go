@@ -315,6 +315,17 @@ var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via 
 // suite. On timeout, check the bed log around this member's landing for
 // "warn: could not post landed comment on PR #<memberPRNum>" — if present,
 // the failure is this known-benign comment-post gap, not a stuck landing.
+//
+// No test-only fallback covers both landing paths reliably, so none is
+// implemented here — see #1275 (engine-side retry of this AddComment call,
+// the actual fix) for why: closedByPullRequestsReferences on the member
+// issue can't substitute because landSingleton's own landing-PR body says
+// "Lands #%d", not "Closes #%d" (engine/merge_train.go:778), so it never
+// registers as a closing PR reference for that path; and bed-log scanning
+// isn't member-scoped for the batch path's "merged integration PR #%d for
+// %s" (engine/merge_train.go:1786, repo-only — ambiguous under concurrent
+// merge-train activity), even though landSingleton's own log line happens to
+// be ("merged singleton landing PR #%d for #%d", engine/merge_train.go:796).
 func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int, timeout time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -332,8 +343,8 @@ func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v) — "+
 				"if the bed log shows \"warn: could not post landed comment on PR #%d\" around this landing, "+
-				"the engine's best-effort comment post failed transiently (not retried); this is a known, "+
-				"non-regression false failure — re-run the test", memberPRNum, repo, err, memberPRNum)
+				"the engine's best-effort comment post failed transiently (not retried, tracked as #1275); this "+
+				"is a known, non-regression false failure — re-run the test", memberPRNum, repo, err, memberPRNum)
 		}
 		time.Sleep(10 * time.Second)
 	}
