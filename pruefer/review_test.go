@@ -720,6 +720,13 @@ func TestReviewPR_TrimExhausted_StillOverCap_NoticesAndSkips(t *testing.T) {
 	if client.addCommentCallCount() != 1 {
 		t.Errorf("AddComment called %d times, want exactly 1", client.addCommentCallCount())
 	}
+	if outcome.SizeDetail == nil || len(outcome.SizeDetail.TrimAttempted) == 0 {
+		t.Fatalf("outcome.SizeDetail = %+v, want TrimAttempted populated — a trim was actually attempted here", outcome.SizeDetail)
+	}
+	notice := client.addedCalls[0].body
+	if !strings.Contains(notice, "also tried automatically dropping") {
+		t.Errorf("notice = %q, want it to say Pruefer already tried auto-dropping the largest file(s)", notice)
+	}
 }
 
 func TestReviewPR_ClaudeFailure_PostsNothing(t *testing.T) {

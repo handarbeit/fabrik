@@ -157,7 +157,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 				reviewFiles = trimmedKept
 				omittedPaths = append(omittedPaths, pathsOf(trimmedDropped)...)
 			} else {
-				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, kept, pathsOf(excluded))
+				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, kept, pathsOf(excluded), pathsOf(trimmedDropped))
 				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after exclusions, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, measured, cfg.MaxDiffBytes)
 				if noticeAlreadyExists {
 					// forceReview bypassed the pre-check above to get this

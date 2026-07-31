@@ -67,6 +67,13 @@ func buildTooLargeNoticeBody(detail DiffSizeDetail, headSHA string) string {
 		}
 		b.WriteString("\n")
 	}
+	if len(detail.TrimAttempted) > 0 {
+		b.WriteString("Pruefer also tried automatically dropping the largest remaining file(s), but the rest was still over the cap:\n\n")
+		for _, p := range detail.TrimAttempted {
+			fmt.Fprintf(&b, "- `%s`\n", p)
+		}
+		b.WriteString("\n")
+	}
 	if len(detail.DominantPaths) > 0 {
 		b.WriteString("Largest remaining contributors:\n\n")
 		for _, p := range detail.DominantPaths {

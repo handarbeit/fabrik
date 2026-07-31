@@ -20,6 +20,21 @@ type diffFile struct {
 // AMBIGUOUS, greedy a/...b/... split — used only as resolveFilePath's
 // last-resort fallback, never as the primary path source; see
 // resolveFilePath for why.
+//
+// KNOWN GAP: this pattern only matches git's unquoted header form. Whenever
+// a path contains a space, a double quote, a backslash, or a non-ASCII byte,
+// git (with the default core.quotepath=true) instead emits a C-quoted form
+// like `diff --git "a/foo bar" "b/foo bar"`, which this regex — and every
+// other regex in this file — fails to match. The entire block for such a
+// file (headers, hunks, everything) then falls into splitDiffFiles's
+// preamble instead of becoming its own diffFile, and per this package's own
+// rule preamble bytes are counted but never excluded or auto-dropped (see
+// splitDiffFiles's doc comment) — so a large or excluded_paths-matched file
+// with a quotable name silently defeats both FR-1 exclusion and FR-5
+// trimming, the same class of silent-signal problem issue #1274 was filed
+// for, just via a different diff-shape trigger. Not fixed here; flagged so
+// a future change knows the gap is real rather than assuming quoted paths
+// are already handled.
 var diffFileHeaderLineRE = regexp.MustCompile(`^diff --git a/(.+) b/(.+)$`)
 
 // diffNewPathLineRE, diffOldPathLineRE, and diffRenameToLineRE each match a

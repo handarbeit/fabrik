@@ -165,25 +165,29 @@ const dominantPathsLimit = 5
 // DiffSizeDetail is the structured record of why a diff was measured as
 // over cap, attached to ReviewOutcome.SizeDetail and rendered into the
 // too-large notice (FR-3: "measured size, cap, dominant contributing
-// paths"). OmittedPaths is the union of config-excluded and (if attempted)
-// auto-dropped paths — every path removed before MeasuredBytes was computed
-// for the *reviewed* portion, or every path that was still present when the
-// notice fired, depending on which of ReviewPR's two call sites builds it.
+// paths"). OmittedPaths is the config-excluded paths only — every path
+// removed via excluded_paths before MeasuredBytes was computed. TrimAttempted
+// is separate: it's the path(s) FR-5's trimToFit decided to drop when it was
+// actually attempted and still didn't bring the diff under cap, so the
+// notice can say Pruefer already tried auto-dropping the largest file(s)
+// rather than silently omitting that it was tried at all.
 type DiffSizeDetail struct {
 	MeasuredBytes int64
 	MaxBytes      int64
 	DominantPaths []PathSize
 	OmittedPaths  []string
+	TrimAttempted []string
 }
 
 // buildDiffSizeDetail computes a DiffSizeDetail from the files a size
-// decision was actually measured against (reviewFiles) plus the paths that
-// were removed from consideration (omitted, from exclusion and/or
-// FR-5 trimming). DominantPaths is reviewFiles sorted by Bytes descending,
+// decision was actually measured against (reviewFiles), the paths removed
+// via excluded_paths (omitted), and — only when FR-5's trim was actually
+// attempted and still insufficient — the paths trimToFit decided to drop
+// (trimAttempted). DominantPaths is reviewFiles sorted by Bytes descending,
 // capped to dominantPathsLimit — a pure, deterministic computation from
 // already-parsed diff structure, never from Claude's prose (mirrors
 // decideEvent's same discipline; see adrs/1251-pruefer-severity-gated-request-changes.md).
-func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, omitted []string) DiffSizeDetail {
+func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, omitted []string, trimAttempted []string) DiffSizeDetail {
 	sorted := make([]diffFile, len(reviewFiles))
 	copy(sorted, reviewFiles)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Bytes > sorted[j].Bytes })
@@ -202,5 +206,6 @@ func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, 
 		MaxBytes:      maxBytes,
 		DominantPaths: dominant,
 		OmittedPaths:  omitted,
+		TrimAttempted: trimAttempted,
 	}
 }

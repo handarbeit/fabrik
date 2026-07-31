@@ -69,3 +69,23 @@ func TestBuildTooLargeNoticeBody_OmittedPathsSection(t *testing.T) {
 		t.Errorf("body = %q, want an already-excluded section naming the omitted path", body)
 	}
 }
+
+func TestBuildTooLargeNoticeBody_TrimAttemptedSection(t *testing.T) {
+	detail := DiffSizeDetail{
+		MeasuredBytes: 600_000,
+		MaxBytes:      500_000,
+		TrimAttempted: []string{"pkg/big/generated.go"},
+	}
+	body := buildTooLargeNoticeBody(detail, "sha1")
+	if !strings.Contains(body, "also tried automatically dropping") || !strings.Contains(body, "pkg/big/generated.go") {
+		t.Errorf("body = %q, want a section naming the auto-drop attempt and the path it tried to drop", body)
+	}
+}
+
+func TestBuildTooLargeNoticeBody_NoTrimAttempted_OmitsSection(t *testing.T) {
+	detail := DiffSizeDetail{MeasuredBytes: 600_000, MaxBytes: 500_000}
+	body := buildTooLargeNoticeBody(detail, "sha1")
+	if strings.Contains(body, "also tried automatically dropping") {
+		t.Errorf("body = %q, want no trim-attempted section when TrimAttempted is empty", body)
+	}
+}
