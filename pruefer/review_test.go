@@ -519,6 +519,84 @@ func TestReviewPR_OverCap_RepolledSameSHA_DoesNotDuplicateNotice(t *testing.T) {
 	}
 }
 
+// TestReviewPR_ForceReview_BypassesExistingTooLargeNotice_ReviewsWhenFixed
+// covers a PR review finding on this feature: an operator who fixes
+// excluded_paths (or max_diff_bytes) after a too-large notice has already
+// fired, then comments "/pruefer review" to ask for a re-check, must get a
+// genuine fresh measurement — not an immediate skip against the stale
+// notice, which would silently strand the request exactly like the
+// "indistinguishable from still reviewing" failure mode this feature exists
+// to eliminate.
+func TestReviewPR_ForceReview_BypassesExistingTooLargeNotice_ReviewsWhenFixed(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	client.comments = []gh.Comment{
+		{DatabaseID: 1, Body: buildTooLargeNoticeBody(DiffSizeDetail{MeasuredBytes: 20_000, MaxBytes: 1000}, "sha1")},
+		{DatabaseID: 2, Body: "/pruefer review"},
+	}
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed after config fix."}, nil
+	}}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"corpus/**"}} // operator fixed the config
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true (forced re-check after config fix)", outcome)
+	}
+	if client.diffCallCount() != 1 {
+		t.Errorf("diff fetched %d times, want 1 — forceReview must bypass the stale notice and re-measure", client.diffCallCount())
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 {
+		t.Errorf("clone/claude calls = %d/%d, want 1/1", cloneCalls.Load(), claude.callCount())
+	}
+	reviewComment := client.comments[1]
+	if !reviewComment.HasReaction("EYES") || !reviewComment.HasReaction("ROCKET") {
+		t.Errorf("review command reactions = %+v, want both EYES and ROCKET", reviewComment.Reactions)
+	}
+}
+
+// TestReviewPR_ForceReview_StillTooLarge_MarksProcessedWithoutDuplicateNotice
+// is the other half of the same finding: if a forced re-check still finds
+// the diff over cap, ReviewPR must not post a second notice comment for the
+// same head SHA (FR-2's "exactly one notice per head SHA" holds even under
+// a forced re-check), but must still mark the "/pruefer review" command
+// processed so the operator gets feedback the notice still stands, and the
+// command isn't retried forever.
+func TestReviewPR_ForceReview_StillTooLarge_MarksProcessedWithoutDuplicateNotice(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = oversizedDiff(10_000)
+	client.comments = []gh.Comment{
+		{DatabaseID: 1, Body: buildTooLargeNoticeBody(DiffSizeDetail{MeasuredBytes: 20_000, MaxBytes: 50}, "sha1")},
+		{DatabaseID: 2, Body: "/pruefer review"},
+	}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 50} // still too small — the forced re-check finds the same verdict
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge", outcome)
+	}
+	if client.diffCallCount() != 1 {
+		t.Errorf("diff fetched %d times, want 1 — forceReview must still trigger a fresh measurement", client.diffCallCount())
+	}
+	if client.addCommentCallCount() != 0 {
+		t.Errorf("AddComment called %d times, want 0 — must not duplicate the existing notice for this head SHA", client.addCommentCallCount())
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("still-too-large diff must not clone or invoke claude")
+	}
+	reviewComment := client.comments[1]
+	if !reviewComment.HasReaction("EYES") || !reviewComment.HasReaction("ROCKET") {
+		t.Errorf("review command reactions = %+v, want both EYES and ROCKET (seen and processed, even though the verdict didn't change)", reviewComment.Reactions)
+	}
+}
+
 // TestReviewPR_TrimsLargestFileAndReviewsRest is the FR-5 best-effort case:
 // no excluded_paths configured, but dropping the single oversized file
 // brings the rest under cap, so ReviewPR reviews the remainder and reports

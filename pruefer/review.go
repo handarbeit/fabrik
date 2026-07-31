@@ -55,16 +55,23 @@ type ReviewOutcome struct {
 // state is derived from GitHub itself, not persisted locally.
 //
 // Cheap checks (draft, self-authored, excluded author/label, already-
-// reviewed-at-SHA, already-noticed-too-large-at-this-SHA) run before any
-// diff fetch; only a PR that passes those triggers the FetchPRDiff call
-// used for the size guard and path exclusion, so a skip never costs an
-// extra network round-trip. Configured path exclusions are applied to the
-// diff, per file, BEFORE it is measured against MaxDiffBytes (FR-1) — an
-// excluded file can no longer consume the size budget or suppress review of
-// everything else. If exclusion alone isn't enough, ReviewPR makes one
-// best-effort attempt to drop the largest remaining file(s) and review the
-// rest (FR-5); only if that still doesn't fit does it post a one-per-head-
-// SHA notice comment and skip (FR-2/FR-3), rather than failing silently.
+// reviewed-at-SHA) run before any diff fetch; only a PR that passes those
+// triggers the FetchPRDiff call used for the size guard and path exclusion,
+// so a skip never costs an extra network round-trip. The already-noticed-
+// too-large-at-this-SHA check is also pre-diff-fetch, but — unlike the
+// other cheap checks — an unprocessed "/pruefer review" comment bypasses it:
+// an operator who fixes excluded_paths or max_diff_bytes after a notice
+// fires and asks for a re-check gets a genuine fresh measurement, not a
+// second silent-feeling skip of the same shape this issue exists to fix.
+// Configured path exclusions are applied to the diff, per file, BEFORE it is
+// measured against MaxDiffBytes (FR-1) — an excluded file can no longer
+// consume the size budget or suppress review of everything else. If
+// exclusion alone isn't enough, ReviewPR makes one best-effort attempt to
+// drop the largest remaining file(s) and review the rest (FR-5); only if
+// that still doesn't fit does it post a one-per-head-SHA notice comment and
+// skip (FR-2/FR-3), rather than failing silently — a forced re-check that
+// still doesn't fit does not duplicate that notice, but does mark the
+// "/pruefer review" command processed so it isn't retried forever.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
 	comments, err := client.FetchIssueComments(owner, repo, pr.Number)
 	if err != nil {
@@ -91,7 +98,19 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		return ReviewOutcome{Skipped: true, Reason: reason}
 	}
 
-	if alreadyNoticedTooLarge(comments, pr.HeadSHA) {
+	if forceReview {
+		// Acknowledge immediately, before any skip path below, so an
+		// operator who comments "/pruefer review" always gets visible
+		// confirmation their request was seen — regardless of what the
+		// fresh check below finds. Idempotent (checks for the EYES
+		// reaction itself), so it's safe to no-op on a re-poll.
+		if err := AcknowledgeForceReview(client, owner, repo, pr.Number); err != nil {
+			logf(pr.Number, "warn", "acknowledging /pruefer review comment on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+		}
+	}
+
+	noticeAlreadyExists := alreadyNoticedTooLarge(comments, pr.HeadSHA)
+	if noticeAlreadyExists && !forceReview {
 		logf(pr.Number, "select", "skipping %s/%s#%d: already noticed as too-large at head %s — not re-fetching the diff\n", owner, repo, pr.Number, pr.HeadSHA)
 		return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
 	}
@@ -127,17 +146,26 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 			} else {
 				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, kept, pathsOf(excluded))
 				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after exclusions, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, measured, cfg.MaxDiffBytes)
-				if _, addErr := client.AddComment(owner, repo, pr.Number, buildTooLargeNoticeBody(detail, pr.HeadSHA)); addErr != nil {
+				if noticeAlreadyExists {
+					// forceReview bypassed the pre-check above to get this
+					// fresh measurement, but the diff still doesn't fit —
+					// the existing notice for this head SHA already says
+					// so; don't post a second one for the same SHA.
+					logf(pr.Number, "select", "not re-posting too-large notice for %s/%s#%d — one already exists at head %s\n", owner, repo, pr.Number, pr.HeadSHA)
+				} else if _, addErr := client.AddComment(owner, repo, pr.Number, buildTooLargeNoticeBody(detail, pr.HeadSHA)); addErr != nil {
 					logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, addErr)
+				}
+				if forceReview {
+					// The forced re-check happened and the verdict didn't
+					// change; mark the command processed so it isn't
+					// retried forever — the notice (existing or just
+					// posted) is the durable "still too large" signal now.
+					if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
+						logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+					}
 				}
 				return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge, SizeDetail: &detail}
 			}
-		}
-	}
-
-	if forceReview {
-		if err := AcknowledgeForceReview(client, owner, repo, pr.Number); err != nil {
-			logf(pr.Number, "warn", "acknowledging /pruefer review comment on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
 		}
 	}
 
