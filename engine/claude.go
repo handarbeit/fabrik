@@ -152,6 +152,16 @@ var claudeTUI bool
 // during construction. When non-empty, --plugin-dir is added to Claude args.
 var claudePluginDir string
 
+// claudeNameFlagSupported records whether the installed claude binary accepts
+// -n/--name, as determined once at startup by probeClaudeNameFlagSupport (see
+// engine.New). Zero value is false ("unsupported"), so every existing call
+// path that never touches this var — including the entire pre-#1284 test
+// suite — keeps producing today's exact argv with no --name flag. Only a
+// successfully parsed, positive probe result flips it; any ambiguity (binary
+// missing, --help errors, unexpected output) must fail safe to false rather
+// than risk killing every worker on a fleet running an older claude binary.
+var claudeNameFlagSupported bool
+
 // claudeWaitDelay is how long runClaude waits for stdout pipe drain after the
 // Claude process exits before giving up and processing buffered output. Set by
 // the Engine during construction from Config.ClaudeWaitDelay. Default (0) is
@@ -487,7 +497,8 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 		effectiveBudget = opts.MaxTurnsOverride
 	}
 	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, resume)
-	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
+	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
+	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir, sessionName)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
@@ -521,7 +532,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 		limit = opts.MaxTurnsOverride
 	}
 	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, true) // resume existing session
-	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir)
+	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
+	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir, sessionName)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
@@ -626,7 +638,52 @@ func mergeEnv(base, overrides []string) []string {
 	return append(result, overrides...)
 }
 
-func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
+// probeClaudeNameFlagSupport runs `claude --help` once with a short timeout to
+// determine whether the installed binary supports -n/--name. Any error path —
+// the binary is missing from PATH, --help exits non-zero, or the command times
+// out — fails safe to false. This is a one-time, process-lifetime probe (see
+// claudeNameFlagSupported); it must never be called per-invocation.
+func probeClaudeNameFlagSupport() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "claude", "--help").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return parseNameFlagSupport(string(out))
+}
+
+// parseNameFlagSupport checks whether claude --help output advertises the
+// -n/--name flag. Matches the precise documented form ("--name <name>") rather
+// than a bare "--name" substring, to avoid a false positive from unrelated
+// help text that happens to mention "name".
+func parseNameFlagSupport(helpText string) bool {
+	return strings.Contains(helpText, "--name <name>")
+}
+
+// sanitizeSentinelComponent collapses any run of whitespace in s to a single
+// "-". The sentinel must stay a single shell token so a naive `ps | grep`
+// keeps working; no shell is involved in launching claude (args are passed as
+// an argv slice), so this is the only sanitization actually required.
+func sanitizeSentinelComponent(s string) string {
+	return strings.Join(strings.Fields(s), "-")
+}
+
+// sessionNameSentinel builds the --name value passed to every worker
+// invocation: fabrik:<owner>/<repo>#<issue>:<stage>. It is deterministic for a
+// given (repo, issueNumber, stageName) and purely observational — nothing in
+// the engine parses it back or branches on it. repo is expected to already be
+// "owner/repo" (as populated from the GitHub GraphQL response on real board
+// items); an empty repo falls back to the literal "unknown/repo" rather than
+// producing a malformed sentinel.
+func sessionNameSentinel(repo string, issueNumber int, stageName string) string {
+	if repo == "" {
+		repo = "unknown/repo"
+	}
+	return fmt.Sprintf("fabrik:%s#%d:%s", sanitizeSentinelComponent(repo), issueNumber, sanitizeSentinelComponent(stageName))
+}
+
+func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string, sessionName string) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -666,6 +723,10 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 	}
 	for _, tool := range tools {
 		args = append(args, "--allowedTools", tool)
+	}
+
+	if claudeNameFlagSupported && sessionName != "" {
+		args = append(args, "--name", sessionName)
 	}
 
 	return args

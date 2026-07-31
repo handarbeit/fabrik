@@ -193,6 +193,16 @@ func New(cfg Config) (*Engine, error) {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
 	claudeGHToken = cfg.Token
+
+	// One-time, process-lifetime capability probe (see claudeNameFlagSupported):
+	// older claude binaries reject unknown flags outright, which would kill
+	// every worker on the fleet, so support must be confirmed once up front
+	// rather than assumed or probed per invocation.
+	claudeNameFlagSupported = probeClaudeNameFlagSupport()
+	if !claudeNameFlagSupported {
+		fmt.Printf("[startup] worker session naming (--name) unavailable: installed claude binary does not advertise --name; upgrade claude to enable session names in ps/session-picker output\n")
+	}
+
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 	ghClient := gh.NewClient(cfg.Token)

@@ -350,7 +350,7 @@ func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
 	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
 
 	t.Run("empty resumeSessionID omits --resume", func(t *testing.T) {
-		args := buildClaudeArgs(stage, "", "", 0, false, "")
+		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
 		for i, a := range args {
 			if a == "--resume" {
 				t.Fatalf("did not expect --resume in args, got %v (at index %d)", args, i)
@@ -359,7 +359,7 @@ func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
 	})
 
 	t.Run("non-empty resumeSessionID appends --resume <id>", func(t *testing.T) {
-		args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "")
+		args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "", "")
 		found := false
 		for i, a := range args {
 			if a == "--resume" {
