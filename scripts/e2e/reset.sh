@@ -151,7 +151,15 @@ if [ "${1:-}" = "--worktrees" ]; then
   echo "== removing Fabrik worktrees + bare clones from $TEST_BED =="
   # Stop the Fabrik instance first if running — otherwise it'll keep using the
   # deleted dirs and produce confusing errors.
-  pid=$(ps ax -o pid,command | grep "$TEST_BED/fabrik" | grep -v grep | awk '{print $1}' | head -1) || true
+  #
+  # ps itself is captured as its own statement (not inside the pipeline
+  # below) so a genuine ps failure still aborts the script under set -e.
+  # Only the downstream grep/awk stage gets `|| true`: once ps has already
+  # succeeded, "no matching process" is the only way that stage can return
+  # non-zero (grep finds nothing), which is the expected, common case this
+  # flag documents as its precondition — not an error to mask.
+  ps_snapshot="$(ps ax -o pid,command)"
+  pid=$(printf '%s\n' "$ps_snapshot" | grep "$TEST_BED/fabrik" | grep -v grep | awk '{print $1}' | head -1) || true
   if [ -n "$pid" ]; then
     echo "  fabrik-test pid $pid is running — stop it before --worktrees" >&2
     exit 1

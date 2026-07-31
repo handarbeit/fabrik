@@ -201,6 +201,18 @@ switch_and_run() {
     echo "JSON log: $jsonlog" >&2
     report_test_outcomes "$jsonlog" >&2 \
       || echo "warning: failed to classify test outcomes (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
+    # KNOWN LIMITATION: this is a literal text match against the whole log,
+    # not scoped to output from the outer `go test` process itself. No
+    # current e2e scenario shells out to a nested `go test` (checked via
+    # grep across tests/e2e/*.go), so there's nothing today whose own
+    # captured "Output" JSON events could contain this exact string other
+    # than the outer suite's own -timeout kill. If a future scenario ever
+    # does invoke `go test` (or otherwise prints this literal string) as
+    # part of its own test body, this check would misfire and trigger
+    # teardown on a run that wasn't actually an E2E_TIMEOUT kill of the
+    # outer suite. Revisit with a more targeted signal (e.g. checking the
+    # panic line has no attributed Test, or checking the outer process's
+    # own exit code pattern) if that ever becomes true.
     if grep -q 'panic: test timed out after' "$jsonlog"; then
       echo "== E2E_TIMEOUT kill detected (leg: ${mode}) — running best-effort teardown ==" >&2
       "$REPO_ROOT/scripts/e2e/reset.sh" \
