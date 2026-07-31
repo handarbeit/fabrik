@@ -911,11 +911,19 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		)
 	} else {
 		// Standard timeout: branches below on whether any reviewer was ever
-		// requested (pendingLine == "" means none was).
+		// requested (pendingLine == "" means none was) AND whether any review
+		// has actually been submitted. pendingLine alone is not sufficient:
+		// once a requested reviewer submits a formal review (e.g.
+		// CHANGES_REQUESTED), GitHub drops them from the requested-reviewers
+		// list, so pendingLine goes back to "" even though a review exists.
+		// That combination is reachable in authoritative mode, where the gate
+		// can still be blocking on that review's verdict — see #1268 review
+		// thread.
 		pendingLine := ""
 		if len(reviewerParts) > 0 {
 			pendingLine = "\n\nPending reviewers: " + strings.Join(reviewerParts, ", ")
 		}
+		_, hasReviews := reviewGateOutstanding(item.LinkedPRReviewRequests, item.LinkedPRReviews)
 		// Authoritative-mode context: live-fetch the verdict and reuse the same
 		// reviewGateAuthorityVerdict pure function both gate sites consult, so
 		// this message can never disagree with why the gate is actually
@@ -937,6 +945,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 					prNumber = pr.Number
 					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 						reviews = restReviews
+						_, hasReviews = reviewGateOutstanding(nil, reviews)
 					}
 				}
 			}
@@ -956,11 +965,16 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 				}
 			}
 		}
-		if pendingLine == "" {
-			// No reviewer was ever requested on this PR — waiting longer cannot
-			// satisfy the gate. Say so plainly instead of claiming a wait on
-			// "outstanding reviewers" that don't exist, and offer the same
-			// remedies as Phase 2.
+		if pendingLine == "" && !hasReviews {
+			// No reviewer was ever requested on this PR, and no review has
+			// been submitted either — waiting longer cannot satisfy the gate.
+			// Say so plainly instead of claiming a wait on "outstanding
+			// reviewers" that don't exist, and offer the same remedies as
+			// Phase 2. The !hasReviews check matters: in authoritative mode a
+			// reviewer who submitted a formal review is no longer "pending"
+			// (pendingLine goes back to ""), but a review did happen — that
+			// case must fall through to the other branch below instead of
+			// falsely claiming none was submitted.
 			prRef := "the linked PR"
 			if item.LinkedPRNumber > 0 {
 				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)

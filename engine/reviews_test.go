@@ -1588,6 +1588,58 @@ func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_MentionsVerdict(t *t
 	if !strings.Contains(body, "bob requested changes") {
 		t.Errorf("expected pause comment to mention the outstanding CHANGES_REQUESTED verdict resolved via the base:<branch> REST fallback, got:\n%s", body)
 	}
+	// Regression guard (#1268 review thread): bob submitted a review, so
+	// pendingLine is "" (he's no longer a requested reviewer) but a review
+	// did happen — the comment must not claim otherwise.
+	if strings.Contains(body, "no review has been submitted") || strings.Contains(body, "No reviewer was ever requested") {
+		t.Errorf("pause comment must not claim no review was submitted when bob's CHANGES_REQUESTED review exists, got:\n%s", body)
+	}
+}
+
+// A requested reviewer who submits a formal review (e.g. CHANGES_REQUESTED)
+// is dropped from GitHub's requested-reviewers list, so pendingLine goes back
+// to "" even though a review was submitted. This is the default-branch
+// GraphQL path (LinkedPRReviews populated directly, no REST fallback) — the
+// no-reviewers-requested branch must not fire here, since a review did
+// happen and the message would otherwise contradict the appended
+// authorityLine quoting that same review's verdict (#1268 review thread).
+func TestPauseForReviewTimeout_Authoritative_ReviewerRespondedButNotPending_NoFalseClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviewDecision called with PR #77, got #%d", prNumber)
+			}
+			return "", nil // no branch protection configured — exercises Fabrik's own fallback
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 77,
+		// LinkedPRReviewRequests intentionally empty: bob already submitted
+		// and is no longer outstanding.
+		LinkedPRReviews: []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED"}},
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "bob requested changes") {
+		t.Errorf("expected pause comment to mention the outstanding CHANGES_REQUESTED verdict, got:\n%s", body)
+	}
+	if strings.Contains(body, "no review has been submitted") || strings.Contains(body, "No reviewer was ever requested") {
+		t.Errorf("pause comment must not claim no review was submitted when bob's CHANGES_REQUESTED review exists, got:\n%s", body)
+	}
+	if strings.Contains(body, "wait_for_reviews: false") {
+		t.Errorf("pause comment should not offer the no-reviewer remedies when a review was actually submitted, got:\n%s", body)
+	}
 }
 
 // removeAwaitingReviewLabel also removes the fabrik:bot-reprompted label.
