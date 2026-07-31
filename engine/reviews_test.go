@@ -97,6 +97,51 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 	}
 }
 
+func TestReviewTimeoutReason(t *testing.T) {
+	tests := []struct {
+		name            string
+		outstanding     []string
+		authorityReason string
+		wantContains    []string
+		wantExcludes    []string
+	}{
+		{
+			name:            "authorityReason takes precedence over everything else",
+			outstanding:     []string{"alice"},
+			authorityReason: "review authority is authoritative and CHANGES_REQUESTED is outstanding",
+			wantContains:    []string{"authoritative gate blocking:", "CHANGES_REQUESTED"},
+		},
+		{
+			name:         "outstanding reviewers named when present",
+			outstanding:  []string{"alice", "bob"},
+			wantContains: []string{"pending reviewers:", "alice", "bob"},
+			wantExcludes: []string{"authoritative gate blocking:", "bots"},
+		},
+		{
+			name:         "no reviewers requested states the three known facts, no bot speculation",
+			outstanding:  nil,
+			wantContains: []string{"no reviewers were requested", "no review has been received", "cannot determine whether one is coming"},
+			wantExcludes: []string{"bot", "authoritative gate blocking:", "pending reviewers:"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reviewTimeoutReason(tt.outstanding, tt.authorityReason)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("reviewTimeoutReason(%v, %q) = %q, want substring %q", tt.outstanding, tt.authorityReason, got, want)
+				}
+			}
+			for _, excl := range tt.wantExcludes {
+				if strings.Contains(strings.ToLower(got), strings.ToLower(excl)) {
+					t.Errorf("reviewTimeoutReason(%v, %q) = %q, must not contain %q", tt.outstanding, tt.authorityReason, got, excl)
+				}
+			}
+		})
+	}
+}
+
 // --- review-authority:<mode> label override (#1261) -----------------------
 
 func TestExtractReviewAuthorityOverride(t *testing.T) {

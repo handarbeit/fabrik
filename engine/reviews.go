@@ -708,6 +708,24 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 // it is used verbatim as the pause reason instead of the generic
 // "pending reviewers"/"no reviews submitted yet" messages, which would
 // otherwise misleadingly suggest nobody has reviewed at all.
+// reviewTimeoutReason builds the log-only reason string for the pause
+// branch of checkAwaitingReviewTimeout. authorityReason, when non-empty,
+// takes precedence: the gate is blocking on an authoritative verdict, not a
+// plain review count. Otherwise, when reviewers are still outstanding, name
+// them. When neither applies, no reviewer was ever requested — state the
+// three things the engine actually knows (no reviewer requested, no review
+// received, can't determine if one is coming) instead of speculating about
+// bots that may not exist on this repo.
+func reviewTimeoutReason(outstanding []string, authorityReason string) string {
+	if authorityReason != "" {
+		return "authoritative gate blocking: " + authorityReason
+	}
+	if len(outstanding) > 0 {
+		return "pending reviewers: " + strings.Join(outstanding, ", ")
+	}
+	return "no reviewers were requested, no review has been received, and Fabrik cannot determine whether one is coming"
+}
+
 func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
@@ -762,14 +780,7 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 		}
 
 		// Mixed/pure-human or no PR number: existing pause behavior.
-		var reason string
-		if authorityReason != "" {
-			reason = "authoritative gate blocking: " + authorityReason
-		} else if len(outstanding) > 0 {
-			reason = "pending reviewers: " + strings.Join(outstanding, ", ")
-		} else {
-			reason = "no reviews submitted yet (bots may not have responded)"
-		}
+		reason := reviewTimeoutReason(outstanding, authorityReason)
 		e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — %s\n", reason)
 		e.removeAwaitingReviewLabel(owner, repo, item)
 		return false, true, true
