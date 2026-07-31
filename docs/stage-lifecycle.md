@@ -281,7 +281,20 @@ Context files are available in .fabrik-context/
 --model <override>            (if label or stage config)
 --max-turns <N>               (if configured)
 --allowedTools <tool> ...     (if restricted)
+--name <sentinel>             (if claude supports --name; probed once at startup)
 ```
+
+### Worker Session Naming (`--name`)
+
+Every worker invocation carries a `--name <sentinel>` flag of the form `fabrik:<owner>/<repo>#<issue>:<stage>` (e.g. `fabrik:handarbeit/fabrik#1284:Implement`), built by `sessionNameSentinel` (`engine/claude.go`) from `issue.Repo`, `issue.Number`, and `stage.Name`. This gives every Fabrik worker a self-describing identity in `ps` output — a `ps aux | grep -- "--name fabrik:"` finds every worker on the host, and the sentinel itself names which repo, issue, and stage each one is serving, without fingerprinting incidental flags (`--output-format`, `--plugin-dir`) or recovering `cmd.Dir` via `lsof`/`--add-dir`.
+
+The stage-name component is passed through `sanitizeSentinelComponent`, which collapses any run of whitespace to a single `-` — the only sanitization required, since args are passed as an argv slice (never through a shell) and the sole constraint is that the value stay one token so naive `ps`-based parsing doesn't break. An empty `issue.Repo` (not expected in production; GraphQL always populates it for real board items) falls back to the literal `unknown/repo` rather than producing a malformed sentinel. The sentinel is identical for a stage run and its comment-review invocations (both are built from the same `stage.Name`), and is deterministic for a given (repo, issue, stage) so repeated and resumed invocations produce the same value.
+
+**Capability probe.** Older `claude` binaries reject unrecognized flags outright, which would kill every in-flight worker — a far worse failure than the `ps`-identification problem this feature solves. To avoid that, `--name` is gated on `claudeNameFlagSupported` (`engine/claude.go`), a package-level boolean probed exactly once, in `engine.New()`, by running `claude --help` with a 5s timeout and checking the output for the literal `--name <name>` flag documentation (`probeClaudeNameFlagSupport`/`parseNameFlagSupport`). This mirrors the existing `claudePluginDir` pattern: computed once at engine construction, read on every `buildClaudeArgs` call, never re-probed per invocation. The probe's zero value is `false`, and any ambiguity — the binary is missing from `PATH`, `--help` exits non-zero, the probe times out, or the output doesn't mention `--name` — fails safe to `false` (flag omitted, workers still run) rather than risking a fleet-wide outage. When unsupported, a single `[startup]` log line explains why and workers proceed exactly as they did before this feature. `buildClaudeArgs` itself stays a pure formatter here too: it receives the already-resolved `sessionName string` and appends `--name <sessionName>` only when both the probe passed and a non-empty sentinel was supplied.
+
+**Interaction with `--resume`.** `--name` is passed unconditionally whenever the capability probe passes, resume or not — live verification during Research confirmed `--name` and `--resume` combine cleanly on the installed CLI (same, unforked `session_id` across a resumed invocation), so there is no conditional-omit branch on the resume path.
+
+**Observability only.** Nothing in the engine reads, parses, or branches on the sentinel — it never appears in prompts or context files, and no engine behavior is keyed off it. Its only consumers are external: a human reading `ps`/the session picker/terminal title, or a future `/fabrik:status` detector (tracked separately, not implemented by this mechanism).
 
 ### Worker Environment: GitHub Identity
 
