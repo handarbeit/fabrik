@@ -335,7 +335,7 @@ func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 		t.Fatalf("could not read state of integration PR #%d: %v\n%s", prNumber, err, out)
 	}
 	if got := strings.TrimSpace(out); got != "MERGED" {
-		t.Fatalf("integration PR #%d state = %q, want MERGED (batch did not land atomically)", prNumber, got)
+		t.Fatalf("integration/singleton PR #%d state = %q, want MERGED (did not land atomically)", prNumber, got)
 	}
 }
 
