@@ -121,6 +121,9 @@ func TestExtensionLoop_ReResolvesFabrikPR(t *testing.T) {
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, State: "open"}, nil
 		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{6}, nil
+		},
 	}
 
 	callCount := 0

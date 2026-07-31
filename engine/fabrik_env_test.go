@@ -20,12 +20,17 @@ import (
 // completes — so the fallback must not fire there at all, or every first
 // Implement invocation would burn a REST call that can never succeed.
 //
-// On a base:<branch> repo, closingIssuesReferences is structurally empty for
-// every PR (not just the linked one), so FetchLinkedPR's branch-name match
-// alone could trust an unrelated PR on a stale/repurposed fabrik/issue-N
-// branch. Mirroring handleBrokenReviewLinkage, resolveFabrikEnvOpts confirms
-// via FetchPRClosingIssues before trusting that match — these cases cover
-// the confirmed, unconfirmed, and transient-error-fails-open paths.
+// FetchLinkedPR's branch-name match alone is never sufficient confirmation —
+// a stale or repurposed fabrik/issue-N branch could carry someone else's
+// unrelated open PR, on either a base:<branch> or a default-branch repo (the
+// latter mirrors handleBrokenReviewLinkage's non-base-label "broken linkage"
+// case in reviews.go, which never trusts an unconfirmed branch-name match
+// either). resolveFabrikEnvOpts therefore always confirms via
+// FetchPRClosingIssues — a direct REST parse of the PR body, independent of
+// GraphQL's closingIssuesReferences/closedByPullRequestsReferences and so
+// equally reliable on both repo shapes — before trusting the match. These
+// cases cover the confirmed, unconfirmed, and transient-error-fails-open
+// paths on both a base:<branch> item and a default-branch item.
 func TestResolveFabrikEnvOpts(t *testing.T) {
 	createDraftPRStage := &stages.Stage{Name: "Implement", CreateDraftPR: true, PostToPR: true}
 	postToPRStage := &stages.Stage{Name: "Review", PostToPR: true}
@@ -80,8 +85,12 @@ func TestResolveFabrikEnvOpts(t *testing.T) {
 			fetchLinkedPR: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 				return &gh.PRDetails{Number: 88, State: "open"}, nil
 			},
-			wantPRNumber:   88,
-			wantFetchCalls: 1,
+			fetchPRClosingIssues: func(owner, repo string, prNumber int) ([]int, error) {
+				return []int{4}, nil
+			},
+			wantPRNumber:     88,
+			wantFetchCalls:   1,
+			wantClosingCalls: 1,
 		},
 		{
 			name:   "PostToPR-only stage calls fallback on first attempt (PR already created by an earlier stage)",
@@ -91,8 +100,12 @@ func TestResolveFabrikEnvOpts(t *testing.T) {
 			fetchLinkedPR: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 				return &gh.PRDetails{Number: 55, State: "open"}, nil
 			},
-			wantPRNumber:   55,
-			wantFetchCalls: 1,
+			fetchPRClosingIssues: func(owner, repo string, prNumber int) ([]int, error) {
+				return []int{5}, nil
+			},
+			wantPRNumber:     55,
+			wantFetchCalls:   1,
+			wantClosingCalls: 1,
 		},
 		{
 			name:   "base:<branch> repo — board 0, closing keyword confirms linkage, PR trusted",
@@ -140,7 +153,7 @@ func TestResolveFabrikEnvOpts(t *testing.T) {
 			wantClosingCalls: 1,
 		},
 		{
-			name:   "non-base repo — closing-keyword confirmation is skipped entirely",
+			name:   "non-base repo — closing keyword confirms linkage, PR trusted (e.g. draft PR just created, board not yet refetched)",
 			item:   gh.ProjectItem{Number: 12, Repo: "owner/repo", LinkedPRNumber: 0},
 			stage:  createDraftPRStage,
 			resume: true,
@@ -148,11 +161,26 @@ func TestResolveFabrikEnvOpts(t *testing.T) {
 				return &gh.PRDetails{Number: 55, State: "open"}, nil
 			},
 			fetchPRClosingIssues: func(owner, repo string, prNumber int) ([]int, error) {
-				return nil, errors.New("should not be called")
+				return []int{12}, nil
 			},
 			wantPRNumber:     55,
 			wantFetchCalls:   1,
-			wantClosingCalls: 0,
+			wantClosingCalls: 1,
+		},
+		{
+			name:   "non-base repo — stale branch's unrelated PR lacks closing keyword, FABRIK_PR unset (the exact broken-linkage case handleBrokenReviewLinkage also refuses to trust)",
+			item:   gh.ProjectItem{Number: 13, Repo: "owner/repo", LinkedPRNumber: 0},
+			stage:  createDraftPRStage,
+			resume: true,
+			fetchLinkedPR: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 99, State: "open"}, nil
+			},
+			fetchPRClosingIssues: func(owner, repo string, prNumber int) ([]int, error) {
+				return []int{456}, nil // closes a different issue, not #13
+			},
+			wantPRNumber:     0,
+			wantFetchCalls:   1,
+			wantClosingCalls: 1,
 		},
 		{
 			name:   "failed lookup leaves PR unset, non-fatal",

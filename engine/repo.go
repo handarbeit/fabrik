@@ -94,16 +94,24 @@ func parseIssueKey(key, defaultOwner, defaultRepo string) (owner, repo string, i
 // blocking the invocation — so FABRIK_PR never shows a PR the review gate
 // itself would discount.
 //
-// On a base:<branch> repo (itemHasBaseLabel), FetchLinkedPR's branch-name
-// match alone is not enough: closingIssuesReferences is structurally empty
-// there for every PR, not just the linked one, so a stale or repurposed
-// fabrik/issue-N branch with its own unrelated open PR would otherwise be
-// trusted as this issue's PR. handleBrokenReviewLinkage guards against
-// exactly this by confirming via FetchPRClosingIssues (a direct PR-body
-// parse) before trusting the match; this resolver applies the identical
-// confirmation, with the identical fail-open-on-transient-error behavior,
-// so a stale-linkage PR that the review gate would pause on can never leak
-// into FABRIK_PR as if it were confirmed-correct.
+// FetchLinkedPR's branch-name match alone is never sufficient confirmation:
+// a stale or repurposed fabrik/issue-N branch could carry its own unrelated
+// open PR, and (on a base:<branch> repo especially) closingIssuesReferences
+// is structurally empty, so a naive match could be wrong. FetchPRClosingIssues
+// resolves this universally — it parses the PR body directly via REST rather
+// than relying on any GraphQL cross-reference field, so it works identically
+// regardless of base branch. This resolver therefore always confirms the
+// branch-name match via FetchPRClosingIssues before trusting it, exactly
+// mirroring handleBrokenReviewLinkage's confirmation for both its base-label
+// and non-base-label branches (reviews.go) — including the identical
+// fail-open-on-transient-error behavior — so a stale-linkage PR that the
+// review gate would refuse to trust (base-label: pause; non-base-label:
+// pause) can never leak into FABRIK_PR as if it were confirmed-correct. Every
+// Fabrik-created PR body carries a closing keyword (`Closes #N`, per
+// CLAUDE.md's PR conventions), so this confirmation succeeds for the common
+// case — a draft PR just created moments ago, before the next GraphQL board
+// refetch has repopulated item.LinkedPRNumber — without needing to special-case
+// it.
 //
 // "A PR could plausibly exist yet" is stage-config-aware, not just
 // stage-config-based: a stage that itself creates the draft PR
@@ -140,19 +148,17 @@ func (e *Engine) resolveFabrikEnvOpts(item gh.ProjectItem, stage *stages.Stage, 
 		return fabrikRoot, 0
 	}
 
-	if itemHasBaseLabel(item) {
-		closingIssues, ciErr := e.readClient.FetchPRClosingIssues(owner, repo, pr.Number)
-		if ciErr != nil {
-			// Transient fetch error: mirror handleBrokenReviewLinkage's fail-open —
-			// trust the branch-name match rather than silently withholding FABRIK_PR
-			// over a network blip.
-			e.logf(item.Number, "warn", "resolveFabrikEnvOpts: FetchPRClosingIssues failed: %v\n", ciErr)
-			return fabrikRoot, pr.Number
-		}
-		if !slices.Contains(closingIssues, item.Number) {
-			e.logf(item.Number, "warn", "resolveFabrikEnvOpts: PR #%d found on branch fabrik/issue-%d but its body lacks a closing keyword (base:<branch> repo) — leaving FABRIK_PR unset\n", pr.Number, item.Number)
-			return fabrikRoot, 0
-		}
+	closingIssues, ciErr := e.readClient.FetchPRClosingIssues(owner, repo, pr.Number)
+	if ciErr != nil {
+		// Transient fetch error: mirror handleBrokenReviewLinkage's fail-open —
+		// trust the branch-name match rather than silently withholding FABRIK_PR
+		// over a network blip.
+		e.logf(item.Number, "warn", "resolveFabrikEnvOpts: FetchPRClosingIssues failed: %v\n", ciErr)
+		return fabrikRoot, pr.Number
+	}
+	if !slices.Contains(closingIssues, item.Number) {
+		e.logf(item.Number, "warn", "resolveFabrikEnvOpts: PR #%d found on branch fabrik/issue-%d but its body lacks a closing keyword — leaving FABRIK_PR unset\n", pr.Number, item.Number)
+		return fabrikRoot, 0
 	}
 
 	return fabrikRoot, pr.Number
