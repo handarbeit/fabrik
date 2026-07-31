@@ -411,6 +411,48 @@ func TestSettleAwaitingCIScan_SkipsPausedAndClosedItems(t *testing.T) {
 	}
 }
 
+// TestSettleAwaitingCIScan_ClosedDuringDeepFetch_SkipsHandlerChain is a
+// PR-review regression (pruefer): the shallow board.Items snapshot at the top
+// of the loop can be stale by the time this item's own FetchItemDetails call
+// runs — if the issue was closed in that window, the pre-fetch item.IsClosed
+// check (already covered by TestSettleAwaitingCIScan_SkipsPausedAndClosedItems)
+// cannot see it. This exercises the OTHER check: FetchItemDetails itself now
+// queries GraphQL's `closed` field and populates item.IsClosed
+// (github/project.go), so the post-fetch re-check added alongside the
+// fabrik:awaiting-ci/fabrik:paused re-check must also catch a since-closed
+// issue and skip the handler chain — closed-item recovery is
+// runValidatePRTerminalAdvance's exclusive job (ADR-056 D2); this scan must
+// not race it.
+func TestSettleAwaitingCIScan_ClosedDuringDeepFetch_SkipsHandlerChain(t *testing.T) {
+	client := ciFailureSettleClient()
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+		// Simulate the race: the issue was closed after the shallow board read
+		// but before this deep-fetch ran.
+		item.IsClosed = true
+		return nil
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				// Shallow snapshot still shows the item open — only the deep-fetch
+				// reveals it closed.
+				Number: 28, Repo: "owner/repo", Status: "Validate", IsClosed: false,
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+	eng.wg.Wait()
+
+	snap, _ := eng.store.Get("owner/repo", 28)
+	if got := snap.CIFixCycles("Validate"); got != 0 {
+		t.Errorf("CIFixCycles(Validate) = %d; want 0 — a since-closed item must not reach the CI-fix handler chain", got)
+	}
+}
+
 // TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateComment
 // is a PR-review regression (pruefer): addCompleteLabelAndRemoveCI (ci.go) adds
 // stage:X:complete and removes fabrik:awaiting-ci via two SEPARATE GitHub API

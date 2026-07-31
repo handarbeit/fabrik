@@ -63,7 +63,14 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // D2) — duplicating that here would be a second owner for no benefit. Paused
 // items are skipped: either escalateAwaitingCIOrphanFailure already handled them
 // (marker removed) or an operator is investigating for an unrelated reason and
-// this scan must not fight them.
+// this scan must not fight them. The closed check is re-applied after
+// FetchItemDetails too (not just at the top-of-loop shallow-board check): a
+// board.Items snapshot can be stale by the time this item's own deep-fetch
+// runs, and until FetchItemDetails queried GraphQL's `closed` field (added
+// alongside this scan per PR review, github/project.go), IsClosed had no way
+// to reflect a since-closed issue at that point — a stale false there would
+// have let this scan run the full gate chain against a now-closed issue,
+// racing runValidatePRTerminalAdvance's exclusive ownership.
 //
 // FetchItemDetails runs here with no cooldown, once per fabrik:awaiting-ci item
 // per poll — raised in PR review as a potential new GraphQL cost. It is not new:
@@ -112,9 +119,13 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		priorInQueue := priorErr == nil && priorSnap.LinkedPR() != nil && priorSnap.LinkedPR().IsInMergeQueue
 		e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: item})
 
-		// A concurrent clear between the shallow board read above and this deep-fetch
-		// must not run stale state through the handler chain.
-		if !hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:paused") {
+		// A concurrent clear/close/pause between the shallow board read above and
+		// this deep-fetch must not run stale state through the handler chain.
+		// item.IsClosed specifically needs this fresh FetchItemDetails result — the
+		// shallow board.Items copy captured at the top of the loop can't see a
+		// since-closed issue, and closed-item recovery is runValidatePRTerminalAdvance's
+		// exclusive job (ADR-056 D2); this scan must not race it (PR review, pruefer).
+		if !hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:paused") || item.IsClosed {
 			continue
 		}
 
