@@ -64,7 +64,17 @@ func spawnBeginRepo(line string) string {
 	if !strings.HasPrefix(trimmed, spawnBeginMarker) {
 		return ""
 	}
-	fields := strings.Fields(strings.TrimPrefix(trimmed, spawnBeginMarker))
+	rest := strings.TrimPrefix(trimmed, spawnBeginMarker)
+
+	// The marker must be a whole word. Without this, a repo glued directly to
+	// it — "FABRIK_SPAWN_CHILD_BEGINowner/repo" — satisfies HasPrefix, survives
+	// TrimPrefix as a lone repo-shaped field, and is accepted as a genuine
+	// marker line: the same boundary confusion this function exists to reject.
+	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+		return ""
+	}
+
+	fields := strings.Fields(rest)
 	if len(fields) != 1 || !spawnRepoRE.MatchString(fields[0]) {
 		return ""
 	}

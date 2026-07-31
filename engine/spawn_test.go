@@ -1138,3 +1138,25 @@ FABRIK_SPAWN_CHILD_END
 		t.Errorf("repo: got %q, want %q", blocks[0].Repo, "owner/second")
 	}
 }
+
+// TestParseSpawnBlocks_MarkerRequiresWordBoundary pins the separator between the
+// marker and its repo argument. Without it, "FABRIK_SPAWN_CHILD_BEGINowner/repo"
+// satisfies HasPrefix and survives TrimPrefix as a lone repo-shaped field — the
+// same boundary confusion the own-line rule exists to reject. Raised in review
+// of #1263.
+func TestParseSpawnBlocks_MarkerRequiresWordBoundary(t *testing.T) {
+	body := "FABRIK_SPAWN_CHILD_BEGINowner/repo\nTITLE: Glued marker\nFABRIK_SPAWN_CHILD_END\n"
+	if blocks := ParseSpawnBlocks(body); len(blocks) != 0 {
+		t.Fatalf("expected 0 blocks when no separator follows the marker, got %d", len(blocks))
+	}
+
+	// A tab separator is legitimate and must still parse.
+	tabbed := "FABRIK_SPAWN_CHILD_BEGIN\towner/repo\nTITLE: Tab separated\nFABRIK_SPAWN_CHILD_END\n"
+	blocks := ParseSpawnBlocks(tabbed)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block for a tab-separated repo, got %d", len(blocks))
+	}
+	if blocks[0].Repo != "owner/repo" {
+		t.Errorf("repo: got %q, want %q", blocks[0].Repo, "owner/repo")
+	}
+}
