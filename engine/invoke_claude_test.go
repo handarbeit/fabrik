@@ -1368,7 +1368,14 @@ printf '%%s\n' '{"result":"fabrik env test\nFABRIK_STAGE_COMPLETE\n","session_id
 		}
 	})
 
-	t.Run("FABRIK_REPO entirely absent when both issue.Repo and opts.FabrikRepo are empty", func(t *testing.T) {
+	t.Run("FABRIK_REPO is empty, not absent, when both issue.Repo and opts.FabrikRepo are empty — and never leaks an ambient value", func(t *testing.T) {
+		// A stale ambient FABRIK_REPO in the engine's own process environment
+		// (e.g. the distinct engine-startup-config FABRIK_REPO documented in
+		// USER_GUIDE.md) must never leak through to the worker just because
+		// Fabrik itself has nothing to supply for this invocation. buildClaudeEnv
+		// must always add a FABRIK_REPO key to overrides (even with an empty
+		// value) so mergeEnv has something to strip the ambient value with.
+		t.Setenv("FABRIK_REPO", "stale-ambient-owner/stale-ambient-repo")
 		issue := gh.ProjectItem{Number: 1292, Title: "No repo info at all"}
 		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 		if err != nil {
@@ -1379,8 +1386,11 @@ printf '%%s\n' '{"result":"fabrik env test\nFABRIK_STAGE_COMPLETE\n","session_id
 			t.Fatalf("reading env file: %v", err)
 		}
 		env := string(data)
-		if strings.Contains(env, "FABRIK_REPO=") {
-			t.Errorf("expected FABRIK_REPO to be entirely absent, got:\n%s", env)
+		if strings.Contains(env, "stale-ambient") {
+			t.Errorf("expected the ambient FABRIK_REPO value to be stripped, got:\n%s", env)
+		}
+		if !strings.Contains(env, "FABRIK_REPO=\n") {
+			t.Errorf("expected FABRIK_REPO= (empty, but present) in env, got:\n%s", env)
 		}
 	})
 }

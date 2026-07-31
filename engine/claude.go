@@ -584,11 +584,18 @@ func commentMaxTurns(stage *stages.Stage) int {
 // it also becomes cmd.Dir). FABRIK_REPO prefers issue.Repo, falling back to
 // opts.FabrikRepo (the caller's e.defaultRepo()) only for the rare item that
 // reaches here before a deep-fetch has backfilled issue.Repo, so the "always
-// present" guarantee holds even then. FABRIK_ROOT and FABRIK_PR come from opts,
-// resolved by the caller's Engine-level resolveFabrikEnvOpts (repo.go) since
-// buildClaudeEnv itself has no access to fabrikDir or the GitHub client. FABRIK_PR
-// is omitted entirely — never emitted as "0" — when opts.PRNumber is 0, so a naive
-// consumer never mistakes "no PR yet" for a real PR number.
+// present" guarantee holds even then. FABRIK_REPO is always added to the returned
+// overrides, even when the resolved value is empty (both sources unset) — unlike
+// FABRIK_ROOT/FABRIK_PR below, omitting it entirely in that case would leave
+// mergeEnv with no override key to strip, letting an ambient FABRIK_REPO already
+// in the engine process's own environment (e.g. the distinct engine-startup-config
+// FABRIK_REPO) leak into the worker unmodified. FABRIK_ROOT and FABRIK_PR come
+// from opts, resolved by the caller's Engine-level resolveFabrikEnvOpts (repo.go)
+// since buildClaudeEnv itself has no access to fabrikDir or the GitHub client.
+// FABRIK_PR is omitted entirely — never emitted as "0" — when opts.PRNumber is 0,
+// so a naive consumer never mistakes "no PR yet" for a real PR number; this is
+// safe because FABRIK_PR's documented contract is conditional presence, unlike
+// FABRIK_REPO's "always."
 func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, opts InvokeOptions) []string {
 	var env []string
 	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
@@ -612,13 +619,20 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	}
 
 	env = append(env, "FABRIK_ISSUE="+strconv.Itoa(issue.Number))
+	// Always add a FABRIK_REPO entry to overrides, even when the resolved value
+	// is empty (both issue.Repo and opts.FabrikRepo unset — practically
+	// unreachable, but possible in pure multi-repo mode with an unbackfilled
+	// item). mergeEnv only strips a base-env key that appears in overrides; if
+	// FABRIK_REPO were omitted here entirely, an ambient FABRIK_REPO already in
+	// the engine process's own environment (e.g. the distinct engine-startup-config
+	// FABRIK_REPO documented in USER_GUIDE.md) would pass straight through to the
+	// worker unmodified — silently contradicting the "worker-injected value always
+	// wins" guarantee documented there.
 	fabrikRepo := issue.Repo
 	if fabrikRepo == "" {
 		fabrikRepo = opts.FabrikRepo
 	}
-	if fabrikRepo != "" {
-		env = append(env, "FABRIK_REPO="+fabrikRepo)
-	}
+	env = append(env, "FABRIK_REPO="+fabrikRepo)
 	if workDir != "" {
 		env = append(env, "FABRIK_WORKTREE="+workDir)
 	}
