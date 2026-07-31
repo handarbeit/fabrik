@@ -113,8 +113,15 @@ PARALLEL="${E2E_PARALLEL:-4}"
 # from a real regression. The built-in -timeout panic dump only reports tests
 # that were actively executing — a test parked waiting for a free -parallel
 # slot never appears there at all. Classification here is by each test's
-# *last* observed action: pass/fail/skip -> completed; run/cont -> still
-# running at kill time; pause -> never started (queued behind -parallel).
+# *last state-transition* action: pass/fail/skip -> completed; run/cont ->
+# still running at kill time; pause -> never started (queued behind
+# -parallel). "output" events are excluded before taking the last action —
+# every test emits output as its final events in practice (-v RUN/PAUSE/CONT
+# lines, t.Log calls, and for the test that actually timed out, the entire
+# panic/goroutine dump is itself a stream of "output" events on that test) —
+# without this exclusion, group_by's last-element pick would land on
+# "output" for nearly every test and the timed-out test itself would vanish
+# from every bucket instead of showing up as still-running.
 # Subtests (names containing "/") are folded into their parent's timeline;
 # per-test granularity is what an operator needs, not per-subtest.
 # Non-JSON lines (e.g. `go: downloading ...` progress, a raw panic dump) are
@@ -123,7 +130,7 @@ report_test_outcomes() {
   local jsonlog="$1"
   jq -R 'fromjson? // empty' "$jsonlog" \
     | jq -s -r '
-        [ .[] | select(.Test != null and (.Test | contains("/") | not)) ]
+        [ .[] | select(.Test != null and (.Test | contains("/") | not) and .Action != "output") ]
         | group_by(.Test)
         | map({test: .[0].Test, last: .[-1].Action})
         | group_by(.last)
