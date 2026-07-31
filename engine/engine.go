@@ -193,6 +193,20 @@ func New(cfg Config) (*Engine, error) {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
 	claudeGHToken = cfg.Token
+
+	// One-time, process-lifetime capability probe (see claudeNameFlagSupported):
+	// older claude binaries reject unknown flags outright, which would kill
+	// every worker on the fleet, so support must be confirmed once up front
+	// rather than assumed or probed per invocation. New() runs once per
+	// long-lived fabrik daemon process start (this is the poll-loop engine,
+	// not a per-invocation interactive CLI path), so the probe's 5s worst-case
+	// timeout is a bounded, one-time cost against the daemon's whole lifetime
+	// — in practice `claude --help` returns in well under a second.
+	claudeNameFlagSupported = probeClaudeNameFlagSupport()
+	if !claudeNameFlagSupported {
+		fmt.Printf("[startup] worker session naming (--name) unavailable: installed claude binary does not advertise --name; upgrade claude to enable session names in ps/session-picker output\n")
+	}
+
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 	ghClient := gh.NewClient(cfg.Token)
