@@ -31,13 +31,24 @@ import (
 //   - Train mode "on" (ADR-059 D6/D7) — the yolo item advances Validate →
 //     Queued and lands via the merge train's own batch (landGreenBatch →
 //     landMergeTrainBatch) or singleton (landSingleton) landing path, both of
-//     which close-not-merge the member's own PR and land the change via a
-//     separate integration/singleton PR. Verifies: the issue reaches Done
-//     (board Status "Done" or issue CLOSED, whichever is observed first —
-//     the same race-tolerant pattern WaitForMemberLanded uses elsewhere),
-//     the member's own linked PR ends CLOSED (not MERGED), a "landing
-//     complete" bed-log line appears after the issue was filed, and
-//     fabrik:auto-merge-enabled is never applied at any point.
+//     which land the change via a separate integration/singleton PR and then
+//     attempt to close the member's own PR. That close attempt only
+//     sometimes succeeds: when the member merged cleanly into the trial
+//     branch, its commits are already ancestors of the base branch by the
+//     time the integration/singleton PR lands, so GitHub has already flipped
+//     the member PR to MERGED on its own — the engine's own close call then
+//     404/422s harmlessly (see #1271). CLOSED only happens when the trial
+//     needed conflict resolution. Both are legitimate terminal states; the
+//     invariant this test actually verifies is that the member's own PR was
+//     never itself the merge vehicle — i.e. a distinct integration/singleton
+//     PR exists and is the one GitHub reports MERGED. Verifies: the issue
+//     reaches Done (board Status "Done" or issue CLOSED, whichever is
+//     observed first — the same race-tolerant pattern WaitForMemberLanded
+//     uses elsewhere), the member's own linked PR reaches a terminal state
+//     (CLOSED or MERGED) while a distinct integration/singleton PR is
+//     confirmed MERGED, a "landing complete" bed-log line appears after the
+//     issue was filed, and fabrik:auto-merge-enabled is never applied at any
+//     point.
 //
 // Out of scope here (better suited to unit/integration tests because
 // provoking them deterministically in e2e is hard):
@@ -78,8 +89,28 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 			WaitForMemberLanded(t, env, env.RepoAlpha, num, 45*time.Minute)
 			t.Logf("%s#%d landed (Done or closed) — checking the merge-train path was taken", env.RepoAlpha, num)
 
-			waitForPRClosedNotMerged(t, env, env.RepoAlpha, prNum, 5*time.Minute)
-			t.Logf("member PR #%d closed without being merged — train landing contract verified", prNum)
+			// GitHub auto-marks a PR MERGED the instant its head commits become
+			// reachable from the base branch — even if Fabrik never called the
+			// merge API on that PR. When the member merged cleanly into the
+			// trial branch, that already happened by the time the
+			// integration/singleton PR lands, so the member's own PR is MERGED
+			// here, not CLOSED — and the engine's own close-the-member-PR call
+			// harmlessly 404/422s (see #1271). CLOSED only happens when the
+			// trial needed conflict resolution. Do NOT "fix" this back to a
+			// CLOSED-only assertion: both are legitimate terminal states. The
+			// invariant that actually matters — that the member's own PR was
+			// never the merge vehicle — is verified below by confirming a
+			// DISTINCT integration/singleton PR is the one GitHub reports
+			// MERGED.
+			landingPRNum := waitForLandingPRNumber(t, env, env.RepoAlpha, prNum, 5*time.Minute)
+			if landingPRNum == prNum {
+				t.Fatalf("member PR #%d cites itself as the landing PR — the member's own PR was the merge vehicle, not a separate integration/singleton PR (this would indicate a direct-merge regression)", prNum)
+			}
+			assertPRMerged(t, env, env.RepoAlpha, landingPRNum)
+			t.Logf("distinct integration/singleton PR #%d confirmed MERGED — train landing contract verified", landingPRNum)
+
+			waitForPRClosed(t, env, env.RepoAlpha, prNum, 5*time.Minute)
+			t.Logf("member PR #%d reached a terminal state (closed or merged-by-ancestry)", prNum)
 
 			WaitForLogLine(t, env, "landing complete", logStart, 5*time.Minute)
 			t.Logf("bed log shows a completed train landing")

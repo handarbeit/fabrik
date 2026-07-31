@@ -5,6 +5,8 @@ package e2e
 import (
 	"encoding/base64"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -289,28 +291,36 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 	}
 }
 
-// waitForPRClosedNotMerged polls until the PR reaches a terminal state, up to
-// timeout. Fails immediately on MERGED — for callers that need the stricter
-// "landed via a separate PR, not by GitHub merging this one" contract (e.g.
-// the merge-train's close-not-merge landing of a member's own PR), where
-// waitForPRClosed's permissive CLOSED-or-MERGED semantics would silently
-// accept the wrong outcome.
-func waitForPRClosedNotMerged(t *testing.T, env *Env, repo string, prNumber int, timeout time.Duration) {
+// landedPRPattern matches the engine-posted "landed" comment both landing
+// paths post on the member's OWN PR (engine/merge_train.go: landSingleton's
+// "Landed one-at-a-time via singleton PR #%d." and landMergeTrainBatch's
+// "Landed via batch PR #%d."), capturing the distinct integration/singleton
+// PR number the change actually landed through.
+var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton) PR #(\d+)\.`)
+
+// waitForLandingPRNumber polls the member's own PR comments (memberPRNum) for
+// the engine's "landed via ..." comment and returns the distinct
+// integration/singleton PR number it cites. This is scoped to the specific
+// member PR, so — unlike log scanning or WaitForIntegrationPR's repo-wide
+// "most recently created" search — it stays correct under t.Parallel()
+// execution where sibling merge-train scenarios land unrelated batches
+// concurrently in the same repo.
+func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int, timeout time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-			"--json", "state", "--jq", ".state")
+		bodies, err := tryPRComments(env, repo, memberPRNum)
 		if err == nil {
-			switch strings.TrimSpace(out) {
-			case "CLOSED":
-				return
-			case "MERGED":
-				t.Fatalf("member PR #%d on %s was MERGED, want CLOSED (should land via a separate integration/singleton PR, not by merging the member's own PR)", prNumber, repo)
+			for _, b := range bodies {
+				if m := landedPRPattern.FindStringSubmatch(b); m != nil {
+					if n, aerr := strconv.Atoi(m[1]); aerr == nil && n > 0 {
+						return n
+					}
+				}
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("member PR #%d on %s not closed within %s (last state: %q, err: %v)", prNumber, repo, timeout, strings.TrimSpace(out), err)
+			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v)", memberPRNum, repo, err)
 		}
 		time.Sleep(10 * time.Second)
 	}
