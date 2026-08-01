@@ -143,6 +143,48 @@ from the suite before this issue, since `reviewGateAllBots`'s declared-reviewer
 branch (the only way to reach the ladder without a formally requested bot reviewer)
 had no scenario declaring `expected_reviewers` to activate it.
 
+## Revision (2026-08-01): draft-PR construction for the scenarios `RequestPRReviewer` can't fix
+
+Issue [#1312](https://github.com/handarbeit/fabrik/issues/1312), fixing the same
+incidental-bot-review race for ADR-1258's `TestReviewAuthority*` scenarios (see that ADR's own
+"Revision (2026-08-01)"), found it applies here too, to four scenarios:
+`TestExpectedReviewersFastAdvance`, `TestExpectedReviewersDeclaredWaitsAndReprompts`,
+`TestExpectedReviewersUndeclaredRegressionGuard`, and
+`TestExpectedReviewersFastAdvanceComposesWithAuthoritative`. The bed's `claude-review.yml` bot
+reviews these member PRs too, typically within ~60-100s, and `expected_reviewers` is not
+consulted by `checkReviewGate`'s outer `len(outstanding) == 0 && hasReviews` clearing branch at
+all — a declared-but-unrequested or undeclared-nothing-requested configuration offers that
+branch no protection whatsoever. An incidental bot `COMMENT` landing before the engine's first
+gate evaluation clears the gate in advisory mode (or, for the authoritative-composition
+scenario, can apply the label via the authoritative-verdict branch instead — the opposite-
+direction failure) before these scenarios' own assertions ever run.
+
+Unlike ADR-1258's fix, **`RequestPRReviewer` is not an option for these four scenarios**: their
+properties under test are specifically "nothing was requested" (`TestExpectedReviewersFastAdvance`,
+`TestExpectedReviewersFastAdvanceComposesWithAuthoritative`, `TestExpectedReviewersUndeclaredRegressionGuard`)
+or "declared but *unrequested*" (`TestExpectedReviewersDeclaredWaitsAndReprompts`). A genuinely
+outstanding requested reviewer would falsify the very condition the scenario exists to verify —
+worse, for the declared-waits-and-reprompts case specifically, a real requested reviewer routes
+to the mixed/human pause path instead of the bot re-prompt ladder (`reviewGateAllBots`), silently
+defeating the scenario's actual purpose (the first e2e coverage of that ladder) rather than just
+racing an assertion.
+
+**Fix:** these four scenarios now seed via `seedReviewGateItemDraft` (`CreateMemberPRDraft`)
+instead of `seedReviewGateItem`, opening the member PR as a draft. Direct inspection of the bed's
+actual `claude-review.yml` confirmed its review job is guarded by
+`if: github.event.pull_request.draft == false` and triggers only on `opened`/`ready_for_review` —
+a draft PR that is never marked ready is therefore permanently invisible to it, removing the
+incidental review entirely rather than racing it. `engine/reviews.go` and the rest of the
+gate/dispatch path never inspect `IsDraft`, so this is purely a bed-workflow-triggering property
+with zero engine-behavior impact. `TestExpectedReviewersPrecedenceGuard` needed no such
+treatment — like ADR-1258's fixed scenarios, it already calls `RequestPRReviewer` before its
+wait, which is unaffected by this gap.
+
+This technique is bed-workflow-dependent in one sense worth flagging for future readers: if a
+future change to `claude-review.yml` removes the `draft == false` guard, these scenarios would
+silently become racy again with no compile-time signal. `tests/e2e/README.md` prerequisite #29
+points at the guard's exact condition for this reason.
+
 ## Alternatives Considered
 
 **A bed-local `ExpectedReviewers`-declaring stage/column variant.** Rejected — see
