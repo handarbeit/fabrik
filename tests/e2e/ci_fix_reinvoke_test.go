@@ -235,6 +235,18 @@ func hasEngineCIWaitTimeoutComment(bodies []string) bool {
 // deliberate, costly (~$0.50–1.50, 30-90 min) live-bed run per #1323's Risks
 // section, not something to repeat routinely.
 //
+// A known fragility (PR handarbeit/fabrik#1324 review): this scenario's
+// non-vacuousness now depends on the CI-fix agent faithfully obeying the
+// "MANDATORY ... no exceptions" append-and-push instruction in
+// ciFixCycleLimitBody on every single reinvoke — there is no engine-side
+// enforcement that any given reinvoke actually pushed. A run that fails the
+// commit-count check at the end is therefore ambiguous between two distinct
+// causes: a genuine engine regression (the cycle-limit path failing to
+// dispatch/advance) vs. the agent skipping a push on some round despite the
+// instruction. The commit-count message below distinguishes these only
+// after the fact, once the full run has already completed — there is no
+// cheaper way to tell them apart mid-run.
+//
 // Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
 func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	t.Parallel()
