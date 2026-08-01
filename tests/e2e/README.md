@@ -418,6 +418,23 @@ is a documented, accepted e2e gap.
     same rationale as prerequisite #22's warning against reusing a real installed
     bot: an unrelated real actor submitting a review would race the deterministic
     re-prompt-ladder assertions in `TestExpectedReviewersDeclaredWaitsAndReprompts`.
+29. **Draft-PR determinism technique (#1312)**: `TestExpectedReviewersFastAdvance`,
+    `TestExpectedReviewersDeclaredWaitsAndReprompts`,
+    `TestExpectedReviewersUndeclaredRegressionGuard`, and
+    `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` seed via
+    `seedReviewGateItemDraft` (which calls `CreateMemberPRDraft`) instead of
+    `seedReviewGateItem`. Their properties under test — "nothing was requested",
+    "declared but unrequested" — would be falsified by requesting a reviewer via
+    `RequestPRReviewer`, so unlike `TestReviewAuthority*` these scenarios can't
+    win the race deterministically that way. Opening the member
+    PR as a draft instead removes the race altogether: `claude-review.yml`
+    guards its review job with `if: github.event.pull_request.draft == false`
+    and triggers only on `opened`/`ready_for_review`, so a draft PR that is
+    never marked ready is permanently invisible to it — there is no incidental
+    bot review to land before the engine's first gate evaluation, or before
+    these scenarios' own bounded-window assertions. This requires no additional
+    bed setup; it is purely a change in how the harness constructs the member
+    PR.
 
 ## Running
 
