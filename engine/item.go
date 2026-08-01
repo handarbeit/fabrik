@@ -1092,14 +1092,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	err := p.invokeErr
 	releaseLock := p.release
 
-	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
-		if usage.MaxTurns > 0 {
-			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
-				usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000)
-		} else {
-			e.logf(item.Number, "stats", "used %d turns, %dk input / %dk output tokens\n",
-				usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000)
-		}
+	if line := formatStatsLogLine(usage); line != "" {
+		e.logf(item.Number, "stats", "%s\n", line)
 	}
 	func() {
 		e.mu.Lock()
