@@ -1555,24 +1555,6 @@ func readEnvFileReviewWaitTimeout(t *testing.T, env *Env) int {
 	return n
 }
 
-// readEnvFileCIWaitTimeout reads FABRIK_CI_WAIT_TIMEOUT (minutes) from the
-// test bed's .env file. Returns 30 (the engine default, see
-// engine/ci.go:ciWaitTimeout) if the key is absent. Fails the test if the key
-// is present but not a valid integer.
-func readEnvFileCIWaitTimeout(t *testing.T, env *Env) int {
-	t.Helper()
-	envFile := filepath.Join(env.FabrikTestDir, ".env")
-	val, err := readEnvFileValue(envFile, "FABRIK_CI_WAIT_TIMEOUT")
-	if err != nil {
-		return 30
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(val))
-	if err != nil {
-		t.Fatalf("FABRIK_CI_WAIT_TIMEOUT in %s is not an integer: %q", envFile, val)
-	}
-	return n
-}
-
 // ghOutputWithToken runs gh with a caller-supplied token (overrides GH_TOKEN).
 // Used by SubmitPRReview where the reviewer identity differs from the bot's
 // main PAT stored in *Env.

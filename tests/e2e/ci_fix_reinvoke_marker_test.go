@@ -116,24 +116,3 @@ func TestHasEngineCIWaitTimeoutComment(t *testing.T) {
 		})
 	}
 }
-
-// TestMinSafeCIWaitTimeoutMinutes locks in the derivation formula so a future
-// edit to the constants (or the formula itself) is a visible, deliberate
-// change rather than a silent drift back toward the timer race.
-func TestMinSafeCIWaitTimeoutMinutes(t *testing.T) {
-	tests := []struct {
-		maxCycles int
-		want      int
-	}{
-		{maxCycles: 2, want: 120}, // 45*2 + 30 — the documented bed recommendation
-		{maxCycles: 3, want: 165},
-		{maxCycles: 1, want: 75},
-	}
-
-	for _, tt := range tests {
-		got := minSafeCIWaitTimeoutMinutes(tt.maxCycles)
-		if got != tt.want {
-			t.Fatalf("minSafeCIWaitTimeoutMinutes(%d) = %d, want %d", tt.maxCycles, got, tt.want)
-		}
-	}
-}

@@ -124,48 +124,42 @@ gh api rate_limit --jq '.resources.graphql'
    ```bash
    E2E_TIMEOUT=1h scripts/e2e/run.sh -run TestCIFixReinvoke
    ```
-8. **`FABRIK_CI_WAIT_TIMEOUT=120` (minutes) in the test bed `.env`** — required
-   for `TestCIFixReinvokeCycleLimit` to deterministically exercise the
-   cycle-limit pause path instead of racing the fixed CI-wait-timeout timer
-   (handarbeit/fabrik#1320). Both `pauseForCITimeout` (`engine/ci.go`) and
-   `pauseForCIFixCycleLimit` are evaluated independently every poll once
-   `fabrik:awaiting-ci` is applied; whichever condition is observed first
-   wins, and the two are otherwise uncoordinated. The engine default
-   (`FABRIK_CI_WAIT_TIMEOUT` unset → 30 min, see `ciWaitTimeout()`) is too
-   short: a captured release-gate run showed two failed CI-fix cycles
-   (`FABRIK_MAX_CI_FIX_CYCLES=2`) still executing at 1h26m26s (~87 min) under
-   full-suite load — comfortably past the 30-minute default, so the
-   wait-timeout timer fired first and the scenario observed the wrong (but
-   still engine-correct) pause reason. **This is the same 87-minute data
-   point cited in "How the timeout/parallelism defaults are derived" below.**
+8. **`FABRIK_CI_WAIT_TIMEOUT` — no override needed; the engine default (30
+   min, see `ciWaitTimeout()`) applies.** #1320 had introduced a
+   `FABRIK_CI_WAIT_TIMEOUT=120` requirement here, reasoning that
+   `TestCIFixReinvokeCycleLimit` needed extra headroom for the cycle-limit
+   path (`pauseForCIFixCycleLimit`) to win its race against the fixed
+   CI-wait-timeout timer (`pauseForCITimeout`). **handarbeit/fabrik#1323
+   found that premise false**: the scenario's fixture never guaranteed a new
+   commit on each CI-fix reinvoke, so the `#958 leg 2` no-op guard
+   (`engine/catch_up_handlers.go`) latched permanently after the very first
+   reinvoke — `CIFixCycleIncremented` never advanced past 1, and
+   `pauseForCIFixCycleLimit` was structurally unreachable *at any*
+   `FABRIK_CI_WAIT_TIMEOUT`. Raising the timeout to 120 min therefore didn't
+   fix a race; it just quadrupled time-to-escalation for every `wait_for_ci`
+   item in the bed, with no compensating benefit.
 
-   The test derives its own minimum safe value at runtime
-   (`minSafeCIWaitTimeoutMinutes` in `ci_fix_reinvoke_test.go`):
-   `observedWorstCaseMinutesPerCIFixCycle (45, i.e. ceil(87/2)) * maxCycles +
-   cycleLimitTimerHeadroomMinutes (30)`. For the recommended
-   `FABRIK_MAX_CI_FIX_CYCLES=2` (prerequisite #6), that's `45*2 + 30 = 120`
-   minutes — hence the **120** recommendation. If `FABRIK_CI_WAIT_TIMEOUT` in
-   the bed `.env` is below this computed minimum for the bed's configured
-   `FABRIK_MAX_CI_FIX_CYCLES`, the test `t.Skip`s with an instructional
-   diagnostic rather than racing the two timers and risking a false
-   pass/fail — see the "Requirements" section of #1320 for why "accept
-   either pause reason" was rejected (the #1319 anti-pattern: a test that
-   passes regardless of which path actually ran).
+   The fixture (`ciFixCycleLimitBody`) now forces an unconditional
+   scratch-file commit+push on every single CI-fix reinvoke, independent of
+   the agent's belief about fixability — the no-op guard only checks head-SHA
+   equality, so this is sufficient to make `CIFixCycleIncremented` genuinely
+   advance to `MaxCiFixCycles` through real repeated dispatch. With the path
+   actually reachable, whether the CI-wait-timeout timer also fires is
+   ordinary e2e timing risk like any other scenario in the bed — not a
+   known-guaranteed structural loss requiring bespoke pre-flight timer math.
+   The test now also asserts the PR gained at least `maxCycles` commits
+   beyond baseline (see `TestCIFixReinvokeCycleLimit`'s doc comment), making
+   "the cycle-limit path was genuinely exercised" independently verifiable
+   rather than inferred from timer coordination.
 
-   Raising this bed-wide from 30→120 min is a deliberate tradeoff: it also
-   lengthens how long a genuinely CI-stuck *unrelated* issue sits before a
-   human is notified via `pauseForCITimeout`, on any issue in the bed, not
-   just this scenario's. After editing `.env`, restart the test-bed Fabrik
-   instance so the new value takes effect.
-
-   **`TestCIFixReinvoke` has the same timer-coupling risk, dormant.** It is
-   currently `t.Skip`'d pending #916 (see the doc comment above `TestCIFixReinvoke`),
-   so this hasn't yet caused a failure, but a single successful CI-fix cycle
-   could plausibly also exceed a too-low `FABRIK_CI_WAIT_TIMEOUT` under load
-   once un-skipped. Re-check this when #916 unblocks it — the derivation
-   formula above only accounts for `TestCIFixReinvokeCycleLimit`'s
-   `MaxCiFixCycles`-bounded cost, not `TestCIFixReinvoke`'s single-cycle
-   recovery cost, which may need its own (likely smaller) minimum.
+   The 87-minute data point that backed the old `120` recommendation (a
+   captured release-gate run "still executing" with `FABRIK_MAX_CI_FIX_CYCLES=2`)
+   is now understood to have likely been an artifact of the same no-op-latch
+   bug — a cycle count stuck at 1 while wall-clock kept advancing is
+   indistinguishable from this exact defect. It should not be treated as a
+   trustworthy per-cycle cost measurement; a future live run against the
+   fixed fixture is what should supply real numbers if the wait-timeout timer
+   does turn out to race in practice.
 
 ### Marker-substring assertion audit (#1320)
 
