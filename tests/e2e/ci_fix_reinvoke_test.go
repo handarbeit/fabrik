@@ -191,36 +191,23 @@ func hasEngineCIWaitTimeoutComment(bodies []string) bool {
 	return false
 }
 
-// observedWorstCaseMinutesPerCIFixCycle and cycleLimitTimerHeadroomMinutes
-// back minSafeCIWaitTimeoutMinutes, which computes the smallest
-// FABRIK_CI_WAIT_TIMEOUT (minutes) at which TestCIFixReinvokeCycleLimit can
-// deterministically exercise the cycle-limit pause path instead of racing
-// the fixed CI-wait-timeout timer (handarbeit/fabrik#1320).
-//
-// observedWorstCaseMinutesPerCIFixCycle=45 is derived from the one real data
-// point available: a captured release-gate run where this scenario was
-// still executing at 1h26m26s (~87min) with FABRIK_MAX_CI_FIX_CYCLES=2 — see
-// "How the timeout/parallelism defaults are derived" in tests/e2e/README.md.
-// ceil(87/2) = 44, rounded up to 45 for a whole-minutes-per-cycle budget.
-const observedWorstCaseMinutesPerCIFixCycle = 45
-
-// cycleLimitTimerHeadroomMinutes is added on top of the raw per-cycle
-// worst-case cost as margin against load variance beyond the single
-// observed data point backing observedWorstCaseMinutesPerCIFixCycle.
-const cycleLimitTimerHeadroomMinutes = 30
-
-// minSafeCIWaitTimeoutMinutes returns the minimum FABRIK_CI_WAIT_TIMEOUT
-// (minutes) needed for the cycle-limit path to deterministically win the
-// race against the fixed CI-wait-timeout timer, for a given
-// FABRIK_MAX_CI_FIX_CYCLES.
-func minSafeCIWaitTimeoutMinutes(maxCycles int) int {
-	return observedWorstCaseMinutesPerCIFixCycle*maxCycles + cycleLimitTimerHeadroomMinutes
-}
-
 // TestCIFixReinvokeCycleLimit is the negative-path regression test for the
 // CI-fix reinvoke cycle limit (engine/ci.go: pauseForCIFixCycleLimit).
 // The sentinel CI job is permanently failing for this issue — Claude cannot fix
 // it — so the engine must exhaust MaxCiFixCycles and pause the issue.
+//
+// handarbeit/fabrik#1323 superseded #1320's timer-race diagnosis: the
+// previous fixture never guaranteed a new commit per CI-fix reinvoke, so the
+// `#958 leg 2` no-op guard (engine/catch_up_handlers.go) latched after the
+// first reinvoke and CIFixCycleIncremented never advanced — the cycle-limit
+// path was structurally unreachable, at any FABRIK_CI_WAIT_TIMEOUT. The
+// fixture below (ciFixCycleLimitBody) instead forces an unconditional
+// scratch-file commit+push on every single reinvoke, independent of any
+// belief about fixability, which is the only thing the no-op guard actually
+// checks (head SHA equality). With that fixed, the cycle-limit path is
+// reached through genuine repeated dispatch and no bespoke timer
+// coordination with FABRIK_CI_WAIT_TIMEOUT is needed — the engine default
+// applies.
 //
 // Pass criteria:
 //   - fabrik:awaiting-ci appears (CI gate fires).
@@ -229,14 +216,51 @@ func minSafeCIWaitTimeoutMinutes(maxCycles int) int {
 //   - A genuine engine-authored "🏭 **Fabrik — CI fix cycle limit reached**"
 //     comment appears on the issue (matched by prefix, not substring — see
 //     hasEngineCycleLimitComment).
+//   - The PR gained at least maxCycles commits beyond its pre-Validate
+//     baseline, proving the cycle-limit path was reached via genuine
+//     repeated dispatch rather than a single latched no-op (non-vacuous
+//     per #1323's Requirements — see PRCommitCount check below).
 //
-// Prerequisite: "ci-fix-sentinel" must be enrolled as a required status check,
-// FABRIK_MAX_CI_FIX_CYCLES must be ≤ 3 (ideally 2), AND FABRIK_CI_WAIT_TIMEOUT
-// must be large enough that the cycle-limit path deterministically wins the
-// race against the fixed CI-wait-timeout timer (see minSafeCIWaitTimeoutMinutes
-// and "Additional prerequisites for TestCIFixReinvoke and
-// TestCIFixReinvokeCycleLimit" in tests/e2e/README.md). The test skips with an
-// instructional message if any condition is not met — handarbeit/fabrik#1320.
+// Prerequisite: "ci-fix-sentinel" must be enrolled as a required status
+// check, and FABRIK_MAX_CI_FIX_CYCLES must be ≤ 3 (ideally 2) — see
+// "Additional prerequisites for TestCIFixReinvoke and
+// TestCIFixReinvokeCycleLimit" in tests/e2e/README.md. The test skips with
+// an instructional message if either condition is not met.
+//
+// Manual, one-off, non-vacuous verification (not run by this test): to
+// confirm the cycle-limit comment assertion above would actually fail if
+// pauseForCIFixCycleLimit were broken, temporarily neutralize it locally
+// (e.g. make it a no-op) and re-run this scenario against a live bed —
+// expect a timeout waiting for fabrik:paused instead of a pass. This is a
+// deliberate, costly (~$0.50–1.50, 30-90 min) live-bed run per #1323's Risks
+// section, not something to repeat routinely.
+//
+// A known fragility (PR handarbeit/fabrik#1324 review): this scenario's
+// non-vacuousness now depends on the CI-fix agent faithfully obeying the
+// "MANDATORY ... no exceptions" append-and-push instruction in
+// ciFixCycleLimitBody on every single reinvoke — there is no engine-side
+// enforcement that any given reinvoke actually pushed. If the agent skips a
+// push on some round (e.g. it misjudges the unfixable check as fixable and
+// attempts a "real" fix that doesn't touch the scratch file), LastCIFixNoOpSHA
+// latches on that head SHA and dispatchWithCycleLimit's no-op short-circuit
+// starts skipping dispatch WITHOUT incrementing the cycle counter — so the
+// cycle limit is never reached at all, and the test fails earlier, as a
+// timeout waiting for fabrik:paused, not as the commit-count t.Fatalf below.
+// Either failure mode is loud (the test does not silently pass), but a
+// timeout is ambiguous between a genuine engine regression (the cycle-limit
+// path failing to dispatch/advance for real) and this agent-compliance
+// fragility — there is no cheaper way to distinguish them than the manual
+// pauseForCIFixCycleLimit-neutralization check described above.
+//
+// Why PRCommitCount rather than an engine-observable signal (PR #1324
+// review): asserting directly on the engine's own CIFixCycleIncremented
+// application (catch_up_handlers.go) would remove the one-layer-removed gap
+// above, but the e2e harness has no mechanism to read the live bed's engine
+// process logs or internal state — only GitHub-visible signals (labels,
+// comments, commits) are observable from here. Adding one would be new
+// engine-side observability infrastructure, which is outside this issue's
+// explicit scope ("No change to engine behavior is implied by this issue").
+// PRCommitCount is the strongest non-vacuous signal available without it.
 //
 // Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
 func TestCIFixReinvokeCycleLimit(t *testing.T) {
@@ -251,28 +275,6 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	}
 	t.Logf("FABRIK_MAX_CI_FIX_CYCLES=%d — cycle limit test will fire after %d failed attempts", maxCycles, maxCycles)
 
-	// Timer coordination guard (handarbeit/fabrik#1320): the cycle-limit path
-	// and the fixed CI-wait-timeout timer race independently every poll.
-	// Under suite load, two full fix cycles routinely exceed the 30-minute
-	// engine default, so the wait-timeout timer wins and this scenario
-	// observes the wrong (but still engine-correct) pause reason. Rather than
-	// accept either pause reason — which would stop validating the
-	// cycle-limit path at all (the #1319 anti-pattern) — fail loudly with a
-	// diagnostic if the bed isn't configured with enough headroom.
-	ciWaitTimeout := readEnvFileCIWaitTimeout(t, env)
-	minSafe := minSafeCIWaitTimeoutMinutes(maxCycles)
-	if ciWaitTimeout < minSafe {
-		t.Skipf("FABRIK_CI_WAIT_TIMEOUT=%d in test bed .env is too low for FABRIK_MAX_CI_FIX_CYCLES=%d — "+
-			"the fixed CI-wait-timeout timer would likely win the race before the cycle limit is reached, "+
-			"producing a false negative for this scenario. Need FABRIK_CI_WAIT_TIMEOUT >= %d "+
-			"(observedWorstCaseMinutesPerCIFixCycle=%d * maxCycles + cycleLimitTimerHeadroomMinutes=%d). "+
-			"Set FABRIK_CI_WAIT_TIMEOUT=%d in the test bed .env and restart Fabrik — see "+
-			"\"Additional prerequisites for TestCIFixReinvoke and TestCIFixReinvokeCycleLimit\" in tests/e2e/README.md.",
-			ciWaitTimeout, maxCycles, minSafe, observedWorstCaseMinutesPerCIFixCycle, cycleLimitTimerHeadroomMinutes, minSafe)
-	}
-	t.Logf("FABRIK_CI_WAIT_TIMEOUT=%d >= minSafeCIWaitTimeoutMinutes(%d)=%d — timers are coordinated, cycle-limit path should win",
-		ciWaitTimeout, maxCycles, minSafe)
-
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e ci-fix-cycle-limit (%s)", stamp)
 
@@ -280,6 +282,17 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
 	SetIssueStatus(t, env, itemID, "Specify")
 	t.Logf("filed %s#%d", env.RepoAlpha, num)
+
+	// Wait for Implement to complete, then capture baseline commit count —
+	// mirrors TestCIFixReinvoke's pattern, needed here for the non-vacuous
+	// commit-count check below.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Implement:complete", 60*time.Minute)
+	prNumber := LinkedPRNumber(t, env, env.RepoAlpha, num)
+	baseCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
+	t.Logf("PR #%d has %d commits at baseline (before Validate)", prNumber, baseCommits)
+
+	// Guard: the agent must NOT have modified the CI workflow.
+	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
 
 	// CI gate fires, then engine exhausts reinvoke cycles and pauses.
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 90*time.Minute)
@@ -321,15 +334,38 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 		if hasEngineCIWaitTimeoutComment(lastBodies) {
 			t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes — instead the engine posted a CI "+
 				"wait-timeout pause comment. This means the fixed CI-wait-timeout timer won the race against the "+
-				"cycle-limit path (handarbeit/fabrik#1320) despite the bed-config guard above — the bed's "+
-				"FABRIK_CI_WAIT_TIMEOUT may be misconfigured, or fix cycles are taking longer than the documented "+
-				"worst case. This is a test timer-coordination problem, not necessarily an engine regression.",
-				env.RepoAlpha, num)
+				"cycle-limit path — the bed's FABRIK_CI_WAIT_TIMEOUT may be misconfigured too low relative to how "+
+				"long %d genuine CI-fix cycles actually take, or fix cycles are taking longer than expected. This "+
+				"is a test timer-coordination problem, not necessarily an engine regression.",
+				env.RepoAlpha, num, maxCycles)
 		}
 		t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes, and no CI wait-timeout comment either — "+
 			"the engine may not have paused at all", env.RepoAlpha, num)
 	}
 	t.Logf("cycle limit comment confirmed on %s#%d — CI-fix cycle limit regression guard passed", env.RepoAlpha, num)
+
+	// Non-vacuous check (#1323): the cycle-limit path must have been reached
+	// via genuine repeated dispatch, not a single no-op latch. Each CI-fix
+	// reinvoke that actually dispatched pushed exactly one scratch-file
+	// commit (see ciFixCycleLimitBody), so the PR must have gained at least
+	// maxCycles commits beyond baseline.
+	finalCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
+	if finalCommits < baseCommits+maxCycles {
+		t.Fatalf("cycle-limit path was not genuinely exercised on PR #%d: expected at least %d commits "+
+			"(baseCommits=%d + maxCycles=%d), got %d — this is consistent with the #958 leg 2 no-op guard "+
+			"latching after a single reinvoke rather than the engine dispatching %d genuine CI-fix cycles "+
+			"(handarbeit/fabrik#1323)", prNumber, baseCommits+maxCycles, baseCommits, maxCycles, finalCommits, maxCycles)
+	}
+	t.Logf("commit count guard passed: %d commits (base=%d + >=%d CI-fix cycles) — cycle-limit path genuinely exercised",
+		finalCommits, baseCommits, maxCycles)
+
+	// Re-check the workflow guard now that the CI-fix reinvoke commits exist.
+	// The pre-Validate check above only covers the initial Implement commit;
+	// this fixture's whole point is to force genuine repeated dispatch, so
+	// the commits actually at risk of violating the "never touch .github/"
+	// hard constraint are the ones produced during the cycle-limit loop, not
+	// the baseline one.
+	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
 }
 
 // ciFixReinvokeBody is the issue body for TestCIFixReinvoke. The PR body must
@@ -396,30 +432,66 @@ commit.
 // ciFixCycleLimitBody is the issue body for TestCIFixReinvokeCycleLimit. The
 // PR body must contain "ci-fix-sentinel-unfixable" so the test-alpha CI
 // workflow runs a permanently-failing sentinel check regardless of content.
-// Claude will attempt to fix CI on each reinvoke but cannot succeed.
+//
+// The sentinel cannot be satisfied by any commit content, so this fixture's
+// job is not to fix CI — it is to guarantee a NEW commit on every single
+// CI-fix reinvoke, unconditionally, independent of whatever the agent
+// believes about fixability. The `#958 leg 2` no-op guard
+// (engine/catch_up_handlers.go) latches whenever a CI-fix reinvoke completes
+// without changing the PR's head SHA — which is exactly what the previous
+// "make your best effort" wording invited (handarbeit/fabrik#1323: the
+// no-op guard latched after the first reinvoke and the cycle-limit path was
+// structurally unreachable). Appending a line to a scratch file and pushing
+// is a mechanically verifiable action, not a judgment call, so
+// headAfter != headBefore holds every round and CIFixCycleIncremented
+// genuinely advances to MaxCiFixCycles.
 const ciFixCycleLimitBody = `## Goal
 
 End-to-end regression test for the Fabrik CI-fix cycle limit
-(handarbeit/fabrik#900). This issue is designed to exhaust MaxCiFixCycles
-by running an unfixable CI check.
+(handarbeit/fabrik#900, handarbeit/fabrik#1323). This issue is designed to
+exhaust MaxCiFixCycles by running an unfixable CI check while forcing a new
+commit on every single CI-fix reinvoke.
 
 ## The change
 
-Add exactly one new HTML comment to README.md, on its own line, immediately
-after the line containing "# fabrik-test-alpha". The comment must be:
+On the initial commit, add exactly one new HTML comment to README.md, on its
+own line, immediately after the line containing "# fabrik-test-alpha":
 
     <!-- ci-fix-cycle-limit-test -->
 
-This is the only change needed. Do NOT attempt to remove or alter the CI
-sentinel marker in the PR body — the sentinel is intentionally unfixable
-at the code level. Make your best effort on each CI-fix reinvoke, but the
-test expects the cycle limit to be reached.
+Also create a new file named exactly ` + "`.ci-fix-attempts.log`" + ` at the
+repository root, containing exactly one line:
+
+    attempt-1
+
+## MANDATORY action on EVERY CI-fix reinvoke (no exceptions)
+
+The CI sentinel check on this PR is PERMANENTLY UNFIXABLE — no code change,
+file edit, or workaround can make it pass. Do NOT attempt to diagnose or fix
+it, and do NOT decide there is "nothing to do" and skip pushing.
+
+Instead, on EVERY CI-fix reinvoke, unconditionally:
+
+1. Append exactly one new line to ` + "`.ci-fix-attempts.log`" + ` at the
+   repository root, reading ` + "`attempt-N`" + ` where N is one greater than
+   the highest attempt number already in the file (e.g. if the file's last
+   line is ` + "`attempt-1`" + `, append ` + "`attempt-2`" + `).
+2. Commit that change and push it.
+
+This applies to the first CI-fix reinvoke and every reinvoke after it, with
+no exceptions and regardless of any belief about whether the check is
+fixable — the point of this test is that it is not. A reinvoke that pushes
+no commit defeats the test.
 
 ## Hard constraints (do NOT violate)
 
 - NEVER modify any file under ` + "`.github/`" + `. The CI workflow — including the
   ci-fix-sentinel job — is immutable test infrastructure. It is intentionally
   unfixable here; editing it invalidates the test.
+- NEVER remove or alter the CI sentinel marker in the PR body.
+- On every CI-fix reinvoke, ALWAYS append to ` + "`.ci-fix-attempts.log`" + ` and
+  push, even though the check cannot be fixed. Skipping the push is the one
+  way to invalidate this test.
 
 ## CI behaviour required
 
@@ -430,5 +502,6 @@ ci-fix-sentinel-unfixable
 
 ## Scope
 
-Single file (README.md). Minimal change. No decomposition.
+README.md and ` + "`.ci-fix-attempts.log`" + ` only. Minimal change per commit. No
+decomposition.
 `
