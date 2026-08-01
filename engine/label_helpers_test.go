@@ -176,6 +176,76 @@ func TestIsTransientError_Nil(t *testing.T) {
 	}
 }
 
+// --- isTransientAPIError unit tests ---
+
+func TestIsTransientAPIError_GraphQLRateLimit(t *testing.T) {
+	err := errors.New("fetching details for item #3989: GraphQL error: API rate limit already exceeded for user ID 282098327.")
+	if !isTransientAPIError(err) {
+		t.Error("expected GraphQL rate-limit error to be transient")
+	}
+}
+
+func TestIsTransientAPIError_RESTPrimaryRateLimit(t *testing.T) {
+	err := errors.New("GitHub API returned 403: API rate limit exceeded for installation ID 123.")
+	if !isTransientAPIError(err) {
+		t.Error("expected REST primary rate-limit error to be transient")
+	}
+}
+
+func TestIsTransientAPIError_RESTSecondaryRateLimit(t *testing.T) {
+	err := errors.New("GitHub API returned 403: You have exceeded a secondary rate limit for the GitHub API")
+	if !isTransientAPIError(err) {
+		t.Error("expected REST secondary rate-limit error to be transient")
+	}
+}
+
+func TestIsTransientAPIError_AbuseDetection(t *testing.T) {
+	err := errors.New("GitHub API returned 403: You have triggered an abuse detection mechanism")
+	if !isTransientAPIError(err) {
+		t.Error("expected abuse-detection error to be transient")
+	}
+}
+
+func TestIsTransientAPIError_CaseInsensitive(t *testing.T) {
+	err := errors.New("GraphQL error: API Rate Limit Already Exceeded for user ID 1.")
+	if !isTransientAPIError(err) {
+		t.Error("expected rate-limit error to be matched case-insensitively")
+	}
+}
+
+func TestIsTransientAPIError_DelegatesToIsTransientError(t *testing.T) {
+	err := errors.New("read: connection reset by peer")
+	if !isTransientAPIError(err) {
+		t.Error("expected isTransientAPIError to delegate to isTransientError for connection reset")
+	}
+}
+
+func TestIsTransientAPIError_StructuralNodeNotFound(t *testing.T) {
+	err := fmt.Errorf("fetching details for item #25: node not found")
+	if isTransientAPIError(err) {
+		t.Error("expected node-not-found error to remain non-transient (structural)")
+	}
+}
+
+func TestIsTransientAPIError_GitHub4xx(t *testing.T) {
+	err := fmt.Errorf("GitHub API returned 422: validation failed")
+	if isTransientAPIError(err) {
+		t.Error("expected GitHub 4xx error to remain non-transient")
+	}
+}
+
+func TestIsTransientAPIError_PlainError(t *testing.T) {
+	if isTransientAPIError(errors.New("some random error")) {
+		t.Error("expected plain error to be non-transient")
+	}
+}
+
+func TestIsTransientAPIError_Nil(t *testing.T) {
+	if isTransientAPIError(nil) {
+		t.Error("expected nil to be non-transient")
+	}
+}
+
 // --- other label helper tests (unchanged) ---
 
 func TestRemoveLockLabel_NonNotFoundError_LogsWarning(t *testing.T) {
