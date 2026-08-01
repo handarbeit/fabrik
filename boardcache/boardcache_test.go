@@ -971,10 +971,17 @@ func TestFetchCheckRuns_StaleCachedFailure_RefetchesLive(t *testing.T) {
 	}
 }
 
-// TestFetchCheckRuns_CachedPending_ServedFromCache verifies the stale-cache
-// guard is specific to a FAILED classification — a cached WAIT (pending)
-// classification is still served from cache without a live refetch.
-func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
+// TestFetchCheckRuns_CachedPending_RefetchesLive is a regression test for
+// #1303: a cached PENDING classification was previously served from cache
+// indefinitely (the stale-cache guard was specific to FAILED). On a
+// webhook-less deployment (the normal case — see ADR-003) nothing ever
+// supersedes a cached PENDING snapshot with a check_run event, so this could
+// turn a transient state into a permanent, completely silent stall in
+// settlePRMergeState's CheckRunsPending branch. The cache-trust check is now
+// an allowlist (only CheckRunsReady is served from cache): a cached PENDING
+// set must force a live refetch and observe a resolved failure that
+// completed after the cache snapshot was taken.
+func TestFetchCheckRuns_CachedPending_RefetchesLive(t *testing.T) {
 	store := itemstate.NewStore(nil)
 	store.Apply(itemstate.CheckRunCompleted{
 		Repo: "owner/repo",
@@ -982,15 +989,46 @@ func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
 		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "in_progress"},
 	})
 
-	mc := &mockClient{}
+	// Live GitHub now reports the same check resolved to a failure — the
+	// check_run "completed" webhook that would normally refresh this was
+	// never delivered (no webhook forwarder on this deployment).
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{
+		{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+	}}
 	c := NewCacheImpl(mc, store, nopLog)
 
 	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
 	if err != nil {
 		t.Fatalf("FetchCheckRuns: %v", err)
 	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("expected a live refetch when the cached classification is PENDING, got %d calls", mc.fetchCheckRunsCount)
+	}
+	if len(runs) != 1 || runs[0].Conclusion != "failure" {
+		t.Errorf("expected the live (resolved) run set, got %+v", runs)
+	}
+}
+
+// TestFetchCheckRuns_CachedReady_ServedFromCache verifies the allowlist still
+// serves the one classification that is safe to trust: a cached terminal
+// success is not re-fetched on every call.
+func TestFetchCheckRuns_CachedReady_ServedFromCache(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo",
+		SHA:  "sha_ready",
+		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
+	})
+
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_ready")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
 	if mc.fetchCheckRunsCount != 0 {
-		t.Errorf("expected cached pending classification served without live refetch, got %d calls", mc.fetchCheckRunsCount)
+		t.Errorf("expected cached Ready classification served without live refetch, got %d calls", mc.fetchCheckRunsCount)
 	}
 	if len(runs) != 1 {
 		t.Errorf("expected 1 cached run, got %+v", runs)
@@ -2728,5 +2766,72 @@ func TestFetchLinkedPR_EmptyHeadSHAForcesRefetch(t *testing.T) {
 	s2 := testGetState(t, c, "owner/repo", 1)
 	if s2.LinkedPR == nil || s2.LinkedPR.HeadSHA != "fresh_sha" {
 		t.Fatalf("store after fallback: want HeadSHA=fresh_sha, got %v", s2.LinkedPR)
+	}
+}
+
+// TestFetchLinkedPR_StaleRecordForcesRefetch is a regression test for #1303:
+// FetchLinkedPR previously trusted a fully-populated Store record (non-empty
+// Title and HeadSHA) forever, with no expiry — unlike its sibling
+// mergeability calls, which always delegate to GitHub. A force-push/rebase
+// changes HeadSHA with no reliable invalidation signal elsewhere in this
+// cache's surface (check-run completion lives on the commit, not the PR, so
+// it never bumps the PR's updatedAt; a missed pull_request webhook on a
+// webhook-degraded deployment leaves nothing else to correct it). An
+// unbounded cache could therefore silently redirect every downstream
+// check-run query at an abandoned pre-rebase commit indefinitely. After the
+// fix, a record older than linkedPRCacheTTL is treated as stale and
+// refetched from GitHub even though it still looks like a valid cache hit.
+func TestFetchLinkedPR_StaleRecordForcesRefetch(t *testing.T) {
+	mc := &mockClient{
+		linkedPRResult: &gh.PRDetails{
+			Number:  99,
+			Title:   "My PR",
+			State:   "OPEN",
+			HeadSHA: "original_sha",
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate"},
+	}, "PID")
+
+	// First call populates the cache.
+	pr1, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("first FetchLinkedPR: %v", err)
+	}
+	if pr1 == nil || pr1.HeadSHA != "original_sha" {
+		t.Fatalf("first call: want HeadSHA=original_sha, got %v", pr1)
+	}
+	if mc.fetchLinkedPRCount != 1 {
+		t.Fatalf("expected 1 GitHub call, got %d", mc.fetchLinkedPRCount)
+	}
+
+	// Simulate a rebase: the PR's real head moves on, but nothing invalidates
+	// the cache (no webhook delivered on this deployment).
+	mc.linkedPRResult = &gh.PRDetails{
+		Number:  99,
+		Title:   "My PR",
+		State:   "OPEN",
+		HeadSHA: "rebased_sha",
+	}
+
+	// Age the cached fetch past the TTL.
+	c.mu.Lock()
+	c.linkedPRFetchedAt[itemKey("owner/repo", 1)] = time.Now().Add(-(linkedPRCacheTTL + time.Second))
+	c.mu.Unlock()
+
+	// A record with a normal-looking cache-hit shape (Title/HeadSHA both
+	// populated) must still be treated as stale and refetched once its TTL
+	// has elapsed.
+	pr2, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("second FetchLinkedPR: %v", err)
+	}
+	if mc.fetchLinkedPRCount != 2 {
+		t.Errorf("expected TTL expiry to force a second GitHub call, got %d", mc.fetchLinkedPRCount)
+	}
+	if pr2 == nil || pr2.HeadSHA != "rebased_sha" {
+		t.Fatalf("want fresh HeadSHA=rebased_sha after TTL expiry, got %v", pr2)
 	}
 }

@@ -147,6 +147,31 @@ func missKeyForSHA(sha string) string {
 
 const recentMissTTL = 10 * time.Minute
 
+// linkedPRCacheTTL bounds how long CacheImpl.FetchLinkedPR trusts a
+// Store-served LinkedPR record without confirming it live via GitHub.
+//
+// #1303: FetchLinkedPR previously served a fully-populated Store record
+// (Title != "" && HeadSHA != "") forever, with no expiry — unlike its sibling
+// mergeability calls (FetchPRMergeableFields, FetchPRMergeable,
+// FetchPRMergeableState, FetchCombinedStatus), which always delegate to
+// GitHub. HeadSHA changes on every force-push/rebase, but nothing in this
+// cache's invalidation surface reliably observes that: check-run completion
+// lives on the commit, not the PR, so it never bumps the PR's updatedAt; and
+// a force-push's own pull_request webhook can be missed on a webhook-less or
+// webhook-degraded deployment (no periodic reconciliation covers this SHA
+// specifically — the board Reconcile pass only runs hourly). A stale HeadSHA
+// silently redirects every downstream check-run query at an abandoned
+// pre-rebase commit indefinitely, which can source a completely silent
+// stall (see settlePRMergeState's unlogged CheckRunsPending branch).
+//
+// A short TTL, not full cache removal, is used because FetchLinkedPR is
+// called from many hot paths across the engine (reviews, PR creation, merge
+// gates, stage dispatch) every poll; bounding trust to roughly one poll cycle
+// preserves the within-poll caching benefit (multiple callers for the same
+// item in one pass still share a single fetch) while ensuring staleness
+// cannot compound across polls the way it did in the incident.
+const linkedPRCacheTTL = 45 * time.Second
+
 // parseItemKey parses "owner/repo#N" into (repo, number, true).
 // Returns ("", 0, false) on invalid input.
 func parseItemKey(key string) (repo string, number int, ok bool) {
@@ -228,6 +253,12 @@ type CacheImpl struct {
 	// Keys are "miss:owner/repo#prN" or "miss:sha:SHA".
 	recentMissCache map[string]time.Time
 
+	// linkedPRFetchedAt records, per item key ("owner/repo#N"), the wall-clock
+	// time of the last successful live FetchLinkedPR fallback fetch. FetchLinkedPR
+	// consults this to bound how long a fully-populated Store record is trusted
+	// before being treated as a miss (see linkedPRCacheTTL, #1303).
+	linkedPRFetchedAt map[string]time.Time
+
 	// localDeltaAt records the last time a webhook bumped an item.
 	// FetchProjectBoard uses max(ItemState.UpdatedAt, localDeltaAt[key]) so that
 	// webhook-driven changes are visible to itemMayNeedWork before the next Reconcile.
@@ -253,11 +284,12 @@ func NewCacheImpl(fallback ReadClient, store *itemstate.Store, logFn func(format
 		panic("boardcache.NewCacheImpl: store must not be nil")
 	}
 	return &CacheImpl{
-		localDeltaAt:    make(map[string]time.Time),
-		recentMissCache: make(map[string]time.Time),
-		store:           store,
-		fallback:        fallback,
-		logFn:           logFn,
+		localDeltaAt:      make(map[string]time.Time),
+		recentMissCache:   make(map[string]time.Time),
+		linkedPRFetchedAt: make(map[string]time.Time),
+		store:             store,
+		fallback:          fallback,
+		logFn:             logFn,
 	}
 }
 
@@ -717,16 +749,22 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 	}
 
 	if runs := c.store.CheckRunsBySHA(sha); len(runs) > 0 {
-		// Never trust a cached read that would classify as FAILED without
-		// confirming it live first: on a webhook-less deployment there is no
-		// check_run event to refresh a stale cached failure, and blindly
-		// trusting it would let a superseded/rerun check keep shadowing its
-		// own fresh rerun forever (#958 leg 3). A cached WAIT or READY
-		// classification is still served from cache.
-		if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
+		// #1303: only a terminal Ready classification is safe to serve from
+		// cache — an allowlist, not a denylist. FAILED must be re-confirmed
+		// live before being trusted (a superseded/rerun check must not keep
+		// shadowing its own fresh rerun forever, #958 leg 3). PENDING must
+		// equally be re-confirmed: "pending" is by definition a transient
+		// state expected to change, and on a webhook-less deployment (the
+		// normal case — webhooks are a latency optimization, not a
+		// correctness dependency, see ADR-003) nothing will ever supersede a
+		// cached PENDING snapshot with a check_run event. Serving it forever
+		// turned a transient state into an unbounded, completely silent
+		// stall in settlePRMergeState's CheckRunsPending branch.
+		if status, _, _ := gh.ClassifyCheckRuns(runs); status == gh.CheckRunsReady {
 			return runs, nil
+		} else {
+			c.logFn("[cache] cached check runs for sha=%s classify as %d — refetching from GitHub before trusting it\n", sha, status)
 		}
-		c.logFn("[cache] cached check runs for sha=%s classify as FAILED — refetching from GitHub before trusting it\n", sha)
 	}
 
 	c.logFn("[cache] miss: FetchCheckRuns sha=%s — fetching from GitHub\n", sha)
@@ -741,12 +779,15 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 	return runs, nil
 }
 
-// FetchLinkedPR returns cached PR details for an issue; falls back to GitHub on miss.
+// FetchLinkedPR returns cached PR details for an issue; falls back to GitHub
+// on miss or once the cached record exceeds linkedPRCacheTTL (#1303).
 func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 	fullRepo := owner + "/" + repo
+	key := itemKey(fullRepo, issueNumber)
 
 	c.mu.RLock()
 	paused := c.paused
+	fetchedAt, hasFetchedAt := c.linkedPRFetchedAt[key]
 	c.mu.RUnlock()
 
 	if paused {
@@ -768,7 +809,13 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 	// block indefinitely (empty HeadSHA → blocked, not cleared) and trigger a REST fallback
 	// on every poll until the SHA is populated. Requiring HeadSHA here ensures the cache only
 	// serves fully-populated records, keeping the REST fallback path rare.
-	if linkedPRNum != 0 && snapErr == nil {
+	//
+	// Additionally require the record to be within linkedPRCacheTTL of its last live
+	// confirmation (#1303): HeadSHA changes on force-push/rebase with no reliable signal
+	// elsewhere in this cache's invalidation surface (see linkedPRCacheTTL's doc comment),
+	// so an otherwise fully-populated record can silently go stale forever without this.
+	fresh := hasFetchedAt && time.Since(fetchedAt) < linkedPRCacheTTL
+	if linkedPRNum != 0 && snapErr == nil && fresh {
 		if lpr := snap.LinkedPR(); lpr != nil && lpr.Title != "" && lpr.HeadSHA != "" {
 			return &gh.PRDetails{
 				Number:              lpr.Number,
@@ -785,7 +832,11 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		}
 	}
 
-	c.logFn("[cache] miss: FetchLinkedPR #%d — fetching from GitHub\n", issueNumber)
+	if linkedPRNum != 0 && snapErr == nil && !fresh {
+		c.logFn("[cache] stale: FetchLinkedPR #%d — cached record older than %s — refetching from GitHub\n", issueNumber, linkedPRCacheTTL)
+	} else {
+		c.logFn("[cache] miss: FetchLinkedPR #%d — fetching from GitHub\n", issueNumber)
+	}
 	pr, err := c.fallback.FetchLinkedPR(owner, repo, issueNumber)
 	if err != nil {
 		return nil, err
@@ -813,6 +864,9 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 			SHA:         pr.HeadSHA,
 		})
 	}
+	c.mu.Lock()
+	c.linkedPRFetchedAt[key] = time.Now()
+	c.mu.Unlock()
 	return pr, nil
 }
 

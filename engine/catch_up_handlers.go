@@ -239,6 +239,12 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		)
 	}
 	if mergeBlocked {
+		// #1303: this claim previously produced no log output — combined with
+		// checkMergeabilityGate's own previously-silent PRMergeUnsettled/
+		// PRMergeQueued branches, a stuck classification could claim an item
+		// every poll with zero trace in the logs. checkCIGate is never
+		// reached while this is true.
+		e.logf(pctx.item.Number, "ci-gate", "claiming item — merge gate blocked, checkCIGate not reached (%s)\n", settle.Reason)
 		return true // mergeability not yet computed; re-evaluate on next poll
 	}
 
