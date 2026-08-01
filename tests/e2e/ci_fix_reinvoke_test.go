@@ -252,6 +252,16 @@ func hasEngineCIWaitTimeoutComment(bodies []string) bool {
 // fragility — there is no cheaper way to distinguish them than the manual
 // pauseForCIFixCycleLimit-neutralization check described above.
 //
+// Why PRCommitCount rather than an engine-observable signal (PR #1324
+// review): asserting directly on the engine's own CIFixCycleIncremented
+// application (catch_up_handlers.go) would remove the one-layer-removed gap
+// above, but the e2e harness has no mechanism to read the live bed's engine
+// process logs or internal state — only GitHub-visible signals (labels,
+// comments, commits) are observable from here. Adding one would be new
+// engine-side observability infrastructure, which is outside this issue's
+// explicit scope ("No change to engine behavior is implied by this issue").
+// PRCommitCount is the strongest non-vacuous signal available without it.
+//
 // Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
 func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	t.Parallel()
