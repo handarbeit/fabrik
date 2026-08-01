@@ -1576,6 +1576,8 @@ A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fail
 
 **Interaction with `review_authority: authoritative`.** The immediate-advance path for `expected_reviewers: []` fires regardless of `review_authority`. This is deliberate, not an oversight: authoritative mode weighs an existing review's verdict (approvals, `CHANGES_REQUESTED`) — see [Authoritative Mode](#authoritative-mode) — and that weighing only ever runs once at least one review has been submitted. When nothing is requested, nothing has been reviewed, and the stage has explicitly declared that no unrequested reviewer is coming, there is no verdict for authoritative mode to weigh; gating the advance on `review_authority` would just wait out the timeout every cycle for a review that, by the stage's own declaration, will never arrive — recreating the exact stall this feature exists to eliminate. If you need branch-protection review requirements enforced even when Fabrik expects no reviewer, configure that requirement on the repository itself (GitHub still blocks the actual merge); `expected_reviewers` and `review_authority` govern Fabrik's own wait/verdict bookkeeping, not GitHub's merge protection.
 
+**Per-issue override.** Editing stage YAML opts in every issue on that stage, repo-wide. To declare no unrequested reviewer (or a synthetic declared one, for testing) on a single issue without touching stage config, apply an `expected-reviewers:none` or `expected-reviewers:declared` label directly to the issue — it overrides the stage's configured `expected_reviewers` for that issue only. No `expected-reviewers:` label means the stage config governs, unchanged (`nil` stays `nil`). `expected-reviewers:declared` resolves to a fixed synthetic reviewer identity (`e2e-synthetic-declared-reviewer`) intended for testing/e2e use — it never posts a real review, so applying it to a production issue runs out the full re-prompt ladder before pausing. If you apply both labels to the same issue, Fabrik resolves to `declared` (the more restrictive value — it imposes waiting, unlike `none`'s immediate advance) and logs a warning; a misspelled or unrecognized value is ignored with a logged warning and falls back to the stage config — it never silently escalates to `declared`. The label only changes which reviewers are expected once the gate is active — `wait_for_reviews: true` on the stage is still required for the gate to engage at all.
+
 ---
 
 ### CI Gate and CI-Fix Workflow
@@ -2228,6 +2230,8 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
 | `review-authority:advisory` | Override the stage's configured `review_authority` to `advisory` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
 | `review-authority:authoritative` | Override the stage's configured `review_authority` to `authoritative` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
+| `expected-reviewers:none` | Override the stage's configured `expected_reviewers` to none for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](#declaring-expected-reviewers). |
+| `expected-reviewers:declared` | Override `expected_reviewers` to a fixed synthetic reviewer for this issue only; testing/e2e use — never posts a real review. Only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](#declaring-expected-reviewers). |
 | `fabrik:clear-claude-limit` | Clear an active account-wide Claude usage-limit suspension without restarting the engine. Apply to *any* open board item — it does not need to be one already carrying `fabrik:claude-limit`, since the suspension is account-wide, not per-issue. Read and consumed on the next poll: clears the suspension immediately and removes itself. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
@@ -2235,6 +2239,8 @@ Model label precedence: `model:<name>` label > stage YAML `model` field > defaul
 Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
 
 Review authority label precedence: no `review-authority:` label → stage YAML `review_authority` governs. Exactly one recognized label (`advisory` or `authoritative`) → it overrides the stage config for this issue only. Both labels present → resolves to `authoritative` (the more restrictive value) and a warning is logged. A malformed or unrecognized suffix is ignored with a logged warning and falls back to the stage config.
+
+Expected reviewers label precedence: no `expected-reviewers:` label → stage YAML `expected_reviewers` governs (`nil` stays `nil`). Exactly one recognized label (`none` or `declared`) → it overrides the stage config for this issue only. Both labels present → resolves to `declared` (the more restrictive value — it imposes waiting, unlike `none`'s immediate advance) and a warning is logged. A malformed or unrecognized suffix is ignored with a logged warning and falls back to the stage config.
 
 ### Advanced: `base:<branch>` timing
 
@@ -2374,6 +2380,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `fabrik:extend-turns` | Pre-grant 2× max turns budget for every stage while present; auto-extends to 3× when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
 | `base:<branch>` | Override base branch for this issue (e.g. `base:develop`); Fabrik forks from, rebases onto, and targets PRs at this branch |
 | `review-authority:<mode>` | Override the stage's configured `review_authority` for this issue only (`advisory`, `authoritative`); only meaningful alongside `wait_for_reviews: true` |
+| `expected-reviewers:<mode>` | Override the stage's configured `expected_reviewers` for this issue only (`none`, `declared`); only meaningful alongside `wait_for_reviews: true` |
 
 Dismiss the panel by pressing `?` again or `Esc`.
 

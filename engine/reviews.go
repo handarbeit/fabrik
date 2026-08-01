@@ -141,15 +141,16 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// reviewGateBlocksLanding does not need the equivalent guard explicitly here:
 	// its own "no PR" branch (:583-585) already returns before prNumber is ever used
 	// to fetch reviews, so it can never reach its fast-path call with prNumber == 0.
-	if !fetchFailed && prNumber > 0 && reviewGateFastAdvance(outstanding, hasReviews, stage.ExpectedReviewers) {
+	expectedReviewers := e.effectiveExpectedReviewers(item, stage)
+	if !fetchFailed && prNumber > 0 && reviewGateFastAdvance(outstanding, hasReviews, expectedReviewers) {
 		e.logf(item.Number, "awaiting-review", "expected_reviewers declared none expected and nothing was requested — advancing immediately\n")
 		e.removeAwaitingReviewLabel(owner, repo, item)
 		return false, false, false
 	}
 
 	var declaredReviewers []string
-	if stage.ExpectedReviewers != nil {
-		declaredReviewers = *stage.ExpectedReviewers
+	if expectedReviewers != nil {
+		declaredReviewers = *expectedReviewers
 	}
 	// On a fetch failure, reviews is nil — "no matching review found" would be
 	// indistinguishable from "review state unknown", so every declared
@@ -464,6 +465,103 @@ func (e *Engine) effectiveReviewAuthority(item gh.ProjectItem, stage *stages.Sta
 	return stage.ReviewAuthority
 }
 
+// expectedReviewersSyntheticName is the fixed identity the
+// "expected-reviewers:declared" per-issue override (#1304) resolves to. It is
+// a testing/e2e hook, not a general "declare a real reviewer" feature — it
+// never actually posts a review on a real PR. Applying it to a production
+// issue causes the gate to run out the full re-prompt ladder before pausing.
+// Must match tests/e2e/expected_reviewers_test.go's expectedReviewersSyntheticName
+// exactly; production code cannot import test files, so the value is
+// independently duplicated here, mirroring how "advisory"/"authoritative" are
+// already duplicated between this file and the e2e suite.
+const expectedReviewersSyntheticName = "e2e-synthetic-declared-reviewer"
+
+// expectedReviewersOverrideRank lists expected-reviewers override modes from
+// least to most restrictive. "declared" imposes strictly more waiting
+// obligation than "none"'s immediate fast-advance (reviewGateFastAdvance), so
+// it is the more restrictive mode — same "prefer to keep waiting" direction
+// reviewAuthorityRank encodes for authoritative > advisory. See #1304.
+var expectedReviewersOverrideRank = []string{"none", "declared"}
+
+// extractExpectedReviewersOverride scans item labels for
+// "expected-reviewers:<mode>" labels and returns the resolved *[]string
+// override, or nil when no valid label is found (stage config governs).
+// Mirrors extractReviewAuthorityOverride's shape (#1261): if multiple
+// recognized labels are present, it resolves to the more restrictive one
+// ("declared" wins) and logs a warning listing all found labels — the same
+// "pick deterministically, don't arbitrate" convention. A label whose suffix
+// is not exactly "none" or "declared" (typo, casing, unknown value) is
+// ignored with a logged warning — never a hard failure, never a silent
+// escalation to "declared".
+//
+// Unlike extractReviewAuthorityOverride's "" empty-string sentinel for "not
+// found" (string can't distinguish unset from a valid ""), nil is
+// unambiguous here because neither valid override value (&[]string{} or
+// &[]string{expectedReviewersSyntheticName}) is ever nil.
+func (e *Engine) extractExpectedReviewersOverride(issueNumber int, labels []string) *[]string {
+	const prefix = "expected-reviewers:"
+	found := make(map[string]bool)
+	var malformed []string
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		mode := strings.TrimPrefix(label, prefix)
+		if mode == "none" || mode == "declared" {
+			found[mode] = true
+		} else {
+			malformed = append(malformed, label)
+		}
+	}
+	if len(malformed) > 0 {
+		e.logf(issueNumber, "warn", "unrecognized expected-reviewers: label(s) %s (must be none or declared); ignoring\n",
+			strings.Join(malformed, ", "))
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	if len(found) > 1 {
+		all := make([]string, 0, len(found))
+		for m := range found {
+			all = append(all, "expected-reviewers:"+m)
+		}
+		e.logf(issueNumber, "warn", "multiple expected-reviewers: labels found (%s); using more restrictive (declared)\n", strings.Join(all, ", "))
+	}
+	// Return the more restrictive mode present.
+	for i := len(expectedReviewersOverrideRank) - 1; i >= 0; i-- {
+		mode := expectedReviewersOverrideRank[i]
+		if !found[mode] {
+			continue
+		}
+		if mode == "none" {
+			return &[]string{}
+		}
+		return &[]string{expectedReviewersSyntheticName}
+	}
+	return nil
+}
+
+// effectiveExpectedReviewers resolves the effective expected_reviewers value
+// for item, applying the per-issue "expected-reviewers:<mode>" label override
+// (#1304) on top of the stage's YAML-configured value. checkReviewGate,
+// reviewGateBlocksLanding, and pauseForReviewTimeout's message-only check all
+// consult this instead of reading stage.ExpectedReviewers directly, so the
+// two gates (and the pause message describing them) can never disagree about
+// which value is in effect for a given issue.
+//
+// Precedence: no expected-reviewers: label on the issue → stage.ExpectedReviewers
+// governs unchanged (nil stays nil — FR-5 default preserved). Exactly one
+// recognized label → it overrides the stage config for this issue only. Both
+// labels present → resolves to &[]string{expectedReviewersSyntheticName}
+// (logged warning). Malformed/unknown label → ignored (logged warning), falls
+// back to stage config.
+func (e *Engine) effectiveExpectedReviewers(item gh.ProjectItem, stage *stages.Stage) *[]string {
+	if override := e.extractExpectedReviewersOverride(item.Number, item.Labels); override != nil {
+		return override
+	}
+	return stage.ExpectedReviewers
+}
+
 // reviewGateAuthorityVerdict is the additive check `review_authority:
 // authoritative` mode applies inside the existing "outstanding == 0 &&
 // hasReviews" clearing branch of both checkReviewGate and
@@ -651,7 +749,7 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// look identical to "genuinely nothing requested or reviewed" —
 	// advancing a landing on unknown review state would be exactly the
 	// fail-open regression FR-6/FR-5 guard against.
-	if !fetchFailed && reviewGateFastAdvance(outstanding, hasReviews, stage.ExpectedReviewers) {
+	if !fetchFailed && reviewGateFastAdvance(outstanding, hasReviews, e.effectiveExpectedReviewers(item, stage)) {
 		e.logf(item.Number, "awaiting-review", "landing decision on PR #%d — expected_reviewers declared none expected and nothing was requested — proceeding immediately\n", prNumber)
 		return false
 	}
@@ -1057,9 +1155,10 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 	// declared-only reviewer).
 	var expectedReviewersLine string
 	var declaredOutstandingNames []string
-	if stage.ExpectedReviewers != nil && len(*stage.ExpectedReviewers) > 0 {
+	expectedReviewers := e.effectiveExpectedReviewers(item, stage)
+	if expectedReviewers != nil && len(*expectedReviewers) > 0 {
 		_, resolvedReviews := e.resolvedReviewData(item)
-		declared := *stage.ExpectedReviewers
+		declared := *expectedReviewers
 		declaredOutstandingNames = declaredReviewersOutstanding(declared, resolvedReviews)
 		outstanding := make(map[string]bool, len(declaredOutstandingNames))
 		for _, name := range declaredOutstandingNames {
