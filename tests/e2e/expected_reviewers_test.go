@@ -139,9 +139,9 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:bot-reprompted", phase1Wait)
 	t.Logf("fabrik:bot-reprompted appeared on %s#%d — Phase 1 re-prompt fired", env.RepoAlpha, num)
 
-	WaitForPRCommentContainingAny(t, env, env.RepoAlpha, num,
+	WaitForPRCommentContainingAny(t, env, env.RepoAlpha, prNum,
 		[]string{"@" + expectedReviewersSyntheticName}, 5*time.Minute)
-	t.Logf("Phase 1 re-prompt comment on %s#%d mentions the declared reviewer %q", env.RepoAlpha, num, expectedReviewersSyntheticName)
+	t.Logf("Phase 1 re-prompt comment on %s PR #%d mentions the declared reviewer %q", env.RepoAlpha, prNum, expectedReviewersSyntheticName)
 
 	// Phase 2: the synthetic name never actually reviews, so after a second
 	// full timeout window the engine gives up and pauses for a human,
