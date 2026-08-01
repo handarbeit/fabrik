@@ -1365,7 +1365,10 @@ func scaleTokens(n int) string {
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
 // Returns empty string when no stats are available (e.g. JSON parse fallback). Input is
 // reported as an "effective input" total (raw + cached) since prompt caching means raw
-// InputTokens alone is structurally near-zero once a conversation has any history.
+// InputTokens alone is structurally near-zero once a conversation has any history. Cache
+// reads and cache writes are broken out separately (not folded into one "cached" figure)
+// because Anthropic prices them differently per token, and collapsing them would obscure
+// that distinction from a reader trying to reason about actual spend from the footer alone.
 func formatStatsFooter(usage TokenUsage, completed bool) string {
 	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
 		usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
@@ -1379,7 +1382,14 @@ func formatStatsFooter(usage TokenUsage, completed bool) string {
 	effectiveInput := usage.InputTokens + cached
 	inputStr := scaleTokens(effectiveInput) + " input"
 	if cached > 0 {
-		inputStr = fmt.Sprintf("%s (%s raw + %s cached)", inputStr, scaleTokens(usage.InputTokens), scaleTokens(cached))
+		breakdown := scaleTokens(usage.InputTokens) + " raw"
+		if usage.CacheReadTokens > 0 {
+			breakdown += " + " + scaleTokens(usage.CacheReadTokens) + " cache-read"
+		}
+		if usage.CacheCreationTokens > 0 {
+			breakdown += " + " + scaleTokens(usage.CacheCreationTokens) + " cache-write"
+		}
+		inputStr = fmt.Sprintf("%s (%s)", inputStr, breakdown)
 	}
 	if usage.MaxTurns > 0 {
 		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %s / %s output tokens.%s",

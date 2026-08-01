@@ -91,11 +91,12 @@ func TestLogDirForItem_MultiRepo(t *testing.T) {
 
 func TestFormatStatsFooter(t *testing.T) {
 	tests := []struct {
-		name      string
-		stats     TokenUsage
-		completed bool
-		wantEmpty bool
-		wantSubs  []string
+		name        string
+		stats       TokenUsage
+		completed   bool
+		wantEmpty   bool
+		wantSubs    []string
+		wantNotSubs []string
 	}{
 		{
 			name:      "zero stats returns empty",
@@ -144,14 +145,24 @@ func TestFormatStatsFooter(t *testing.T) {
 			},
 			completed: true,
 			wantEmpty: false,
-			wantSubs:  []string{"26.0M input", "476 raw", "26.0M cached", "171k output"},
+			wantSubs:  []string{"26.0M input", "476 raw", "25.0M cache-read", "993k cache-write", "171k output"},
 		},
 		{
 			name:      "cache-only, no raw input or output",
 			stats:     TokenUsage{TurnsUsed: 5, MaxTurns: 10, CacheReadTokens: 12000},
 			completed: true,
 			wantEmpty: false,
-			wantSubs:  []string{"12k input", "0 raw", "12k cached"},
+			wantSubs:  []string{"12k input", "0 raw", "12k cache-read"},
+		},
+		{
+			name: "cache-read only omits cache-write term",
+			stats: TokenUsage{
+				TurnsUsed: 3, MaxTurns: 10,
+				InputTokens: 100, CacheReadTokens: 5000,
+			},
+			completed: true,
+			wantEmpty: false,
+			wantNotSubs: []string{"cache-write"},
 		},
 	}
 
@@ -167,6 +178,11 @@ func TestFormatStatsFooter(t *testing.T) {
 			for _, sub := range tt.wantSubs {
 				if !strings.Contains(got, sub) {
 					t.Errorf("footer %q missing %q", got, sub)
+				}
+			}
+			for _, notSub := range tt.wantNotSubs {
+				if strings.Contains(got, notSub) {
+					t.Errorf("footer %q unexpectedly contains %q", got, notSub)
 				}
 			}
 		})

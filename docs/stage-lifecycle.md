@@ -522,10 +522,10 @@ Every invocation reports token usage in two places: an operator-facing log line 
 used 41/250 turns | in: 476 | out: 171009 | cache_read: 25003551 | cache_write: 993820
 ```
 
-**Footer format** (`formatStatsFooter`, posted into the GitHub comment/PR a human reads) is k/M-scaled and leads with an "effective input" total (`InputTokens + CacheReadTokens + CacheCreationTokens`) so a reader can't mistake the raw figure for total input consumed, with a raw/cached breakdown in parentheses when cache activity is non-zero:
+**Footer format** (`formatStatsFooter`, posted into the GitHub comment/PR a human reads) is k/M-scaled and leads with an "effective input" total (`InputTokens + CacheReadTokens + CacheCreationTokens`) so a reader can't mistake the raw figure for total input consumed, with a raw/cache-read/cache-write breakdown in parentheses when cache activity is non-zero. Cache reads and cache writes are broken out separately rather than folded into one "cached" figure, since Anthropic prices them differently per token:
 
 ```
-Used 41/250 turns, 26.0M input (476 raw + 26.0M cached) / 171k output tokens.
+Used 41/250 turns, 26.0M input (476 raw + 25.0M cache-read + 993k cache-write) / 171k output tokens.
 ```
 
 **Emptiness guards.** Both formatters return an empty string — suppressing the line entirely — only when *all five* fields (`TurnsUsed`, `InputTokens`, `OutputTokens`, `CacheReadTokens`, `CacheCreationTokens`) are zero. An invocation with meaningful cache activity but zero raw input/output still reports, since caching means that combination is a real, common case rather than a signal of an empty invocation.
