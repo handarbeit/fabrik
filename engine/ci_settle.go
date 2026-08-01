@@ -87,13 +87,21 @@ const awaitingCIOrphanRetryStage = "__awaiting_ci_orphan__"
 // diagnosability reason this whole scan exists.
 func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoard, advancedItems map[string]bool) {
 	// examined counts every fabrik:awaiting-ci item this scan looked at, whether
-	// or not it reached the CI gate; gateReached counts only those that made it
-	// through to catchUpPhase1Handlers. Kept separate (PR review, pruefer): a
-	// poll where every item is retrying in the orphan-column or
-	// deep-fetch-failure branches would otherwise log "processed 0 item(s)",
-	// which reads as "nothing is happening" on exactly the kind of poll an
-	// operator diagnosing a stall (this issue's own motivating scenario) most
-	// needs visibility into.
+	// or not it reached the CI gate; gateReached counts only those for which
+	// handleMergeAndCIGates actually called checkCIGate (pctx.reachedCIGate).
+	// Kept separate (PR review, pruefer): a poll where every item is retrying in
+	// the orphan-column or deep-fetch-failure branches would otherwise log
+	// "processed 0 item(s)", which reads as "nothing is happening" on exactly
+	// the kind of poll an operator diagnosing a stall (this issue's own
+	// motivating scenario) most needs visibility into.
+	//
+	// #1303: before this fix, gateReached incremented unconditionally at the
+	// end of every loop iteration regardless of which handler in
+	// catchUpPhase1Handlers claimed the item (or whether any did) — so the log
+	// line below could report "1 reached the CI gate" for an item whose
+	// checkCIGate call never actually ran (e.g. checkMergeabilityGate claimed it
+	// first). That false signal delayed triage of the incident this issue
+	// documents. gateReached now only counts pctx.reachedCIGate == true.
 	var examined, gateReached int
 	for _, item := range board.Items {
 		if !hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:paused") || item.IsClosed {
@@ -252,7 +260,9 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			// place that reaches it for them.
 			e.runCatchUpPhase2(ctx, board, item, stage, advancedItems)
 		}
-		gateReached++
+		if pctx.reachedCIGate {
+			gateReached++
+		}
 	}
 	if examined > 0 {
 		e.logf(0, "awaiting-ci-settle", "examined %d fabrik:awaiting-ci item(s), %d reached the CI gate\n", examined, gateReached)

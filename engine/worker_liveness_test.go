@@ -408,7 +408,10 @@ func TestWorkerPIDSetNoOpWhenWorkerNil(t *testing.T) {
 }
 
 // TestDetectorSkipsPIDZeroWorker verifies that the detector skips workers whose
-// PID is 0 (not yet set by OnPIDReady), even if the heartbeat is stale.
+// PID is 0 (not yet set by OnPIDReady) and whose StartedAt is recent — the
+// normal "worker just started, on its way to onPIDReady" case. setWorker
+// always sets StartedAt to time.Now(), so this exercises that path
+// regardless of how stale the (unused, for a PID=0 worker) LastSignAt is.
 func TestDetectorSkipsPIDZeroWorker(t *testing.T) {
 	client := &mockGitHubClient{}
 	e := testEngine(t, client, &mockClaudeInvoker{})
@@ -420,13 +423,56 @@ func TestDetectorSkipsPIDZeroWorker(t *testing.T) {
 
 	e.runWorkerDetectorScan()
 
-	// Worker must remain non-nil — PID=0 means skip.
+	// Worker must remain non-nil — freshly-started, PID=0 means skip.
 	if w := getWorker(t, e, 10); w == nil {
 		t.Error("detector incorrectly cleared Worker with PID=0 (should skip)")
 	}
 	removed := removeLabelsCalled(client, 10)
 	if len(removed) > 0 {
 		t.Errorf("detector removed labels for PID=0 worker: %v", removed)
+	}
+}
+
+// TestDetectorClearsPIDNeverSetAfterStartedAtTimeout is the #1303 regression:
+// a dispatch goroutine that hangs BEFORE onPIDReady fires (e.g. stuck in
+// ensureRepoReady) never records a PID, so isWorkerStale's signal-0 check can
+// never run for it — before this fix, runWorkerDetectorScan's unconditional
+// "PID <= 0 → skip" branch let such a marker (and the fabrik:locked:<user> /
+// stage:<name>:in_progress labels it gates) outlive the hung goroutine
+// indefinitely, permanently suppressing dispatch for the item. Once
+// w.StartedAt exceeds workerStaleTimeout, the detector must now clear the
+// marker via the same cleanupStaleWorker path, distinctly logged as a
+// timeout-based (not confirmed-dead) clear.
+func TestDetectorClearsPIDNeverSetAfterStartedAtTimeout(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 11, []string{"fabrik:locked:testuser", "stage:Implement:in_progress"})
+	staleStart := time.Now().Add(-10 * time.Minute) // older than the 5-minute default workerStaleTimeout
+	e.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       "owner/repo",
+		Number:     11,
+		User:       e.cfg.User,
+		AcquiredAt: staleStart,
+		Worker: &itemstate.WorkerHandle{
+			PID:        0, // never reached onPIDReady
+			StageName:  "Implement",
+			StartedAt:  staleStart,
+			LastSignAt: staleStart,
+		},
+	})
+
+	e.runWorkerDetectorScan()
+
+	if w := getWorker(t, e, 11); w != nil {
+		t.Errorf("expected Worker == nil after StartedAt-timeout cleanup, got PID=%d", w.PID)
+	}
+	removed := removeLabelsCalled(client, 11)
+	if !hasRemovedLabel(removed, "fabrik:locked:testuser") {
+		t.Errorf("expected lock label to be removed; got: %v", removed)
+	}
+	if !hasRemovedLabel(removed, "stage:Implement:in_progress") {
+		t.Errorf("expected in_progress label to be removed; got: %v", removed)
 	}
 }
 

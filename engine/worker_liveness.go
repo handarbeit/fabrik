@@ -100,7 +100,25 @@ func (e *Engine) runWorkerDetectorScan() {
 			continue
 		}
 		if w.PID <= 0 {
-			// PID not yet set (or invalid) — worker just started; skip this cycle.
+			// PID not yet set (or invalid). Normally this is just a freshly-entered
+			// worker still on its way to onPIDReady — skip this cycle and let it
+			// arrive. #1303: but if the dispatch goroutine hangs BEFORE onPIDReady
+			// fires (e.g. stuck in ensureRepoReady, before processComments starts the
+			// child process), no PID is ever recorded — isWorkerStale's signal-0
+			// liveness check can never run for it, so an unconditional skip here would
+			// let the WorkerEntered marker (and the fabrik:locked:<user> /
+			// stage:<name>:in_progress labels it gates) outlive that goroutine
+			// indefinitely, permanently suppressing dispatch for the item. Apply the
+			// same staleness threshold against w.StartedAt instead (LastSignAt never
+			// starts ticking for a worker that never reached PID assignment, so it
+			// cannot be used here) and clear on timeout — this can't be confirmed dead
+			// via signal-0, so it is a timeout-based clear, not a confirmed-dead clear.
+			if time.Since(w.StartedAt) > threshold {
+				repo := snap.Repo()
+				number := snap.Number()
+				e.logf(number, "worker-liveness", "worker never reached PID assignment (started %v ago) — clearing, could not verify liveness\n", time.Since(w.StartedAt).Round(time.Second))
+				e.cleanupStaleWorker(repo, number, lockLabel, w.StageName)
+			}
 			continue
 		}
 		if time.Since(w.LastSignAt) <= threshold {

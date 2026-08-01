@@ -11,6 +11,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // testEngineForMergeWithRealWM is like testEngineForMerge but registers a real
@@ -287,6 +288,64 @@ func TestCheckMergeabilityGate_PRMergeQueued_BlocksNoChurn(t *testing.T) {
 	}
 	if len(client.removeLabelCalls) != 0 {
 		t.Errorf("PRMergeQueued must not remove any label (no churn), got %d remove(s)", len(client.removeLabelCalls))
+	}
+}
+
+// TestCheckMergeabilityGate_PRMergeUnsettled_LogsClaim is a #1303 regression:
+// checkMergeabilityGate's PRMergeUnsettled branch used to claim the item
+// (blocked=true) with no log line at all — a stuck classification (e.g. a
+// stale-cached CheckRunsPending read) could then stall an item silently for
+// over an hour with nothing in the logs to point at. This asserts the claim
+// now logs under the "merge-gate" tag, naming both the branch and settle's
+// own reason string.
+func TestCheckMergeabilityGate_PRMergeUnsettled_LogsClaim(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	events := make(chan tui.Event, 16)
+	eng.events = events
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable=null (GitHub computing)"}
+
+	eng.checkMergeabilityGate(item, stage, settle)
+
+	close(events)
+	var found bool
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "merge-gate" && strings.Contains(le.Message, "PRMergeUnsettled") && strings.Contains(le.Message, settle.Reason) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a merge-gate log line naming PRMergeUnsettled and the settle reason on claim")
+	}
+}
+
+// TestCheckMergeabilityGate_PRMergeQueued_LogsClaim mirrors
+// TestCheckMergeabilityGate_PRMergeUnsettled_LogsClaim for the PRMergeQueued
+// branch — the other previously-silent claim path in this switch.
+func TestCheckMergeabilityGate_PRMergeQueued_LogsClaim(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	events := make(chan tui.Event, 16)
+	eng.events = events
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeQueued, Reason: "PR in merge queue", PR: &gh.PRDetails{Number: 42}}
+
+	eng.checkMergeabilityGate(item, stage, settle)
+
+	close(events)
+	var found bool
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "merge-gate" && strings.Contains(le.Message, "merge queue") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a merge-gate log line naming the merge-queue claim reason")
 	}
 }
 

@@ -2,12 +2,14 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // TestCatchUpPhase1HandlersOrder asserts the handler precedence order by name.
@@ -956,6 +958,57 @@ func TestHandleMergeAndCIGates_CITerminated_Claims(t *testing.T) {
 	}
 	if !hasPaused {
 		t.Errorf("expected fabrik:paused to be added for closed-not-merged PR; labels added: %v", labelNames)
+	}
+}
+
+// TestHandleMergeAndCIGates_MergeBlocked_LogsClaim is a #1303 regression:
+// handleMergeAndCIGates's `if mergeBlocked { return true }` branch used to
+// claim the item with no log line at all. Combined with
+// checkMergeabilityGate's own previously-silent PRMergeUnsettled/PRMergeQueued
+// branches, a stuck classification could claim an item every poll with zero
+// trace in the logs — exactly the shape that left this issue's field incident
+// undiagnosable for over an hour. This asserts the claim now logs under the
+// "ci-gate" tag, naming checkCIGate as unreached.
+func TestHandleMergeAndCIGates_MergeBlocked_LogsClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "deadbeef", State: "open", Merged: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			// mergeable=nil ("GitHub still computing") pins settle to PRMergeUnsettled,
+			// so checkMergeabilityGate claims (mergeBlocked=true) and checkCIGate is
+			// never reached.
+			return nil, "", nil
+		},
+	}
+	waitTrue := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	events := make(chan tui.Event, 16)
+	eng.events = events
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	pctx := makeMergeGatePctx(board, make(map[string]bool))
+
+	if got := eng.handleMergeAndCIGates(pctx); !got {
+		t.Error("handleMergeAndCIGates: expected true (item claimed) on merge-gate block, got false")
+	}
+	if pctx.reachedCIGate {
+		t.Error("expected reachedCIGate to stay false — checkCIGate must not run when the merge gate claims first")
+	}
+
+	close(events)
+	var found bool
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "ci-gate" && strings.Contains(le.Message, "merge gate blocked") && strings.Contains(le.Message, "checkCIGate not reached") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a ci-gate log line naming the merge-gate-blocked claim and that checkCIGate was not reached")
 	}
 }
 

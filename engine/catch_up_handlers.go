@@ -23,6 +23,14 @@ type phase1Ctx struct {
 	// in poll.go before ItemDeepFetched overwrites the store. checkAutoMergeConvergence
 	// uses it to detect the poll-native "left the queue" edge (ADR-058 D4 OQ-3).
 	priorInQueue bool
+	// reachedCIGate is set true by handleMergeAndCIGates immediately before it
+	// calls checkCIGate — the one call site that matters. #1303: settleAwaitingCIScan's
+	// gateReached counter previously incremented unconditionally at the end of every
+	// loop iteration regardless of which handler claimed the item (or whether any
+	// did), so its log line ("N reached the CI gate") reported a count that did not
+	// match what it claimed to measure. Reading this field after the handler loop
+	// instead makes the count accurate.
+	reachedCIGate bool
 }
 
 // catchUpHandler is a named Phase 1 gate/recovery handler. The name field lets
@@ -251,6 +259,7 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 	// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 	// Runs in Phase 1 (unconditional) so CI failures are fixed regardless of
 	// auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut, terminated).
+	pctx.reachedCIGate = true
 	ciBlocked, ciFailure, ciTimedOut, ciTerminated := e.checkCIGate(pctx.board, pctx.item, pctx.stage, settle)
 	if ciTerminated {
 		// checkCIGate already paused the item directly (e.g. PR closed without
