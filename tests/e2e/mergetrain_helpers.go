@@ -85,6 +85,25 @@ func defaultBranchSHA(t *testing.T, env *Env, repo, baseBranch string) string {
 // conflict-resolution scenarios.
 func CreateMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle string, issueNum int) int {
 	t.Helper()
+	return createMemberPR(t, env, repo, baseBranch, branch, path, content, issueTitle, issueNum, false)
+}
+
+// CreateMemberPRDraft is CreateMemberPR, but opens the PR as a draft. The bed's
+// claude-review.yml review workflow guards its job with
+// `if: github.event.pull_request.draft == false` and only triggers on
+// opened/ready_for_review — a draft PR that is never marked ready is therefore
+// permanently invisible to it. Scenarios whose property under test is "nothing
+// has reviewed this PR yet" (e.g. expected_reviewers's declared-but-unrequested
+// and undeclared-nothing-requested cases) use this instead of CreateMemberPR to
+// avoid racing that bot's incidental review against the engine's first gate
+// evaluation (see #1312).
+func CreateMemberPRDraft(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle string, issueNum int) int {
+	t.Helper()
+	return createMemberPR(t, env, repo, baseBranch, branch, path, content, issueTitle, issueNum, true)
+}
+
+func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle string, issueNum int, draft bool) int {
+	t.Helper()
 	baseSHA := defaultBranchSHA(t, env, repo, baseBranch)
 
 	// Create the branch ref off the base head.
@@ -111,9 +130,13 @@ func CreateMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 
 	// Open the PR with the Closes #N linkage.
 	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n", issueNum)
-	out, err := ghOutput(env, "pr", "create", "-R", repo,
+	args := []string{"pr", "create", "-R", repo,
 		"--base", baseBranch, "--head", branch,
-		"--title", issueTitle, "--body", body)
+		"--title", issueTitle, "--body", body}
+	if draft {
+		args = append(args, "--draft")
+	}
+	out, err := ghOutput(env, args...)
 	if err != nil {
 		t.Fatalf("create member PR for #%d on %s: %v\n%s", issueNum, repo, err, out)
 	}
@@ -121,7 +144,7 @@ func CreateMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 	if prNum == 0 {
 		t.Fatalf("could not parse member PR number from %q", out)
 	}
-	t.Logf("created member PR #%d (issue #%d, branch %s, path %s)", prNum, issueNum, branch, path)
+	t.Logf("created member PR #%d (issue #%d, branch %s, path %s, draft=%v)", prNum, issueNum, branch, path, draft)
 	return prNum
 }
 
