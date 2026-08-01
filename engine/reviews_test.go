@@ -214,6 +214,91 @@ func TestEffectiveReviewAuthority(t *testing.T) {
 	}
 }
 
+// --- expected-reviewers:<mode> label override (#1304) ---------------------
+
+// expectedReviewersSlice compares *[]string by nil-ness and contents, since
+// two separately-allocated slices with identical contents are not == but
+// should compare equal for these tests.
+func expectedReviewersSlice(got *[]string, want *[]string) bool {
+	if (got == nil) != (want == nil) {
+		return false
+	}
+	if got == nil {
+		return true
+	}
+	if len(*got) != len(*want) {
+		return false
+	}
+	for i := range *got {
+		if (*got)[i] != (*want)[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestExtractExpectedReviewersOverride(t *testing.T) {
+	eng := reviewTestEngine(t, &mockGitHubClient{})
+	declared := &[]string{expectedReviewersSyntheticName}
+	none := &[]string{}
+	tests := []struct {
+		name   string
+		labels []string
+		want   *[]string
+	}{
+		{"no labels", nil, nil},
+		{"no expected-reviewers label", []string{"stage:Plan:complete", "fabrik:locked"}, nil},
+		{"single none", []string{"expected-reviewers:none"}, none},
+		{"single declared", []string{"expected-reviewers:declared"}, declared},
+		{"label among others", []string{"stage:Plan", "expected-reviewers:declared", "fabrik:locked"}, declared},
+		{"both present resolves to declared", []string{"expected-reviewers:none", "expected-reviewers:declared"}, declared},
+		{"malformed suffix ignored", []string{"expected-reviewers:Declared"}, nil},
+		{"unknown suffix ignored", []string{"expected-reviewers:foo"}, nil},
+		{"empty suffix ignored", []string{"expected-reviewers:"}, nil},
+		{"malformed alongside valid label falls back to valid", []string{"expected-reviewers:foo", "expected-reviewers:none"}, none},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eng.extractExpectedReviewersOverride(0, tc.labels)
+			if !expectedReviewersSlice(got, tc.want) {
+				t.Errorf("extractExpectedReviewersOverride(%v) = %v, want %v", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveExpectedReviewers(t *testing.T) {
+	eng := reviewTestEngine(t, &mockGitHubClient{})
+	declared := &[]string{expectedReviewersSyntheticName}
+	none := &[]string{}
+	stageDeclared := &[]string{"pruefer-bot"}
+	tests := []struct {
+		name       string
+		labels     []string
+		stageValue *[]string
+		want       *[]string
+	}{
+		{"no label, stage nil → nil (FR-5 default preserved)", nil, nil, nil},
+		{"no label, stage declared → stage value unchanged", nil, stageDeclared, stageDeclared},
+		{"label none, stage nil → none", []string{"expected-reviewers:none"}, nil, none},
+		{"label declared, stage nil → synthetic name", []string{"expected-reviewers:declared"}, nil, declared},
+		{"label none, stage declared → label wins (none)", []string{"expected-reviewers:none"}, stageDeclared, none},
+		{"both labels, stage nil → declared wins", []string{"expected-reviewers:none", "expected-reviewers:declared"}, nil, declared},
+		{"malformed label, stage declared → falls back to stage config", []string{"expected-reviewers:bogus"}, stageDeclared, stageDeclared},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			item := gh.ProjectItem{Number: 10, Labels: tc.labels}
+			stage := &stages.Stage{Name: "Implement", ExpectedReviewers: tc.stageValue}
+			got := eng.effectiveExpectedReviewers(item, stage)
+			if !expectedReviewersSlice(got, tc.want) {
+				t.Errorf("effectiveExpectedReviewers(labels=%v, stage.ExpectedReviewers=%v) = %v, want %v",
+					tc.labels, tc.stageValue, got, tc.want)
+			}
+		})
+	}
+}
+
 // review-authority:authoritative label on a stage whose YAML is advisory
 // (unset) must produce authoritative behavior at checkReviewGate — the
 // advance gate.
