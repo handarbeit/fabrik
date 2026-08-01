@@ -347,6 +347,56 @@ func TestSettleAwaitingCIScan_DeepFetchFailure_Escalates(t *testing.T) {
 	}
 }
 
+// TestSettleAwaitingCIScan_RateLimitFailure_DoesNotEscalate is the #1313
+// regression: a FetchItemDetails failure whose error text is a GraphQL/REST
+// rate-limit or secondary-rate-limit exhaustion message must never consume the
+// shared __awaiting_ci_orphan__ escalation counter, however many consecutive
+// settle passes are affected — the item is simply deferred to a future poll.
+// Runs well past MaxRetries and asserts no pause, no escalation comment, and
+// fabrik:awaiting-ci remains present throughout.
+func TestSettleAwaitingCIScan_RateLimitFailure_DoesNotEscalate(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("fetching details for item #25: GraphQL error: API rate limit already exceeded for user ID 282098327.")
+		},
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxRetries = 3
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 25,
+				Repo:   "owner/repo",
+				Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	for i := 0; i < eng.cfg.MaxRetries*3; i++ {
+		eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("expected fabrik:paused to never be added for a rate-limited deep-fetch, however many consecutive polls fail")
+		}
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			t.Error("expected fabrik:awaiting-ci to remain present — a rate-limited fetch must not clear it via escalation")
+		}
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected no escalation comment for a rate-limited deep-fetch, got: %v", client.addCommentCalls)
+	}
+}
+
 // TestSettleAwaitingCIScan_MixedCauseRetries_EscalateAtCombinedMaxRetries
 // covers the shared-counter design decision (pruefer review): orphan-column
 // and deep-fetch-failure retries both key off the SAME

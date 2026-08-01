@@ -144,15 +144,25 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			e.logf(item.Number, "awaiting-ci-settle", "deep-fetching details from GitHub\n")
 		}
 		if err := e.readClient.FetchItemDetails(&item); err != nil {
-			e.logf(item.Number, "awaiting-ci-settle", "could not deep-fetch item details: %v — will retry next poll\n", err)
 			e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})
-			// A repeatedly failing deep-fetch is itself a "gate genuinely cannot be
-			// evaluated" case (the issue's own example is PR-linkage loss, but any
-			// persistent fetch failure — permissions, a deleted issue node, sustained
-			// API errors — has the same shape: this scan can never reach checkCIGate
-			// for the item). Route it through the same retry/escalate counter as the
-			// orphan-column case so it surfaces as a pause + comment after MaxRetries
-			// rather than retrying silently forever.
+			if isTransientAPIError(err) {
+				// #1313: a transient/global failure (rate-limit or secondary-rate-limit
+				// exhaustion, 5xx, timeout, connection reset) is not evidence this
+				// particular item is broken — it affects every item on the board
+				// simultaneously and resolves itself (rate limits reset hourly). Defer
+				// without touching the escalation counter at all, however many
+				// consecutive polls are affected, so a rate-limit episode can never
+				// mass-pause every fabrik:awaiting-ci item on the board.
+				e.logf(item.Number, "awaiting-ci-settle", "could not deep-fetch item details (transient/rate-limited — deferring without counting toward escalation): %v\n", err)
+				continue
+			}
+			// A repeatedly failing deep-fetch with a non-transient error is itself a
+			// "gate genuinely cannot be evaluated" case (e.g. PR-linkage loss,
+			// permissions, a deleted issue node) — this scan can never reach
+			// checkCIGate for the item. Route it through the same retry/escalate
+			// counter as the orphan-column case so it surfaces as a pause + comment
+			// after MaxRetries rather than retrying silently forever.
+			e.logf(item.Number, "awaiting-ci-settle", "could not deep-fetch item details (non-transient — counts toward escalation): %v\n", err)
 			e.recordAwaitingCIOrphanRetry(item)
 			continue
 		}
@@ -278,6 +288,13 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 // escalateNoWorkNeededFailure's single generic-message counter for its own
 // multiple failure causes (board-move failure vs. issue-close failure).
 // Escalates via escalateAwaitingCIOrphanFailure once e.cfg.MaxRetries is reached.
+//
+// #1313: this is called for the orphan-column case and for a non-transient
+// FetchItemDetails failure only. A transient/global failure (rate-limit
+// exhaustion, 5xx, timeout, connection reset — see isTransientAPIError) never
+// reaches this function at all: it is deferred to a future poll without
+// touching the counter, so a single rate-limit episode can never mass-pause
+// every fabrik:awaiting-ci item on the board.
 func (e *Engine) recordAwaitingCIOrphanRetry(item gh.ProjectItem) {
 	e.recordSettleRetry(item, awaitingCIOrphanRetryStage, e.escalateAwaitingCIOrphanFailure)
 }
@@ -302,7 +319,7 @@ func (e *Engine) escalateAwaitingCIOrphanFailure(item gh.ProjectItem) {
 			problem = fmt.Sprintf("sits at board column %q, which has no `wait_for_ci` stage — the CI gate cannot be evaluated here", item.Status)
 			fix = "move the issue back to the `wait_for_ci` stage it was awaiting CI for (e.g. `Validate`)"
 		} else {
-			problem = "could not be fetched from GitHub on repeated settle attempts, so its CI status could not be checked (see the engine log for the specific fetch error)"
+			problem = "could not be fetched from GitHub on repeated settle attempts due to a non-transient error (rate-limiting and other transient conditions defer automatically and never reach this point), so its CI status could not be checked (see the engine log for the specific fetch error)"
 			fix = "resolve the underlying GitHub API access issue for this repository/issue"
 		}
 		comment := fmt.Sprintf(
