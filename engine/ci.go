@@ -245,7 +245,9 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 	}
 
 	// Generic Unsettled: hadChecks/dwell/HeadSHA-empty/mergeable=nil/unknown.
-	// Block and re-evaluate on next poll.
+	// Block and re-evaluate on next poll. #1303: every other branch in this
+	// function already logs its claim; this fallback previously did not.
+	e.logf(item.Number, "ci-gate", "PR #%d mergeable_state=%q, no check_runs — CI state unsettled; blocking\n", prNum, mergeableState)
 	return true, false, false, false
 }
 

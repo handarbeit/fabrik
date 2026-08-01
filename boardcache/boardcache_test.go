@@ -31,6 +31,7 @@ type mockClient struct {
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
+	checkRunsErr       error // returned by FetchCheckRuns when non-nil
 	linkedPRResult     *gh.PRDetails
 	labelsResult       []string
 	projectBoardResult *gh.ProjectBoard
@@ -84,6 +85,9 @@ func (m *mockClient) FetchItemDetails(item *gh.ProjectItem) error {
 
 func (m *mockClient) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	m.fetchCheckRunsCount++
+	if m.checkRunsErr != nil {
+		return nil, m.checkRunsErr
+	}
 	return m.checkRunsResult, nil
 }
 
@@ -973,7 +977,12 @@ func TestFetchCheckRuns_StaleCachedFailure_RefetchesLive(t *testing.T) {
 
 // TestFetchCheckRuns_CachedPending_ServedFromCache verifies the stale-cache
 // guard is specific to a FAILED classification — a cached WAIT (pending)
-// classification is still served from cache without a live refetch.
+// classification is still served from cache without a live refetch. #1303:
+// this is deliberately unchanged — the stale-Pending hazard this documents is
+// closed for the one caller where it caused an unbounded stall
+// (settleAwaitingCIScan, via RefreshCheckRunsLive) rather than by inverting
+// this general cache-trust contract for all ~35 FetchCheckRuns/
+// settlePRMergeState call sites.
 func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
 	store := itemstate.NewStore(nil)
 	store.Apply(itemstate.CheckRunCompleted{
@@ -994,6 +1003,63 @@ func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
 	}
 	if len(runs) != 1 {
 		t.Errorf("expected 1 cached run, got %+v", runs)
+	}
+}
+
+// TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore is a regression test
+// for #1303: RefreshCheckRunsLive must unconditionally consult GitHub — even
+// when the store already holds a fully-populated (but stale) PENDING
+// classification for the sha — and must leave the store primed with the fresh
+// result so a subsequent FetchCheckRuns call for the same sha is served from
+// this fresh data rather than the stale one.
+func TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo",
+		SHA:  "sha_pending",
+		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "in_progress"},
+	})
+
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{
+		{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+	}}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	if err := c.RefreshCheckRunsLive("owner", "repo", "sha_pending"); err != nil {
+		t.Fatalf("RefreshCheckRunsLive: %v", err)
+	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("expected RefreshCheckRunsLive to bypass the cache unconditionally, got %d GitHub calls", mc.fetchCheckRunsCount)
+	}
+
+	// A subsequent FetchCheckRuns call must now be served the fresh (Failed)
+	// classification from the store, not the stale Pending one — proving the
+	// live result was actually applied, not just fetched and discarded.
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns after refresh: %v", err)
+	}
+	if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
+		t.Errorf("expected store to reflect the live Failed classification after RefreshCheckRunsLive, got status=%v runs=%+v", status, runs)
+	}
+	// FetchCheckRuns' own FAILED guard forces one more live call to confirm —
+	// that's its existing, unrelated #958-leg-3 behavior, not double-counting
+	// RefreshCheckRunsLive's own call.
+	if mc.fetchCheckRunsCount != 2 {
+		t.Errorf("expected exactly 1 additional GitHub call from FetchCheckRuns' own FAILED-reconfirm guard, got %d total calls", mc.fetchCheckRunsCount)
+	}
+}
+
+// TestRefreshCheckRunsLive_ErrorPropagates verifies a GitHub fetch failure is
+// returned to the caller (settleAwaitingCIScan treats this as non-fatal and
+// falls through to FetchCheckRuns' own cache-trust decision) rather than
+// silently swallowed.
+func TestRefreshCheckRunsLive_ErrorPropagates(t *testing.T) {
+	mc := &mockClient{checkRunsErr: fmt.Errorf("boom")}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+
+	if err := c.RefreshCheckRunsLive("owner", "repo", "sha_err"); err == nil {
+		t.Fatal("expected RefreshCheckRunsLive to propagate the fallback error")
 	}
 }
 
@@ -2728,5 +2794,72 @@ func TestFetchLinkedPR_EmptyHeadSHAForcesRefetch(t *testing.T) {
 	s2 := testGetState(t, c, "owner/repo", 1)
 	if s2.LinkedPR == nil || s2.LinkedPR.HeadSHA != "fresh_sha" {
 		t.Fatalf("store after fallback: want HeadSHA=fresh_sha, got %v", s2.LinkedPR)
+	}
+}
+
+// TestFetchLinkedPR_StaleRecordForcesRefetch is a regression test for #1303:
+// FetchLinkedPR previously trusted a fully-populated Store record (non-empty
+// Title and HeadSHA) forever, with no expiry — unlike its sibling
+// mergeability calls, which always delegate to GitHub. A force-push/rebase
+// changes HeadSHA with no reliable invalidation signal elsewhere in this
+// cache's surface (check-run completion lives on the commit, not the PR, so
+// it never bumps the PR's updatedAt; a missed pull_request webhook on a
+// webhook-degraded deployment leaves nothing else to correct it). An
+// unbounded cache could therefore silently redirect every downstream
+// check-run query at an abandoned pre-rebase commit indefinitely. After the
+// fix, a record older than linkedPRCacheTTL is treated as stale and
+// refetched from GitHub even though it still looks like a valid cache hit.
+func TestFetchLinkedPR_StaleRecordForcesRefetch(t *testing.T) {
+	mc := &mockClient{
+		linkedPRResult: &gh.PRDetails{
+			Number:  99,
+			Title:   "My PR",
+			State:   "OPEN",
+			HeadSHA: "original_sha",
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate"},
+	}, "PID")
+
+	// First call populates the cache.
+	pr1, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("first FetchLinkedPR: %v", err)
+	}
+	if pr1 == nil || pr1.HeadSHA != "original_sha" {
+		t.Fatalf("first call: want HeadSHA=original_sha, got %v", pr1)
+	}
+	if mc.fetchLinkedPRCount != 1 {
+		t.Fatalf("expected 1 GitHub call, got %d", mc.fetchLinkedPRCount)
+	}
+
+	// Simulate a rebase: the PR's real head moves on, but nothing invalidates
+	// the cache (no webhook delivered on this deployment).
+	mc.linkedPRResult = &gh.PRDetails{
+		Number:  99,
+		Title:   "My PR",
+		State:   "OPEN",
+		HeadSHA: "rebased_sha",
+	}
+
+	// Age the cached fetch past the TTL.
+	c.mu.Lock()
+	c.linkedPRFetchedAt[itemKey("owner/repo", 1)] = time.Now().Add(-(linkedPRCacheTTL + time.Second))
+	c.mu.Unlock()
+
+	// A record with a normal-looking cache-hit shape (Title/HeadSHA both
+	// populated) must still be treated as stale and refetched once its TTL
+	// has elapsed.
+	pr2, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("second FetchLinkedPR: %v", err)
+	}
+	if mc.fetchLinkedPRCount != 2 {
+		t.Errorf("expected TTL expiry to force a second GitHub call, got %d", mc.fetchLinkedPRCount)
+	}
+	if pr2 == nil || pr2.HeadSHA != "rebased_sha" {
+		t.Fatalf("want fresh HeadSHA=rebased_sha after TTL expiry, got %v", pr2)
 	}
 }

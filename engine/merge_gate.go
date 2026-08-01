@@ -38,11 +38,17 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 	case PRMergeNoPR, PRMergeTerminal:
 		return false, false
 	case PRMergeUnsettled:
+		// #1303: this claim previously produced no log output at all, which
+		// let a stuck classification (e.g. a stale-cached CheckRunsPending
+		// read) stall an item silently for over an hour with nothing in the
+		// logs to point at. Every claim on this path must name itself.
+		e.logf(item.Number, "merge-gate", "claiming item — PRMergeUnsettled (%s)\n", settle.Reason)
 		return true, false
 	case PRMergeQueued:
 		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
 		// Block like PRMergeUnsettled (no conflict, no fabrik:rebase-needed churn) so a
 		// human-enqueued non-yolo PR at a gate-checked stage simply waits for the queue.
+		e.logf(item.Number, "merge-gate", "claiming item — PR in merge queue (%s)\n", settle.Reason)
 		return true, false
 	case PRMergeBlocked:
 		// CI has failed but there is no base-branch conflict. Clear the merge

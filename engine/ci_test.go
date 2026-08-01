@@ -1244,6 +1244,46 @@ func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
 	}
 }
 
+// TestClassifyCIFromMergeableState_GenericUnsettled_LogsClaim is a #1303
+// regression: classifyCIFromMergeableState's generic "Unsettled" fallback
+// (hadChecks/dwell/HeadSHA-empty/mergeable=nil/unknown, no check_runs) used
+// to claim the item (blocked=true) with no log line — the one branch in this
+// function that didn't name itself, unlike every sibling branch. Reuses the
+// exact settle shape from TestCheckCIGate_PostPushDwell_WithinDwell_Blocks
+// (empty MergeableState, no check runs) to confirm the fallback now logs
+// under the "ci-gate" tag.
+func TestClassifyCIFromMergeableState_GenericUnsettled_LogsClaim(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	eventsCh := make(chan tui.Event, 16)
+	eng.events = eventsCh
+
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "post-push dwell active",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-fresh", State: "open"},
+	}
+
+	blocked, _, _, _ := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked {
+		t.Fatal("expected blocked=true for the generic Unsettled fallback")
+	}
+
+	close(eventsCh)
+	var found bool
+	for ev := range eventsCh {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "ci-gate" && strings.Contains(le.Message, "CI state unsettled") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a ci-gate log line naming the generic Unsettled claim")
+	}
+}
+
 // TestCheckCIGate_PostPushDwell_DwellElapsed_Clears covers SC-2:
 // mergeable_state="unknown" + check_runs=[] + hadChecks=false + dwell elapsed
 // → gate clears as "no CI configured" (existing fallthrough preserved).

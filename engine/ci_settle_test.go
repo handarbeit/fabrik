@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -568,5 +570,216 @@ func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateCommen
 	defer client.mu.Unlock()
 	if got := len(client.addCommentCalls); got != 1 {
 		t.Errorf("got %d pause comment(s) for the two-pass race window; want exactly 1 — hasCIGatePauseComment must suppress the second pass's duplicate", got)
+	}
+}
+
+// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim is
+// a regression test for #1303's requested unconditional CIWaitTimeout
+// backstop: checkCIGate's own timeout guard only fires once checkCIGate is
+// actually reached, but any silent claim earlier in the Phase 1 handler chain
+// (this test pins settle to PRMergeUnsettled on every poll via a permanently
+// nil mergeable — mirroring the confirmed incident shape, where
+// checkMergeabilityGate claims the item and checkCIGate never runs) makes
+// that inner timeout dead. settleAwaitingCIScan must pause the issue on its
+// own once fabrik:awaiting-ci exceeds CIWaitTimeout, independent of what any
+// gate would otherwise classify or claim.
+func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 43, HeadSHA: "cafebabe", State: "open", Merged: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			// mergeable=nil forever ("GitHub still computing") pins settle to
+			// PRMergeUnsettled every poll, so checkMergeabilityGate claims the
+			// item and checkCIGate is never reached — exactly the shape that
+			// left the inner CIWaitTimeout guard dead in the field incident.
+			return nil, "", nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-45 * time.Minute), nil // older than the default 30-minute CIWaitTimeout
+		},
+		addLabelToIssueFn:    func(_, _ string, _ int, _ string) error { return nil },
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 31, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	pausedLabelAdded := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedLabelAdded = true
+		}
+	}
+	if !pausedLabelAdded {
+		t.Error("expected fabrik:paused to be applied by the CIWaitTimeout backstop even though the merge gate would claim the item every poll")
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected exactly 1 pause comment, got %d", len(client.addCommentCalls))
+	}
+
+	// The handler chain must not have been reached: the CI-fix cycle counter
+	// (only incremented by checkCIGate's ciFailure branch, which requires
+	// checkCIGate to run at all) stays at zero.
+	snap, _ := eng.store.Get("owner/repo", 31)
+	if snap.CIFixCycles("Validate") != 0 {
+		t.Errorf("expected the backstop to fire ahead of the handler chain (CIFixCycles=0), got %d", snap.CIFixCycles("Validate"))
+	}
+}
+
+// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout verifies the
+// backstop added for #1303 does not fire — and does not disturb the normal
+// gate-driven path — for an item whose fabrik:awaiting-ci label was applied
+// recently (well within CIWaitTimeout).
+func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing.T) {
+	client := ciFailureSettleClient() // fetchLabelAppliedAtFn returns time.Now() — elapsed ≈ 0
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 5
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 32, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("backstop must not fire for an item well within CIWaitTimeout")
+		}
+	}
+	// The normal path (checkCIGate reached, CI failure classified) must still
+	// dispatch the CI-fix reinvoke exactly as before this change.
+	snap, _ := eng.store.Get("owner/repo", 32)
+	if snap.CIFixCycles("Validate") != 1 {
+		t.Errorf("CIFixCycles(Validate) = %d; want 1 — the normal gate-driven path must be unaffected by the new backstop", snap.CIFixCycles("Validate"))
+	}
+}
+
+// TestSettleAwaitingCIScan_StaleCachedPendingCheckRuns_EndToEnd is the full
+// end-to-end regression test for #1303's confirmed root cause, reproducing the
+// exact field incident shape through the REAL boardcache.CacheImpl (not a mock
+// ReadClient) so FetchCheckRuns' cache-trust logic genuinely executes:
+//
+//   - The store already holds a check-run snapshot for the PR's head SHA
+//     classifying as CheckRunsPending — mirroring what a dropped/absent
+//     check_run webhook leaves behind on a webhook-less deployment.
+//   - GitHub's live state (via the fallback client) has since resolved to a
+//     definitive FAILURE on that same check name (a fresh, higher-ID run).
+//   - The PR is otherwise MERGEABLE with mergeable_state=blocked (exactly the
+//     PR #3932 shape from the issue's field evidence) and carries a stale
+//     fabrik:rebase-needed label from an earlier, now-resolved conflict phase.
+//
+// Before RefreshCheckRunsLive existed, FetchCheckRuns' denylist cache-trust
+// check would keep serving the cached Pending classification forever (only a
+// would-be-FAILED classification forces a live refetch — the #958 leg 3
+// guard), so settlePRMergeState → checkMergeabilityGate would classify
+// PRMergeUnsettled and silently claim the item every poll, and checkCIGate
+// (and the CI-fix reinvoke it drives) would never run. This test asserts the
+// full chain now converges: RefreshCheckRunsLive primes the store with the
+// live FAILURE before the handler chain runs, checkMergeabilityGate reaches
+// PRMergeBlocked (clearing the stale fabrik:rebase-needed label), and
+// checkCIGate classifies the failure and dispatches a CI-fix reinvoke.
+func TestSettleAwaitingCIScan_StaleCachedPendingCheckRuns_EndToEnd(t *testing.T) {
+	const sha = "5ad0a61cfeedface5ad0a61cfeedface5ad0a61c"
+	const prNumber = 3932
+
+	var fetchCheckRunsCalls int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, HeadSHA: sha, State: "open", Merged: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, checkSHA string) ([]gh.CheckRun, error) {
+			fetchCheckRunsCalls++
+			// GitHub's genuinely live state: the same check name, resolved to a
+			// definitive failure, at a higher check-run ID than the stale cached
+			// pending run seeded into the store below.
+			return []gh.CheckRun{
+				{ID: 2, Name: "ci-fix-sentinel", Status: "completed", Conclusion: "failure"},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRHeadSHA = sha
+			item.LinkedPRNumber = prNumber
+			return nil
+		},
+		addLabelToIssueFn:      func(_, _ string, _ int, _ string) error { return nil },
+		removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 5
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// Seed the store with a stale cached PENDING classification for this exact
+	// SHA — mirrors what a dropped/absent check_run webhook leaves behind: the
+	// checks were pending when last observed, and nothing else supersedes that
+	// snapshot on a webhook-less deployment.
+	eng.store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo", SHA: sha,
+		Run: gh.CheckRun{ID: 1, Name: "ci-fix-sentinel", Status: "in_progress"},
+	})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 33, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci", "fabrik:rebase-needed"},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	if fetchCheckRunsCalls == 0 {
+		t.Fatal("expected at least one live FetchCheckRuns call (via RefreshCheckRunsLive) — the stale cached Pending snapshot must not be served indefinitely")
+	}
+
+	snap, _ := eng.store.Get("owner/repo", 33)
+	if got := snap.CIFixCycles("Validate"); got != 1 {
+		t.Errorf("CIFixCycles(Validate) = %d; want 1 — a CI-fix reinvoke must dispatch once the stale Pending cache is refreshed to the live Failure", got)
+	}
+	if !advancedItems["owner/repo#33"] {
+		t.Error("expected advancedItems[owner/repo#33] set on successful CI-fix dispatch")
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	rebaseNeededRemoved := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			rebaseNeededRemoved = true
+		}
+	}
+	if !rebaseNeededRemoved {
+		t.Error("expected the stale fabrik:rebase-needed label to be cleared once checkMergeabilityGate reaches PRMergeBlocked")
 	}
 }
