@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -31,12 +32,17 @@ func TestCrossRepoSpawn(t *testing.T) {
 	startedAt := time.Now()
 
 	// Per-run-unique token so the fixture isn't satisfied by a prior run's
-	// beta-side work (#1308). idSuffix is a legal Go exported-identifier
-	// suffix (digits only, from the punctuation-stripped stamp); sentinel is
-	// the human-readable variant used as the function's returned string.
+	// beta-side work (#1308). The stamp alone is only second-granularity, so
+	// two runs starting in the same UTC second (a manual re-run right after a
+	// failure, or racing CI shards) would collide; a random nonce is appended
+	// to rule that out. idSuffix is a legal Go exported-identifier suffix
+	// (digits only, from the punctuation-stripped token); sentinel is the
+	// human-readable variant used as the function's returned string.
 	stamp := time.Now().UTC().Format("20060102-150405")
-	idSuffix := strings.ReplaceAll(stamp, "-", "")
-	sentinel := fmt.Sprintf("e2e-cross-repo-spawn-%s", stamp)
+	nonce := fmt.Sprintf("%04d", rand.IntN(10000))
+	token := stamp + "-" + nonce
+	idSuffix := strings.ReplaceAll(token, "-", "")
+	sentinel := fmt.Sprintf("e2e-cross-repo-spawn-%s", token)
 
 	body := fmt.Sprintf(crossRepoBodyTemplate,
 		env.RepoBeta, env.RepoBeta, idSuffix, sentinel, env.RepoAlpha, idSuffix)
