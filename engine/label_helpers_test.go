@@ -213,6 +213,32 @@ func TestIsTransientAPIError_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestIsTransientAPIError_RESTStatus429 covers the pruefer PR review finding
+// on #1313: a REST rate-limit response that comes back as HTTP 429 (Too Many
+// Requests) rather than 403, with body text that doesn't match any of the
+// known rate-limit phrases, must still be recognized as transient via the
+// status-code check — not fall through to structural and risk mass-pausing
+// the board on a wording variant the phrase table doesn't happen to cover.
+func TestIsTransientAPIError_RESTStatus429(t *testing.T) {
+	err := errors.New("GitHub API returned 429: Too many requests, please retry after 60 seconds")
+	if !isTransientAPIError(err) {
+		t.Error("expected HTTP 429 response to be transient regardless of body wording")
+	}
+}
+
+// TestIsTransientAPIError_UnrelatedRateLimitMention covers the other pruefer
+// PR review finding on #1313: the bare phrase "api rate limit" was narrowed
+// to "api rate limit exceeded" / "api rate limit already exceeded" so that
+// unrelated prose merely mentioning "api rate limit" (without reporting an
+// actual exhaustion) is not misclassified as transient and silently deferred
+// forever instead of escalating.
+func TestIsTransientAPIError_UnrelatedRateLimitMention(t *testing.T) {
+	err := errors.New("GitHub API returned 403: your api rate limit allowance is documented at https://docs.github.com")
+	if isTransientAPIError(err) {
+		t.Error("expected a non-exhaustion mention of \"api rate limit\" to remain non-transient (structural)")
+	}
+}
+
 func TestIsTransientAPIError_DelegatesToIsTransientError(t *testing.T) {
 	err := errors.New("read: connection reset by peer")
 	if !isTransientAPIError(err) {

@@ -1954,19 +1954,26 @@ func isTransientError(err error) bool {
 }
 
 // rateLimitErrorPatterns are substrings observed in GitHub's own GraphQL and
-// REST error text for rate-limit/quota-exhaustion conditions: the GraphQL
-// primary rate limit ("API rate limit already exceeded for user ID ..."), the
-// REST primary rate limit ("API rate limit exceeded for ..."), and the REST
-// secondary/abuse-detection rate limit ("You have exceeded a secondary rate
-// limit..."). Matched case-insensitively against the full err.Error() string,
-// which covers both GraphQL's "GraphQL error: %s" framing and REST's
+// REST error text for rate-limit/quota-exhaustion conditions: the REST
+// primary rate limit ("API rate limit exceeded for ..."), the GraphQL primary
+// rate limit ("API rate limit already exceeded for user ID ..."), and the
+// REST secondary/abuse-detection rate limit ("You have exceeded a secondary
+// rate limit..."). Matched case-insensitively against the full err.Error()
+// string, which covers both GraphQL's "GraphQL error: %s" framing and REST's
 // "GitHub API returned %d: %s" framing without needing to parse status codes.
-// Deliberately specific multi-word phrases rather than a bare "rate limit"
-// substring — see botServiceNoticePatterns (comments.go) for this codebase's
-// prior experience with over-broad rate-limit substrings colliding with
-// unrelated prose.
+// Deliberately specific multi-word phrases rather than a bare "rate limit" or
+// "api rate limit" substring — see botServiceNoticePatterns (comments.go) for
+// this codebase's prior experience with over-broad rate-limit substrings
+// colliding with unrelated prose. "api rate limit exceeded" and "api rate
+// limit already exceeded" (rather than a shared bare "api rate limit" prefix)
+// were split out deliberately (PR review, pruefer): "api rate limit" alone
+// would also match unrelated text that merely mentions the concept (e.g. a
+// permissions error whose body quotes rate-limit documentation) without
+// actually reporting an exhaustion, silently deferring an error that should
+// have escalated.
 var rateLimitErrorPatterns = []string{
-	"api rate limit",
+	"api rate limit exceeded",
+	"api rate limit already exceeded",
 	"rate limit exceeded",
 	"secondary rate limit",
 	"abuse detection",
@@ -1989,6 +1996,15 @@ func isTransientAPIError(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
+	// GitHub's REST framing is "GitHub API returned %d: %s" (client.go) — 429
+	// (Too Many Requests) is used exclusively for rate-limiting by GitHub's
+	// API, unlike 403 (shared with permission errors), so a bare status-code
+	// match is safe here without also checking body text. Added (PR review,
+	// pruefer) because the phrase table alone would miss a future response
+	// that returns 429 with body wording that doesn't match any known phrase.
+	if strings.Contains(msg, "github api returned 429") {
+		return true
+	}
 	for _, pattern := range rateLimitErrorPatterns {
 		if strings.Contains(msg, pattern) {
 			return true
