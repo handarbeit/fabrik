@@ -1132,6 +1132,14 @@ The `Closes #N` first line links the PR to the issue so Fabrik can discover PR c
 
 **Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
 
+### How do I ask Fabrik to change something on an open PR?
+
+Leave an **inline review thread comment** on the specific line(s) you want changed — start a review on the PR, comment on the relevant diff lines, and submit it. Fabrik picks up unresolved inline thread comments and re-invokes the stage agent to address them, commit, and push.
+
+**Top-level PR review bodies are ignored.** A review submitted with only a general summary comment — no inline thread comments on specific lines — provides nothing for Fabrik to act on, even if it says things like "please also handle X." The feedback has to be attached to a line via an inline thread comment.
+
+This works **regardless of `wait_for_reviews`** — re-invocation from inline thread comments is unconditional, not gated behind that setting. See [Pending Reviewer Gate](#pending-reviewer-gate) for the full mechanism, including how this interacts with auto-advance and the `fabrik:awaiting-review` label.
+
 ### Retry and Escalation
 
 When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
@@ -1392,9 +1400,11 @@ When a child is closed — regardless of whether its PR was merged — the paren
 
 ### Pending Reviewer Gate
 
-When a stage has `wait_for_reviews: true` set, Fabrik waits for all requested PR reviewers to submit their reviews, then re-invokes the stage agent to address any submitted inline feedback. **Re-invocation is unconditional** — it fires for any issue with submitted inline review thread comments, regardless of whether auto-advance is active. Auto-advancement to the next stage after re-invocation still requires auto-advance to be active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue).
+Unresolved inline PR review thread comments re-invoke the stage agent to address them — **this happens regardless of whether `wait_for_reviews: true` is set on the stage**. What `wait_for_reviews: true` actually controls is narrower: whether Fabrik *waits* for all requested PR reviewers to submit their reviews **before advancing the issue** to the next stage. Re-invocation is a separate, unconditional mechanism triggered purely by the presence of unresolved inline feedback, whether or not the gate is enabled. Auto-advancement to the next stage after re-invocation additionally requires auto-advance to be active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue).
 
-For the authoritative spec on label lifecycle and gate transitions, see [State Machine](state-machine.md).
+**Review re-invocation vs. CI re-invocation — not the same rule.** Review re-invocation (this section) fires irrespective of `wait_for_reviews`, because `handleReviewGate` falls through to dispatching re-invocation whenever the gate is inactive rather than skipping it. CI re-invocation is different: it genuinely requires `wait_for_ci: true`, because its caller (`handleMergeAndCIGates`) guards the CI-fix dispatch on the gate's own result and has no equivalent fall-through path when the gate is off. Don't generalize this section's "unconditional" to CI re-invocation — see [CI Gate and CI-Fix Workflow](#ci-gate-and-ci-fix-workflow) below, which requires `wait_for_ci: true`.
+
+For the authoritative spec on label lifecycle and gate transitions, see [State Machine § 2.9 Review Reinvoke](state-machine.md#29-review-reinvoke).
 
 The Review and Validate stages ship with `wait_for_reviews: true` enabled by default.
 
@@ -1409,7 +1419,7 @@ wait_for_reviews: true
 ...
 ```
 
-The reviewer wait and re-invocation cycle fire unconditionally — they activate whenever `wait_for_reviews: true` and inline review feedback is present, regardless of whether auto-advance is active. If you're manually dragging cards through the board, re-invocation still happens; the issue will not advance automatically after the cycle completes — you still move the card manually.
+Re-invocation fires whenever unresolved inline review feedback is present, regardless of `wait_for_reviews` or whether auto-advance is active — enabling the gate above changes only whether Fabrik *waits* for reviewers before advancing. If you're manually dragging cards through the board, re-invocation still happens; the issue will not advance automatically after the cycle completes — you still move the card manually.
 
 #### Label Lifecycle
 
@@ -1426,7 +1436,7 @@ The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
 2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates the dual condition: the gate clears only when no requested reviewers are outstanding **and** at least one review has been submitted. Requiring at least one review (not just an empty pending list) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhook without ever appearing in the formal requested-reviewer list — if only the pending list were checked, the gate would race through while bots were still processing. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
-3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review`, and the cycle returns to Phase 2 until the gate clears again under the same dual condition — no requested reviewers outstanding **and** at least one review submitted — or, if that does not happen before the wait limit, Fabrik falls back to `fabrik:awaiting-input`. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with `wait_for_reviews: true` and submitted inline feedback, regardless of whether auto-advance is active.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review`, and the cycle returns to Phase 2 until the gate clears again under the same dual condition — no requested reviewers outstanding **and** at least one review submitted — or, if that does not happen before the wait limit, Fabrik falls back to `fabrik:awaiting-input`. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with submitted inline feedback, regardless of `wait_for_reviews` (when the gate is off, Phases 1–2 above simply never run, and Fabrik goes straight to this Phase 3 dispatch) and regardless of whether auto-advance is active.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
 
