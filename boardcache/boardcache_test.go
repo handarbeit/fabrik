@@ -31,6 +31,7 @@ type mockClient struct {
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
+	checkRunsErr       error // returned by FetchCheckRuns when non-nil
 	linkedPRResult     *gh.PRDetails
 	labelsResult       []string
 	projectBoardResult *gh.ProjectBoard
@@ -84,6 +85,9 @@ func (m *mockClient) FetchItemDetails(item *gh.ProjectItem) error {
 
 func (m *mockClient) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	m.fetchCheckRunsCount++
+	if m.checkRunsErr != nil {
+		return nil, m.checkRunsErr
+	}
 	return m.checkRunsResult, nil
 }
 
@@ -971,17 +975,15 @@ func TestFetchCheckRuns_StaleCachedFailure_RefetchesLive(t *testing.T) {
 	}
 }
 
-// TestFetchCheckRuns_CachedPending_RefetchesLive is a regression test for
-// #1303: a cached PENDING classification was previously served from cache
-// indefinitely (the stale-cache guard was specific to FAILED). On a
-// webhook-less deployment (the normal case — see ADR-003) nothing ever
-// supersedes a cached PENDING snapshot with a check_run event, so this could
-// turn a transient state into a permanent, completely silent stall in
-// settlePRMergeState's CheckRunsPending branch. The cache-trust check is now
-// an allowlist (only CheckRunsReady is served from cache): a cached PENDING
-// set must force a live refetch and observe a resolved failure that
-// completed after the cache snapshot was taken.
-func TestFetchCheckRuns_CachedPending_RefetchesLive(t *testing.T) {
+// TestFetchCheckRuns_CachedPending_ServedFromCache verifies the stale-cache
+// guard is specific to a FAILED classification — a cached WAIT (pending)
+// classification is still served from cache without a live refetch. #1303:
+// this is deliberately unchanged — the stale-Pending hazard this documents is
+// closed for the one caller where it caused an unbounded stall
+// (settleAwaitingCIScan, via RefreshCheckRunsLive) rather than by inverting
+// this general cache-trust contract for all ~35 FetchCheckRuns/
+// settlePRMergeState call sites.
+func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
 	store := itemstate.NewStore(nil)
 	store.Apply(itemstate.CheckRunCompleted{
 		Repo: "owner/repo",
@@ -989,49 +991,75 @@ func TestFetchCheckRuns_CachedPending_RefetchesLive(t *testing.T) {
 		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "in_progress"},
 	})
 
-	// Live GitHub now reports the same check resolved to a failure — the
-	// check_run "completed" webhook that would normally refresh this was
-	// never delivered (no webhook forwarder on this deployment).
-	mc := &mockClient{checkRunsResult: []gh.CheckRun{
-		{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
-	}}
+	mc := &mockClient{}
 	c := NewCacheImpl(mc, store, nopLog)
 
 	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
 	if err != nil {
 		t.Fatalf("FetchCheckRuns: %v", err)
 	}
-	if mc.fetchCheckRunsCount != 1 {
-		t.Errorf("expected a live refetch when the cached classification is PENDING, got %d calls", mc.fetchCheckRunsCount)
-	}
-	if len(runs) != 1 || runs[0].Conclusion != "failure" {
-		t.Errorf("expected the live (resolved) run set, got %+v", runs)
-	}
-}
-
-// TestFetchCheckRuns_CachedReady_ServedFromCache verifies the allowlist still
-// serves the one classification that is safe to trust: a cached terminal
-// success is not re-fetched on every call.
-func TestFetchCheckRuns_CachedReady_ServedFromCache(t *testing.T) {
-	store := itemstate.NewStore(nil)
-	store.Apply(itemstate.CheckRunCompleted{
-		Repo: "owner/repo",
-		SHA:  "sha_ready",
-		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
-	})
-
-	mc := &mockClient{}
-	c := NewCacheImpl(mc, store, nopLog)
-
-	runs, err := c.FetchCheckRuns("owner", "repo", "sha_ready")
-	if err != nil {
-		t.Fatalf("FetchCheckRuns: %v", err)
-	}
 	if mc.fetchCheckRunsCount != 0 {
-		t.Errorf("expected cached Ready classification served without live refetch, got %d calls", mc.fetchCheckRunsCount)
+		t.Errorf("expected cached pending classification served without live refetch, got %d calls", mc.fetchCheckRunsCount)
 	}
 	if len(runs) != 1 {
 		t.Errorf("expected 1 cached run, got %+v", runs)
+	}
+}
+
+// TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore is a regression test
+// for #1303: RefreshCheckRunsLive must unconditionally consult GitHub — even
+// when the store already holds a fully-populated (but stale) PENDING
+// classification for the sha — and must leave the store primed with the fresh
+// result so a subsequent FetchCheckRuns call for the same sha is served from
+// this fresh data rather than the stale one.
+func TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo",
+		SHA:  "sha_pending",
+		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "in_progress"},
+	})
+
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{
+		{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+	}}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	if err := c.RefreshCheckRunsLive("owner", "repo", "sha_pending"); err != nil {
+		t.Fatalf("RefreshCheckRunsLive: %v", err)
+	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("expected RefreshCheckRunsLive to bypass the cache unconditionally, got %d GitHub calls", mc.fetchCheckRunsCount)
+	}
+
+	// A subsequent FetchCheckRuns call must now be served the fresh (Failed)
+	// classification from the store, not the stale Pending one — proving the
+	// live result was actually applied, not just fetched and discarded.
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns after refresh: %v", err)
+	}
+	if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
+		t.Errorf("expected store to reflect the live Failed classification after RefreshCheckRunsLive, got status=%v runs=%+v", status, runs)
+	}
+	// FetchCheckRuns' own FAILED guard forces one more live call to confirm —
+	// that's its existing, unrelated #958-leg-3 behavior, not double-counting
+	// RefreshCheckRunsLive's own call.
+	if mc.fetchCheckRunsCount != 2 {
+		t.Errorf("expected exactly 1 additional GitHub call from FetchCheckRuns' own FAILED-reconfirm guard, got %d total calls", mc.fetchCheckRunsCount)
+	}
+}
+
+// TestRefreshCheckRunsLive_ErrorPropagates verifies a GitHub fetch failure is
+// returned to the caller (settleAwaitingCIScan treats this as non-fatal and
+// falls through to FetchCheckRuns' own cache-trust decision) rather than
+// silently swallowed.
+func TestRefreshCheckRunsLive_ErrorPropagates(t *testing.T) {
+	mc := &mockClient{checkRunsErr: fmt.Errorf("boom")}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+
+	if err := c.RefreshCheckRunsLive("owner", "repo", "sha_err"); err == nil {
+		t.Fatal("expected RefreshCheckRunsLive to propagate the fallback error")
 	}
 }
 

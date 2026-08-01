@@ -169,6 +169,57 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			continue
 		}
 
+		// #1303: unconditional CIWaitTimeout backstop, evaluated ahead of the
+		// Phase 1 handler chain below and independent of what any gate would
+		// classify or claim. checkCIGate's own identical CIWaitTimeout guard
+		// (classifyCIFromCheckRuns etc., ci.go) only fires once checkCIGate is
+		// actually reached — but any silent claim earlier in the chain
+		// (confirmed possible via a stale cached CheckRunsPending read, closed
+		// by RefreshCheckRunsLive below for that specific cause, but not
+		// provably the only way it can happen) makes checkCIGate unreachable,
+		// leaving that inner timeout dead. This check does not depend on the
+		// handler chain at all, so it bounds the whole class rather than just
+		// the one confirmed cause. Idempotent: pauseForCITimeout no-ops via
+		// hasCIGatePauseComment if a pause comment was already posted this
+		// poll (e.g. by the normal checkCIGate path reached for a different
+		// item), and a FetchLabelAppliedAt error or zero timestamp leaves this
+		// a no-op, falling through to the normal gate-driven path unchanged.
+		{
+			owner, repoName := itemOwnerRepo(item, e.defaultRepo())
+			if appliedAt, err := e.client.FetchLabelAppliedAt(owner, repoName, item.Number, "fabrik:awaiting-ci"); err != nil {
+				e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIWaitTimeout backstop: %v\n", err)
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())
+				e.pauseForCITimeout(board, item, stage)
+				continue
+			}
+		}
+
+		// #1303: prime the store with a genuinely fresh check-run read before
+		// the handler chain runs. FetchCheckRuns' general cache-trust contract
+		// deliberately still serves a cached PENDING classification (see its
+		// doc comment) — on a webhook-less deployment nothing else ever
+		// supersedes that snapshot, which is exactly the confirmed mechanism
+		// behind this item silently latching in checkMergeabilityGate's
+		// PRMergeUnsettled branch forever. Scoped to this one caller (the
+		// bounded fabrik:awaiting-ci item set already deep-fetched
+		// unconditionally above) rather than changing FetchCheckRuns' cache
+		// trust for its ~35 other call sites. item.LinkedPRHeadSHA here comes
+		// from the just-completed FetchItemDetails GraphQL deep-fetch
+		// (headRefOid), not any REST-cached record. Non-fatal on error — falls
+		// through to whatever FetchCheckRuns' own cache-trust check decides,
+		// matching FetchItemDetails' failure handling above.
+		if item.LinkedPRHeadSHA != "" && item.LinkedPRNumber != 0 {
+			if c := e.cache(); c != nil {
+				shaShort := item.LinkedPRHeadSHA[:min(8, len(item.LinkedPRHeadSHA))]
+				owner, repoName := itemOwnerRepo(item, e.defaultRepo())
+				e.logf(item.Number, "awaiting-ci-settle", "refreshing check runs live for sha=%s\n", shaShort)
+				if err := c.RefreshCheckRunsLive(owner, repoName, item.LinkedPRHeadSHA); err != nil {
+					e.logf(item.Number, "awaiting-ci-settle", "could not refresh check runs live for sha=%s: %v — falling back to cache\n", shaShort, err)
+				}
+			}
+		}
+
 		// The item resolved to a real wait_for_ci stage this pass — clear any
 		// orphan-retry count so a transient bounce through a stray column doesn't
 		// accumulate toward escalation.

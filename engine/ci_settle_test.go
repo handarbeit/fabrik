@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -568,5 +569,110 @@ func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateCommen
 	defer client.mu.Unlock()
 	if got := len(client.addCommentCalls); got != 1 {
 		t.Errorf("got %d pause comment(s) for the two-pass race window; want exactly 1 — hasCIGatePauseComment must suppress the second pass's duplicate", got)
+	}
+}
+
+// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim is
+// a regression test for #1303's requested unconditional CIWaitTimeout
+// backstop: checkCIGate's own timeout guard only fires once checkCIGate is
+// actually reached, but any silent claim earlier in the Phase 1 handler chain
+// (this test pins settle to PRMergeUnsettled on every poll via a permanently
+// nil mergeable — mirroring the confirmed incident shape, where
+// checkMergeabilityGate claims the item and checkCIGate never runs) makes
+// that inner timeout dead. settleAwaitingCIScan must pause the issue on its
+// own once fabrik:awaiting-ci exceeds CIWaitTimeout, independent of what any
+// gate would otherwise classify or claim.
+func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 43, HeadSHA: "cafebabe", State: "open", Merged: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			// mergeable=nil forever ("GitHub still computing") pins settle to
+			// PRMergeUnsettled every poll, so checkMergeabilityGate claims the
+			// item and checkCIGate is never reached — exactly the shape that
+			// left the inner CIWaitTimeout guard dead in the field incident.
+			return nil, "", nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-45 * time.Minute), nil // older than the default 30-minute CIWaitTimeout
+		},
+		addLabelToIssueFn:    func(_, _ string, _ int, _ string) error { return nil },
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 31, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	pausedLabelAdded := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedLabelAdded = true
+		}
+	}
+	if !pausedLabelAdded {
+		t.Error("expected fabrik:paused to be applied by the CIWaitTimeout backstop even though the merge gate would claim the item every poll")
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected exactly 1 pause comment, got %d", len(client.addCommentCalls))
+	}
+
+	// The handler chain must not have been reached: the CI-fix cycle counter
+	// (only incremented by checkCIGate's ciFailure branch, which requires
+	// checkCIGate to run at all) stays at zero.
+	snap, _ := eng.store.Get("owner/repo", 31)
+	if snap.CIFixCycles("Validate") != 0 {
+		t.Errorf("expected the backstop to fire ahead of the handler chain (CIFixCycles=0), got %d", snap.CIFixCycles("Validate"))
+	}
+}
+
+// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout verifies the
+// backstop added for #1303 does not fire — and does not disturb the normal
+// gate-driven path — for an item whose fabrik:awaiting-ci label was applied
+// recently (well within CIWaitTimeout).
+func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing.T) {
+	client := ciFailureSettleClient() // fetchLabelAppliedAtFn returns time.Now() — elapsed ≈ 0
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 5
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 32, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("backstop must not fire for an item well within CIWaitTimeout")
+		}
+	}
+	// The normal path (checkCIGate reached, CI failure classified) must still
+	// dispatch the CI-fix reinvoke exactly as before this change.
+	snap, _ := eng.store.Get("owner/repo", 32)
+	if snap.CIFixCycles("Validate") != 1 {
+		t.Errorf("CIFixCycles(Validate) = %d; want 1 — the normal gate-driven path must be unaffected by the new backstop", snap.CIFixCycles("Validate"))
 	}
 }

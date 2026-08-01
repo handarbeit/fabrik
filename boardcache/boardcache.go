@@ -749,22 +749,25 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 	}
 
 	if runs := c.store.CheckRunsBySHA(sha); len(runs) > 0 {
-		// #1303: only a terminal Ready classification is safe to serve from
-		// cache — an allowlist, not a denylist. FAILED must be re-confirmed
-		// live before being trusted (a superseded/rerun check must not keep
-		// shadowing its own fresh rerun forever, #958 leg 3). PENDING must
-		// equally be re-confirmed: "pending" is by definition a transient
-		// state expected to change, and on a webhook-less deployment (the
-		// normal case — webhooks are a latency optimization, not a
-		// correctness dependency, see ADR-003) nothing will ever supersede a
-		// cached PENDING snapshot with a check_run event. Serving it forever
-		// turned a transient state into an unbounded, completely silent
-		// stall in settlePRMergeState's CheckRunsPending branch.
-		if status, _, _ := gh.ClassifyCheckRuns(runs); status == gh.CheckRunsReady {
+		// Never trust a cached read that would classify as FAILED without
+		// confirming it live first: on a webhook-less deployment there is no
+		// check_run event to refresh a stale cached failure, and blindly
+		// trusting it would let a superseded/rerun check keep shadowing its
+		// own fresh rerun forever (#958 leg 3). A cached WAIT or READY
+		// classification is still served from cache.
+		//
+		// #1303: a cached PENDING classification has the identical staleness
+		// hazard (nothing supersedes it without a webhook either) and is not
+		// inverted to an allowlist here deliberately — see RefreshCheckRunsLive
+		// below, which closes that specific gap for the one caller
+		// (settleAwaitingCIScan) where an open-ended stale-Pending stall is
+		// possible, without changing this general cache-trust contract (and
+		// the ~35 existing settlePRMergeState/ReadClient call sites) for
+		// every other caller of FetchCheckRuns.
+		if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
 			return runs, nil
-		} else {
-			c.logFn("[cache] cached check runs for sha=%s classify as %d — refetching from GitHub before trusting it\n", sha, status)
 		}
+		c.logFn("[cache] cached check runs for sha=%s classify as FAILED — refetching from GitHub before trusting it\n", sha)
 	}
 
 	c.logFn("[cache] miss: FetchCheckRuns sha=%s — fetching from GitHub\n", sha)
@@ -777,6 +780,44 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 		c.store.Apply(itemstate.CheckRunCompleted{Repo: fullRepo, SHA: sha, Run: run})
 	}
 	return runs, nil
+}
+
+// RefreshCheckRunsLive unconditionally fetches check runs for sha from GitHub,
+// bypassing FetchCheckRuns's cache-trust check entirely, and applies the
+// result into the Store exactly as FetchCheckRuns's own miss path does — so a
+// subsequent FetchCheckRuns call for the same sha is served from this fresh
+// data.
+//
+// #1303: this exists to close a narrow but real gap in FetchCheckRuns's
+// general cache-trust contract (deliberately left unchanged — see its doc
+// comment): a cached PENDING classification is served from cache
+// indefinitely, since only a would-be-FAILED classification forces a live
+// refetch (#958 leg 3). On a webhook-less deployment nothing else ever
+// supersedes a stale cached PENDING snapshot with a check_run event, so
+// settleAwaitingCIScan (the one caller for which an open-ended stale-Pending
+// read is consequential — it can silently claim the item forever via
+// checkMergeabilityGate's PRMergeUnsettled branch) calls this once per
+// fabrik:awaiting-ci item per poll to prime the store with genuinely fresh
+// data before the Phase 1 handler chain runs, rather than trusting whatever
+// FetchCheckRuns' own cache-trust check would otherwise decide.
+func (c *CacheImpl) RefreshCheckRunsLive(owner, repo, sha string) error {
+	c.mu.RLock()
+	paused := c.paused
+	c.mu.RUnlock()
+
+	if paused {
+		return nil
+	}
+
+	fullRepo := owner + "/" + repo
+	runs, err := c.fallback.FetchCheckRuns(owner, repo, sha)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		c.store.Apply(itemstate.CheckRunCompleted{Repo: fullRepo, SHA: sha, Run: run})
+	}
+	return nil
 }
 
 // FetchLinkedPR returns cached PR details for an issue; falls back to GitHub
