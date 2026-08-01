@@ -5,6 +5,7 @@ package e2e
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -637,6 +638,29 @@ query {
 		}
 	}
 	t.Fatalf("%s#%d not blocked by %s#%d (blockedBy was: %+v)", issueRepo, issueNumber, blockerRepo, blockerNumber, nodes)
+}
+
+// FetchRepoFileContent reads a file's content from repo's default branch via
+// the GitHub Contents API and returns it decoded. Mirrors CreateMemberPR's
+// write shape (mergetrain_helpers.go) but as a read. Fails the test
+// immediately on a fetch/decode error (API or plumbing failure) — a
+// content-mismatch check is the caller's responsibility, kept separate so a
+// transient API hiccup here is never mistaken for "the expected content is
+// absent". GitHub wraps the base64 content with embedded newlines, which
+// must be stripped before decoding.
+func FetchRepoFileContent(t *testing.T, env *Env, repo, path string) string {
+	t.Helper()
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/contents/%s", repo, path),
+		"--jq", ".content")
+	if err != nil {
+		t.Fatalf("fetch %s from %s: %v\n%s", path, repo, err, out)
+	}
+	encoded := strings.ReplaceAll(strings.TrimSpace(out), "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode content of %s from %s: %v", path, repo, err)
+	}
+	return string(decoded)
 }
 
 // CloseIssue best-effort closes the named issue (used in t.Cleanup).

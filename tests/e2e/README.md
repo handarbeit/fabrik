@@ -658,7 +658,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestSmokeSingleRepoFullPipeline` | Full single-repo pipeline (Specify → … → Done with merged PR) | Both | 20–40 min | $0.50–1.50 |
 | `TestNoWorkNeeded` | `FABRIK_NO_WORK_NEEDED` short-circuit closes issue without PR | Both | 10–15 min | $0.30–0.50 |
 | `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` pause + comment-driven resume | Both | 10–15 min | $0.30–0.50 |
-| `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close) | Both | 45–60 min | $1.00–2.00 |
+| `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close); final assertion reads back a per-run-unique sentinel string from the merged beta-side file, not merely the `fabrik:children-spawned` label | Both | 45–60 min | $1.00–2.00 |
 | `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done; mode-appropriate landing contract (native auto-merge + `fabrik:auto-merge-enabled` under "off"; train close-not-merge + label never applied under "on") | Both (mode-aware) | 20–40 min | $0.50–1.50 |
 | `TestConvergenceRace` | Deterministic post-Validate auto-merge race (#829): two conflicting yolo PRs; mode-appropriate `fabrik:auto-merge-enabled` contract, both land within budget, neither ends `fabrik:paused` | Both (mode-aware) | 80–100 min | $2–4 |
 | `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | Both | 30–50 min | $0.80–2.00 |
@@ -696,7 +696,7 @@ shape, not just the single-mode total.
 | `TestSmokeSingleRepoFullPipeline` | Full pipeline regression |
 | `TestNoWorkNeeded` | #733 (marker), #742 (close-on-no-work) |
 | `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` marker, ed46b7fc (awaiting-input label clear) |
-| `TestCrossRepoSpawn` | #797 / #803 (on-demand spawn-target init), v0.0.66 spawn machinery, #800 (addBlockedBy mutation name) |
+| `TestCrossRepoSpawn` | #797 / #803 (on-demand spawn-target init), v0.0.66 spawn machinery, #800 (addBlockedBy mutation name), #1308 (per-run-unique fixture token; stronger final assertion) |
 | `TestYoloAutoMergeLabel` | #829 (GitHub native auto-merge for yolo), #831/#835/#871 (convergence regression cascade) |
 | `TestConvergenceRace` | #829 (post-Validate auto-merge race, Story 2/SC-002); regression guard for the production failure on example-org/example-repo#82 (spurious CI-fix-cycle-limit pause); #1217 (mode-aware `fabrik:auto-merge-enabled` assertion) |
 | `TestCruiseFullPipeline` | #898 (cruise/yolo gate at Validate, `engine/poll.go`); ensures cruise never triggers `checkAutoMergeConvergence` |
