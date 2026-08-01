@@ -62,6 +62,20 @@ import (
 // All scenarios only touch checkReviewGate, which has no FABRIK_MERGE_TRAIN
 // branching — they pass identically under both legs of the suite's two-mode
 // gate.
+//
+// Determinism (#1312): four scenarios below (FastAdvance,
+// DeclaredWaitsAndReprompts, UndeclaredRegressionGuard,
+// FastAdvanceComposesWithAuthoritative) seed via seedReviewGateItemDraft
+// instead of seedReviewGateItem — their properties under test ("nothing was
+// requested", "declared but unrequested") would be falsified by
+// RequestPRReviewer, so unlike the review_authority_test.go fix they can't
+// use a genuinely outstanding reviewer to make the wait deterministic.
+// Opening the member PR as a draft keeps the bed's claude-review.yml bot
+// from ever reviewing it (its job is guarded by
+// `if: github.event.pull_request.draft == false`, triggering only on
+// opened/ready_for_review), removing the incidental review entirely rather
+// than racing it. TestExpectedReviewersPrecedenceGuard needs no such
+// treatment — it already calls RequestPRReviewer before its wait.
 const (
 	expectedReviewersNoneLabel     = "expected-reviewers:none"
 	expectedReviewersDeclaredLabel = "expected-reviewers:declared"
@@ -75,13 +89,20 @@ const (
 // eliminate. Requires the follow-up engine-side label-read issue to be
 // merged; see the file-level doc comment.
 //
+// Uses seedReviewGateItemDraft (#1312): this assertion can't currently fail
+// against an incidental bot review (a race there falls through to the
+// ordinary outer clearing branch, which also never applies the label), but a
+// race would silently stop this test from exercising the FR-2 fast-advance
+// code path it's named for. The draft-PR construction is coverage integrity,
+// not a correctness fix.
+//
 // Wall-clock: ~2-5 min (a short window well under FABRIK_REVIEW_WAIT_TIMEOUT).
 func TestExpectedReviewersFastAdvance(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "expected-none-fast-advance", expectedReviewersNoneLabel)
+	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-none-fast-advance", expectedReviewersNoneLabel)
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 
 	// The gate must never apply fabrik:awaiting-review at all — a fast
@@ -112,6 +133,18 @@ func TestExpectedReviewersFastAdvance(t *testing.T) {
 // into scenario 1's test. Requires the follow-up engine-side label-read
 // issue to be merged; see the file-level doc comment.
 //
+// Uses seedReviewGateItemDraft (#1312): this scenario's entire mechanism
+// depends on nothing being reviewed until the Phase 1/2 timeouts fire, but
+// expected_reviewers is not consulted by checkReviewGate's outer clearing
+// branch — an incidental bot COMMENT review would clear the gate in advisory
+// mode before Phase 1 can ever be reached, silently preventing the
+// re-prompt ladder (this test's actual subject) from engaging at all.
+// RequestPRReviewer isn't an option here either: a genuinely outstanding
+// *requested* reviewer routes to the mixed/human pause path instead of the
+// bot ladder (reviewGateAllBots). The draft PR is never marked ready for
+// the duration of this test, so the bed's claude-review.yml never reviews
+// it and there is no incidental review to race.
+//
 // Wall-clock (worst case): ~2xFABRIK_REVIEW_WAIT_TIMEOUT + buffer — see
 // README for a recommended bed value.
 func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
@@ -121,7 +154,7 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 
 	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "expected-declared-reprompt", expectedReviewersDeclaredLabel)
+	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-declared-reprompt", expectedReviewersDeclaredLabel)
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 
 	// Contrast with TestExpectedReviewersFastAdvance: a declared-but-unmatched
@@ -216,13 +249,20 @@ func TestExpectedReviewersPrecedenceGuard(t *testing.T) {
 // empty slice. Zero dependency on the follow-up engine issue; ships green
 // in this PR alone.
 //
+// Uses seedReviewGateItemDraft (#1312): the property under test is "nothing
+// requested, nothing reviewed yet" — RequestPRReviewer would falsify that
+// premise, so it can't be used to make the wait deterministic the way the
+// TestReviewAuthority* scenarios do. A draft PR means the bed's
+// claude-review.yml bot never reviews it, so there is no incidental review
+// to race against the engine's first gate evaluation.
+//
 // Wall-clock: ~2-5 min.
 func TestExpectedReviewersUndeclaredRegressionGuard(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "expected-nil-regression")
+	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-nil-regression")
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 
 	// Undeclared (nil) must behave exactly as it did before #1283: the gate
@@ -243,13 +283,23 @@ func TestExpectedReviewersUndeclaredRegressionGuard(t *testing.T) {
 // (for expected-reviewers:none) AND #1261 (for review-authority:authoritative,
 // already merged) to be in effect; see the file-level doc comment.
 //
+// Uses seedReviewGateItemDraft (#1312): this is the opposite-direction risk
+// of the WaitForIssueLabel-precondition race — an incidental bot review
+// landing before fast-advance's own check would make hasReviews true, and in
+// authoritative mode with no branch-protection review requirement configured
+// that falls back to "satisfied unless CHANGES_REQUESTED", which a bare
+// COMMENT is not, so the gate would still apply fabrik:awaiting-review via
+// the authoritative-verdict branch rather than fast-advancing — failing this
+// bounded "must never appear" assertion in the opposite direction from a
+// timeout. A draft PR removes the incidental review entirely.
+//
 // Wall-clock: ~2-5 min.
 func TestExpectedReviewersFastAdvanceComposesWithAuthoritative(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "expected-none-authoritative",
+	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-none-authoritative",
 		expectedReviewersNoneLabel, "review-authority:authoritative")
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 

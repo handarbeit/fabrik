@@ -51,6 +51,24 @@ import (
 // All four scenarios only touch checkReviewGate, which has no
 // FABRIK_MERGE_TRAIN branching — they pass identically under both legs of
 // the suite's two-mode gate.
+//
+// Determinism (#1312): the three scenarios below that assert
+// fabrik:awaiting-review as a *precondition* before their own deliberate
+// verdict lands (BlocksAndPausesOnChangesRequested, ClearsOnApproval,
+// AdvisoryRegressionGuard) each call RequestPRReviewer right after seeding,
+// making outstanding genuinely non-empty by construction. This corrects
+// ADR-1258's original "no RequestPRReviewer call is needed" rationale — that
+// reasoning covered checkReviewGate's outer clearing condition
+// (len(outstanding)==0 && hasReviews) in isolation, but didn't account for
+// the bed's own claude-review.yml bot satisfying that same condition with an
+// incidental COMMENT review before the engine's first gate evaluation, which
+// is exactly what #1312 reports. YoloDoesNotBypassBlock's two
+// fabrik:awaiting-review waits need no such fix: both occur after this
+// test's own genuine REQUEST_CHANGES review is already submitted, and once a
+// genuine CHANGES_REQUESTED review exists, an unrelated incidental bot
+// COMMENT landing before or after it can never satisfy the outer clearing
+// condition on its own — the wait is already deterministic. See
+// adrs/1258-e2e-review-authority-coverage.md's Revision section.
 
 // TestReviewAuthorityBlocksAndPausesOnChangesRequested covers scenarios 1 and
 // 5 from issue #1258: authoritative + CHANGES_REQUESTED blocks advancement,
@@ -82,10 +100,22 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "blocks-pauses", "review-authority:authoritative")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
-	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
+	reviewerLogin := TokenLogin(t, reviewerToken)
+	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
 	}
+
+	// Request the reviewer so outstanding is genuinely non-empty by
+	// construction, before confirming the gate's pre-verdict block. Without
+	// this, the bed's claude-review.yml bot can land its own incidental
+	// COMMENT review before the engine's first gate evaluation; that alone
+	// satisfies checkReviewGate's outer len(outstanding)==0 && hasReviews
+	// clearing branch, which never applies fabrik:awaiting-review — the wait
+	// below would then time out against genuinely correct engine behavior
+	// (#1312), rather than proving the gate engaged.
+	RequestPRReviewer(t, env, env.RepoAlpha, prNum, reviewerLogin)
+	t.Logf("requested reviewer %q on %s PR #%d — outstanding is non-empty by construction, gate engagement is deterministic", reviewerLogin, env.RepoAlpha, prNum)
 
 	// Confirm the gate's trivial, pre-verdict block (hasReviews==false blocks
 	// unconditionally) before the review lands. This alone doesn't prove the
@@ -180,10 +210,23 @@ func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "clears-approval", "review-authority:authoritative")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
-	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
+	reviewerLogin := TokenLogin(t, reviewerToken)
+	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
 	}
+
+	// Request the reviewer so outstanding is genuinely non-empty by
+	// construction, before confirming the gate engages. Without this, the
+	// bed's claude-review.yml bot can land its own incidental COMMENT review
+	// before the engine's first gate evaluation and before this test's own
+	// APPROVE — that alone satisfies checkReviewGate's outer
+	// len(outstanding)==0 && hasReviews clearing branch, which never applies
+	// fabrik:awaiting-review. The wait below would then time out against
+	// genuinely correct engine behavior (#1312) instead of proving the gate
+	// engaged before the deliberate approval.
+	RequestPRReviewer(t, env, env.RepoAlpha, prNum, reviewerLogin)
+	t.Logf("requested reviewer %q on %s PR #%d — outstanding is non-empty by construction, gate engagement is deterministic", reviewerLogin, env.RepoAlpha, prNum)
 
 	// Confirm the gate genuinely engages (no review submitted yet, so
 	// checkReviewGate's outer hasReviews==false condition blocks and applies
@@ -303,10 +346,23 @@ func TestReviewAuthorityAdvisoryRegressionGuard(t *testing.T) {
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "advisory-regression")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
-	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
+	reviewerLogin := TokenLogin(t, reviewerToken)
+	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
 	}
+
+	// Request the reviewer so outstanding is genuinely non-empty by
+	// construction, before confirming the gate engages. Without this, the
+	// bed's claude-review.yml bot can land its own incidental COMMENT review
+	// before the engine's first gate evaluation and before this test's own
+	// REQUEST_CHANGES — that alone satisfies checkReviewGate's outer
+	// len(outstanding)==0 && hasReviews clearing branch, which never applies
+	// fabrik:awaiting-review. The wait below would then time out against
+	// genuinely correct engine behavior (#1312) instead of proving the gate
+	// engaged before the deliberate verdict.
+	RequestPRReviewer(t, env, env.RepoAlpha, prNum, reviewerLogin)
+	t.Logf("requested reviewer %q on %s PR #%d — outstanding is non-empty by construction, gate engagement is deterministic", reviewerLogin, env.RepoAlpha, prNum)
 
 	// Confirm the gate genuinely engages (no review submitted yet, so
 	// checkReviewGate's outer hasReviews==false condition blocks and applies

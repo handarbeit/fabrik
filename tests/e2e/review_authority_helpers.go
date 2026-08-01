@@ -33,7 +33,34 @@ import (
 // without ever invoking Claude for the gated stage — the same zero-cost
 // construction precedent as TestPausedMergedPRRecovery's R5. extraLabels are
 // applied at file time (e.g. "fabrik:yolo" for the composition scenario).
+//
+// The member PR is opened ready (non-draft), so the bed's claude-review.yml
+// bot will typically review it within ~60-100s. Scenarios that submit their
+// own deliberate verdict must not treat the bot's incidental review as proof
+// the gate engaged — see the file-level "Determinism" note below and #1312.
 func seedReviewGateItem(t *testing.T, env *Env, repo, baseBranch, column, marker string, extraLabels ...string) (issueNum, prNum int, itemID string) {
+	t.Helper()
+	return seedReviewGateItemImpl(t, env, repo, baseBranch, column, marker, false, extraLabels...)
+}
+
+// seedReviewGateItemDraft is seedReviewGateItem, but opens the member PR as a
+// draft (via CreateMemberPRDraft) so the bed's claude-review.yml bot never
+// reviews it — its job is guarded by
+// `if: github.event.pull_request.draft == false` and only triggers on
+// opened/ready_for_review. Use this when the property under test is "nothing
+// has reviewed this PR" (e.g. expected_reviewers's declared-but-unrequested
+// and undeclared-nothing-requested scenarios): with a real (non-draft) PR, an
+// incidental bot review can satisfy checkReviewGate's
+// `len(outstanding) == 0 && hasReviews` clearing branch before the scenario's
+// own assertions run, independent of any reviewer the test explicitly
+// requested or declared. Never mark the returned PR ready during such a
+// scenario, or the bot becomes eligible to review it again. See #1312.
+func seedReviewGateItemDraft(t *testing.T, env *Env, repo, baseBranch, column, marker string, extraLabels ...string) (issueNum, prNum int, itemID string) {
+	t.Helper()
+	return seedReviewGateItemImpl(t, env, repo, baseBranch, column, marker, true, extraLabels...)
+}
+
+func seedReviewGateItemImpl(t *testing.T, env *Env, repo, baseBranch, column, marker string, draft bool, extraLabels ...string) (issueNum, prNum int, itemID string) {
 	t.Helper()
 	stamp := time.Now().UTC().Format("150405.000")
 	title := fmt.Sprintf("e2e review-authority %s (%s)", marker, stamp)
@@ -44,14 +71,18 @@ func seedReviewGateItem(t *testing.T, env *Env, repo, baseBranch, column, marker
 	branch := fmt.Sprintf("fabrik/issue-%d", num)
 	path := fmt.Sprintf("e2e/review-authority/%s-%d.md", marker, num)
 	content := fmt.Sprintf("# e2e review-authority marker\n\nmarker=%s\n", marker)
-	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, path, content, title, num)
+	if draft {
+		prNum = CreateMemberPRDraft(t, env, repo, baseBranch, branch, path, content, title, num)
+	} else {
+		prNum = CreateMemberPR(t, env, repo, baseBranch, branch, path, content, title, num)
+	}
 	// Confirm the PR is resolvable by the fabrik/issue-<N> branch convention
 	// (mirrors the engine's resolver) before seeding the completion label.
 	LinkedPRNumber(t, env, repo, num)
 
 	AddLabel(t, env, repo, num, "stage:"+column+":complete")
 	SetIssueStatus(t, env, itemID, column)
-	t.Logf("seeded review-gate item: issue #%d, PR #%d, stage:%s:complete, Status=%s (marker=%s)",
-		num, prNum, column, column, marker)
+	t.Logf("seeded review-gate item: issue #%d, PR #%d, stage:%s:complete, Status=%s (marker=%s, draft=%v)",
+		num, prNum, column, column, marker, draft)
 	return num, prNum, itemID
 }

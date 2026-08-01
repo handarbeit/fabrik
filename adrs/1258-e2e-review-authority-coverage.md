@@ -118,6 +118,10 @@ reviewers come only from `reviewRequests`, never from who actually submitted. A 
 `FABRIK_MERGE_TRAIN`-sensitive code, so they run identically and unmodified in both legs of
 the suite's two-mode gate.
 
+> **Correction (2026-08-01):** this paragraph reasoned about the outer clearing condition
+> correctly but is otherwise wrong in practice — see "Revision (2026-08-01)" below. Three of
+> the four scenarios now do call `RequestPRReviewer`.
+
 **Scenario 5 (issue #1258: "verdict that never clears → pause, no infinite spin") folds into
 scenario 1's test** rather than exercising `MaxReviewCycles`/`pauseForReviewCycleLimit`.
 `dispatchReviewReinvoke`'s precheck (`len(buildReviewThreadComments(item)) > 0`) requires
@@ -172,6 +176,43 @@ on an existing one.
 `TestReviewAuthorityClearsOnApproval`, `TestReviewAuthorityYoloDoesNotBypassBlock`,
 `TestReviewAuthorityAdvisoryRegressionGuard`) run in both legs of the two-mode gate at
 negligible added GitHub API cost, since none of them touch merge-train code paths.
+
+## Revision (2026-08-01): `RequestPRReviewer` needed after all, for pre-verdict engagement proof
+
+Issue [#1312](https://github.com/handarbeit/fabrik/issues/1312) found that the "No
+`RequestPRReviewer` call is needed" rationale above, while correct about
+`checkReviewGate`'s outer clearing condition in isolation, did not account for the bed's own
+`claude-review.yml` bot. That bot reviews these trivial, markdown-only member PRs too (not
+just full Implement-stage PRs) — the same `COMMENT`-only workflow whose *verdict* this ADR's
+Context section already excluded from use, but whose mere existence as *a* submitted review
+was overlooked. A `COMMENT` review satisfies `hasReviews` exactly as well as this test's own
+deliberate `SubmitPRReview` call does, and it typically lands within ~60-100s of PR creation —
+often faster than the engine's first `checkReviewGate` evaluation under suite load (observed
+as slow as ~3.5 minutes in incident evidence). Three scenarios
+(`TestReviewAuthorityBlocksAndPausesOnChangesRequested`, `TestReviewAuthorityClearsOnApproval`,
+`TestReviewAuthorityAdvisoryRegressionGuard`) waited for `fabrik:awaiting-review` as a
+*precondition* before submitting their own deliberate verdict, intending to prove "the gate
+engaged before we reviewed it, so the later transition is genuinely observed, not a trivial
+first-look pass." When the bot's incidental review landed first, the outer clearing branch
+cleared the gate on the very first evaluation and never applied the label at all — a scenario
+timeout against **correct** engine behavior, not a defect, and not a symptom `checkReviewGate`'s
+clearing semantics need to change for (out of scope for both this ADR and #1312's fix).
+
+**Fix:** the three affected scenarios now call `RequestPRReviewer` immediately after
+`seedReviewGateItem`, reusing the `FABRIK_REVIEWER_TOKEN` identity they already require for
+their own deliberate verdict. This makes `outstanding` genuinely non-empty by construction —
+the exact mechanism this ADR's Decision section (above) reasoned was unnecessary — so the
+gate's pre-verdict engagement no longer depends on out-running any incidental reviewer,
+bot or otherwise. `TestReviewAuthorityYoloDoesNotBypassBlock`'s two
+`fabrik:awaiting-review` waits needed no such fix: both occur *after* that test's own genuine
+`REQUEST_CHANGES` review is already submitted, and once a genuine `CHANGES_REQUESTED` verdict
+exists, an unrelated incidental bot `COMMENT` — landing before or after it — can never satisfy
+the outer clearing condition on its own; that wait was already deterministic.
+
+This does not change `checkReviewGate`'s wall-clock/API-cost profile materially (one extra
+`gh pr edit --add-reviewer` call per affected scenario) and does not reopen the "silent-skip
+trap" this ADR's first Revision rejected — `RequestPRReviewer` fails the test loudly
+(`t.Fatalf`) if it errors, it does not skip.
 
 ## Alternatives Considered
 
