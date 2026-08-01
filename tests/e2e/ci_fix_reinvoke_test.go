@@ -239,13 +239,18 @@ func hasEngineCIWaitTimeoutComment(bodies []string) bool {
 // non-vacuousness now depends on the CI-fix agent faithfully obeying the
 // "MANDATORY ... no exceptions" append-and-push instruction in
 // ciFixCycleLimitBody on every single reinvoke — there is no engine-side
-// enforcement that any given reinvoke actually pushed. A run that fails the
-// commit-count check at the end is therefore ambiguous between two distinct
-// causes: a genuine engine regression (the cycle-limit path failing to
-// dispatch/advance) vs. the agent skipping a push on some round despite the
-// instruction. The commit-count message below distinguishes these only
-// after the fact, once the full run has already completed — there is no
-// cheaper way to tell them apart mid-run.
+// enforcement that any given reinvoke actually pushed. If the agent skips a
+// push on some round (e.g. it misjudges the unfixable check as fixable and
+// attempts a "real" fix that doesn't touch the scratch file), LastCIFixNoOpSHA
+// latches on that head SHA and dispatchWithCycleLimit's no-op short-circuit
+// starts skipping dispatch WITHOUT incrementing the cycle counter — so the
+// cycle limit is never reached at all, and the test fails earlier, as a
+// timeout waiting for fabrik:paused, not as the commit-count t.Fatalf below.
+// Either failure mode is loud (the test does not silently pass), but a
+// timeout is ambiguous between a genuine engine regression (the cycle-limit
+// path failing to dispatch/advance for real) and this agent-compliance
+// fragility — there is no cheaper way to distinguish them than the manual
+// pauseForCIFixCycleLimit-neutralization check described above.
 //
 // Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
 func TestCIFixReinvokeCycleLimit(t *testing.T) {
