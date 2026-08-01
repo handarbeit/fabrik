@@ -179,6 +179,20 @@ generic message. `escalateAwaitingCIOrphanFailure` re-resolves the item's curren
 time so the posted comment names whichever cause is actually current, rather than always claiming a
 stray column even when the item is sitting on a perfectly valid `wait_for_ci` stage.
 
+**Amendment (issue #1313):** field evidence (`fabrik-test-alpha#3989`) showed this unconditional routing
+was too broad — it also caught transient, *global* API failures, most notably GraphQL rate-limit
+exhaustion, which affects every item on the board simultaneously and resolves itself automatically at
+the next hourly reset. Three consecutive rate-limited settle passes exhausted `MaxRetries` and paused an
+otherwise-healthy issue, requiring manual `fabrik:paused` removal to recover — a regression this ADR's
+original design introduced. `settleAwaitingCIScan` now classifies the `FetchItemDetails` error via
+`isTransientAPIError` (`engine/item.go`, layered on top of the existing `isTransientError`) before
+calling `recordAwaitingCIOrphanRetry`: a transient/global failure (rate-limit/secondary-rate-limit/abuse
+exhaustion, 5xx, timeout, connection reset) is deferred to the next poll **without touching the counter
+at all**, however many consecutive polls are affected; a non-transient (structural) failure — permissions,
+a deleted issue node, or any other persistent per-item error — continues through the exact path described
+above. The shared-counter design for the orphan-column and structural-fetch-failure causes is unchanged;
+only the transient case is carved out of counting entirely. See `docs/state-machine.md` §6.14.2.
+
 ## Consequences
 
 **Positive:**

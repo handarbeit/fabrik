@@ -1953,6 +1953,67 @@ func isTransientError(err error) bool {
 	return false
 }
 
+// rateLimitErrorPatterns are substrings observed in GitHub's own GraphQL and
+// REST error text for rate-limit/quota-exhaustion conditions: the REST
+// primary rate limit ("API rate limit exceeded for ..."), the GraphQL primary
+// rate limit ("API rate limit already exceeded for user ID ..."), and the
+// REST secondary/abuse-detection rate limit ("You have exceeded a secondary
+// rate limit..."). Matched case-insensitively against the full err.Error()
+// string, which covers both GraphQL's "GraphQL error: %s" framing and REST's
+// "GitHub API returned %d: %s" framing without needing to parse status codes.
+// Deliberately specific multi-word phrases rather than a bare "rate limit" or
+// "api rate limit" substring — see botServiceNoticePatterns (comments.go) for
+// this codebase's prior experience with over-broad rate-limit substrings
+// colliding with unrelated prose. "api rate limit exceeded" and "api rate
+// limit already exceeded" (rather than a shared bare "api rate limit" prefix)
+// were split out deliberately (PR review, pruefer): "api rate limit" alone
+// would also match unrelated text that merely mentions the concept (e.g. a
+// permissions error whose body quotes rate-limit documentation) without
+// actually reporting an exhaustion, silently deferring an error that should
+// have escalated. No bare "rate limit exceeded" entry: it would be a strict
+// substring of both "api rate limit..." phrases above (PR review, pruefer)
+// and adds no coverage they don't already provide.
+var rateLimitErrorPatterns = []string{
+	"api rate limit exceeded",
+	"api rate limit already exceeded",
+	"secondary rate limit",
+	"abuse detection",
+}
+
+// isTransientAPIError reports whether err represents a transient, global
+// GitHub API failure that should be retried without consuming a per-item
+// escalation budget: everything isTransientError already recognizes (network
+// errors, unexpected EOF, 5xx, connection reset, i/o timeout), plus GraphQL/
+// REST rate-limit and secondary-rate-limit/abuse-detection exhaustion, which
+// isTransientError does not cover. Unlike isTransientError, this predicate is
+// scoped to callers deciding whether a failure is safe to defer indefinitely
+// (#1313) rather than safe to retry a bounded number of times — anything not
+// confidently recognized here must default to false (structural), never true.
+func isTransientAPIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isTransientError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	// GitHub's REST framing is "GitHub API returned %d: %s" (client.go) — 429
+	// (Too Many Requests) is used exclusively for rate-limiting by GitHub's
+	// API, unlike 403 (shared with permission errors), so a bare status-code
+	// match is safe here without also checking body text. Added (PR review,
+	// pruefer) because the phrase table alone would miss a future response
+	// that returns 429 with body wording that doesn't match any known phrase.
+	if strings.Contains(msg, "github api returned 429") {
+		return true
+	}
+	for _, pattern := range rateLimitErrorPatterns {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // removeEditingLabel removes fabrik:editing, retrying up to 3 times with
 // exponential backoff on transient errors. The GitHub mutation is performed
 // directly here (not via removeLabel) so the retry loop can inspect the raw
