@@ -124,14 +124,108 @@ gh api rate_limit --jq '.resources.graphql'
    ```bash
    E2E_TIMEOUT=1h scripts/e2e/run.sh -run TestCIFixReinvoke
    ```
+8. **`FABRIK_CI_WAIT_TIMEOUT=120` (minutes) in the test bed `.env`** — required
+   for `TestCIFixReinvokeCycleLimit` to deterministically exercise the
+   cycle-limit pause path instead of racing the fixed CI-wait-timeout timer
+   (handarbeit/fabrik#1320). Both `pauseForCITimeout` (`engine/ci.go`) and
+   `pauseForCIFixCycleLimit` are evaluated independently every poll once
+   `fabrik:awaiting-ci` is applied; whichever condition is observed first
+   wins, and the two are otherwise uncoordinated. The engine default
+   (`FABRIK_CI_WAIT_TIMEOUT` unset → 30 min, see `ciWaitTimeout()`) is too
+   short: a captured release-gate run showed two failed CI-fix cycles
+   (`FABRIK_MAX_CI_FIX_CYCLES=2`) still executing at 1h26m26s (~87 min) under
+   full-suite load — comfortably past the 30-minute default, so the
+   wait-timeout timer fired first and the scenario observed the wrong (but
+   still engine-correct) pause reason. **This is the same 87-minute data
+   point cited in "How the timeout/parallelism defaults are derived" below.**
+
+   The test derives its own minimum safe value at runtime
+   (`minSafeCIWaitTimeoutMinutes` in `ci_fix_reinvoke_test.go`):
+   `observedWorstCaseMinutesPerCIFixCycle (45, i.e. ceil(87/2)) * maxCycles +
+   cycleLimitTimerHeadroomMinutes (30)`. For the recommended
+   `FABRIK_MAX_CI_FIX_CYCLES=2` (prerequisite #6), that's `45*2 + 30 = 120`
+   minutes — hence the **120** recommendation. If `FABRIK_CI_WAIT_TIMEOUT` in
+   the bed `.env` is below this computed minimum for the bed's configured
+   `FABRIK_MAX_CI_FIX_CYCLES`, the test `t.Skip`s with an instructional
+   diagnostic rather than racing the two timers and risking a false
+   pass/fail — see the "Requirements" section of #1320 for why "accept
+   either pause reason" was rejected (the #1319 anti-pattern: a test that
+   passes regardless of which path actually ran).
+
+   Raising this bed-wide from 30→120 min is a deliberate tradeoff: it also
+   lengthens how long a genuinely CI-stuck *unrelated* issue sits before a
+   human is notified via `pauseForCITimeout`, on any issue in the bed, not
+   just this scenario's. After editing `.env`, restart the test-bed Fabrik
+   instance so the new value takes effect.
+
+   **`TestCIFixReinvoke` has the same timer-coupling risk, dormant.** It is
+   currently `t.Skip`'d pending #916 (see the doc comment above `TestCIFixReinvoke`),
+   so this hasn't yet caused a failure, but a single successful CI-fix cycle
+   could plausibly also exceed a too-low `FABRIK_CI_WAIT_TIMEOUT` under load
+   once un-skipped. Re-check this when #916 unblocks it — the derivation
+   formula above only accounts for `TestCIFixReinvokeCycleLimit`'s
+   `MaxCiFixCycles`-bounded cost, not `TestCIFixReinvoke`'s single-cycle
+   recovery cost, which may need its own (likely smaller) minimum.
+
+### Marker-substring assertion audit (#1320)
+
+`TestCIFixReinvokeCycleLimit` used to assert on a `🏭 **Fabrik —` marker via
+`strings.Contains` across every issue comment — including stage-output
+comments authored by the Claude agent. On `handarbeit/fabrik-test-alpha#4049`
+this produced a **false pass**: the only comment containing the cycle-limit
+marker text was the Research stage's own output, which quoted the marker in
+prose while researching the feature. The engine never posted a cycle-limit
+comment on that issue at all — it paused via the CI-wait-timeout path
+instead. This is the same class of defect as #1319
+(`TestExpectedReviewersPrecedenceGuard` passing regardless of which
+resolution actually occurred) and #1263 (a Plan stage quoting
+`FABRIK_SPAWN_CHILD_BEGIN` in prose defeated a different assertion).
+
+A repo-wide search (`grep -rn "🏭" tests/e2e/*.go`) found every call site in
+`tests/e2e/` that matches a `🏭 **Fabrik —` marker. Audit result:
+
+1. **`ci_fix_reinvoke_test.go` (`TestCIFixReinvokeCycleLimit`) — fixed here.**
+   Replaced the `strings.Contains` scan with `hasEngineCycleLimitComment`,
+   which matches via `strings.HasPrefix` — the same body-prefix convention
+   `findNewComments` (`engine/comments.go`) uses to distinguish Fabrik's own
+   output from prose. See `TestHasEngineCycleLimitComment` in
+   `ci_fix_reinvoke_marker_test.go` for a fast, non-e2e proof that this
+   rejects a comment shaped like the `#4049` false-pass evidence while still
+   accepting a genuine engine comment.
+2. **`ci_fix_reinvoke_test.go` (`TestCIFixReinvoke`) — same class of flaw,
+   currently dormant.** Line ~99-100 calls
+   `WaitForPRCommentContaining(t, env, ..., "🏭 **Fabrik — stage: Validate**", ...)`,
+   which resolves to a `strings.Contains` scan (`harness.go`) across all PR
+   comments — the same unscoped-match shape as the original defect, just
+   against a different marker. This has not caused an observed false pass
+   because the whole test is `t.Skip`'d pending #916 and has never run
+   against real data. **Not fixed here** — out of scope per #1320 (only
+   auditing this test was in scope; fixing it is deferred to whoever
+   un-skips it for #916, at which point this note should be revisited).
+3. **`expected_reviewers_test.go:175` and `review_authority_test.go:174`
+   (`WaitForPRCommentContainingAny`) — already sound, not `🏭` markers.**
+   Both call sites match on non-marker substrings specific to their scenario
+   (`"@" + syntheticName`, `"reviewDecision=CHANGES_REQUESTED"`,
+   `"requested changes"`), not a `🏭 **Fabrik —` prefix, so an agent quoting a
+   *Fabrik* marker in prose can't accidentally satisfy them. They share the
+   underlying `Contains`-based helper family
+   (`WaitForPRCommentContaining`/`WaitForPRCommentContainingAny` in
+   `harness.go`) with the flawed assertions above, so a future scenario that
+   reuses these helpers to match a `🏭 **Fabrik —` marker would reintroduce
+   the same risk — a broader audit of "any engine-message substring
+   assertion" (not just `🏭` markers) is a known boundary of this audit, not
+   a finding against these two call sites as they stand today.
+
+No other `tests/e2e/*.go` file references the `🏭` emoji or a
+`"🏭 **Fabrik —"` literal.
 
 ### Additional prerequisites for `TestPausedMergedPRRecovery`
 
-8. **Gate labels seeded** in `handarbeit/fabrik-test-alpha`: `fabrik:awaiting-ci`,
+9. **Gate labels seeded** in `handarbeit/fabrik-test-alpha`: `fabrik:awaiting-ci`,
    `fabrik:awaiting-review`, `fabrik:paused`, and `fabrik:awaiting-input` are
    production labels that must exist. `AddLabel` fatals immediately if a label is
    absent — create them manually in the repo if needed.
-9. The default `E2E_TIMEOUT=4h` already covers `TestPausedMergedPRRecovery`
+10. The default `E2E_TIMEOUT=4h` already covers `TestPausedMergedPRRecovery`
    run in isolation (three sequential cruise pipelines, Specify → Implement
    each, total ~60–90 min). Use a *smaller* override to fail faster while
    iterating on just this scenario, e.g.:
@@ -141,10 +235,10 @@ gh api rate_limit --jq '.resources.graphql'
 
 ### Additional prerequisites for `TestConjunctiveCIReviewGate`
 
-10. **`slow-gate` enrolled as a required status check** on
+11. **`slow-gate` enrolled as a required status check** on
     `handarbeit/fabrik-test-alpha/main`. The test skips gracefully (via
     `t.Skip`) if not enrolled — safe to merge before enrollment.
-11. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
+12. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
     identity** — no shell export shadowing it. `config.Token()`'s precedence
     is `FABRIK_TOKEN > GITHUB_TOKEN`, and `godotenv.Load(".env")` does not
     override a variable already set in the process environment, so this only
@@ -157,7 +251,7 @@ gh api rate_limit --jq '.resources.graphql'
     `AssertPRAuthorIsExpectedIdentity` preflight check catches this in
     seconds rather than after a full 60–100 min run — if it fails, check the
     launching shell's environment for a stray `FABRIK_TOKEN` export.
-12. **One of the following for R5 (joint-clear verification)**:
+13. **One of the following for R5 (joint-clear verification)**:
     - **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — a GitHub PAT for a
       non-`@arbeithand` account with write access to `fabrik-test-alpha`. The
       test uses this token to submit an approving PR review from a second
@@ -189,7 +283,7 @@ gh api rate_limit --jq '.resources.graphql'
       second identity to request, so it remains exposed to the
       `gemini-code-assist` bot clearing the gate before the timeout fires
       (residual flakiness, not fixed by this redesign — see #925).
-13. The default `E2E_TIMEOUT=4h` already covers this test run in isolation
+14. The default `E2E_TIMEOUT=4h` already covers this test run in isolation
     (worst case ~60–90 min for the approval path). Use a *smaller* override
     to fail faster while iterating on just this scenario, e.g.:
     ```bash
@@ -208,17 +302,17 @@ but nothing drains `Queued` when `merge_train: off` (no per-item dispatch,
 no batch handler), so without this check they'd hang to their full 10–50 min
 timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
 
-14. **`Queued` board column** on `handarbeit/projects/2`, positioned between
+15. **`Queued` board column** on `handarbeit/projects/2`, positioned between
     `Validate` and `Done` (ADR-059 D1 — the durable train queue). Add it in the
     Project's Status field options.
-15. **`queued.yaml` holding stage** in the bed's `.fabrik/stages/`, e.g.:
+16. **`queued.yaml` holding stage** in the bed's `.fabrik/stages/`, e.g.:
     ```yaml
     name: Queued
     order: 8            # after Validate, before Done
     holding_stage: true # engine-managed; no Claude invocation
     ```
     Copy from `stages/examples/queued.yaml` (`fabrik init` / `fabrik refresh-stages`).
-16. **Train-capable binary** in the bed, built from `main` (the release does not
+17. **Train-capable binary** in the bed, built from `main` (the release does not
     yet carry ADR-059). Run it **without `--auto-upgrade`** so it is not reverted
     to a release mid-suite:
     ```bash
@@ -226,7 +320,7 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     # on macOS/Apple Silicon a copied binary may be SIGKILL'd; build in place or:
     #   xattr -cr ~/dev/fabrik-test/fabrik && codesign --force --sign - ~/dev/fabrik-test/fabrik
     ```
-17. **`train-poison-guard` required check** on `fabrik-test-alpha` — only for
+18. **`train-poison-guard` required check** on `fabrik-test-alpha` — only for
     `TestMergeTrainBisectionEjectsPoisoner`. Commit
     `tests/e2e/testdata/train-poison-guard.yml` to the repo as
     `.github/workflows/train-poison-guard.yml` and mark the `train-poison-guard`
@@ -234,16 +328,16 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     The bisection test skips this check indirectly — if the guard is absent the
     combined batch is green and no bisection occurs, failing the `bisecting`
     log-line wait; run it only after the guard is enrolled.
-18. The default `E2E_TIMEOUT=4h` already covers these run in isolation
+19. The default `E2E_TIMEOUT=4h` already covers these run in isolation
     (happy/bisect: 20–40 min; restart — two sequential landings: 25–50 min).
     Use a *smaller* override to fail faster while iterating, e.g.
     `E2E_TIMEOUT=1h`.
-19. **`train-poison-guard` required check on `fabrik-test-beta`** — only for
+20. **`train-poison-guard` required check on `fabrik-test-beta`** — only for
     `TestMergeTrainRunawayGuardPausesBatch`. Commit
     `tests/e2e/testdata/train-poison-guard.yml` to `handarbeit/fabrik-test-beta`
     as `.github/workflows/train-poison-guard.yml` and mark the
     `train-poison-guard` check REQUIRED on branch protection (same steps as for
-    Alpha in prerequisite #17, targeting Beta instead). The runaway test skips
+    Alpha in prerequisite #18, targeting Beta instead). The runaway test skips
     cleanly until this is enrolled.
     **`FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=6`** must also be set in the bed's
     `.env` before launching the Fabrik instance for this test. At the default
@@ -288,14 +382,14 @@ advisory scenarios on the shared bed. This is a documented, accepted e2e gap —
 scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` disappears,
 `fabrik:paused` never applied), not that the item merges.
 
-20. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
-    in prerequisite #12 above. All four `TestReviewAuthority*` scenarios skip with an
+21. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
+    in prerequisite #13 above. All four `TestReviewAuthority*` scenarios skip with an
     instructional message if it is unset; there is no timeout-fallback path here (unlike
     `TestConjunctiveCIReviewGate`) because these scenarios exist specifically to assert
     on a deterministic verdict, not on gate-timeout behavior alone.
-21. **`review-authority:authoritative` label seeded** in `handarbeit/fabrik-test-alpha`
+22. **`review-authority:authoritative` label seeded** in `handarbeit/fabrik-test-alpha`
     (the only repo these scenarios use). `FileIssue` passes it straight through to
-    `gh issue create --label`, which — like `AddLabel` (prerequisite #8) — fatals
+    `gh issue create --label`, which — like `AddLabel` (prerequisite #9) — fatals
     immediately if the label doesn't already exist as a label object in the repo; `gh`
     does not auto-create labels on issue creation. Create it manually
     (`gh label create review-authority:authoritative -R handarbeit/fabrik-test-alpha`)
@@ -303,7 +397,7 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     *interprets* the label on an issue it already carries, not the GitHub label object
     itself — the object must exist before any of these scenarios can even file their
     seed issue.
-22. **Why the bed reviewer (`claude-review.yml`) stays COMMENT-only, and is not used
+23. **Why the bed reviewer (`claude-review.yml`) stays COMMENT-only, and is not used
     for verdict assertions here**: `.github/workflows/claude-review.yml` submits
     `gh pr review --comment` in both its agent path and its fallback path — it can
     never produce `APPROVE` or `CHANGES_REQUESTED`, so it cannot exercise authoritative
@@ -314,7 +408,7 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     coupling (Fabrik's release gate depending on pruefer's health). All verdict assertions
     in `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
     deterministic, harness-posted formal reviews from a non-author identity.
-23. The default `E2E_TIMEOUT=4h` already covers
+24. The default `E2E_TIMEOUT=4h` already covers
     `TestReviewAuthorityBlocksAndPausesOnChangesRequested` in isolation — its
     worst-case wall-clock is `FABRIK_REVIEW_WAIT_TIMEOUT + ~30 min`
     (10 min initial block-confirmation wait + `FABRIK_REVIEW_WAIT_TIMEOUT`+10 min for the
@@ -328,7 +422,7 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     review-wait-timeout pause landing inside that window, which the test detects and fails
     on explicitly (distinct message, not misreported as a yolo bypass) rather than passing.
     A moderate value (e.g. `FABRIK_REVIEW_WAIT_TIMEOUT=5`) balances both tests' needs.
-24. **Note on scope**: neither test bed repo has a branch-protection review requirement
+25. **Note on scope**: neither test bed repo has a branch-protection review requirement
     configured (only required *status checks* are documented as enrolled), so
     `FetchPRReviewDecision` returns `""` for every scenario here and `reviewGateAuthorityVerdict`
     exercises its Fabrik-computed fallback branch, not GitHub's native `reviewDecision`
@@ -386,14 +480,14 @@ scenarios — taking every other in-flight parallel scenario down with it.
 a stage literally named `Validate`, and seeding on `Review` cannot reach it. This
 is a documented, accepted e2e gap.
 
-25. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT as
-    prerequisite #20, required only by `TestExpectedReviewersPrecedenceGuard`
+26. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT as
+    prerequisite #21, required only by `TestExpectedReviewersPrecedenceGuard`
     (the others don't need a submitted review). Skips with an instructional
     message if unset.
-26. **`expected-reviewers:none` and `expected-reviewers:declared` labels seeded**
+27. **`expected-reviewers:none` and `expected-reviewers:declared` labels seeded**
     in `handarbeit/fabrik-test-alpha` (the only repo these scenarios use).
     `FileIssue` passes extra labels straight through to `gh issue create --label`,
-    which — like `AddLabel` (prerequisite #8) and prerequisite #21's
+    which — like `AddLabel` (prerequisite #9) and prerequisite #22's
     `review-authority:authoritative` label — fatals immediately if a label doesn't
     already exist as a label object in the repo; `gh` does not auto-create labels
     on issue creation. Create both manually if needed:
@@ -405,20 +499,20 @@ is a documented, accepted e2e gap.
     that *interprets* a label an issue already carries, not the GitHub label
     object itself — the objects must exist before any of these scenarios can even
     file their seed issue.
-27. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
+28. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
     (~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer, similar to
     `TestReviewAuthorityBlocksAndPausesOnChangesRequested`) — Phase 1 and Phase 2
     of the bot re-prompt ladder are folded into one continuation. The same
-    moderate `FABRIK_REVIEW_WAIT_TIMEOUT` value recommended in prerequisite #23
+    moderate `FABRIK_REVIEW_WAIT_TIMEOUT` value recommended in prerequisite #24
     (e.g. `5`) applies here too; a very short value risks a legitimate Phase 1/2
     transition racing this test's own bounded-window assertions in
     `TestExpectedReviewersFastAdvance`/`...ComposesWithAuthoritative`.
-28. **The synthetic declared-reviewer name (`e2e-synthetic-declared-reviewer`)
+29. **The synthetic declared-reviewer name (`e2e-synthetic-declared-reviewer`)
     must never resolve to a real, active GitHub account** on the bed's org —
-    same rationale as prerequisite #22's warning against reusing a real installed
+    same rationale as prerequisite #23's warning against reusing a real installed
     bot: an unrelated real actor submitting a review would race the deterministic
     re-prompt-ladder assertions in `TestExpectedReviewersDeclaredWaitsAndReprompts`.
-29. **Draft-PR determinism technique (#1312)**: `TestExpectedReviewersFastAdvance`,
+30. **Draft-PR determinism technique (#1312)**: `TestExpectedReviewersFastAdvance`,
     `TestExpectedReviewersDeclaredWaitsAndReprompts`,
     `TestExpectedReviewersUndeclaredRegressionGuard`, and
     `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` seed via
