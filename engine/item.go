@@ -1970,11 +1970,12 @@ func isTransientError(err error) bool {
 // would also match unrelated text that merely mentions the concept (e.g. a
 // permissions error whose body quotes rate-limit documentation) without
 // actually reporting an exhaustion, silently deferring an error that should
-// have escalated.
+// have escalated. No bare "rate limit exceeded" entry: it would be a strict
+// substring of both "api rate limit..." phrases above (PR review, pruefer)
+// and adds no coverage they don't already provide.
 var rateLimitErrorPatterns = []string{
 	"api rate limit exceeded",
 	"api rate limit already exceeded",
-	"rate limit exceeded",
 	"secondary rate limit",
 	"abuse detection",
 }
