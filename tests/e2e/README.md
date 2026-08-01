@@ -337,6 +337,88 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     an unrecognized value would require new branch-protection bed setup, which is not
     "cheaply expressible" per the issue's own bar for that scenario.
 
+### Additional prerequisites for `TestExpectedReviewers*` scenarios
+
+`TestExpectedReviewersFastAdvance`, `TestExpectedReviewersDeclaredWaitsAndReprompts`,
+`TestExpectedReviewersPrecedenceGuard`, and
+`TestExpectedReviewersFastAdvanceComposesWithAuthoritative` cover ADR-1283's
+`expected_reviewers` (declared unrequested reviewers for the review gate).
+`TestExpectedReviewersUndeclaredRegressionGuard` is the fifth scenario and has no
+dependency described below. All five run against the bed's existing `Review`
+column/stage (default, untouched config) — **no bed column or stage-YAML setup is
+required**, beyond `FABRIK_REVIEW_WAIT_TIMEOUT`/`FABRIK_REVIEWER_TOKEN` (already
+documented above) and the two labels below.
+
+**Mechanism: two per-issue labels, not a bed column.** A declared `expected_reviewers`
+value is applied per item via one of two labels, passed as an extra label at seed
+time (`seedReviewGateItem`'s `extraLabels`):
+
+- `expected-reviewers:none` → `expected_reviewers: []` (fast-advance path)
+- `expected-reviewers:declared` → `expected_reviewers: [e2e-synthetic-declared-reviewer]`
+  (waiting/re-prompt-ladder path)
+
+This is the same mechanism `TestReviewAuthority*` uses for
+`review-authority:authoritative` (see above), applied to a second, list-shaped
+stage-config field. Engine support for reading these two labels is tracked as a
+separate, decoupled follow-up issue (not yet filed as of #1298's PR — see that
+PR's description for the exact spec: the four call sites to update, the
+`declared` > `none` precedence rule, and the `github/labels.go` pre-seeding step).
+`TestExpectedReviewersFastAdvance`, `TestExpectedReviewersDeclaredWaitsAndReprompts`,
+`TestExpectedReviewersPrecedenceGuard`, and
+`TestExpectedReviewersFastAdvanceComposesWithAuthoritative` cannot pass until that
+follow-up merges and both labels exist on the bed repo — they either run for real
+or fail loudly (not skip) if the follow-up hasn't landed yet, mirroring #1258's
+rejection of silent skips. `TestExpectedReviewersUndeclaredRegressionGuard` sets
+neither label, exercises the bed's untouched default (`nil`) config, and ships
+green regardless.
+
+A bed-local `wait_for_reviews`-bearing stage/board-column variant (mirroring the
+`Queued`/`queued.yaml` precedent) was considered and rejected for this feature too
+— see `adrs/1298-e2e-expected-reviewers-coverage.md`. Its blast radius is worse
+than the `Review-Authoritative` design #1258 already rejected: a normal (non-
+`HoldingStage`, non-`Unmanaged`) stage gets no board-column-alignment exemption at
+startup (`engine/startup.go` `checkStageColumnAlignment`), so a missing column
+would stop the shared bed from starting entirely — not just skip a handful of
+scenarios — taking every other in-flight parallel scenario down with it.
+
+**Why these scenarios can't cover the landing/auto-merge gate:** same reason as
+`TestReviewAuthority*` above — `reviewGateBlocksLanding` is only reachable through
+a stage literally named `Validate`, and seeding on `Review` cannot reach it. This
+is a documented, accepted e2e gap.
+
+25. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT as
+    prerequisite #20, required only by `TestExpectedReviewersPrecedenceGuard`
+    (the others don't need a submitted review). Skips with an instructional
+    message if unset.
+26. **`expected-reviewers:none` and `expected-reviewers:declared` labels seeded**
+    in `handarbeit/fabrik-test-alpha` (the only repo these scenarios use).
+    `FileIssue` passes extra labels straight through to `gh issue create --label`,
+    which — like `AddLabel` (prerequisite #8) and prerequisite #21's
+    `review-authority:authoritative` label — fatals immediately if a label doesn't
+    already exist as a label object in the repo; `gh` does not auto-create labels
+    on issue creation. Create both manually if needed:
+    ```
+    gh label create expected-reviewers:none -R handarbeit/fabrik-test-alpha
+    gh label create expected-reviewers:declared -R handarbeit/fabrik-test-alpha
+    ```
+    This is independent of the follow-up engine issue: that issue adds the code
+    that *interprets* a label an issue already carries, not the GitHub label
+    object itself — the objects must exist before any of these scenarios can even
+    file their seed issue.
+27. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
+    (~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer, similar to
+    `TestReviewAuthorityBlocksAndPausesOnChangesRequested`) — Phase 1 and Phase 2
+    of the bot re-prompt ladder are folded into one continuation. The same
+    moderate `FABRIK_REVIEW_WAIT_TIMEOUT` value recommended in prerequisite #23
+    (e.g. `5`) applies here too; a very short value risks a legitimate Phase 1/2
+    transition racing this test's own bounded-window assertions in
+    `TestExpectedReviewersFastAdvance`/`...ComposesWithAuthoritative`.
+28. **The synthetic declared-reviewer name (`e2e-synthetic-declared-reviewer`)
+    must never resolve to a real, active GitHub account** on the bed's org —
+    same rationale as prerequisite #22's warning against reusing a real installed
+    bot: an unrelated real actor submitting a review would race the deterministic
+    re-prompt-ladder assertions in `TestExpectedReviewersDeclaredWaitsAndReprompts`.
+
 ## Running
 
 The recommended entrypoint is the runner script, which sets sensible defaults:
@@ -589,12 +671,17 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250 composition guarantee (via `review-authority:authoritative` label, requires #1261): fabrik:yolo does not bypass an authoritative gate — blocked while CHANGES_REQUESTED stands, clears once approved | Both | 5–10 min | ~$0.03 (no Claude) |
 | `TestReviewAuthorityAdvisoryRegressionGuard` | Regression guard: advisory (default) mode still clears on any submitted review regardless of verdict — proves the additive authoritative check didn't narrow the default path | Both | 2–5 min | ~$0.02 (no Claude) |
+| `TestExpectedReviewersFastAdvance` | ADR-1283 `expected_reviewers: []` (via `expected-reviewers:none` label, requires follow-up engine issue): nothing requested/reviewed → gate fast-advances instead of waiting out the review timeout (the #1080 stall this feature fixes) | Both | 2–5 min | ~$0.02 (no Claude) |
+| `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283 `expected_reviewers: [<name>]` (via `expected-reviewers:declared` label, requires follow-up engine issue): declared-but-unrequested reviewer holds the gate open, Phase 1 re-prompt ladder fires with an @mention comment, Phase 2 pauses for human when no response arrives | Both | ~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer | ~$0.05 (no Claude) |
+| `TestExpectedReviewersPrecedenceGuard` | ADR-1283 precedence guard (via `expected-reviewers:none` label, requires follow-up engine issue): a genuinely requested reviewer holds the gate open despite `expected_reviewers: []` being declared | Both | 5–10 min | ~$0.03 (no Claude) |
+| `TestExpectedReviewersUndeclaredRegressionGuard` | Regression guard: undeclared (`nil`) `expected_reviewers` still never fast-advances — pins the `expected != nil` check and proves the shipped default (FR-5) is unchanged | Both | 2–5 min | ~$0.02 (no Claude) |
+| `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | Train-only (on) | 10–20 min | low (no Claude) |
 
-Approximate single-mode suite total: ~615 min wall-clock, $10.30–30 in Claude
+Approximate single-mode suite total: ~685 min wall-clock, $10.30–30 in Claude
 tokens. A full two-mode gate run is roughly double this, minus the
 near-instant skip of the four Train-only scenarios in the `off` leg — the
 default `E2E_TIMEOUT=4h` and the contention data behind it (see "How the
@@ -622,6 +709,11 @@ shape, not just the single-mode total.
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250, #1258 |
 | `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250's yolo/cruise composition guarantee, #1258 |
 | `TestReviewAuthorityAdvisoryRegressionGuard` | ADR-1250 additive-check regression guard, #1258 |
+| `TestExpectedReviewersFastAdvance` | ADR-1283 (`expected_reviewers`), #1298 (this scenario), the #1080 stall the feature exists to eliminate |
+| `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283, #1298 — first e2e coverage of the bot re-prompt ladder (`fabrik:bot-reprompted`, Phase 1/2 of `checkAwaitingReviewTimeout`) |
+| `TestExpectedReviewersPrecedenceGuard` | ADR-1283, #1298 — declared reviewers narrow waiting for unrequested reviewers only, never bypass a genuinely requested one |
+| `TestExpectedReviewersUndeclaredRegressionGuard` | ADR-1283 FR-5 regression guard, #1298 — pins `reviewGateFastAdvance`'s `expected != nil` check |
+| `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283, #1298 — fast-advance independence from `review_authority` (ADR-1250) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
