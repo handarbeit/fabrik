@@ -331,6 +331,14 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	}
 	t.Logf("commit count guard passed: %d commits (base=%d + >=%d CI-fix cycles) — cycle-limit path genuinely exercised",
 		finalCommits, baseCommits, maxCycles)
+
+	// Re-check the workflow guard now that the CI-fix reinvoke commits exist.
+	// The pre-Validate check above only covers the initial Implement commit;
+	// this fixture's whole point is to force genuine repeated dispatch, so
+	// the commits actually at risk of violating the "never touch .github/"
+	// hard constraint are the ones produced during the cycle-limit loop, not
+	// the baseline one.
+	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
 }
 
 // ciFixReinvokeBody is the issue body for TestCIFixReinvoke. The PR body must
