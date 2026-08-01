@@ -147,6 +147,76 @@ func TestCIFixReinvoke(t *testing.T) {
 	t.Logf("commit count guard passed: %d commits (base=%d + 1 CI-fix)", finalCommits, baseCommits)
 }
 
+// cycleLimitMarker is the literal prefix of the engine's own CI-fix
+// cycle-limit pause comment (engine/ci.go:pauseForCIFixCycleLimit). Matching
+// on HasPrefix rather than Contains ensures hasEngineCycleLimitComment can
+// only be satisfied by a genuine engine-authored comment, not by a
+// stage-output comment where an agent quotes the marker text in prose while
+// reasoning about the feature — this happened on handarbeit/fabrik-test-alpha#4049,
+// where the Research stage output was the only comment containing the
+// marker and the engine never posted one at all. See handarbeit/fabrik#1320.
+const cycleLimitMarker = "🏭 **Fabrik — CI fix cycle limit reached**"
+
+// ciWaitTimeoutMarker is the literal prefix of the engine's competing CI
+// wait-timeout pause comment (engine/ci.go:pauseForCITimeout). Used only to
+// produce a diagnostic that distinguishes "the cycle-limit path never fired
+// because the fixed wait-timeout timer won the race" from "no pause
+// happened at all" in TestCIFixReinvokeCycleLimit's failure message.
+const ciWaitTimeoutMarker = "🏭 **Fabrik — CI wait timeout**"
+
+// hasEngineCycleLimitComment reports whether bodies contains a genuine
+// engine-authored CI-fix cycle-limit pause comment. It matches on
+// strings.HasPrefix, mirroring the body-prefix convention findNewComments
+// (engine/comments.go) uses to distinguish Fabrik's own output from prose —
+// a strings.Contains scan would also match a stage-output comment where an
+// agent quotes the marker text while reasoning about the feature.
+func hasEngineCycleLimitComment(bodies []string) bool {
+	for _, b := range bodies {
+		if strings.HasPrefix(b, cycleLimitMarker) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasEngineCIWaitTimeoutComment reports whether bodies contains a genuine
+// engine-authored CI wait-timeout pause comment, using the same HasPrefix
+// convention as hasEngineCycleLimitComment.
+func hasEngineCIWaitTimeoutComment(bodies []string) bool {
+	for _, b := range bodies {
+		if strings.HasPrefix(b, ciWaitTimeoutMarker) {
+			return true
+		}
+	}
+	return false
+}
+
+// observedWorstCaseMinutesPerCIFixCycle and cycleLimitTimerHeadroomMinutes
+// back minSafeCIWaitTimeoutMinutes, which computes the smallest
+// FABRIK_CI_WAIT_TIMEOUT (minutes) at which TestCIFixReinvokeCycleLimit can
+// deterministically exercise the cycle-limit pause path instead of racing
+// the fixed CI-wait-timeout timer (handarbeit/fabrik#1320).
+//
+// observedWorstCaseMinutesPerCIFixCycle=45 is derived from the one real data
+// point available: a captured release-gate run where this scenario was
+// still executing at 1h26m26s (~87min) with FABRIK_MAX_CI_FIX_CYCLES=2 — see
+// "How the timeout/parallelism defaults are derived" in tests/e2e/README.md.
+// ceil(87/2) = 44, rounded up to 45 for a whole-minutes-per-cycle budget.
+const observedWorstCaseMinutesPerCIFixCycle = 45
+
+// cycleLimitTimerHeadroomMinutes is added on top of the raw per-cycle
+// worst-case cost as margin against load variance beyond the single
+// observed data point backing observedWorstCaseMinutesPerCIFixCycle.
+const cycleLimitTimerHeadroomMinutes = 30
+
+// minSafeCIWaitTimeoutMinutes returns the minimum FABRIK_CI_WAIT_TIMEOUT
+// (minutes) needed for the cycle-limit path to deterministically win the
+// race against the fixed CI-wait-timeout timer, for a given
+// FABRIK_MAX_CI_FIX_CYCLES.
+func minSafeCIWaitTimeoutMinutes(maxCycles int) int {
+	return observedWorstCaseMinutesPerCIFixCycle*maxCycles + cycleLimitTimerHeadroomMinutes
+}
+
 // TestCIFixReinvokeCycleLimit is the negative-path regression test for the
 // CI-fix reinvoke cycle limit (engine/ci.go: pauseForCIFixCycleLimit).
 // The sentinel CI job is permanently failing for this issue — Claude cannot fix
@@ -156,11 +226,17 @@ func TestCIFixReinvoke(t *testing.T) {
 //   - fabrik:awaiting-ci appears (CI gate fires).
 //   - fabrik:paused and fabrik:awaiting-input appear (cycle limit reached).
 //   - Issue remains OPEN.
-//   - A "🏭 **Fabrik — CI fix cycle limit reached**" comment appears on the issue.
+//   - A genuine engine-authored "🏭 **Fabrik — CI fix cycle limit reached**"
+//     comment appears on the issue (matched by prefix, not substring — see
+//     hasEngineCycleLimitComment).
 //
-// Prerequisite: "ci-fix-sentinel" must be enrolled as a required status check
-// AND FABRIK_MAX_CI_FIX_CYCLES must be ≤ 3 (ideally 2) in the test bed .env.
-// The test skips with an instructional message if either condition is not met.
+// Prerequisite: "ci-fix-sentinel" must be enrolled as a required status check,
+// FABRIK_MAX_CI_FIX_CYCLES must be ≤ 3 (ideally 2), AND FABRIK_CI_WAIT_TIMEOUT
+// must be large enough that the cycle-limit path deterministically wins the
+// race against the fixed CI-wait-timeout timer (see minSafeCIWaitTimeoutMinutes
+// and "Additional prerequisites for TestCIFixReinvoke and
+// TestCIFixReinvokeCycleLimit" in tests/e2e/README.md). The test skips with an
+// instructional message if any condition is not met — handarbeit/fabrik#1320.
 //
 // Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
 func TestCIFixReinvokeCycleLimit(t *testing.T) {
@@ -174,6 +250,28 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 		t.Skipf("FABRIK_MAX_CI_FIX_CYCLES=%d in test bed .env (must be ≤3 for this test — set to 2 and restart Fabrik)", maxCycles)
 	}
 	t.Logf("FABRIK_MAX_CI_FIX_CYCLES=%d — cycle limit test will fire after %d failed attempts", maxCycles, maxCycles)
+
+	// Timer coordination guard (handarbeit/fabrik#1320): the cycle-limit path
+	// and the fixed CI-wait-timeout timer race independently every poll.
+	// Under suite load, two full fix cycles routinely exceed the 30-minute
+	// engine default, so the wait-timeout timer wins and this scenario
+	// observes the wrong (but still engine-correct) pause reason. Rather than
+	// accept either pause reason — which would stop validating the
+	// cycle-limit path at all (the #1319 anti-pattern) — fail loudly with a
+	// diagnostic if the bed isn't configured with enough headroom.
+	ciWaitTimeout := readEnvFileCIWaitTimeout(t, env)
+	minSafe := minSafeCIWaitTimeoutMinutes(maxCycles)
+	if ciWaitTimeout < minSafe {
+		t.Skipf("FABRIK_CI_WAIT_TIMEOUT=%d in test bed .env is too low for FABRIK_MAX_CI_FIX_CYCLES=%d — "+
+			"the fixed CI-wait-timeout timer would likely win the race before the cycle limit is reached, "+
+			"producing a false negative for this scenario. Need FABRIK_CI_WAIT_TIMEOUT >= %d "+
+			"(observedWorstCaseMinutesPerCIFixCycle=%d * maxCycles + cycleLimitTimerHeadroomMinutes=%d). "+
+			"Set FABRIK_CI_WAIT_TIMEOUT=%d in the test bed .env and restart Fabrik — see "+
+			"\"Additional prerequisites for TestCIFixReinvoke and TestCIFixReinvokeCycleLimit\" in tests/e2e/README.md.",
+			ciWaitTimeout, maxCycles, minSafe, observedWorstCaseMinutesPerCIFixCycle, cycleLimitTimerHeadroomMinutes, minSafe)
+	}
+	t.Logf("FABRIK_CI_WAIT_TIMEOUT=%d >= minSafeCIWaitTimeoutMinutes(%d)=%d — timers are coordinated, cycle-limit path should win",
+		ciWaitTimeout, maxCycles, minSafe)
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e ci-fix-cycle-limit (%s)", stamp)
@@ -197,30 +295,39 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 		t.Fatalf("expected issue OPEN after cycle limit, got %s", state)
 	}
 
-	// The engine posts the cycle-limit message directly to the issue (not the PR).
+	// The engine posts the cycle-limit message directly to the issue (not the
+	// PR). hasEngineCycleLimitComment matches by HasPrefix so this can only be
+	// satisfied by a genuine engine-authored comment — never by a stage-output
+	// comment where an agent quotes the marker text in prose (#1320).
 	cycleDeadline := time.Now().Add(5 * time.Minute)
 	found := false
+	var lastBodies []string
 	for time.Now().Before(cycleDeadline) {
 		out, err := ghOutput(env, "issue", "view", fmt.Sprint(num), "-R", env.RepoAlpha,
 			"--json", "comments", "--jq", "[.comments[].body]")
 		if err == nil {
 			var bodies []string
 			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &bodies); jsonErr == nil {
-				for _, b := range bodies {
-					if strings.Contains(b, "🏭 **Fabrik — CI fix cycle limit reached**") {
-						found = true
-						break
-					}
+				lastBodies = bodies
+				if hasEngineCycleLimitComment(bodies) {
+					found = true
+					break
 				}
 			}
-		}
-		if found {
-			break
 		}
 		pollSleep(pollBase())
 	}
 	if !found {
-		t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes", env.RepoAlpha, num)
+		if hasEngineCIWaitTimeoutComment(lastBodies) {
+			t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes — instead the engine posted a CI "+
+				"wait-timeout pause comment. This means the fixed CI-wait-timeout timer won the race against the "+
+				"cycle-limit path (handarbeit/fabrik#1320) despite the bed-config guard above — the bed's "+
+				"FABRIK_CI_WAIT_TIMEOUT may be misconfigured, or fix cycles are taking longer than the documented "+
+				"worst case. This is a test timer-coordination problem, not necessarily an engine regression.",
+				env.RepoAlpha, num)
+		}
+		t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes, and no CI wait-timeout comment either — "+
+			"the engine may not have paused at all", env.RepoAlpha, num)
 	}
 	t.Logf("cycle limit comment confirmed on %s#%d — CI-fix cycle limit regression guard passed", env.RepoAlpha, num)
 }
