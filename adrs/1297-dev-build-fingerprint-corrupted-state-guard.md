@@ -144,6 +144,14 @@ self-heal already-poisoned installs without a format change. The intersection
 this leaves exposed — an old pre-0bd2c57e-corrupted install, first inspected
 by a dev build instead of a release build — is judged narrow enough to accept
 given the alternative costs, but it is a real gap, not a hypothetical one.
+Since the guard re-evaluates from live binary state on every startup rather
+than latching a verdict, any release-binary check closes the window for that
+install permanently — the exposure is specifically "a pre-0bd2c57e-corrupted
+install whose very first post-fix startup happens to be a dev build." In
+practice that means building `fabrik` from source and pointing it at an
+already-`fabrik init`'d directory that has never itself been started with a
+release binary since — a real but uncommon operational sequence, not the
+typical `go install`/release-download path most operator installs take.
 
 ## Risks / Dependencies
 
