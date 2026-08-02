@@ -1364,7 +1364,7 @@ After spawning, the parent waits at Implement with `fabrik:blocked` until all ch
 
 #### What You Observe
 
-- During Plan: no sub-issues exist. Plan can be revised freely.
+- During Plan: no sub-issues exist. Plan can be revised freely. A decomposing Plan comment carries a receipt note stating how many sub-issues were declared and that they'll be created when the issue advances to Implement — so you don't have to know this section exists to know where they went.
 - After advancing to Implement: child issues appear on the project board in Specify, each labeled `fabrik:sub-issue`.
 - A child may transiently show `fabrik:awaiting-placement` if its initial board placement failed — it clears automatically once a later poll places it successfully, or escalates to `fabrik:paused` with an explanatory comment after repeated failures.
 - If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages, while cruise children stop at Validate for manual merge.

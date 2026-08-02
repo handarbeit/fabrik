@@ -506,6 +506,10 @@ All Fabrik markers are stripped from output before posting:
 **Otherwise** (Specify, Research, Plan):
 - Full output posted directly on the issue as a stage comment
 
+### Spawn Receipt Note
+
+If the posted output contains N > 0 well-formed spawn blocks — as counted by `ParseSpawnBlocks`, never by string-matching the marker text — a deterministic note is appended stating that N sub-issues are declared and will be created when the parent advances to the **Implement** stage. This applies to any stage whose output parses spawn blocks (not gated on stage name; Plan is the only stage that emits them today), and to both output-posting paths above. The note is folded into the same `footer` value that also carries the stats footer below, computed once and threaded unchanged through every posting path — so it renders identically whether output goes straight to the issue or through `post_to_pr`. N == 0 produces no note and byte-identical output to before this existed. See ADR-048 and #1338.
+
 ### Comments Marked as Seen
 
 After a stage runs, any pre-existing user comments get a rocket reaction via `markCommentsSeenByStage`. They were included in the prompt as context and should not trigger the awaiting-input unblock logic on subsequent polls.
