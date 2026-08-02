@@ -345,6 +345,12 @@ func (c WarningsPaneComponent) View(width int) string {
 			dir = fmt.Sprintf(" (%d above, %d below)", above, below)
 		case above > 0:
 			dir = " above"
+			// No case for below>0-only (unscrolled): "… +N more" alone
+			// already means "below" by default, matching pre-fix wording and
+			// every byte-exact test predating scroll direction. Don't
+			// "balance" this by adding an explicit " below" suffix here —
+			// that changes rendered output and breaks
+			// TestWarningsView_OverflowIndicatorDirection.
 		}
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … +%d more%s", hidden, dir)))
 	}
