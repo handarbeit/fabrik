@@ -1609,6 +1609,8 @@ wait_for_ci: true
 
 CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST calls per poll: one to get the head SHA via the linked PR, and one to fetch the check runs. If no check runs exist **and** GitHub's `mergeable_state` is either empty or `"unknown"` (meaning no legacy Commit Status is blocking merge), the gate clears immediately. If `mergeable_state` is non-empty and not `"unknown"` (a legacy Commit Status or external status check is actively blocking merge), the gate holds even with no `check_runs` — Fabrik falls back to CIWaitTimeout escalation to avoid blocking forever.
 
+For a repo whose required CI signal is a classic commit status rather than a normal GitHub Actions check run, configure `required_status_contexts` (per-repo, in [`.fabrik/config.yaml`](#2-configuration-reference), ADR-933) so the gate can distinguish a required context that never ran from one that was correctly skipped.
+
 #### Label Lifecycle
 
 When a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`, Fabrik immediately adds the `fabrik:awaiting-ci` label to the issue — it means "CI gate active" and covers both pending and failed CI states. `stage:X:complete` is withheld until `checkCIGate` confirms all checks pass (conjunctive gate, ADR 032). This label:
@@ -2520,6 +2522,18 @@ from the parent process do not leak into Claude subprocesses. If you previously
 relied on ambient env vars being available inside Claude (e.g., API keys or tool
 paths set in your shell), pass them explicitly via your stage YAML or a shell
 wrapper script.
+
+### Worker Session Naming (`--name`)
+
+Every worker invocation carries a `--name fabrik:<owner>/<repo>#<issue>:<stage>`
+flag (e.g. `fabrik:handarbeit/fabrik#1284:Implement`), giving each Fabrik worker a
+self-describing identity in `ps` output — `ps aux | grep -- "--name fabrik:"` finds
+every worker on the host, and the sentinel itself names which repo, issue, and stage
+each one is serving. The flag is gated on a one-time startup probe of the installed
+`claude` binary's `--help` output; on older binaries that predate the flag, it's
+omitted and workers run exactly as before. It is observability-only — the engine
+never reads or branches on it. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
+for the full as-built mechanism.
 
 ### Rate Limit Monitoring
 
