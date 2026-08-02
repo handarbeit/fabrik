@@ -1328,6 +1328,14 @@ Your job is to:
 // mistaken for a marker by this or any other marker-detection logic, and is
 // self-delimited with its own "---" rule so it renders as a clearly separate
 // block from the stats footer.
+//
+// Callers must only invoke this for the Plan stage's own output. preImplement
+// (engine/spawn.go) only ever reads the comment literally named "Plan", so a
+// note rendered on any other stage's comment would promise a spawn that
+// mechanism never performs — e.g. if a later stage's context (which includes
+// the Plan comment verbatim) leads it to quote a spawn block back into its
+// own output. See the stage.Name == "Plan" gate at the call site in
+// finalizeStageOutcome (engine/item.go).
 func formatSpawnReceiptNote(output string) string {
 	n := len(ParseSpawnBlocks(output))
 	if n == 0 {

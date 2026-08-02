@@ -79,6 +79,78 @@ func TestFinalizeStageOutcome_SpawnBlocks_NoteAndFooterBothPosted(t *testing.T) 
 	}
 }
 
+// researchStages returns a Research stage (not "Plan") followed by a cleanup
+// Done stage, for exercising the #1338 review-finding guard below.
+func researchStages() []*stages.Stage {
+	return []*stages.Stage{
+		{
+			Name:       "Research",
+			Order:      1,
+			Prompt:     "research it",
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		},
+		{
+			Name:            "Done",
+			Order:           99,
+			CleanupWorktree: true,
+		},
+	}
+}
+
+// TestFinalizeStageOutcome_SpawnBlocks_NonPlanStage_NoNote is the #1338
+// review-finding guard: preImplement only ever reads the comment literally
+// named "Plan" (engine/spawn.go, findStageComment(item.Comments, "Plan")), so
+// a note posted on any other stage's comment would promise a spawn that
+// mechanism never performs — e.g. if a later stage's Claude quotes a spawn
+// block back verbatim from context (later stages receive the Plan comment
+// through .fabrik-context/stage-Plan.md). This proves the stage.Name ==
+// "Plan" gate in finalizeStageOutcome actually suppresses the note when
+// well-formed spawn blocks appear in a non-Plan stage's output, while the raw
+// marker text and the stats footer remain unaffected.
+func TestFinalizeStageOutcome_SpawnBlocks_NonPlanStage_NoNote(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			output := "As declared in the plan:\n" +
+				"FABRIK_SPAWN_CHILD_BEGIN owner/child-repo\n" +
+				"TITLE: Add authentication module\n" +
+				"Implement OAuth2 authentication.\n" +
+				"FABRIK_SPAWN_CHILD_END\n" +
+				"FABRIK_STAGE_COMPLETE\n"
+			return output, true, TokenUsage{TurnsUsed: 5, MaxTurns: 30, InputTokens: 1000, OutputTokens: 2000}, nil
+		},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, researchStages())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 92, Title: "Decomposing issue", Status: "Research", ItemID: "PVTI_92"}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment posted, got %d: %v", len(client.addCommentCalls), client.addCommentCalls)
+	}
+	body := client.addCommentCalls[0].body
+
+	if strings.Contains(body, "sub-issue") {
+		t.Errorf("expected no spawn receipt note on a non-Plan stage comment, got: %s", body)
+	}
+	if !strings.Contains(body, "FABRIK_SPAWN_CHILD_BEGIN owner/child-repo") {
+		t.Errorf("expected raw spawn block text to still appear in the posted comment, got: %s", body)
+	}
+	if !strings.Contains(body, "Used 5 turns") {
+		t.Errorf("expected stats footer in comment body, got: %s", body)
+	}
+}
+
 // TestPostOutputToPR_SpawnBlocks_NoteAppearsInComment is the AC5 guard: the
 // post_to_pr path renders the note under the same N>0 condition as the
 // issue-comment path, since both flow through the same footer value computed
