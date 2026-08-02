@@ -116,6 +116,10 @@ GitHub token to a gitignored `.env` file:
 # Required scopes: repo, project, workflow
 # Create at: https://github.com/settings/tokens (select "Tokens (classic)")
 FABRIK_TOKEN=ghp_...
+
+# Optional: run this instance's Claude invocations against a different Claude
+# account/subscription. See "Alternate Claude Profile (CLAUDE_CONFIG_DIR)" below.
+# CLAUDE_CONFIG_DIR=/home/user/.claude-alt-profile
 ```
 
 > **Note:** When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories **without** `.git/` — containers, CI workspaces, or bare directories — this check is skipped and `.env` is loaded normally without requiring a `.gitignore` entry.
@@ -2520,11 +2524,54 @@ working directory. Useful for diagnosing prompt issues or unexpected behavior.
 
 ### Subprocess Environment
 
-Claude Code is invoked with a clean, isolated environment — environment variables
-from the parent process do not leak into Claude subprocesses. If you previously
-relied on ambient env vars being available inside Claude (e.g., API keys or tool
-paths set in your shell), pass them explicitly via your stage YAML or a shell
-wrapper script.
+Claude Code is invoked with the engine's full parent-process environment as its
+base — every ambient variable in the engine's own environment is inherited by
+Claude subprocesses. Fabrik does not isolate or clear this environment; instead
+it shadows a small, explicit set of keys it cares about (`CLAUDE_CODE_EFFORT_LEVEL`,
+`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, the `FABRIK_*` invocation facts,
+`GH_TOKEN`/`GITHUB_TOKEN`) so that Fabrik's own value for those specific keys
+always wins over an ambient one, no matter which happened to be set first.
+Everything else — anything not on that list — passes through untouched. If you
+want a stage-specific variable to reach Claude reliably regardless of what's
+ambient, pass it explicitly via your stage YAML or a shell wrapper script rather
+than relying on shell export order.
+
+### Alternate Claude Profile (`CLAUDE_CONFIG_DIR`)
+
+`CLAUDE_CONFIG_DIR` is not special-cased by Fabrik — it is simply one instance of
+the general passthrough rule above, which is what makes this pattern work at all.
+Setting it in the engine's environment points every Claude Code invocation at an
+alternate credentials/config directory — a different account, subscription, and
+billing quota than the engine's own default profile. Fabrik does not set or
+otherwise manage this variable; it only reads it once, at startup, to emit the
+notice below.
+
+This is the pattern to use when you want one Fabrik instance's stage invocations
+to bill against a different Claude account than the one the engine itself runs
+as — for example, running several instances across several accounts to spread
+usage-limit exposure.
+
+Set it in `.env` (already `.gitignore`-enforced, per the note above):
+
+```
+CLAUDE_CONFIG_DIR=/home/user/.claude-alt-profile
+```
+
+It survives `--auto-upgrade` re-execs: a re-exec restarts the same binary from
+scratch, which re-runs `.env` loading at startup, so the value is picked up again
+exactly as on a fresh start.
+
+To confirm it took effect, check the startup output (stderr and `.fabrik/fabrik.log`)
+for a line naming the resolved directory:
+
+```
+[startup] notice: CLAUDE_CONFIG_DIR is set to "/home/user/.claude-alt-profile" — Claude invocations will use this profile directory instead of the default account. See docs/USER_GUIDE.md.
+```
+
+No line means `CLAUDE_CONFIG_DIR` was unset — every invocation runs against the
+default profile. Fabrik does not validate the directory's contents or credential
+state; a misconfigured or unauthenticated profile fails wherever Claude Code
+itself would fail, not at Fabrik startup.
 
 ### Worker Session Naming (`--name`)
 
