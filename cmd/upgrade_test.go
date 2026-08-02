@@ -510,3 +510,53 @@ func TestRunUpgrade_CustomWorkflowError(t *testing.T) {
 		t.Fatalf("expected 'local customizations' in error, got: %v", callErr)
 	}
 }
+
+// TestRunUpgrade_DeliversLabelsMdToExistingInstall covers issue #1339 AC3: an
+// already-populated .fabrik/plugin/ (not a fresh init) that predates LABELS.md
+// must receive it via the default (non---force) `fabrik upgrade` path. A
+// fresh-init-only test would not catch a regression in this refresh path.
+//
+// The fixture is built from the current embedded FS (which now includes
+// LABELS.md) with LABELS.md then removed from disk, simulating a prior
+// install made before this file existed. installedVer is seeded from that
+// post-removal disk state via ComputeDiskVersion+WriteVersionHash — not
+// WriteInstalledVersion, which always writes ComputeEmbeddedVersion() (the
+// current, LABELS.md-inclusive fingerprint) and would desync disk vs.
+// installed, missing the "pristine but stale" state this test targets.
+func TestRunUpgrade_DeliversLabelsMdToExistingInstall(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	pluginDir := buildFabrikPluginDir(t)
+
+	labelsPath := filepath.Join(pluginDir, "LABELS.md")
+	if _, err := os.Stat(labelsPath); err != nil {
+		t.Fatalf("expected embedded LABELS.md fixture to exist before removal: %v", err)
+	}
+	if err := os.Remove(labelsPath); err != nil {
+		t.Fatalf("removing LABELS.md from fixture: %v", err)
+	}
+
+	diskVer, err := fabrikplugin.ComputeDiskVersion(pluginDir)
+	if err != nil {
+		t.Fatalf("ComputeDiskVersion: %v", err)
+	}
+	if err := fabrikplugin.WriteVersionHash(pluginDir, diskVer); err != nil {
+		t.Fatalf("WriteVersionHash: %v", err)
+	}
+
+	if err := runUpgrade([]string{}); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+
+	embeddedData, err := fabrikplugin.FabrikPlugin.ReadFile("fabrik-workflows/LABELS.md")
+	if err != nil {
+		t.Fatalf("reading embedded LABELS.md: %v", err)
+	}
+	diskData, err := os.ReadFile(labelsPath)
+	if err != nil {
+		t.Fatalf("LABELS.md missing after upgrade: %v", err)
+	}
+	if !bytes.Equal(embeddedData, diskData) {
+		t.Fatal("LABELS.md on disk does not match embedded content after upgrade")
+	}
+}
