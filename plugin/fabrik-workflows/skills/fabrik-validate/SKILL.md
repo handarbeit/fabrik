@@ -281,6 +281,16 @@ So: prefer making steady, committed progress over racing to finish inside one sl
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
 
+## Labels You Interact With
+
+- **`fabrik:awaiting-ci`** — applied by the engine the instant you emit `FABRIK_STAGE_COMPLETE` (since `wait_for_ci: true` by default here); `stage:Validate:complete` is deliberately withheld until CI actually passes. Also re-applied on a confirmed CI failure to drive the CI-fix re-invocation described below.
+- **`fabrik:rebase-needed`** — exactly the condition the Pre-Completion Gate's mergeability check (Step 2 above) exists to catch: the engine applies this if the PR stops being cleanly mergeable against its base and re-dispatches you to resolve it.
+- **`fabrik:awaiting-review` / `review-authority:<mode>` / `expected-reviewers:<mode>` / `fabrik:bot-reprompted`** — the same review-gate labels Review interacts with; Validate shares `wait_for_reviews: true` with Review by default, so the gate can still be active here.
+- **`fabrik:auto-merge-enabled` / `fabrik:yolo` / `fabrik:cruise`** — drive what happens after you emit `FABRIK_STAGE_COMPLETE`: `yolo` (non-cruise) triggers GitHub-native auto-merge and applies `fabrik:auto-merge-enabled`; `cruise` stops the pipeline at Validate completion without merging, even if `yolo` is also present.
+- **`fabrik:revalidate`** — the operator recovery path for a stuck Validate item: forces re-entry into this stage by stripping completion/gate labels and re-dispatching. You don't act on it directly; it's why you might be invoked again on an issue you'd already completed.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Engine Context
 
 **Before you run**: Worktree exists with implementation + review commits.

@@ -37,6 +37,12 @@ Your output should be the full updated Research stage content: all findings, dec
 
 Do **not** use `FABRIK_ISSUE_UPDATE` markers — research findings live in the stage comment, not the issue body. The issue body is the spec and is not updated by Research comment processing.
 
+## Labels You Interact With
+
+- **`fabrik:paused` + `fabrik:awaiting-input`** — the engine cleared these to invoke you (a human comment is what resumes a blocked-on-input issue). You don't set or remove them yourself.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Completion
 
 When all open questions are resolved and the research findings are complete and sufficient for the Plan stage to proceed, signal completion:

@@ -214,6 +214,15 @@ Out-of-scope work in the same Fabrik run belongs to a sibling issue's worktree, 
 
 > Note: Hard tool-restriction enforcement of these guardrails is tracked in [handarbeit/fabrik#761](https://github.com/handarbeit/fabrik/issues/761). Until that ships, this section is the authoritative behavioral requirement. Follow it exactly.
 
+## Labels You Interact With
+
+- **`fabrik:extend-turns`** — if present, you've been pre-granted a 2× turn budget for this invocation; relevant if you're pacing work against "If You Hit the Turn Limit" concerns elsewhere in this skill.
+- **`base:<branch>`** — if present, your worktree was forked from and targets `<branch>` instead of the repository default; this is why your PR base isn't the default branch.
+- **`fabrik:unrestricted`** — if present, you were launched with `--dangerously-skip-permissions` instead of the default tool allowlist; explains why tools beyond the normal default set are available.
+- **`fabrik:children-spawned` / `fabrik:sub-issue`** — applied by the engine's pre-Implement step, before your first invocation, if the Plan stage declared sub-issue decomposition. You don't act on these; they're already-settled state by the time you start.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Engine Context
 
 **Before you run**: The engine has created a worktree on branch `fabrik/issue-<N>`, rebased onto main (on first run) or left as-is (on retry to preserve your context). A draft PR may have been created.

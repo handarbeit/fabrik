@@ -50,6 +50,14 @@ part of the normal happy path, not an error condition.
   Blocks auto-advance and PR landing until clear. See `review-authority:<mode>`
   and `expected-reviewers:<mode>` below for how the gate's strictness and
   reviewer expectations can be tuned per-issue.
+- **`fabrik:bot-reprompted`** — Idempotency guard for the review gate's
+  bot-reviewer escalation ladder: applied once `fabrik:awaiting-review` has
+  been active for a full `ReviewWaitTimeout` and every outstanding reviewer
+  is a bot (requested, declared via `expected_reviewers`, or both) — the
+  engine re-triggers each bot's webhook and posts a check-in comment.
+  Removed when a bot responds and the gate clears naturally, or when a
+  second full timeout elapses with still no response (the issue is then
+  paused). Never persists beyond one gate cycle.
 - **`fabrik:awaiting-ci`** — The `wait_for_ci: true` CI gate is active.
   Applied the instant a stage emits `FABRIK_STAGE_COMPLETE`; the stage's own
   `stage:<name>:complete` label is deliberately withheld until CI actually

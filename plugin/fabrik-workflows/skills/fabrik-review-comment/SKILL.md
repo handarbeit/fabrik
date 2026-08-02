@@ -108,6 +108,13 @@ Use bracketed or descriptive numbering instead:
 
 The same rule applies any time you number something in output that posts to a GitHub comment — threads, files, findings, or list items.
 
+## Labels You Interact With
+
+- **`fabrik:awaiting-review`** — the review-gate label; may already be present if you're processing a comment from a reviewer rather than a user decision on findings. You don't act on it directly.
+- **`fabrik:bot-reprompted`** — may be present if the engine already re-prompted an unresponsive bot reviewer this gate cycle; informational only from this skill's perspective.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Completion
 
 Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Review returns control to the engine without advancing the pipeline. The Review stage continues until all findings are resolved and the main Review workflow signals completion.
