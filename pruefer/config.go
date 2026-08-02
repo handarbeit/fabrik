@@ -81,6 +81,18 @@ type Config struct {
 	// default) means resolve one installation per distinct owner present in
 	// WatchedRepos instead (see BootstrapMulti in pruefer/auth.go).
 	AppInstallationID int64
+
+	// AutoUpgrade enables self-upgrade checks at the poll boundary (see
+	// Daemon.checkAndUpgrade in pruefer/upgrade.go). Default false, mirroring
+	// cmd/root.go's -auto-upgrade default — an operator opts in deliberately
+	// rather than the daemon silently replacing its own binary. See
+	// ADR-1197.
+	AutoUpgrade bool
+
+	// VersionRequested is set when --version is passed. Execute checks this
+	// before validating required config (AppID/WatchedRepos) so `pruefer
+	// --version` works without a fully configured environment.
+	VersionRequested bool
 }
 
 // yamlConfig is the shape of Pruefer's YAML config file. All fields are
@@ -103,6 +115,7 @@ type yamlConfig struct {
 	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
 	TUI                     *bool    `yaml:"tui"`
 	LogFile                 *string  `yaml:"log_file"`
+	AutoUpgrade             *bool    `yaml:"auto_upgrade"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
@@ -141,6 +154,8 @@ type flagValues struct {
 	configPath              string
 	noTUI                   bool
 	logFile                 string
+	autoUpgrade             bool
+	versionRequested        bool
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -169,8 +184,14 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.configPath, "config", DefaultConfigPath, "Path to Pruefer's YAML config file")
 	fs.BoolVar(&fv.noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
+	fs.BoolVar(&fv.autoUpgrade, "auto-upgrade", false, "At each poll boundary (never mid-review), check GitHub Releases for a newer version and self-upgrade; dev builds (built from the fabrik source checkout) rebuild from origin/main instead")
+	fs.BoolVar(&fv.versionRequested, "version", false, "Print the pruefer version and exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
+	}
+
+	if fv.versionRequested {
+		return Config{VersionRequested: true}, nil
 	}
 
 	explicit := make(map[string]bool)
@@ -201,12 +222,16 @@ func LoadConfig(args []string) (Config, error) {
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
 		TUI:               true,
 		LogFile:           DefaultLogPath,
+		AutoUpgrade:       false,
 	}
 	if yc.RequestChangesThreshold != "" {
 		cfg.RequestChangesThreshold = Severity(yc.RequestChangesThreshold)
 	}
 	if yc.TUI != nil {
 		cfg.TUI = *yc.TUI
+	}
+	if yc.AutoUpgrade != nil {
+		cfg.AutoUpgrade = *yc.AutoUpgrade
 	}
 	if yc.PollIntervalSec != nil {
 		cfg.PollInterval = time.Duration(*yc.PollIntervalSec) * time.Second
@@ -289,6 +314,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["log-file"] {
 		cfg.LogFile = fv.logFile
 	}
+	if explicit["auto-upgrade"] {
+		cfg.AutoUpgrade = fv.autoUpgrade
+	}
 
 	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
 		return Config{}, fmt.Errorf("request_changes_threshold: %q is not a recognized severity tier (must be one of low, medium, high, critical, or empty to disable)", cfg.RequestChangesThreshold)
@@ -365,6 +393,11 @@ func applyEnv(cfg *Config) {
 	// used above, is what makes that distinction possible.
 	if v, ok := os.LookupEnv("PRUEFER_LOG_FILE"); ok {
 		cfg.LogFile = v
+	}
+	if v := os.Getenv("PRUEFER_AUTO_UPGRADE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.AutoUpgrade = b
+		}
 	}
 }
 
