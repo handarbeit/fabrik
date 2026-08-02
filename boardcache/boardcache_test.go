@@ -72,6 +72,7 @@ func (m *mockClient) FetchItemDetails(item *gh.ProjectItem) error {
 		item.Body = m.itemDetailsResult.Body
 		item.Comments = cloneComments(m.itemDetailsResult.Comments)
 		item.LinkedPRNumber = m.itemDetailsResult.LinkedPRNumber
+		item.LinkedPRHeadSHA = m.itemDetailsResult.LinkedPRHeadSHA
 		item.LinkedPRReviews = clonePRReviews(m.itemDetailsResult.LinkedPRReviews)
 		item.LinkedPRReviewRequests = cloneReviewRequests(m.itemDetailsResult.LinkedPRReviewRequests)
 		item.LinkedPRReviewThreadComments = cloneComments(m.itemDetailsResult.LinkedPRReviewThreadComments)
@@ -471,6 +472,63 @@ func TestFetchItemDetailsCacheStaleRefetches(t *testing.T) {
 	}
 	if mc.fetchItemDetailsCount != 2 {
 		t.Errorf("fourth call (re-fresh): want 2 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+}
+
+// TestFetchItemDetailsCacheHit_PopulatesLinkedPRHeadSHA is the #1325 regression
+// test: on a genuine cache hit, copyDeepFieldsFromState must populate
+// LinkedPRHeadSHA from the store's ItemState.LinkedPR.HeadSHA, not leave it at
+// its zero value. Before the fix, copyDeepFieldsFromState copied
+// LinkedPRNumber from the same s.LinkedPR struct but never LinkedPRHeadSHA,
+// so this test fails against unmodified main (item2.LinkedPRHeadSHA == "").
+func TestFetchItemDetailsCacheHit_PopulatesLinkedPRHeadSHA(t *testing.T) {
+	t0 := time.Date(2026, 5, 9, 2, 47, 0, 0, time.UTC)
+	mc := &mockClient{
+		itemDetailsResult: &gh.ProjectItem{
+			Number: 12, Repo: "owner/repo",
+			Body:            "body v1",
+			LinkedPRNumber:  33,
+			LinkedPRHeadSHA: "sha_first",
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items: []gh.ProjectItem{{
+			ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review",
+			UpdatedAt: t0,
+		}},
+	})
+
+	// First call: cache miss → fallback populates LinkedPRHeadSHA, which
+	// FetchItemDetails separately persists into the store via PRHeadSHAUpdated.
+	item := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t0}
+	if err := c.FetchItemDetails(&item); err != nil {
+		t.Fatalf("FetchItemDetails(first): %v", err)
+	}
+	if mc.fetchItemDetailsCount != 1 {
+		t.Fatalf("first call: want 1 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+	if item.LinkedPRHeadSHA != "sha_first" {
+		t.Fatalf("first call: want LinkedPRHeadSHA %q, got %q", "sha_first", item.LinkedPRHeadSHA)
+	}
+
+	// Second call, same UpdatedAt, a fresh/zeroed *gh.ProjectItem — must be a
+	// genuine cache hit (no extra fallback call) whose returned
+	// LinkedPRHeadSHA still matches the seeded value, sourced from the store's
+	// cached ItemState.LinkedPR.HeadSHA rather than a re-fetch.
+	item2 := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t0}
+	if err := c.FetchItemDetails(&item2); err != nil {
+		t.Fatalf("FetchItemDetails(second): %v", err)
+	}
+	if mc.fetchItemDetailsCount != 1 {
+		t.Fatalf("second call (cache hit): want 1 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+	if item2.LinkedPRHeadSHA != "sha_first" {
+		t.Errorf("second call (cache hit): want LinkedPRHeadSHA %q, got %q", "sha_first", item2.LinkedPRHeadSHA)
+	}
+	if item2.LinkedPRNumber != 33 {
+		t.Errorf("second call (cache hit): want LinkedPRNumber 33, got %d", item2.LinkedPRNumber)
 	}
 }
 
