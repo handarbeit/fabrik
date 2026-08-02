@@ -103,6 +103,14 @@ var versionSkewExecCommandFn = exec.CommandContext
 // syscall.Exec re-exec, or a manual/external replacement (e.g. a fleet
 // sharing ~/go/bin/fabrik). Non-fatal: any error resolving the path or
 // running the subprocess is logged and the check is skipped for this poll.
+//
+// Unlike allow_auto_merge/stage_drift/undeclared_reviewers (#1348), this
+// warning needs no separate stale-sweep. Its key's subject — the resolved
+// on-disk executable path — is re-derived fresh on every idle-upgrade check
+// (poll.go), not looked up against a shrinking discovered set (board repos,
+// configured stages). The Clear branch below is therefore reachable on
+// every single evaluation, so the warning can never outlive the condition
+// that produced it.
 func (e *Engine) checkVersionSkew(ctx context.Context) {
 	exe, err := versionSkewExecutableFn()
 	if err != nil {
