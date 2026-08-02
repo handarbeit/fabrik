@@ -723,8 +723,8 @@ func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return false, nil
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -748,8 +748,8 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return true, nil
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -767,8 +767,8 @@ func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return false, errors.New("network error")
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{}, errors.New("network error")
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -778,7 +778,9 @@ func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 		eng.checkAllowAutoMerge("owner", "repo")
 	})
 
-	// No WARNING block should be emitted for an API error.
+	// No WARNING block should be emitted for an API error. A probe error fails
+	// open (CanPush: true, AllowAutoMerge: true), so no allow_auto_merge
+	// warning fires either.
 	if strings.Contains(out, "WARNING") {
 		t.Errorf("should not print WARNING on API error; got: %q", out)
 	}
@@ -789,9 +791,9 @@ func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	var callCount int
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
 			callCount++
-			return false, nil
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})

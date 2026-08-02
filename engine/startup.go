@@ -304,10 +304,55 @@ func (e *Engine) checkHTTPSCredentials(hasSSHRewrite bool) {
 	}
 }
 
+// resolveRepoAccess returns the cached write-access determination for
+// owner/repo, probing and caching it on first call (at most once per repo per
+// process run, per R3/AC4). It is the single shared resolver consulted by
+// label seeding, checkAllowAutoMerge, and itemMayNeedWork's dispatch gate
+// (ADR-1347) — whichever of those calls it first for a given repo is the one
+// that fetches and logs.
+//
+// Fails open (CanPush: true) on a probe error (network failure, transient
+// 5xx), matching this codebase's prior error posture for the same GET
+// request: a genuinely managed repo should not lose dispatch/seeding for the
+// rest of the process lifetime over a transient blip.
+func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
+	key := owner + "/" + repo
+	e.mu.Lock()
+	access, cached := e.repoAccess[key]
+	e.mu.Unlock()
+	if cached {
+		return access
+	}
+
+	access, err := e.client.FetchRepoAccess(owner, repo)
+	if err != nil {
+		e.logf(0, "warn", "could not determine repo access for %s: %v (assuming writable)\n", key, err)
+		access = gh.RepoAccess{AllowAutoMerge: true, CanPush: true}
+	}
+
+	e.mu.Lock()
+	existing, already := e.repoAccess[key]
+	if already {
+		access = existing
+	} else {
+		e.repoAccess[key] = access
+	}
+	e.mu.Unlock()
+
+	if !already && !access.CanPush {
+		e.logf(0, "startup", "%s: no write access — skipping label seeding and allow_auto_merge check; items from this repo will not be processed\n", key)
+	}
+	return access
+}
+
 // checkAllowAutoMerge queries the GitHub API for the allow_auto_merge setting on
 // owner/repo and prints a WARNING if it is disabled. Non-fatal: API errors are
 // logged at warn level and processing continues. The check fires at most once per
-// repo per process run (guarded by checkedAutoMergeRepos).
+// repo per process run (guarded by checkedAutoMergeRepos). Skips entirely — no
+// warning, no API call beyond the shared resolveRepoAccess probe — when the
+// token has no write access to the repo (R2): a repo Fabrik can't push to also
+// can't have allow_auto_merge administered on it, and resolveRepoAccess has
+// already logged the "no write access" notice once.
 func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 	key := owner + "/" + repo
 	e.mu.Lock()
@@ -317,12 +362,11 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 	if already {
 		return
 	}
-	enabled, err := e.client.FetchAllowAutoMerge(owner, repo)
-	if err != nil {
-		e.logf(0, "warn", "could not check allow_auto_merge for %s: %v\n", key, err)
+	access := e.resolveRepoAccess(owner, repo)
+	if !access.CanPush {
 		return
 	}
-	if !enabled {
+	if !access.AllowAutoMerge {
 		e.logf(0, "startup", "WARNING: %s has allow_auto_merge disabled.\n", key)
 		e.logf(0, "startup", "WARNING: yolo issues on this repo will reach Validate complete but their PRs will not merge.\n")
 		e.logf(0, "startup", "WARNING: Fix: gh api -X PATCH repos/%s -f allow_auto_merge=true\n", key)
