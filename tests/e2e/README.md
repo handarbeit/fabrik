@@ -736,6 +736,39 @@ reports), and **never started** (parked waiting for a free `-parallel` slot,
 which the built-in panic dump omits entirely). The full JSON log is kept for
 follow-up debugging at the path printed above.
 
+#### Per-test wall-clock summary (#1355)
+
+Unlike the failure classification above, `report_test_timings` runs
+unconditionally — pass or fail — right after each leg's suite invocation
+finishes, so "which scenarios cost the most" is a measured number from every
+gate run rather than a guess:
+
+```
+== per-test wall-clock (leg: off), slowest first ==
+2312.4s  pass  TestConvergenceRace
+1382.1s  pass  TestPausedMergedPRRecovery
+612.0s   pass  TestNoWorkNeeded
+58.3s    pass  TestSmokeSingleRepoDispatch
+0s       skip  TestMergeTrainHappyPathLanding
+```
+
+Elapsed is Go's own per-test `Elapsed` field from the `go test -json` stream
+(only meaningful on a test's terminal pass/fail/skip event), sorted
+descending; subtests are folded into their parent, same as the failure
+classification above. Printed once per leg — a combined cross-leg table
+isn't possible without changing `switch_and_run`'s per-leg `jsonlog` scoping
+(see the function's own doc comment for why).
+
+**Verification status:** the `jq` pipeline itself is proven against
+synthetic `go test -json` fixtures (multiple tests, a subtest, all three
+terminal actions, sorted correctly) — not by inspection. A full smoke test
+of the integrated `scripts/e2e/run.sh` output (AC4) against a live gate run
+was not performed for the same reason as `TestNoWorkNeeded`'s live-bed
+verification above: doing so touches `~/dev/fabrik-test`, outside any
+automated Fabrik stage's worktree sandbox. Run `scripts/e2e/run.sh -run
+TestSmokeSingleRepoDispatch` manually to confirm the table prints in
+context.
+
 #### Teardown on kill
 
 A run killed by `E2E_TIMEOUT` (or an external signal) skips every in-flight
