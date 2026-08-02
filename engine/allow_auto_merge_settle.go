@@ -58,6 +58,6 @@ func (e *Engine) sweepStaleAllowAutoMergeWarnings(seenRepos map[string]bool) {
 		return
 	}
 	for _, key := range cleared {
-		e.logf(0, "startup", "cleared stale warning %s: repo no longer on the board\n", key)
+		e.logf(0, "poll", "cleared stale warning %s: repo no longer on the board\n", key)
 	}
 }

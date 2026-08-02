@@ -2557,8 +2557,10 @@ repo (e.g. everything currently in Done) would durably clear a legitimate warnin
 reappear until a process restart. Multi-repo mode (`e.cfg.Repo == ""`) has no equivalent always-present
 repo, so `defaultRepo()` returning `""` is a correct no-op there. Runs every poll, because `seenRepos`
 itself is rebuilt every poll (a repo leaving/rejoining the board is visible immediately). No new API
-calls: everything consumed is already computed this poll cycle. Each clear logs one line (tag
-`"startup"`) naming the full key and the reason ("repo no longer on the board").
+calls: everything consumed is already computed this poll cycle. Each clear logs one line (tag `"poll"`,
+matching the cadence of the other per-poll log lines it sits next to — not `"startup"`, which the
+codebase reserves for once-per-process/once-per-repo events) naming the full key and the reason ("repo
+no longer on the board").
 
 **`stage_drift` / `undeclared_reviewers` (stage-name-keyed, startup-only).** `stages.SweepStaleWarnings`
 (`stages/drift.go`) is called once from `Run()`, immediately after the existing `WarnStageDrift`/
