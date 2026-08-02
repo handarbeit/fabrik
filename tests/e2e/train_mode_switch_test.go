@@ -58,12 +58,12 @@ func TestSwitchTrainMode(t *testing.T) {
 	StartFabrikTestBed(t, env)
 
 	// Postcondition: verify the switch actually took effect rather than
-	// trusting that Stop/Start succeeded. A cached or partially-failed
-	// switch (see scripts/e2e/run.sh's -count=1) must fail loudly here
-	// instead of reporting success.
-	if pid := lockedPID(env); pid == 0 {
-		t.Fatalf("postcondition failed: bed is not running after restart")
-	}
+	// trusting that Stop/Start succeeded. StartFabrikTestBed above already
+	// t.Fatalf's if the bed doesn't come up, so "is it running" is already
+	// covered by the time we get here — what it does NOT cover is whether
+	// the restarted bed actually picked up the new mode. A cached or
+	// partially-failed switch (see scripts/e2e/run.sh's -count=1) must fail
+	// loudly here instead of reporting success.
 	got, err := readEnvFileValue(envFile, "FABRIK_MERGE_TRAIN")
 	if err != nil {
 		t.Fatalf("postcondition failed: read FABRIK_MERGE_TRAIN from %s: %v", envFile, err)
