@@ -789,6 +789,46 @@ func TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning(t *testing.T) {
 	}
 }
 
+// TestCheckAllowAutoMerge_NoWriteAccessClearsStaleWarning verifies that a
+// previously recorded allow_auto_merge warning is cleared, not left immortal,
+// when a later run finds the repo's write access has been revoked. Without
+// this, the !CanPush early return would skip past checkAllowAutoMerge's own
+// Clear branch forever, since checkedAutoMergeRepos never lets this function
+// re-run for the repo a second time in the same process (raised in PR review
+// on #1347).
+func TestCheckAllowAutoMerge_NoWriteAccessClearsStaleWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+
+	if err := warnings.Record(warnings.Entry{
+		Key:    "allow_auto_merge:owner/repo",
+		Type:   "allow_auto_merge",
+		Title:  "allow_auto_merge disabled on owner/repo",
+		Detail: "stale entry from a prior run when access was still present",
+	}); err != nil {
+		t.Fatalf("seeding stale warning: %v", err)
+	}
+
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: false}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	eng.checkAllowAutoMerge("owner", "repo")
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	for _, e := range entries {
+		if e.Key == "allow_auto_merge:owner/repo" {
+			t.Errorf("expected stale allow_auto_merge warning to be cleared once access is revoked; still present: %+v", e)
+		}
+	}
+}
+
 func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })

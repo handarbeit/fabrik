@@ -348,11 +348,16 @@ func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
 // checkAllowAutoMerge queries the GitHub API for the allow_auto_merge setting on
 // owner/repo and prints a WARNING if it is disabled. Non-fatal: API errors are
 // logged at warn level and processing continues. The check fires at most once per
-// repo per process run (guarded by checkedAutoMergeRepos). Skips entirely — no
-// warning, no API call beyond the shared resolveRepoAccess probe — when the
+// repo per process run (guarded by checkedAutoMergeRepos). Skips the warning
+// entirely — no API call beyond the shared resolveRepoAccess probe — when the
 // token has no write access to the repo (R2): a repo Fabrik can't push to also
 // can't have allow_auto_merge administered on it, and resolveRepoAccess has
-// already logged the "no write access" notice once.
+// already logged the "no write access" notice once. Also clears any
+// allow_auto_merge warning already recorded for the repo from a prior run when
+// access was still present: a repo whose access is revoked between runs would
+// otherwise keep an unfixable, now-moot warning immortal in
+// .fabrik/warnings.json forever, since !CanPush never reaches this function's
+// own Clear branch below again.
 func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 	key := owner + "/" + repo
 	e.mu.Lock()
@@ -364,6 +369,7 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 	}
 	access := e.resolveRepoAccess(owner, repo)
 	if !access.CanPush {
+		_ = warnings.Clear("allow_auto_merge:" + key)
 		return
 	}
 	if !access.AllowAutoMerge {

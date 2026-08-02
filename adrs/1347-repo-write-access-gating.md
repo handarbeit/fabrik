@@ -137,3 +137,13 @@ convention for this one notice was judged unnecessary scope.
   auto-cleaned — a disk-space leak, not a correctness or security issue. Manual
   removal of the worktree directory is the only path, consistent with this issue's
   own "retroactively removing labels already seeded" non-goal.
+- **`checkAllowAutoMerge`'s `!CanPush` early return also clears any stale
+  `allow_auto_merge` warning for the repo** (raised in PR review, #1356): a repo
+  previously writable with `allow_auto_merge` disabled would have a warning
+  recorded; if access is later revoked, the early return would otherwise skip past
+  the function's own `Clear` branch forever (`checkedAutoMergeRepos` never lets it
+  re-run for that repo in the same process), leaving an unfixable, now-moot warning
+  immortal in `.fabrik/warnings.json`. This is a distinct case from #1348's
+  stale-warning sweep, which only clears warnings for repos that have left the
+  board entirely — a repo still on the board with newly revoked access is never
+  "absent" from `seenRepos`, so #1348's sweep does not reach it.
