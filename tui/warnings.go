@@ -337,7 +337,16 @@ func (c WarningsPaneComponent) View(width int) string {
 	}
 	if len(visible) > displayRows {
 		hidden := len(visible) - displayRows
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … +%d more", hidden)))
+		above := offset
+		below := hidden - above
+		var dir string
+		switch {
+		case above > 0 && below > 0:
+			dir = fmt.Sprintf(" (%d above, %d below)", above, below)
+		case above > 0:
+			dir = " above"
+		}
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … +%d more%s", hidden, dir)))
 	}
 
 	// Expanded detail for the selected entry.

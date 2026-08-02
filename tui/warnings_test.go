@@ -79,6 +79,64 @@ func TestWarningsView_OverflowIndicator(t *testing.T) {
 	}
 }
 
+// TestWarningsView_OverflowIndicatorDirection guards against the overflow
+// line always implying "more below" regardless of scroll position. Once the
+// window has scrolled (offset > 0), some or all of the hidden entries are
+// above the rendered window, not below — the indicator's wording must
+// reflect that instead of always pointing down.
+func TestWarningsView_OverflowIndicatorDirection(t *testing.T) {
+	n := 20
+	newAt := func(curIdx int) WarningsPaneComponent {
+		c := newTestWarningsPane(n)
+		c.curIdx = curIdx
+		return c
+	}
+
+	t.Run("unscrolled: all hidden are below, no above wording", func(t *testing.T) {
+		c := newAt(0)
+		out := ansi.Strip(c.View(80))
+		want := fmt.Sprintf("+%d more", n-maxWarningRows)
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q; got:\n%s", want, out)
+		}
+		if strings.Contains(out, "above") {
+			t.Errorf("unscrolled window should not claim anything is hidden above; got:\n%s", out)
+		}
+	})
+
+	t.Run("scrolled to last entry: all hidden are above", func(t *testing.T) {
+		c := newAt(n - 1)
+		out := ansi.Strip(c.View(80))
+		want := fmt.Sprintf("+%d more above", n-maxWarningRows)
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q; got:\n%s", want, out)
+		}
+		if strings.Contains(out, "below") {
+			t.Errorf("window scrolled to the end should not claim anything is hidden below; got:\n%s", out)
+		}
+	})
+
+	t.Run("scrolled to middle: hidden both above and below, counts sum to total", func(t *testing.T) {
+		c := newAt(n / 2)
+		displayRows := min(n, maxWarningRows)
+		offset := warningsWindowOffset(c.curIdx, n, displayRows)
+		above := offset
+		below := n - displayRows - above
+		if above == 0 || below == 0 {
+			t.Fatalf("test setup expects both above and below hidden entries, got above=%d below=%d", above, below)
+		}
+		out := ansi.Strip(c.View(80))
+		wantTotal := fmt.Sprintf("+%d more", n-maxWarningRows)
+		wantAbove := fmt.Sprintf("%d above", above)
+		wantBelow := fmt.Sprintf("%d below", below)
+		for _, want := range []string{wantTotal, wantAbove, wantBelow} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q; got:\n%s", want, out)
+			}
+		}
+	})
+}
+
 // AC2: with N > 3, every entry can be brought on screen through normal
 // navigation (repeated "down" presses).
 func TestWarningsView_NavigationReachesLastEntry(t *testing.T) {
