@@ -3,6 +3,7 @@ package pruefer
 import (
 	"path/filepath"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
@@ -15,6 +16,13 @@ const (
 	fabrikOwner = "handarbeit"
 	fabrikRepo  = "fabrik"
 )
+
+// upgradeCheckInterval throttles Daemon.Run's upgrade check, independent of
+// Config.PollInterval. Pruefer doesn't need this for safety (the
+// poll-boundary placement already guarantees no in-flight review) — it's
+// purely a rate/cost control on git-fetch and GitHub Releases API chatter.
+// See ADR-1197.
+const upgradeCheckInterval = 30 * time.Minute
 
 // releaseAPIBaseURL overrides the GitHub API host used by
 // checkReleaseUpgrade's dedicated release-check client. Empty (the
