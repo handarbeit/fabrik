@@ -791,7 +791,7 @@ func Execute() error {
 	var skillsStaleCount int
 	var customWorkflow bool
 	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
-		cw, upgradeNeeded, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+		cw, upgradeNeeded, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 		if cwErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", cwErr)
 		} else {
@@ -816,7 +816,7 @@ func Execute() error {
 		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, stopCh, skillsStaleCount, customWorkflow)
 	}
 	if customWorkflow {
-		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin"))
 	} else if skillsStaleCount > 0 {
 		if refreshErr := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); refreshErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill refresh failed: %v\n", refreshErr)
@@ -882,11 +882,11 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 		return
 	}
 	os.Unsetenv(envVar)
-	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 	if stateErr != nil {
 		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed%s: %v\n", msgSuffix, stateErr)
 	} else if customWorkflow {
-		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin"))
 	} else if upgradeNeeded {
 		if _, err := fabrikplugin.RefreshPlugin(); err != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed%s: %v\n", msgSuffix, err)
@@ -896,6 +896,22 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 	} else {
 		fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
 	}
+}
+
+// pluginCustomizationWarning builds the "local customizations" startup warning,
+// naming the specific files that differ between pluginDir and the currently
+// embedded plugin (the same comparison basis diffingPluginFiles uses for stale-
+// skill detection in cmd/upgrade.go), so the warning is directly actionable
+// rather than a bare assertion. Falls back to the assertion alone if the diff
+// itself fails or reports no differences (e.g. a race with a concurrent
+// refresh) rather than raising an error to the caller.
+func pluginCustomizationWarning(pluginDir string) string {
+	msg := "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh"
+	if diffing, diffErr := diffingPluginFiles(pluginDir); diffErr == nil && len(diffing) > 0 {
+		msg += fmt.Sprintf(" (differing: %s)", strings.Join(diffing, ", "))
+	}
+	msg += "; run 'fabrik upgrade --force' to overwrite\n"
+	return msg
 }
 
 // reviewWaitTimeout converts a ReviewWaitTimeout config value (minutes) to a
