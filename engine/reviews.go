@@ -234,7 +234,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	} else if len(declaredOutstanding) > 0 {
 		e.logf(item.Number, "awaiting-review", "waiting for declared reviewer(s): %s\n", strings.Join(declaredOutstanding, ", "))
 	} else {
-		e.logf(item.Number, "awaiting-review", "waiting for initial review submission (no reviewers requested; bot reviewers may still be processing)\n")
+		e.logf(item.Number, "awaiting-review", "waiting for initial review submission (no reviewers requested, none declared via expected_reviewers)\n")
 	}
 
 	// Apply label on first block transition.
@@ -1308,9 +1308,9 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			// check matters for the same reason: a declared-but-unrequested
 			// reviewer that hasn't responded yet is a case Fabrik *can* name
 			// (see the standard branch below, which surfaces it via
-			// expectedReviewersLine) — asserting here that "Fabrik cannot
-			// determine whether one is ever coming" would contradict the
-			// operator's own declaration.
+			// expectedReviewersLine) — framing this branch's "whether one is
+			// ever coming" as declarable rather than unknowable would
+			// contradict the operator's own declaration if it applied here.
 			prRef := "the linked PR"
 			if item.LinkedPRNumber > 0 {
 				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
@@ -1334,14 +1334,17 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			msg = fmt.Sprintf(
 				"🏭 **Fabrik — review wait timeout**\n\n"+
 					"The review gate for stage **%s** timed out. No reviewer was ever requested on %s, and no review "+
-					"has been submitted — Fabrik cannot determine whether one is ever coming.%s\n\n"+
+					"has been submitted. Whether one is ever coming is declarable rather than unknowable — see remedy (b) below.%s\n\n"+
 					"Fabrik has paused this issue. To resume, either:\n"+
 					"- (a) post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
 					"the gate, even though GitHub forbids self-approval%s,\n"+
-					"- (b) set `wait_for_reviews: false` in the %s stage YAML if this repo has no reviewer,\n"+
-					"- (c) merge %s manually, or\n"+
-					"- (d) remove `fabrik:paused` to let the engine wait again.",
-				stage.Name, prRef, authorityLine, prRef, selfReviewCaveat, stage.Name, prRef,
+					"- (b) set `expected_reviewers: []` in the %s stage YAML to declare that no *unrequested* "+
+					"reviewer is expected here — an explicitly requested reviewer is still honored,\n"+
+					"- (c) set `wait_for_reviews: false` in the %s stage YAML to disable the review gate entirely "+
+					"if this repo has no reviewer,\n"+
+					"- (d) merge %s manually, or\n"+
+					"- (e) remove `fabrik:paused` to let the engine wait again.",
+				stage.Name, prRef, authorityLine, prRef, selfReviewCaveat, stage.Name, stage.Name, prRef,
 			)
 		} else if pendingLine == "" && hasReviews && authorityLine != "" {
 			// No reviewer is currently outstanding, but a review does exist —
