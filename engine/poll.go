@@ -88,7 +88,9 @@ func pollStatusClear() {
 // use that directory's credentials/profile instead of the default account, and
 // this is otherwise unobservable (ps eww only shows exec-time env, not vars set
 // by godotenv during startup — see #1350). A no-op when configDir is empty, so
-// the unset case stays byte-for-byte silent (R2).
+// the unset case stays byte-for-byte silent (R2). Emitted once, from the
+// environment snapshot at process start — if CLAUDE_CONFIG_DIR ever became
+// reloadable without a full re-exec, this notice would go stale.
 func logClaudeConfigDir(configDir string, w io.Writer) {
 	if configDir == "" {
 		return
@@ -136,15 +138,16 @@ func (e *Engine) Run() error {
 	// notice, to both stderr (visible at startup) and fabrik.log (durable for
 	// post-mortems). Without the log copy, recurrences of "same drift bit us
 	// again" are invisible from the persistent log alone.
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if e.logFile != nil {
 		w := io.MultiWriter(os.Stderr, e.logFile)
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
-		logClaudeConfigDir(os.Getenv("CLAUDE_CONFIG_DIR"), w)
+		logClaudeConfigDir(configDir, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
-		logClaudeConfigDir(os.Getenv("CLAUDE_CONFIG_DIR"), os.Stderr)
+		logClaudeConfigDir(configDir, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
