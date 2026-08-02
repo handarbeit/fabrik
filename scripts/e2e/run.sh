@@ -185,12 +185,12 @@ switch_and_run() {
   # window than the suite invocation below, and extending it the same
   # machinery would mean auto-tearing-down a bed that may just be mid-restart
   # rather than actually stuck.
-  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -timeout 3m \
+  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -count=1 -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
   echo "== running suite with E2E_TRAIN_MODE=${mode} =="
   local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
   local rc=0
-  E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -timeout "$TIMEOUT" -parallel "$PARALLEL" \
+  E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$PARALLEL" \
       ./tests/e2e/... "$@" 2>&1 \
     | tee "$jsonlog" \
     | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
