@@ -763,6 +763,32 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 	}
 }
 
+// TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning verifies AC2/R2: a repo
+// with no write access produces no allow_auto_merge warning even when
+// AllowAutoMerge is false — the unfixable-without-admin-rights warning must
+// not fire for a repo the operator can't administer at all.
+func TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: false}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("expected no WARNING for a repo with no write access, even with allow_auto_merge disabled; got: %q", out)
+	}
+	if strings.Contains(out, "gh api -X PATCH") {
+		t.Errorf("expected no admin-only remediation for a repo with no write access; got: %q", out)
+	}
+}
+
 func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
