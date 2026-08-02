@@ -25,11 +25,11 @@ func TestSetToken_UpdatesSubsequentRequests(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token-v1", srv.URL)
-	if _, err := c.FetchAllowAutoMerge("owner", "repo"); err != nil {
+	if _, err := c.FetchRepoAccess("owner", "repo"); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	c.SetToken("token-v2")
-	if _, err := c.FetchAllowAutoMerge("owner", "repo"); err != nil {
+	if _, err := c.FetchRepoAccess("owner", "repo"); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 

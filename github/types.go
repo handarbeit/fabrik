@@ -29,6 +29,13 @@ type Dependency struct {
 	Repo   string // "owner/repo" of the blocking issue; empty if same repo
 }
 
+// RepoAccess captures the write-access-relevant fields from GET /repos/{owner}/{repo}
+// for the authenticated token. CanPush reflects permissions.push on that response.
+type RepoAccess struct {
+	AllowAutoMerge bool
+	CanPush        bool
+}
+
 // ReviewRequest represents a pending review request on a pull request.
 type ReviewRequest struct {
 	Login string // GitHub login of the requested reviewer (user or bot)
