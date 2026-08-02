@@ -113,8 +113,30 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	logf(0, "poll", "pruefer starting: watching %d repo(s), poll interval %s, concurrency %d\n",
 		len(d.Config.WatchedRepos), interval, d.effectiveConcurrency())
 
+	// lastUpgradeCheck is local to Run, not a Daemon field: Run is the sole
+	// sequential caller (both TUI and headless modes call d.Run), so there's
+	// no concurrent access to guard against. Zero value means the first
+	// iteration always checks.
+	var lastUpgradeCheck time.Time
+
 	for {
 		d.poll(ctx)
+
+		// The upgrade check runs after poll() returns — poll() already calls
+		// wg.Wait() before returning, so the in-flight review set is
+		// guaranteed empty here. This is the poll-boundary safety guarantee:
+		// re-exec'ing mid-review would orphan an ephemeral clone and a
+		// running claude subprocess with no review posted (see ADR-1197).
+		//
+		// The 30-minute throttle is a rate/cost control, not a safety
+		// requirement — it exists to bound git-fetch/GitHub-Releases-API
+		// chatter (Pruefer's own poll interval defaults to 120s, which would
+		// otherwise mean checking upstream roughly every 2 minutes).
+		if d.Config.AutoUpgrade && time.Since(lastUpgradeCheck) >= upgradeCheckInterval {
+			lastUpgradeCheck = time.Now()
+			d.checkAndUpgrade()
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil

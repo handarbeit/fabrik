@@ -92,6 +92,19 @@ Pruefer loads `.env` (via the same `godotenv`-based loader Fabrik uses), reads `
 
 A lock file at `.pruefer/pruefer.lock` prevents two instances from polling the same working directory concurrently.
 
+## Version & self-upgrade
+
+`pruefer --version` (or `-version`) prints the running build's version and exits: a stamped release tag (e.g. `v0.0.76`) for a binary downloaded from GitHub Releases, or `dev(<short-sha>)` for a binary built from source. This distinction is what the self-upgrade logic below uses to pick its upgrade path — Pruefer ships from the same `.goreleaser.yaml`/tag as Fabrik itself, not an independent release train (see [adrs/1197-pruefer-self-upgrade.md](../../adrs/1197-pruefer-self-upgrade.md) for the rationale).
+
+Self-upgrade is **off by default** (`--auto-upgrade` / `PRUEFER_AUTO_UPGRADE` / `auto_upgrade: true`) — an operator opts in deliberately, mirroring Fabrik's own `-auto-upgrade` default. Given that a stale Pruefer has no board or issues to make its staleness visible (see the top of this README's motivation), **enabling `--auto-upgrade` is recommended** for any long-running deployment. When enabled, Pruefer checks for an upgrade at the poll boundary — right after a poll cycle's reviews have all completed (`Daemon.poll` joins every in-flight review before returning) and before the next poll begins — so an upgrade never interrupts an in-flight review's ephemeral clone or `claude` subprocess. The check itself is throttled to roughly every 30 minutes, independent of `poll_interval_seconds`, to bound `git fetch`/GitHub Releases API chatter.
+
+Which upgrade path runs depends on how the binary was built:
+
+- **Dev mode** (running version is `dev(<sha>)`): Pruefer must be run from the Fabrik source checkout, invoked such that `.pruefer/pruefer.lock` (and thus Pruefer's working directory) sits at the checkout root — the same convention Fabrik's own dev-rebuild path uses. On finding new commits on `origin/main` (or unpushed local commits matching neither), Pruefer runs `git pull --ff-only` and rebuilds itself with `go build` from `cmd/pruefer` before re-exec'ing. This is the mode you get by building and running `pruefer` directly inside a Fabrik checkout — no extra configuration needed beyond `--auto-upgrade`.
+- **Release mode** (running version is a stamped tag): Pruefer checks `handarbeit/fabrik`'s GitHub Releases for a newer tag using a dedicated, unauthenticated GitHub API client (decoupled from the per-owner App installation tokens used for reviews — those aren't guaranteed to cover `handarbeit/fabrik`), downloads the matching platform archive, atomically replaces the running binary, and re-execs. This is the mode for a deployment running from a distinct directory (e.g. `~/dev/pruefer`) with a binary downloaded from a release — the actual "usage" deployment shape this feature targets.
+
+On macOS arm64, a release-mode upgrade re-signs the replacement binary ad-hoc after download (the same step Fabrik's own upgrade path uses) so the swapped-in binary isn't rejected by Gatekeeper/AMFI.
+
 ## Terminal UI
 
 When run with a real terminal attached (both stdin and stdout), Pruefer launches an interactive TUI by default — the same `bubbletea`/`bubbles`/`lipgloss` stack and model/update/view structure as Fabrik's own `tui/` package, so the two feel like the same family of tool. It shows:
@@ -157,6 +170,8 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from `watched_repos`) | Legacy pin: set to force every watched repo through one specific installation, regardless of owner |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
+| `--auto-upgrade` | `PRUEFER_AUTO_UPGRADE` | `auto_upgrade` | `false` | Check for a newer version at the poll boundary and self-upgrade (dev-rebuild or release-download, depending on the running build — see [Version & self-upgrade](#version--self-upgrade)). Recommended for long-running deployments. |
+| `--version` | — | — | — | Print the running version (a stamped release tag, or `dev(<sha>)`) and exit. |
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 

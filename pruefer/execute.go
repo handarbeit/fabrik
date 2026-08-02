@@ -29,6 +29,10 @@ func Execute() error {
 	if err != nil {
 		return err
 	}
+	if cfg.VersionRequested {
+		fmt.Println(Version)
+		return nil
+	}
 	if cfg.AppID == 0 {
 		return fmt.Errorf("github_app_id is required (set via config file, PRUEFER_GITHUB_APP_ID, or --github-app-id)")
 	}
