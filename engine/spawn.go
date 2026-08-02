@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,18 @@ type SpawnBlock struct {
 	Repo  string // "owner/repo"
 	Title string
 	Body  string
+
+	// DependsOnDeclared reports whether the block carried an optional
+	// DEPENDS_ON: header, regardless of whether its value parsed as valid.
+	// DependsOnRaw preserves the raw header value (for error messages).
+	// DependsOn is the parsed 1-based index into this Plan output's own block
+	// list; it stays at the sentinel 0 — never a legal 1-based index — when
+	// the header was absent or its value could not be parsed as a positive
+	// integer, so validateSpawnDependsOn can treat "absent", "malformed", and
+	// "zero/negative" uniformly as "invalid" through a single comparison.
+	DependsOnDeclared bool
+	DependsOnRaw      string
+	DependsOn         int
 }
 
 // spawnBeginRepo returns the target repo declared by line when line is a
@@ -134,11 +147,14 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 			break
 		}
 
-		if title, blockBody := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title != "" {
+		if title, dependsOnDeclared, dependsOnRaw, dependsOn, blockBody := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title != "" {
 			blocks = append(blocks, SpawnBlock{
-				Repo:  repo,
-				Title: title,
-				Body:  blockBody,
+				Repo:              repo,
+				Title:             title,
+				Body:              blockBody,
+				DependsOnDeclared: dependsOnDeclared,
+				DependsOnRaw:      dependsOnRaw,
+				DependsOn:         dependsOn,
 			})
 		}
 
@@ -149,9 +165,16 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 	return blocks
 }
 
-// parseTitleAndBody extracts the title (from the "TITLE: ..." line) and the
-// remaining body content from the inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.
-func parseTitleAndBody(content string) (title, body string) {
+// parseTitleAndBody extracts the title (from the "TITLE: ..." line), the
+// optional DEPENDS_ON: header, and the remaining body content from the
+// inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.
+//
+// DEPENDS_ON:, when present, must appear on the line immediately following
+// TITLE: — no blank line between them, matching the issue's own example. A
+// DEPENDS_ON:-looking line separated from TITLE: by a blank line is just
+// body content, avoiding any ambiguity about how far to scan for the
+// optional header.
+func parseTitleAndBody(content string) (title string, dependsOnDeclared bool, dependsOnRaw string, dependsOn int, body string) {
 	lines := strings.Split(content, "\n")
 	titleIdx := -1
 	for i, l := range lines {
@@ -166,16 +189,55 @@ func parseTitleAndBody(content string) (title, body string) {
 			break
 		}
 		// First non-empty line that isn't a TITLE: prefix — malformed.
-		return "", ""
+		return "", false, "", 0, ""
 	}
 	if title == "" || titleIdx == -1 {
-		return "", ""
+		return "", false, "", 0, ""
 	}
 
-	// Body is everything after the TITLE: line, trimmed.
-	bodyLines := lines[titleIdx+1:]
+	bodyStart := titleIdx + 1
+	if bodyStart < len(lines) {
+		next := strings.TrimSpace(strings.TrimRight(lines[bodyStart], "\r"))
+		if strings.HasPrefix(next, "DEPENDS_ON:") {
+			dependsOnDeclared = true
+			dependsOnRaw = strings.TrimSpace(strings.TrimPrefix(next, "DEPENDS_ON:"))
+			if n, err := strconv.Atoi(dependsOnRaw); err == nil && n > 0 {
+				dependsOn = n
+			}
+			bodyStart++
+		}
+	}
+
+	// Body is everything after the TITLE: (and optional DEPENDS_ON:) line, trimmed.
+	bodyLines := lines[bodyStart:]
 	body = strings.TrimSpace(strings.Join(bodyLines, "\n"))
-	return title, body
+	return title, dependsOnDeclared, dependsOnRaw, dependsOn, body
+}
+
+// validateSpawnDependsOn performs the purely structural DEPENDS_ON validation
+// that must run before any GitHub mutation (requirement 5): each declared
+// DEPENDS_ON must be a forward reference to a strictly earlier block in the
+// same Plan output — 1 <= DependsOn < the block's own 1-based index. A single
+// comparison covers out-of-range, non-forward (self/higher index), and any
+// syntactically malformed value (non-numeric, empty, zero, negative), since
+// ParseSpawnBlocks leaves DependsOn at the sentinel 0 for anything it could
+// not parse as a positive integer. No graph walk is needed or performed:
+// forward-only references make sibling dependency cycles structurally
+// impossible.
+func validateSpawnDependsOn(blocks []SpawnBlock) error {
+	for i, b := range blocks {
+		if !b.DependsOnDeclared {
+			continue
+		}
+		ownIndex := i + 1
+		if b.DependsOn < 1 || b.DependsOn >= ownIndex {
+			if ownIndex == 1 {
+				return fmt.Errorf("spawn block #1 declares DEPENDS_ON: %q, but block 1 has no earlier sibling to depend on", b.DependsOnRaw)
+			}
+			return fmt.Errorf("spawn block #%d declares DEPENDS_ON: %q, which must be a forward reference to an earlier block (valid range: 1-%d)", ownIndex, b.DependsOnRaw, ownIndex-1)
+		}
+	}
+	return nil
 }
 
 // childFooter returns the engine-appended back-reference footer for a spawned
@@ -334,6 +396,19 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string, blocks []SpawnBlock) (bool, error) {
 	e.logf(item.Number, "spawn", "pre-Implement: found %d child(ren) to spawn\n", len(blocks))
 
+	// Validate DEPENDS_ON headers upfront, before any GitHub mutation. This is
+	// purely structural (no created-issue data needed) so an invalid index
+	// fails loud and cheap, with zero orphaned issues — "Created so far: none"
+	// is always accurate for this failure class.
+	if err := validateSpawnDependsOn(blocks); err != nil {
+		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\n%s. Created so far: %s\n\nRemove `fabrik:paused` after fixing the Plan output to retry.",
+			err, formatSpawnedList(nil))
+		e.pauseIssue(item, msg, pauseOpts{
+			labelEcho: true,
+		})
+		return false, fmt.Errorf("pre-implement: %w", err)
+	}
+
 	// Ensure all target repos are initialized (bare-cloned) before any mutation.
 	// On-demand clone via singleflight — no prior processing of an issue from the
 	// target repo is required. Error comment and labels are posted by
@@ -358,8 +433,11 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	sf := e.statusField
 	e.mu.Unlock()
 
-	// Spawn children in order.
+	// Spawn children in order, retaining the block-index -> child node-ID
+	// mapping so the sibling-wiring pass below can resolve DEPENDS_ON
+	// references after all children exist.
 	var spawned []string
+	childNodeIDs := make([]string, len(blocks))
 	for i, block := range blocks {
 		childOwner, childRepo, ok := parseOwnerRepoStr(block.Repo)
 		if !ok {
@@ -383,6 +461,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 		e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
 		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
+		childNodeIDs[i] = childNodeID
 
 		// Add child to the project board.
 		childItemID, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID)
@@ -444,7 +523,31 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 	}
 
-	// All children spawned successfully — mark parent with idempotency guard.
+	// Second pass: wire each declared DEPENDS_ON as a sibling blockedBy edge,
+	// in addition to the parent edges added above. Runs after all children
+	// exist per requirement 2's two-phase design — a block may depend on any
+	// earlier sibling regardless of where creation happened to succeed.
+	for i, block := range blocks {
+		if !block.DependsOnDeclared {
+			continue
+		}
+		blockerIdx := block.DependsOn - 1
+		if err := e.client.AddBlockedByIssue(childNodeIDs[i], childNodeIDs[blockerIdx]); err != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to link sibling dependency for spawn block #%d (DEPENDS_ON: %d): `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+				i+1, block.DependsOn, err, formatSpawnedList(spawned))
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
+			return false, fmt.Errorf("pre-implement: linking sibling dependency for block %d: %w", i+1, err)
+		}
+		e.logf(item.Number, "spawn", "linked sibling dependency: block %d depends on block %d\n", i+1, block.DependsOn)
+	}
+
+	// All children spawned and sibling dependencies wired — mark parent with
+	// idempotency guard. This must come after the sibling-wiring pass so the
+	// guard covers the full two-phase operation: a wiring failure retries
+	// from scratch on the next attempt, consistent with the existing
+	// "v1 does not skip already-created children on retry" behavior.
 	// No webhook echo here — preserving prior behavior (never echoed at this site).
 	e.applyLabelAdd(item, "fabrik:children-spawned", false)
 
