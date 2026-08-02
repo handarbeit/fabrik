@@ -37,9 +37,9 @@ func newTestWarningsPane(n int) WarningsPaneComponent {
 
 func TestWarningsWindowOffset(t *testing.T) {
 	cases := []struct {
-		name             string
-		curIdx, n, rows  int
-		wantOffset       int
+		name            string
+		curIdx, n, rows int
+		wantOffset      int
 	}{
 		{"cursor within first window", 0, 10, 3, 0},
 		{"cursor at end of first window", 2, 10, 3, 0},
