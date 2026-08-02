@@ -221,6 +221,15 @@ The `.fabrik/` directory (config, stages, plugin) always lives in the directory 
 
 Fabrik can manage issues across every repository on the board in a single run. To enable multi-repo mode, omit (or comment out) the `repo:` field in `.fabrik/config.yaml` — Fabrik then discovers repositories lazily from the project board and processes issues from all of them. Each repository gets its own bare clone at `.fabrik/repos/<owner>-<repo>.git` and its own set of worktrees, all driven by the same poll loop.
 
+#### Write-access gating for board-derived repos
+
+Because repos are discovered from board items rather than configured explicitly, tracking an upstream issue on your own board (a normal GitHub Projects workflow) can surface a repo you don't administer. Fabrik checks the configured token's write access to each newly discovered repo (piggybacked on the same API call already used for the `allow_auto_merge` check — no extra request) before seeding any labels or evaluating `allow_auto_merge` on it:
+
+- A repo the token **can** write to is managed exactly as before: labels are seeded, `allow_auto_merge` is checked, and its board items are dispatched into the pipeline normally.
+- A repo the token **cannot** write to is skipped entirely: no label-mutation requests are made against it, no `allow_auto_merge` warning is printed (its only fix requires admin rights the operator doesn't have), and its board items are **not processed at all** — not even read-only. Nearly every stage past Specify/Research needs to push commits and open PRs, which requires exactly the access already found absent, so partial processing would only fail later and less clearly. Fabrik logs a one-time notice naming the repo and reason instead.
+
+The access determination is cached per repo for the life of the process — it costs one API call the first time a repo is seen, never repeated on later polls.
+
 ### Git Clone Protocol (HTTPS vs SSH)
 
 By default, Fabrik uses HTTPS to bare-clone managed repos (`https://github.com/<owner>/<repo>.git`). Users who authenticate via SSH keys can switch to SSH clone URLs instead.
@@ -6499,6 +6508,7 @@ Shallow pre-filtering is a two-pass process that avoids the expensive `FetchItem
 |-------|-----------|
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
+| Repo write access | Repo not yet resolved by `resolveRepoAccess` (fail-open on "unknown"), OR resolved with `CanPush: true`. A repo cached with `CanPush: false` is never admitted, regardless of stage or status — see ADR-1347. Purely in-memory (no API call); the probe itself always runs earlier in the same poll cycle, in `poll()`'s seeding block. |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
