@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,6 +19,19 @@ import (
 //
 // This is the regression test for #733 (the marker itself) and #742 (the
 // close-on-no-work fix).
+//
+// handarbeit/fabrik#1355 (R2): WaitForIssueClosed alone cannot distinguish
+// the no-work-needed path from an ordinary close — a broken
+// settleNoWorkNeeded that somehow still closed the issue some other way
+// would pass this test just as easily as a correctly-working one. The
+// assertion below additionally requires the engine's own no-work-needed
+// skip comment (noWorkNeededSkipComment, engine/no_work_needed_settle.go),
+// matched by body prefix via hasNoWorkNeededSkipComment
+// (no_work_needed_marker_test.go) — an observable only settleNoWorkNeeded
+// produces — closing the vacuity gap. settleNoWorkNeeded posts this comment
+// before it moves the item to Done and closes the issue, so once
+// WaitForIssueClosed returns, the comment is guaranteed to already exist if
+// the no-work-needed path actually ran; no polling race is needed.
 //
 // Wall-clock: ~10-15 min. Cost: ~$0.30-0.50.
 func TestNoWorkNeeded(t *testing.T) {
@@ -50,8 +65,28 @@ This is an e2e regression test for #733 (the marker) and #742 (close-on-no-work)
 	WaitForIssueClosed(t, env, env.RepoAlpha, num, 20*time.Minute)
 	t.Logf("%s#%d closed without PR — short-circuit verified", env.RepoAlpha, num)
 
+	// The engine's own no-work-needed skip comment must be present, matched
+	// by body prefix — the discriminating assertion for R2 (see doc comment
+	// above). settleNoWorkNeeded posts it before closing, so it is already
+	// there by the time WaitForIssueClosed returns; a single fetch suffices.
+	out, err := ghOutput(env, "issue", "view", fmt.Sprint(num), "-R", env.RepoAlpha,
+		"--json", "comments", "--jq", "[.comments[].body]")
+	if err != nil {
+		t.Fatalf("could not fetch comments on %s#%d: %v", env.RepoAlpha, num, err)
+	}
+	var bodies []string
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &bodies); jsonErr != nil {
+		t.Fatalf("could not parse comments on %s#%d: %v (raw: %s)", env.RepoAlpha, num, jsonErr, out)
+	}
+	if !hasNoWorkNeededSkipComment(bodies) {
+		t.Fatalf("no engine-authored no-work-needed skip comment (prefix %q) found on %s#%d — "+
+			"the issue closed, but not provably via the no-work-needed path",
+			noWorkNeededSkipCommentPrefix, env.RepoAlpha, num)
+	}
+	t.Logf("no-work-needed skip comment confirmed on %s#%d — no-work-needed path genuinely exercised", env.RepoAlpha, num)
+
 	// Spot-check: should NOT have any open PR referencing this issue.
-	out, err := ghOutput(env, "pr", "list", "-R", env.RepoAlpha, "--state", "open",
+	out, err = ghOutput(env, "pr", "list", "-R", env.RepoAlpha, "--state", "open",
 		"--search", fmt.Sprintf("in:body \"Closes #%d\"", num),
 		"--json", "number", "--jq", "length")
 	if err != nil {
