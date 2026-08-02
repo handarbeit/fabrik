@@ -83,6 +83,20 @@ func pollStatusClear() {
 	}
 }
 
+// logClaudeConfigDir is the testable core of the R1/R3 startup notice: when
+// CLAUDE_CONFIG_DIR is set in the engine's environment, Claude Code invocations
+// use that directory's credentials/profile instead of the default account, and
+// this is otherwise unobservable (ps eww only shows exec-time env, not vars set
+// by godotenv during startup — see #1350). A no-op when configDir is empty, so
+// the unset case stays byte-for-byte silent (R2).
+func logClaudeConfigDir(configDir string, w io.Writer) {
+	if configDir == "" {
+		return
+	}
+	fmt.Fprintf(w, "[startup] notice: CLAUDE_CONFIG_DIR is set to %q — Claude invocations will use this profile "+
+		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir)
+}
+
 func (e *Engine) Run() error {
 	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
 	// processing the same project board concurrently. The lock file lives in
@@ -126,9 +140,11 @@ func (e *Engine) Run() error {
 		w := io.MultiWriter(os.Stderr, e.logFile)
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
+		logClaudeConfigDir(os.Getenv("CLAUDE_CONFIG_DIR"), w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
+		logClaudeConfigDir(os.Getenv("CLAUDE_CONFIG_DIR"), os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

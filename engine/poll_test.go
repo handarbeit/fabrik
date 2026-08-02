@@ -3217,3 +3217,25 @@ func hasAddLabelCallLocked(client *mockGitHubClient, label string) bool {
 	}
 	return false
 }
+
+func TestLogClaudeConfigDir_SetWritesOneLine(t *testing.T) {
+	var buf strings.Builder
+	logClaudeConfigDir("/home/user/.claude-alt", &buf)
+
+	out := buf.String()
+	if !strings.Contains(out, "/home/user/.claude-alt") {
+		t.Fatalf("expected output to name the directory, got: %q", out)
+	}
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("expected exactly one line, got: %q", out)
+	}
+}
+
+func TestLogClaudeConfigDir_UnsetWritesNothing(t *testing.T) {
+	var buf strings.Builder
+	logClaudeConfigDir("", &buf)
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when configDir is empty, got: %q", buf.String())
+	}
+}
