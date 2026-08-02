@@ -198,6 +198,77 @@ func TestCheckPluginSkillsWithReader_AutoRefresh_NonTTY(t *testing.T) {
 	}
 }
 
+// TestCheckPluginSkillsWithReader_DevBuildUnlistedFingerprint_AutoRefresh
+// verifies the issue #1297 fix: a fingerprint written by a dev build (disk ==
+// installedVer, but installedVer was never registered in
+// KnownEmbeddedVersions, since a dev build's own embedded content can never
+// appear in that release-only list) auto-refreshes normally instead of being
+// misclassified as an operator customization. Deliberately does NOT use
+// writeInstalledForDir, which registers the hash in KnownEmbeddedVersions —
+// that would test the already-covered known-embedded path, not this one. The
+// test process itself runs as a dev build (Version has no ldflags-injected
+// release tag), so checkPluginSkillsWithReader's internal CheckPluginState
+// call exercises the isDevBuild=true branch under test without any Version
+// mutation.
+func TestCheckPluginSkillsWithReader_DevBuildUnlistedFingerprint_AutoRefresh(t *testing.T) {
+	if !strings.HasPrefix(Version, "dev") {
+		t.Skipf("test process must run as a dev build for this test to exercise the intended branch; Version=%q", Version)
+	}
+	pluginDir := buildPluginDir(t)
+	// Simulate "old" installed state written by a prior dev-build refresh:
+	// old content on disk, installedVer seeded from it, but never added to
+	// KnownEmbeddedVersions (a dev fingerprint structurally never is).
+	entries, err := filepath.Glob(filepath.Join(pluginDir, "skills", "*", "SKILL.md"))
+	if err != nil || len(entries) == 0 {
+		t.Fatal("no SKILL.md files found in test plugin dir")
+	}
+	if err := os.WriteFile(entries[0], []byte("old dev-build content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	diskVer, err := fabrikplugin.ComputeDiskVersion(pluginDir)
+	if err != nil {
+		t.Fatalf("ComputeDiskVersion: %v", err)
+	}
+	for _, known := range fabrikplugin.KnownEmbeddedVersions {
+		if diskVer == known {
+			t.Skip("diskVer accidentally matches a known embedded version — cannot test unlisted-fingerprint path")
+		}
+	}
+	if err := fabrikplugin.WriteVersionHash(pluginDir, diskVer); err != nil {
+		t.Fatalf("WriteVersionHash: %v", err)
+	}
+	// disk == installedVer (both diskVer); embedded differs; installedVer unlisted.
+
+	r, w, _ := os.Pipe()
+	origStderr := os.Stderr
+	os.Stderr = w
+
+	callErr := checkPluginSkillsWithReader(pluginDir, false, strings.NewReader(""))
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if callErr != nil {
+		t.Fatalf("expected nil error, got %v", callErr)
+	}
+	if strings.Contains(output, "local customizations") {
+		t.Fatalf("dev-build unlisted fingerprint must NOT be treated as a customization, got: %q", output)
+	}
+	if !strings.Contains(output, "auto-refreshed") {
+		t.Fatalf("expected auto-refresh message on stderr, got: %q", output)
+	}
+	// File must now match embedded content — proves auto-refresh actually ran.
+	rel, _ := filepath.Rel(pluginDir, entries[0])
+	embeddedData, _ := fabrikplugin.FabrikPlugin.ReadFile(filepath.Join("fabrik-workflows", rel))
+	diskData, _ := os.ReadFile(entries[0])
+	if !bytes.Equal(embeddedData, diskData) {
+		t.Fatal("dev-build unlisted-fingerprint path should auto-refresh disk with embedded content")
+	}
+}
+
 // TestCheckPluginSkillsWithReader_CustomWorkflow_TTYRedirects verifies that
 // when operator customizations are detected, the TTY path shows a redirect
 // message (--force / --reconcile) instead of the y/N prompt.
