@@ -200,6 +200,38 @@ func TestWarningsView_HeightMatchesRenderedLines(t *testing.T) {
 	}
 }
 
+// TestWarningsView_ConstrainedAvailableHeight covers the case model.go's
+// updateLayout can produce — availableH < Height() — which arises whenever
+// the terminal is too short to grant the panel's full request. View()'s
+// existing tail-truncation (a pre-existing mechanism, not introduced by this
+// fix) drops whatever line falls past availableH. This asserts that
+// degradation is bounded (never exceeds the granted budget, never panics)
+// and that a one-line shortfall drops the closing border before it drops the
+// "… +N more" indicator this fix exists to add — i.e. the new information is
+// not the first casualty of a tight layout.
+func TestWarningsView_ConstrainedAvailableHeight(t *testing.T) {
+	for _, n := range []int{4, 20} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			c := newTestWarningsPane(n)
+			full := c.Height()
+			for avail := full; avail >= 1; avail-- {
+				c.SetLayout(80, avail)
+				out := c.View(80)
+				gotLines := len(strings.Split(out, "\n"))
+				if gotLines > avail {
+					t.Fatalf("availableH=%d: View() rendered %d lines (overflowed budget):\n%s", avail, gotLines, out)
+				}
+			}
+			c.SetLayout(80, full-1)
+			out := ansi.Strip(c.View(80))
+			want := fmt.Sprintf("+%d more", n-maxWarningRows)
+			if !strings.Contains(out, want) {
+				t.Errorf("availableH=%d (one less than full): overflow indicator %q dropped before border; got:\n%s", full-1, want, out)
+			}
+		})
+	}
+}
+
 // AC7: with dismissed entries present and showDismissed toggled both ways,
 // AC1-AC4 still hold — the fix must operate on the visible slice.
 func TestWarningsView_WithDismissedEntries(t *testing.T) {
