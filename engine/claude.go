@@ -1315,6 +1315,30 @@ Your job is to:
 7. Maintain the structure and formatting of the PR description.`
 }
 
+// formatSpawnReceiptNote returns a deterministic "parse receipt" note when
+// output contains N > 0 well-formed spawn blocks, as counted by
+// ParseSpawnBlocks — the sole source of truth for block counting (#1338).
+// Never derive N by string-matching the marker text: that is the exact
+// regression #1263 guards against, since a Plan that merely mentions the
+// marker in prose must not produce a note. Returns "" when there are no
+// blocks, so a non-decomposing stage comment is byte-identical to before
+// this note existed.
+//
+// The note deliberately avoids any literal FABRIK_* token so it can never be
+// mistaken for a marker by this or any other marker-detection logic, and is
+// self-delimited with its own "---" rule so it renders as a clearly separate
+// block from the stats footer.
+func formatSpawnReceiptNote(output string) string {
+	n := len(ParseSpawnBlocks(output))
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return "\n\n---\n1 sub-issue declared above. It does not exist yet — it will be created when this issue advances to the **Implement** stage."
+	}
+	return fmt.Sprintf("\n\n---\n%d sub-issues declared above. None exist yet — they will be created when this issue advances to the **Implement** stage.", n)
+}
+
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
 // Returns empty string when no stats are available (e.g. JSON parse fallback).
 func formatStatsFooter(usage TokenUsage, completed bool) string {

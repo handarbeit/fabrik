@@ -149,6 +149,93 @@ FABRIK_SPAWN_CHILD_END`
 	}
 }
 
+// ---- formatSpawnReceiptNote unit tests (#1338) ----
+
+func TestFormatSpawnReceiptNote_NoBlocks_Empty(t *testing.T) {
+	if note := formatSpawnReceiptNote("no spawn blocks here, just regular Plan output"); note != "" {
+		t.Fatalf("expected empty note for zero blocks, got %q", note)
+	}
+}
+
+func TestFormatSpawnReceiptNote_SingleBlock(t *testing.T) {
+	body := `FABRIK_SPAWN_CHILD_BEGIN owner/child-repo
+TITLE: Add authentication module
+Implement OAuth2 authentication.
+FABRIK_SPAWN_CHILD_END`
+	note := formatSpawnReceiptNote(body)
+	if note == "" {
+		t.Fatal("expected a non-empty note for 1 well-formed block")
+	}
+	if !strings.Contains(note, "1 sub-issue") {
+		t.Errorf("note should state the count of 1, got %q", note)
+	}
+	if !strings.Contains(note, "Implement") {
+		t.Errorf("note should name the Implement stage transition, got %q", note)
+	}
+	if strings.Contains(note, "FABRIK_") {
+		t.Errorf("note must not contain a literal FABRIK_ token, got %q", note)
+	}
+}
+
+func TestFormatSpawnReceiptNote_MultipleBlocks(t *testing.T) {
+	body := `FABRIK_SPAWN_CHILD_BEGIN owner/repo-a
+TITLE: First child
+First body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/repo-b
+TITLE: Second child
+Second body.
+FABRIK_SPAWN_CHILD_END`
+	note := formatSpawnReceiptNote(body)
+	if !strings.Contains(note, "2 sub-issues") {
+		t.Errorf("note should state the count of 2, got %q", note)
+	}
+	if !strings.Contains(note, "Implement") {
+		t.Errorf("note should name the Implement stage transition, got %q", note)
+	}
+}
+
+// TestFormatSpawnReceiptNote_MalformedMarkers_NoNote is the #1263 regression
+// guard (AC3): prose that merely mentions the marker name must not produce a
+// note, even though the raw marker text is still visible in the body. This
+// only proves what it claims once formatSpawnReceiptNote actually calls
+// ParseSpawnBlocks (never string-matches the marker) — see the Verification
+// note in the issue.
+func TestFormatSpawnReceiptNote_MalformedMarkers_NoNote(t *testing.T) {
+	body := "- [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN owner/repo` block scoping the child work\n" +
+		"FABRIK_SPAWN_CHILD_END\n"
+	if note := formatSpawnReceiptNote(body); note != "" {
+		t.Fatalf("expected no note for malformed/prose-only markers, got %q", note)
+	}
+	if !strings.Contains(body, "FABRIK_SPAWN_CHILD_BEGIN") {
+		t.Fatal("test setup invalid: body should still contain the raw marker text")
+	}
+}
+
+// TestFormatSpawnReceiptNote_RoundTrip_NoteIsParseInert is AC6: appending the
+// rendered note to a comment body and re-running ParseSpawnBlocks over it
+// must yield the same block count as before the note was added, since
+// preImplement re-parses the posted comment body verbatim at Implement time.
+func TestFormatSpawnReceiptNote_RoundTrip_NoteIsParseInert(t *testing.T) {
+	body := `FABRIK_SPAWN_CHILD_BEGIN owner/child-repo
+TITLE: Add authentication module
+Implement OAuth2 authentication.
+FABRIK_SPAWN_CHILD_END`
+	before := len(ParseSpawnBlocks(body))
+
+	note := formatSpawnReceiptNote(body)
+	if note == "" {
+		t.Fatal("expected a non-empty note to round-trip")
+	}
+	withNote := body + note
+
+	after := len(ParseSpawnBlocks(withNote))
+	if after != before {
+		t.Errorf("round-trip block count changed: before=%d after=%d (note is not parse-inert)", before, after)
+	}
+}
+
 // ---- resolveSpecifyOptionID unit tests ----
 
 func TestResolveSpecifyOptionID_Nil(t *testing.T) {

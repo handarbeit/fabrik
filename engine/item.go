@@ -1274,7 +1274,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 
 	// Post Claude's output
 	if postOutput != "" {
-		footer := formatStatsFooter(usage, completed)
+		footer := formatSpawnReceiptNote(postOutput) + formatStatsFooter(usage, completed)
 		if stage.PostToPR {
 			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 		} else {
