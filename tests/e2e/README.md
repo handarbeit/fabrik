@@ -927,6 +927,52 @@ Every escape-from-release regression earns a new scenario in this table.
    the test bed (`t.Cleanup` is your friend).
 4. Document what regression the scenario protects against. Reference the
    originating issue or PR.
+5. **Assert on something that can only be produced by the engine, on the
+   specific path under test** (handarbeit/fabrik#1355). A scenario that
+   passes just as easily against a broken engine as a working one is worse
+   than no scenario at all — it looks like coverage but proves nothing, and
+   the failure is invisible until someone happens to ask why the test
+   passed. Two incidents motivated this rule:
+   - **#1320**: `TestCIFixReinvokeCycleLimit` matched the engine's
+     `🏭 **Fabrik — CI fix cycle limit reached**` marker via
+     `strings.Contains` across *every* comment on the issue, including
+     stage-output comments the Claude agent itself wrote. On
+     `handarbeit/fabrik-test-alpha#4049` a Research-stage comment quoted the
+     marker text in prose while describing the feature — the engine never
+     posted the marker at all, but the substring scan matched the prose
+     instead and the test passed green.
+   - **#1319**: `TestExpectedReviewersPrecedenceGuard` passed identically
+     against an engine with zero `expected_reviewers` support and against
+     the fixed engine — its assertion (`fabrik:awaiting-review` held while a
+     reviewer is outstanding) was true under both, so it never actually
+     exercised the feature it was named for. It was deleted rather than
+     fixed (see handarbeit/fabrik#1355 R1) once shown the property it wanted
+     to prove is unreachable in e2e by construction: `reviewGateFastAdvance`
+     (`engine/reviews.go`) short-circuits on the outstanding-reviewer check
+     before the `expected_reviewers` branch is ever reached.
+
+   In practice:
+   - **Match engine-authored comments by body prefix, never by substring
+     anywhere in the body.** Mirror `findNewComments`
+     (`engine/comments.go:17`), which uses `strings.HasPrefix(c.Body, "🏭
+     **Fabrik")` to distinguish Fabrik's own output from anything an agent
+     wrote. See the "Marker-substring assertion audit (#1320)" section above
+     for the full audit of every `🏭`-marker call site in this package, and
+     `ci_fix_reinvoke_marker_test.go` / `no_work_needed_marker_test.go` for
+     the concrete pattern to copy: a literal prefix `const`, a
+     `strings.HasPrefix`-based helper, and a companion fast (no live bed)
+     unit test with fixtures proving the helper accepts genuine engine
+     output and rejects a fixture shaped like the #4049 false-pass (prose
+     that quotes the marker text).
+   - Before writing the assertion, ask what a *broken* version of the
+     feature under test would do differently. If the answer is "nothing
+     observable," the scenario doesn't yet discriminate — strengthen it
+     (per the `TestNoWorkNeeded`/#1355 R2 fix above) or don't add it.
+   - **Prefer a loud, diagnostic `t.Skip` over an assertion that can be
+     satisfied by accident.** A skip with a clear reason ("prerequisite X
+     not configured") is honest about missing coverage; a green check that
+     doesn't actually exercise the path under test is worse, because it
+     hides the gap.
 
 ## Design notes
 
