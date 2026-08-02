@@ -537,6 +537,50 @@ func TestItemNeedsWork_UnmanagedStage(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_NoWriteAccessSkipsDispatch verifies R6: an item whose
+// repo is cached as CanPush: false is never admitted for dispatch, regardless
+// of stage or status.
+func TestItemMayNeedWork_NoWriteAccessSkipsDispatch(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.repoAccess["owner/repo"] = gh.RepoAccess{AllowAutoMerge: true, CanPush: false}
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("item in a repo with no write access should not need work")
+	}
+}
+
+// TestItemMayNeedWork_UnresolvedRepoAccessAdmits verifies the fail-open default:
+// a repo not yet present in the repoAccess cache (resolveRepoAccess hasn't run
+// for it yet) is admitted, not gated — the gate only fires once the access
+// determination is actually known.
+func TestItemMayNeedWork_UnresolvedRepoAccessAdmits(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item in a repo with no cached access determination should be admitted (fail-open on unknown)")
+	}
+}
+
+// TestItemMayNeedWork_WriteAccessAdmits verifies a repo cached as CanPush: true
+// is unaffected by the new gate.
+func TestItemMayNeedWork_WriteAccessAdmits(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.repoAccess["owner/repo"] = gh.RepoAccess{AllowAutoMerge: true, CanPush: true}
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item in a writable repo should still need work")
+	}
+}
+
 // TestItemMayNeedWork_ClosedIssue_CleanupStage verifies that a closed issue in
 // a cleanup stage still passes itemMayNeedWork when the worktree directory exists.
 func TestItemMayNeedWork_ClosedIssue_CleanupStage(t *testing.T) {
