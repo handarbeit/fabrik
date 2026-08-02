@@ -84,6 +84,66 @@ func TestLoadConfig_TUIPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_AutoUpgradeDefaultsOff(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = true, want false by default")
+	}
+}
+
+func TestLoadConfig_AutoUpgradePrecedence(t *testing.T) {
+	dir := t.TempDir()
+
+	// YAML can enable it.
+	path := writeYAMLConfig(t, dir, `auto_upgrade: true`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = false, want true (from YAML)")
+	}
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_AUTO_UPGRADE", "false")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = true, want false (env should override YAML)")
+	}
+
+	// --auto-upgrade flag overrides env.
+	t.Setenv("PRUEFER_AUTO_UPGRADE", "false")
+	cfg, err = LoadConfig([]string{"-config", path, "-auto-upgrade"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = false, want true (--auto-upgrade flag should override env)")
+	}
+}
+
+func TestLoadConfig_VersionRequestedShortCircuits(t *testing.T) {
+	// --version must work even with no config file present and no other
+	// required flags set, so it short-circuits before YAML/env resolution.
+	cfg, err := LoadConfig([]string{"-version"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.VersionRequested {
+		t.Errorf("VersionRequested = false, want true")
+	}
+	if cfg.AppID != 0 || len(cfg.WatchedRepos) != 0 {
+		t.Errorf("expected short-circuited zero-value Config aside from VersionRequested, got %+v", cfg)
+	}
+}
+
 func TestLoadConfig_YAMLOverridesDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := writeYAMLConfig(t, dir, `
