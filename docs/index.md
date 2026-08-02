@@ -482,7 +482,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">👁️</span>
         <div class="feature-title">Pending Reviewer Gate</div>
         <div class="feature-desc">
-          Waits for all requested PR reviewers then re-invokes the stage to address comments.
+          Waits for requested reviewers—including self-submitting bots—then re-invokes the stage, optionally enforcing an authoritative verdict before advancing.
         </div>
       </a>
       <a class="feature-card" href="{{ '/state-machine' | relative_url }}#65-ci-gate-and-ci-fix-reinvoke" aria-label="CI Gate — open documentation">
