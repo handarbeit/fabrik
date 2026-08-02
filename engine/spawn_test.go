@@ -149,6 +149,222 @@ FABRIK_SPAWN_CHILD_END`
 	}
 }
 
+// ---- DEPENDS_ON parser tests (#1337) ----
+
+func TestParseSpawnBlocks_DependsOnValid(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: First slice
+First body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Second slice
+DEPENDS_ON: 1
+Second body.
+FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(blocks))
+	}
+	if blocks[0].DependsOnDeclared {
+		t.Error("block 0 should not have DEPENDS_ON declared")
+	}
+	if !blocks[1].DependsOnDeclared {
+		t.Fatal("block 1 should have DEPENDS_ON declared")
+	}
+	if blocks[1].DependsOn != 1 {
+		t.Errorf("DependsOn: got %d, want 1", blocks[1].DependsOn)
+	}
+	if blocks[1].DependsOnRaw != "1" {
+		t.Errorf("DependsOnRaw: got %q, want %q", blocks[1].DependsOnRaw, "1")
+	}
+	if !strings.Contains(blocks[1].Body, "Second body") {
+		t.Errorf("body should retain the real content, got: %q", blocks[1].Body)
+	}
+	if strings.Contains(blocks[1].Body, "DEPENDS_ON") {
+		t.Errorf("body must not contain the DEPENDS_ON header text, got: %q", blocks[1].Body)
+	}
+}
+
+// TestParseSpawnBlocks_DependsOnAbsent is the regression guard for requirement
+// 4 / acceptance criterion 3: a block with no DEPENDS_ON header must parse
+// exactly as before this feature (DependsOnDeclared=false, DependsOn=0).
+func TestParseSpawnBlocks_DependsOnAbsent(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: No depends on
+Body text.
+FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	b := blocks[0]
+	if b.DependsOnDeclared {
+		t.Error("DependsOnDeclared should be false when no header is present")
+	}
+	if b.DependsOn != 0 {
+		t.Errorf("DependsOn: got %d, want 0", b.DependsOn)
+	}
+	if b.DependsOnRaw != "" {
+		t.Errorf("DependsOnRaw: got %q, want empty", b.DependsOnRaw)
+	}
+}
+
+// TestParseSpawnBlocks_DependsOnMalformedValue verifies a non-numeric
+// DEPENDS_ON value is retained (not silently dropped, per the Plan's Key
+// Decisions) with DependsOnDeclared=true and DependsOn left at the sentinel
+// 0 — validateSpawnDependsOn is where this becomes a hard failure.
+func TestParseSpawnBlocks_DependsOnMalformedValue(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Bad depends on
+DEPENDS_ON: abc
+Body text.
+FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected the block to be retained (not silently dropped), got %d blocks", len(blocks))
+	}
+	b := blocks[0]
+	if !b.DependsOnDeclared {
+		t.Error("DependsOnDeclared should be true even for a malformed value")
+	}
+	if b.DependsOnRaw != "abc" {
+		t.Errorf("DependsOnRaw: got %q, want %q", b.DependsOnRaw, "abc")
+	}
+	if b.DependsOn != 0 {
+		t.Errorf("DependsOn: got %d, want sentinel 0 for a malformed value", b.DependsOn)
+	}
+}
+
+// TestParseSpawnBlocks_DependsOnEmptyValue covers "DEPENDS_ON:" with no value
+// at all — also malformed, same sentinel treatment.
+func TestParseSpawnBlocks_DependsOnEmptyValue(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Empty depends on
+DEPENDS_ON:
+Body text.
+FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	b := blocks[0]
+	if !b.DependsOnDeclared {
+		t.Error("DependsOnDeclared should be true for an empty-valued header")
+	}
+	if b.DependsOn != 0 {
+		t.Errorf("DependsOn: got %d, want sentinel 0", b.DependsOn)
+	}
+}
+
+// TestParseSpawnBlocks_DependsOnBlankLineSeparated_TreatedAsBody pins the
+// immediate-adjacency rule: DEPENDS_ON must follow TITLE: with no blank line
+// between. Separated by a blank line, it is just body content.
+func TestParseSpawnBlocks_DependsOnBlankLineSeparated_TreatedAsBody(t *testing.T) {
+	body := `
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Not adjacent
+
+DEPENDS_ON: 1
+Body text.
+FABRIK_SPAWN_CHILD_END
+`
+	blocks := ParseSpawnBlocks(body)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	b := blocks[0]
+	if b.DependsOnDeclared {
+		t.Error("a DEPENDS_ON line separated from TITLE: by a blank line must not be recognized as a header")
+	}
+	if !strings.Contains(b.Body, "DEPENDS_ON: 1") {
+		t.Errorf("blank-line-separated DEPENDS_ON should be treated as body content, got: %q", b.Body)
+	}
+}
+
+// ---- validateSpawnDependsOn unit tests (#1337) ----
+
+func TestValidateSpawnDependsOn_NoHeadersNoError(t *testing.T) {
+	blocks := []SpawnBlock{{Title: "one"}, {Title: "two"}, {Title: "three"}}
+	if err := validateSpawnDependsOn(blocks); err != nil {
+		t.Fatalf("unexpected error with no DEPENDS_ON headers: %v", err)
+	}
+}
+
+func TestValidateSpawnDependsOn_ValidChain(t *testing.T) {
+	blocks := []SpawnBlock{
+		{Title: "one"},
+		{Title: "two", DependsOnDeclared: true, DependsOnRaw: "1", DependsOn: 1},
+		{Title: "three", DependsOnDeclared: true, DependsOnRaw: "2", DependsOn: 2},
+	}
+	if err := validateSpawnDependsOn(blocks); err != nil {
+		t.Fatalf("unexpected error for a valid chain: %v", err)
+	}
+}
+
+func TestValidateSpawnDependsOn_OutOfRange(t *testing.T) {
+	blocks := []SpawnBlock{
+		{Title: "one"},
+		{Title: "two"},
+		{Title: "three", DependsOnDeclared: true, DependsOnRaw: "4", DependsOn: 4},
+	}
+	if err := validateSpawnDependsOn(blocks); err == nil {
+		t.Fatal("expected error for an out-of-range DEPENDS_ON index")
+	}
+}
+
+func TestValidateSpawnDependsOn_NonForward(t *testing.T) {
+	blocks := []SpawnBlock{
+		{Title: "one"},
+		{Title: "two", DependsOnDeclared: true, DependsOnRaw: "3", DependsOn: 3},
+		{Title: "three"},
+	}
+	if err := validateSpawnDependsOn(blocks); err == nil {
+		t.Fatal("expected error for a non-forward (equal-or-higher) DEPENDS_ON index")
+	}
+}
+
+func TestValidateSpawnDependsOn_SelfReference(t *testing.T) {
+	blocks := []SpawnBlock{
+		{Title: "one"},
+		{Title: "two", DependsOnDeclared: true, DependsOnRaw: "2", DependsOn: 2},
+	}
+	if err := validateSpawnDependsOn(blocks); err == nil {
+		t.Fatal("expected error for a block depending on itself")
+	}
+}
+
+func TestValidateSpawnDependsOn_Block1Declares(t *testing.T) {
+	blocks := []SpawnBlock{
+		{Title: "one", DependsOnDeclared: true, DependsOnRaw: "1", DependsOn: 1},
+	}
+	err := validateSpawnDependsOn(blocks)
+	if err == nil {
+		t.Fatal("expected error when block 1 declares DEPENDS_ON")
+	}
+	if !strings.Contains(err.Error(), "block 1") {
+		t.Errorf("error should mention block 1, got: %v", err)
+	}
+}
+
+func TestValidateSpawnDependsOn_NonNumericRaw(t *testing.T) {
+	blocks := []SpawnBlock{
+		{Title: "one"},
+		{Title: "two", DependsOnDeclared: true, DependsOnRaw: "abc", DependsOn: 0},
+	}
+	if err := validateSpawnDependsOn(blocks); err == nil {
+		t.Fatal("expected error for a non-numeric DEPENDS_ON value")
+	}
+}
+
 // ---- formatSpawnReceiptNote unit tests (#1338) ----
 
 func TestFormatSpawnReceiptNote_NoBlocks_Empty(t *testing.T) {
@@ -824,6 +1040,308 @@ FABRIK_SPAWN_CHILD_END
 	// CreateIssue must have been called for the child.
 	if len(client.createIssueCalls) != 1 {
 		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+}
+
+// ---- DEPENDS_ON integration tests (#1337) ----
+
+// TestPreImplement_DependsOnChain_WiresSiblingEdges is acceptance criteria 1-2:
+// a 3-block chain where block 2 depends on block 1 and block 3 depends on
+// block 2 produces the parent-blocked-by-all edges (unchanged) plus two
+// sibling edges wiring the declared chain, and the children-spawned label is
+// applied only after both passes succeed.
+func TestPreImplement_DependsOnChain_WiresSiblingEdges(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			childCounter++
+			return 400 + childCounter, fmt.Sprintf("I_chain%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice one
+Slice one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice two
+DEPENDS_ON: 1
+Slice two body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice three
+DEPENDS_ON: 2
+Slice three body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	if len(client.createIssueCalls) != 3 {
+		t.Fatalf("expected 3 CreateIssue calls, got %d", len(client.createIssueCalls))
+	}
+
+	// 3 parent edges + 2 sibling edges = 5 total AddBlockedByIssue calls.
+	if len(client.addBlockedByIssueCalls) != 5 {
+		t.Fatalf("expected 5 AddBlockedByIssue calls (3 parent + 2 sibling), got %d", len(client.addBlockedByIssueCalls))
+	}
+
+	var parentEdges, siblingEdges int
+	siblingPairs := make(map[string]bool)
+	for _, c := range client.addBlockedByIssueCalls {
+		if c.issueNodeID == "I_parent" {
+			parentEdges++
+			continue
+		}
+		siblingEdges++
+		siblingPairs[c.issueNodeID+"<-"+c.blockerNodeID] = true
+	}
+	if parentEdges != 3 {
+		t.Errorf("expected 3 parent edges, got %d", parentEdges)
+	}
+	if siblingEdges != 2 {
+		t.Errorf("expected 2 sibling edges, got %d", siblingEdges)
+	}
+	if !siblingPairs["I_chain2<-I_chain1"] {
+		t.Error("expected sibling edge: child 2 blocked-by child 1")
+	}
+	if !siblingPairs["I_chain3<-I_chain2"] {
+		t.Error("expected sibling edge: child 3 blocked-by child 2")
+	}
+
+	var spawnedLabelCount int
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:children-spawned" {
+			spawnedLabelCount++
+		}
+	}
+	if spawnedLabelCount != 1 {
+		t.Errorf("expected fabrik:children-spawned added exactly once, got %d", spawnedLabelCount)
+	}
+}
+
+// TestPreImplement_NoDependsOn_MatchesTodaysCallsExactly is the regression
+// guard for requirement 4 / acceptance criterion 3: a Plan with no DEPENDS_ON
+// headers must produce exactly today's parent-only edges, byte-identical to
+// before this feature.
+func TestPreImplement_NoDependsOn_MatchesTodaysCallsExactly(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			childCounter++
+			return 500 + childCounter, fmt.Sprintf("I_star%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Star child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Star child two
+Body two.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	if len(client.addBlockedByIssueCalls) != 2 {
+		t.Fatalf("expected exactly 2 AddBlockedByIssue calls (parent edges only, no sibling wiring), got %d", len(client.addBlockedByIssueCalls))
+	}
+	for _, c := range client.addBlockedByIssueCalls {
+		if c.issueNodeID != "I_parent" {
+			t.Errorf("AddBlockedByIssue issueNodeID: got %q, want %q (parent edge only)", c.issueNodeID, "I_parent")
+		}
+	}
+}
+
+// TestPreImplement_InvalidDependsOnIndex_PausesBeforeAnyCreate is acceptance
+// criterion 4: an out-of-range DEPENDS_ON must fail the spawn step loudly,
+// before any GitHub mutation — zero CreateIssue calls, parent paused, and the
+// pause comment must read "Created so far: none".
+func TestPreImplement_InvalidDependsOnIndex_PausesBeforeAnyCreate(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice one
+Slice one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice two
+DEPENDS_ON: 4
+Slice two body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected error for an out-of-range DEPENDS_ON index")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+	if len(client.createIssueCalls) != 0 {
+		t.Errorf("expected 0 CreateIssue calls (validation runs before any mutation), got %d", len(client.createIssueCalls))
+	}
+
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("fabrik:paused not added on invalid DEPENDS_ON")
+	}
+
+	var sawCreatedSoFarNone bool
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "Created so far: none") {
+			sawCreatedSoFarNone = true
+		}
+	}
+	if !sawCreatedSoFarNone {
+		t.Error(`expected pause comment to read "Created so far: none"`)
+	}
+}
+
+// TestPreImplement_InvalidDependsOnIndex_NonForward covers block 2 declaring
+// DEPENDS_ON: 3 in a 3-block output (equal-or-higher index) per acceptance
+// criterion 4's second example.
+func TestPreImplement_InvalidDependsOnIndex_NonForward(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice one
+Slice one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice two
+DEPENDS_ON: 3
+Slice two body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice three
+Slice three body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected error for a non-forward DEPENDS_ON index")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+	if len(client.createIssueCalls) != 0 {
+		t.Errorf("expected 0 CreateIssue calls, got %d", len(client.createIssueCalls))
+	}
+}
+
+// TestPreImplement_SiblingWireFailure_PausesAfterChildrenCreated verifies the
+// accepted partial-creation-on-failure shape when the second (sibling-wiring)
+// pass fails: children already exist (unlike the upfront-validation failure
+// above), the parent is paused, and fabrik:children-spawned must never be
+// applied since the two-phase operation did not complete.
+func TestPreImplement_SiblingWireFailure_PausesAfterChildrenCreated(t *testing.T) {
+	childCounter := 0
+	blockedByCalls := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			childCounter++
+			return 600 + childCounter, fmt.Sprintf("I_wirefail%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+		addBlockedByIssueFn: func(issueNodeID, blockerNodeID string) error {
+			blockedByCalls++
+			// Let the two parent edges succeed; fail the sibling edge (3rd call).
+			if blockedByCalls == 3 {
+				return fmt.Errorf("github: 500 internal server error")
+			}
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice one
+Slice one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice two
+DEPENDS_ON: 1
+Slice two body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected error when the sibling-wiring pass fails")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+
+	// Both children were already created before the wiring pass ran.
+	if len(client.createIssueCalls) != 2 {
+		t.Errorf("expected 2 CreateIssue calls (children created before wiring), got %d", len(client.createIssueCalls))
+	}
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:children-spawned" {
+			t.Error("fabrik:children-spawned must not be added when sibling wiring fails")
+		}
+	}
+
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("fabrik:paused not added when sibling wiring fails")
 	}
 }
 
