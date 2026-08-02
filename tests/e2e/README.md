@@ -575,6 +575,17 @@ A two-mode run is roughly double the single-mode GitHub API cost — see #1219
 for the budget headroom this assumes, and merge it before attempting a full
 two-mode run.
 
+Both `go test` invocations inside `switch_and_run()` (the `TestSwitchTrainMode`
+step and the suite invocation that follows it) pass `-count=1`, Go's standard
+mechanism for defeating the test cache. Neither is safe to serve from cache:
+the switch step is deliberately side-effecting (it stops/restarts the shared
+bed), and the suite invocation reads live external state (the bed process,
+GitHub). A cached `PASS` on either would be replayed as though it ran while
+none of that actually happened — see #1327. `TestSwitchTrainMode` also
+asserts its own postcondition (bed running, `.env` mode matches) after
+`StartFabrikTestBed` returns, so a cached or partially-failed switch fails
+loudly instead of reporting success.
+
 Scenarios resolve mode via `resolveTrainMode` (`harness.go`): `E2E_TRAIN_MODE`
 takes precedence when set (an invalid value is a hard test failure), falling
 back to a lenient read of the bed's own `.env` for ad-hoc/manual runs where
