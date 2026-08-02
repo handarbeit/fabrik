@@ -1496,12 +1496,13 @@ The timeout is based on the timestamp of when the `fabrik:awaiting-review` label
 
 It isn't: **the gate's actual test is "has a human looked at this?", not "has a reviewer approved this?"** A `COMMENTED` review submitted by the PR author itself satisfies the gate — GitHub permits a self-`COMMENT` even though it forbids self-approval. This is the supported manual way to clear the gate when no other reviewer can respond.
 
-When the timeout elapses with no reviewer ever requested, Fabrik's pause comment says so plainly — it does not claim to have waited on "outstanding reviewers" that don't exist — and lists four ways to resume:
+When the timeout elapses with no reviewer ever requested, Fabrik's pause comment says so plainly — it does not claim to have waited on "outstanding reviewers" that don't exist — and lists five ways to resume:
 
 1. Post a review on the PR yourself. A `COMMENTED` self-review satisfies the gate — unless the stage is `authoritative` and the repo requires approving reviews (branch protection reports `REVIEW_REQUIRED`), in which case an approval from another account is needed; see [Authoritative Mode](#authoritative-mode) below.
-2. Set `wait_for_reviews: false` in the stage YAML if this repo has no reviewer. This is the supported setting for a reviewer-less repo going forward, rather than repeatedly hitting this timeout.
-3. Merge the PR manually.
-4. Remove the `fabrik:paused` label to let the engine wait again (useful if a reviewer is actually expected and just hasn't gotten to it yet).
+2. Set `expected_reviewers: []` in the stage YAML to declare that no *unrequested* reviewer (e.g. a bot) is expected here — an explicitly requested reviewer is still honored. This is the narrower, purpose-built option: it stops the gate from waiting out unrequested reviewers that will never respond, without disabling the gate for a reviewer requested on a later PR. See [Declaring Expected Reviewers](#declaring-expected-reviewers) below.
+3. Set `wait_for_reviews: false` in the stage YAML if this repo has no reviewer at all. This disables the review gate entirely, including for a reviewer requested on a later PR — the supported setting only when no review will ever be relevant on this repo.
+4. Merge the PR manually.
+5. Remove the `fabrik:paused` label to let the engine wait again (useful if a reviewer is actually expected and just hasn't gotten to it yet).
 
 Fabrik deliberately does not try to detect "no reviewer will ever respond" automatically (e.g. by inspecting CODEOWNERS or requested-reviewer history) — that signal can't distinguish "no reviewer exists" from "the reviewer is just slow or down," and guessing wrong in the direction of auto-advancing would merge an unreviewed PR. The gate stays loud-and-conservative; only the messaging tells you honestly what it knows.
 

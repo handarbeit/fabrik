@@ -11,6 +11,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // reviewTestStages returns a two-stage pipeline for review gate tests.
@@ -623,6 +624,54 @@ func TestCheckReviewGate_NoReviewersNoReviews_Blocks(t *testing.T) {
 	}
 	if len(client.addLabelCalls) != 1 {
 		t.Errorf("expected 1 label add (fabrik:awaiting-review), got %d", len(client.addLabelCalls))
+	}
+}
+
+// FR-1 (#1334): when nothing is requested and nothing is declared via
+// expected_reviewers, the blocking log line must state what is known — that
+// nothing is requested and nothing is declared — and name expected_reviewers
+// as the way to change that. It must not speculate that bot reviewers may
+// still be processing (#1080).
+func TestCheckReviewGate_NoReviewersNoDeclaration_LogsExpectedReviewersRemedy(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	eventsCh := make(chan tui.Event, 32)
+	eng.events = eventsCh
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRReviewRequests: nil, // no requested reviewers
+		LinkedPRReviews:        nil, // no reviews submitted yet
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // no ExpectedReviewers declared
+
+	blocked, _, _ := eng.checkReviewGate(board, item, stage)
+	if !blocked {
+		t.Fatal("expected blocked when no reviews submitted yet")
+	}
+
+	close(eventsCh)
+	var msg string
+	var found bool
+	for ev := range eventsCh {
+		le, ok := ev.(tui.LogEvent)
+		if !ok || le.Tag != "awaiting-review" {
+			continue
+		}
+		if strings.Contains(le.Message, "waiting for initial review submission") {
+			msg = le.Message
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a log event for 'waiting for initial review submission'")
+	}
+	if !strings.Contains(msg, "no reviewers requested") || !strings.Contains(msg, "none declared via expected_reviewers") {
+		t.Errorf("expected log to state nothing requested and nothing declared via expected_reviewers, got: %s", msg)
+	}
+	if strings.Contains(msg, "bot reviewers may still be processing") {
+		t.Errorf("log must not speculate that bot reviewers may still be processing when nothing is requested or declared, got: %s", msg)
 	}
 }
 
@@ -1556,8 +1605,9 @@ func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 }
 
 // On a timeout where no reviewer was ever requested, the pause comment must
-// not claim to have waited on "outstanding reviewers" and must list the four
-// remedies, including the COMMENTED self-review hatch (#1268).
+// not claim to have waited on "outstanding reviewers" and must list the five
+// remedies, including the COMMENTED self-review hatch (#1268) and the
+// expected_reviewers: [] declaration (#1283, #1334).
 func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(t, client)
@@ -1579,8 +1629,24 @@ func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) 
 	if strings.Contains(body, "outstanding reviewers") {
 		t.Errorf("pause comment must not claim to wait on outstanding reviewers when none were requested; got:\n%s", body)
 	}
-	if !containsAll(body, "COMMENTED", "self-review", "wait_for_reviews: false", "merge", "fabrik:paused") {
-		t.Errorf("pause comment should list the four remedies including the COMMENTED self-review hatch; got:\n%s", body)
+	if !containsAll(body, "COMMENTED", "self-review", "expected_reviewers: []", "wait_for_reviews: false", "merge", "fabrik:paused") {
+		t.Errorf("pause comment should list the five remedies including the COMMENTED self-review hatch and expected_reviewers: []; got:\n%s", body)
+	}
+	// FR-2: expected_reviewers: [] and wait_for_reviews: false must be
+	// distinguished, not merged into one recommendation — the former narrows
+	// waiting for unrequested reviewers while honoring an explicit request,
+	// the latter disables the gate entirely.
+	if !strings.Contains(body, "entirely") {
+		t.Errorf("pause comment should distinguish wait_for_reviews: false as disabling the gate entirely; got:\n%s", body)
+	}
+	// FR-3: the old "cannot determine whether one is ever coming" framing
+	// asserted an inherent limit that expected_reviewers (#1283) removed —
+	// it must be replaced with declarable-not-unknowable framing.
+	if strings.Contains(body, "cannot determine whether one is ever coming") {
+		t.Errorf("pause comment must not claim Fabrik cannot determine whether a reviewer is coming — this is now declarable via expected_reviewers; got:\n%s", body)
+	}
+	if !strings.Contains(body, "declarable") {
+		t.Errorf("pause comment should note that whether a reviewer is coming is declarable; got:\n%s", body)
 	}
 	// Advisory mode (no ReviewAuthority set): a self-COMMENT is known to
 	// satisfy the gate outright, so the authoritative-mode caveat on remedy
