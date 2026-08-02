@@ -213,6 +213,61 @@ A repo-wide search (`grep -rn "🏭" tests/e2e/*.go`) found every call site in
 No other `tests/e2e/*.go` file references the `🏭` emoji or a
 `"🏭 **Fabrik —"` literal.
 
+### `TestNoWorkNeeded` discriminator verification (#1355)
+
+`TestNoWorkNeeded` used to assert only `WaitForIssueClosed` (plus a
+best-effort "no open PR" spot-check) — insufficient by itself, since closing
+proves the pipeline finished, not that it took the no-work-needed path
+specifically (the same vacuity class as #1320/#1319). It now additionally
+asserts the engine's own no-work-needed skip comment
+(`noWorkNeededSkipComment`, `engine/no_work_needed_settle.go`) is present,
+matched by body prefix via `hasNoWorkNeededSkipComment`
+(`no_work_needed_marker_test.go`) — never by substring-anywhere, for the same
+reason `hasEngineCycleLimitComment` matches by prefix.
+
+**Verified so far:** `TestHasNoWorkNeededSkipComment` is a fast, no-live-bed
+unit test that proves the helper accepts both genuine comment variants
+`noWorkNeededSkipComment` can produce and rejects a fixture where an agent
+quotes the marker text in prose (the #4049/#1320 false-pass shape) — run it
+with `go test -tags e2e -run TestHasNoWorkNeededSkipComment ./tests/e2e/`.
+This establishes the matching logic itself discriminates correctly.
+
+**Not yet verified: a genuine red/green cycle against the live e2e bed**
+(the issue's own Verification Note calls this the load-bearing step). Doing
+so requires temporarily neutralizing `noWorkNeededSkipComment`'s posting in
+a locally-built engine binary, deploying that binary to the shared
+`~/dev/fabrik-test` bed, and restarting the bed's Fabrik instance — all
+outside the `tests/e2e/` worktree, and outside the sandbox boundary an
+automated Fabrik Implement/Review/Validate stage operates under (see
+CLAUDE.md's "Worktree Boundary"). No pipeline stage in this repo can safely
+perform that step; it requires a human operator with direct access to the
+bed. Steps to complete AC3 before merge:
+
+```bash
+cd ~/dev/fabrik-test
+# Stop the running instance (Ctrl-C in its session, or: kill $(cat .fabrik/fabrik.lock))
+
+# RED: neutralize the skip-comment posting, uncommitted
+#   in engine/no_work_needed_settle.go, make noWorkNeededSkipComment return ""
+go build -o fabrik .
+./fabrik -notui &   # do NOT pass --auto-upgrade, it would overwrite this build
+cd -   # back to this branch's checkout
+go test -tags e2e -run TestNoWorkNeeded ./tests/e2e/ -timeout 25m -v
+# Expect FAIL: "no engine-authored no-work-needed skip comment ... found"
+
+cd ~/dev/fabrik-test
+git diff --stat engine/   # confirm the neutralization is still the only engine change
+git checkout -- engine/no_work_needed_settle.go   # revert
+go build -o fabrik .
+# restart the instance (Ctrl-C the red one first): ./fabrik -notui --auto-upgrade &
+cd -
+go test -tags e2e -run TestNoWorkNeeded ./tests/e2e/ -timeout 25m -v
+# Expect PASS
+```
+
+Record both outcomes (pass/fail, timestamps, relevant log lines) in the PR
+or as a follow-up comment on handarbeit/fabrik#1355 once run.
+
 ### Additional prerequisites for `TestPausedMergedPRRecovery`
 
 9. **Gate labels seeded** in `handarbeit/fabrik-test-alpha`: `fabrik:awaiting-ci`,
