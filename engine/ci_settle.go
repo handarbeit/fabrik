@@ -202,15 +202,13 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// poll (e.g. by the normal checkCIGate path reached for a different
 		// item), and a FetchLabelAppliedAt error or zero timestamp leaves this
 		// a no-op, falling through to the normal gate-driven path unchanged.
-		{
-			owner, repoName := itemOwnerRepo(item, e.defaultRepo())
-			if appliedAt, err := e.client.FetchLabelAppliedAt(owner, repoName, item.Number, "fabrik:awaiting-ci"); err != nil {
-				e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIWaitTimeout backstop: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
-				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())
-				e.pauseForCITimeout(board, item, stage)
-				continue
-			}
+		owner, repoName := itemOwnerRepo(item, e.defaultRepo())
+		if appliedAt, err := e.client.FetchLabelAppliedAt(owner, repoName, item.Number, "fabrik:awaiting-ci"); err != nil {
+			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIWaitTimeout backstop: %v\n", err)
+		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
+			e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())
+			e.pauseForCITimeout(board, item, stage)
+			continue
 		}
 
 		// #1303: prime the store with a genuinely fresh check-run read before
@@ -222,15 +220,25 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// PRMergeUnsettled branch forever. Scoped to this one caller (the
 		// bounded fabrik:awaiting-ci item set already deep-fetched
 		// unconditionally above) rather than changing FetchCheckRuns' cache
-		// trust for its ~35 other call sites. item.LinkedPRHeadSHA here comes
-		// from the just-completed FetchItemDetails GraphQL deep-fetch
-		// (headRefOid), not any REST-cached record. Non-fatal on error — falls
+		// trust for its ~35 other call sites. Non-fatal on error — falls
 		// through to whatever FetchCheckRuns' own cache-trust check decides,
 		// matching FetchItemDetails' failure handling above.
+		//
+		// #1325: item.LinkedPRHeadSHA here has two possible provenances,
+		// depending on whether the FetchItemDetails call above (via
+		// e.readClient, normally boardcache.CacheImpl) hit or missed the
+		// cache. On a miss, it comes from that call's own live GraphQL
+		// deep-fetch (headRefOid). On a hit — the common case, and the one
+		// this guard exists to rescue — it comes from copyDeepFieldsFromState
+		// reading the store's ItemState.LinkedPR.HeadSHA, which is kept fresh
+		// independently of this call by every deep fetch and by
+		// pull_request/check_run webhook deltas (boardcache/delta.go). Before
+		// #1325, copyDeepFieldsFromState never populated this field on a
+		// cache hit, so this guard passed only when a miss had just happened
+		// — exactly the one case where the guard's rescue wasn't needed.
 		if item.LinkedPRHeadSHA != "" && item.LinkedPRNumber != 0 {
 			if c := e.cache(); c != nil {
 				shaShort := item.LinkedPRHeadSHA[:min(8, len(item.LinkedPRHeadSHA))]
-				owner, repoName := itemOwnerRepo(item, e.defaultRepo())
 				e.logf(item.Number, "awaiting-ci-settle", "refreshing check runs live for sha=%s\n", shaShort)
 				if err := c.RefreshCheckRunsLive(owner, repoName, item.LinkedPRHeadSHA); err != nil {
 					e.logf(item.Number, "awaiting-ci-settle", "could not refresh check runs live for sha=%s: %v — falling back to cache\n", shaShort, err)
