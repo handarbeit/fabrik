@@ -242,6 +242,30 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// TestParseSpawnBlocks_DependsOnNonCanonicalNumeric verifies that values
+// strconv.Atoi alone would accept but which are not canonical positive
+// decimal integers — a leading '+' or a leading zero — are rejected the same
+// as any other malformed value (sentinel 0), not silently normalized to the
+// number they represent. Found in review (#1337): Atoi("+1") and Atoi("01")
+// both succeed, which would have let non-canonical forms slip past a header
+// grammar documented as strict.
+func TestParseSpawnBlocks_DependsOnNonCanonicalNumeric(t *testing.T) {
+	for _, raw := range []string{"+1", "01", "-1", "0"} {
+		body := "\nFABRIK_SPAWN_CHILD_BEGIN owner/repo\nTITLE: Non-canonical depends on\nDEPENDS_ON: " + raw + "\nBody text.\nFABRIK_SPAWN_CHILD_END\n"
+		blocks := ParseSpawnBlocks(body)
+		if len(blocks) != 1 {
+			t.Fatalf("DEPENDS_ON: %s: expected the block to be retained, got %d blocks", raw, len(blocks))
+		}
+		b := blocks[0]
+		if !b.DependsOnDeclared {
+			t.Errorf("DEPENDS_ON: %s: DependsOnDeclared should be true", raw)
+		}
+		if b.DependsOn != 0 {
+			t.Errorf("DEPENDS_ON: %s: DependsOn: got %d, want sentinel 0 (non-canonical numeric form)", raw, b.DependsOn)
+		}
+	}
+}
+
 // TestParseSpawnBlocks_DependsOnEmptyValue covers "DEPENDS_ON:" with no value
 // at all — also malformed, same sentinel treatment.
 func TestParseSpawnBlocks_DependsOnEmptyValue(t *testing.T) {

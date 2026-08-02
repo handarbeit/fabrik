@@ -27,6 +27,12 @@ const (
 // a slash and so used to be accepted as a real spawn target.
 var spawnRepoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
+// spawnDependsOnRE matches a canonical positive decimal integer: no leading
+// zero, no leading '+'/'-'. strconv.Atoi alone would accept "01" and "+1" as
+// valid, silently admitting non-canonical forms into a header whose grammar
+// is documented (ADR-1337) as strict about what counts as a valid index.
+var spawnDependsOnRE = regexp.MustCompile(`^[1-9][0-9]*$`)
+
 // errPreImplementDeferred signals that preImplement could not conclusively
 // resolve the stage:Plan:complete-but-no-Plan-comment inconsistency (#982) on
 // this pass — e.g. the live re-read itself failed, or a recovery cooldown is
@@ -201,8 +207,10 @@ func parseTitleAndBody(content string) (title string, dependsOnDeclared bool, de
 		if strings.HasPrefix(next, "DEPENDS_ON:") {
 			dependsOnDeclared = true
 			dependsOnRaw = strings.TrimSpace(strings.TrimPrefix(next, "DEPENDS_ON:"))
-			if n, err := strconv.Atoi(dependsOnRaw); err == nil && n > 0 {
-				dependsOn = n
+			if spawnDependsOnRE.MatchString(dependsOnRaw) {
+				if n, err := strconv.Atoi(dependsOnRaw); err == nil {
+					dependsOn = n
+				}
 			}
 			bodyStart++
 		}
