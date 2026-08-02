@@ -1362,7 +1362,7 @@ After spawning, the parent waits at Implement with `fabrik:blocked` until all ch
 
 #### What You Observe
 
-- During Plan: no sub-issues exist. Plan can be revised freely.
+- During Plan: no sub-issues exist. Plan can be revised freely. A decomposing Plan comment carries a receipt note stating how many sub-issues were declared and that they'll be created when the issue advances to Implement — so you don't have to know this section exists to know where they went.
 - After advancing to Implement: child issues appear on the project board in Specify, each labeled `fabrik:sub-issue`.
 - A child may transiently show `fabrik:awaiting-placement` if its initial board placement failed — it clears automatically once a later poll places it successfully, or escalates to `fabrik:paused` with an explanatory comment after repeated failures.
 - If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages, while cruise children stop at Validate for manual merge.
@@ -4844,6 +4844,8 @@ FABRIK_SPAWN_CHILD_END
 
 These blocks persist in the Plan stage comment — they are data, not consumed-and-stripped signals. The `preImplement` engine step reads them from the most-recent Plan comment body at Implement dispatch time.
 
+**On-thread spawn receipt (#1338):** at the moment the Plan comment is posted — well before `preImplement` ever runs — the engine appends a deterministic note naming the count of well-formed blocks it parsed (via the same `ParseSpawnBlocks` `preImplement` itself uses) and stating that no sub-issues exist yet, that they will be created when the parent advances to Implement. This makes the declarative nature of the blocks visible on the thread itself, rather than only in `docs/USER_GUIDE.md` or the engine log; see `docs/stage-lifecycle.md`'s "Spawn Receipt Note" section for the posting-path details. A parse failure (malformed markers, e.g. #1263) produces zero blocks and therefore no note, even though the raw marker text is still visible — a loud, on-thread mismatch that surfaces the failure immediately instead of silently at Implement time. The note is gated to the Plan stage specifically, matching `preImplement`'s own hardcoded `findStageComment(item.Comments, "Plan")` lookup above — a note appearing on any other stage's comment would promise a spawn that lookup will never act on.
+
 **Own-line requirement (enforced by `ParseSpawnBlocks`):** Both markers must stand on their own line, the same convention `FABRIK_STAGE_COMPLETE` follows. On the BEGIN line the target repo must be the only trailing token and a well-formed `owner/repo`; the END line must carry nothing else. Leading whitespace is tolerated, so a block nested under a list item still parses — trailing prose after the repo is not. A marker occurring inside prose (for example a backticked mention in the Plan's own task checklist) is therefore ignored, and cannot consume, truncate, or suppress a genuine block later in the same comment. Until this was enforced, such a mention silently destroyed the real block and the spawn simply did not happen (#1263). When a BEGIN-looking line is present but no well-formed block parses, `preImplement` now logs that fact rather than returning the same silent "nothing to spawn" result as a Plan that declared no children.
 
 **Code path:** `processItem()` → Implement stage dispatch → `preImplement()` (in `engine/spawn.go`)
@@ -7263,6 +7265,10 @@ All Fabrik markers are stripped from output before posting:
 
 **Otherwise** (Specify, Research, Plan):
 - Full output posted directly on the issue as a stage comment
+
+### Spawn Receipt Note
+
+If the Plan stage's posted output contains N > 0 well-formed spawn blocks — as counted by `ParseSpawnBlocks`, never by string-matching the marker text — a deterministic note is appended stating that N sub-issues are declared and will be created when the parent advances to the **Implement** stage. The note is gated to `stage.Name == "Plan"`, matching exactly what `preImplement` itself reads (`findStageComment(item.Comments, "Plan")`, engine/spawn.go): a note on any other stage's comment would promise a spawn that mechanism never performs — for example, a later stage's Claude quoting a spawn block back verbatim from its own context (later stages receive the Plan comment through `.fabrik-context/stage-Plan.md`). The gate applies to both output-posting paths above. The note is folded into the same `footer` value that also carries the stats footer below, computed once and threaded unchanged through every posting path — so it renders identically whether output goes straight to the issue or through `post_to_pr`. N == 0, or a non-Plan stage, produces no note and byte-identical output to before this existed. See ADR-048 and #1338.
 
 ### Comments Marked as Seen
 

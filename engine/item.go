@@ -1275,6 +1275,20 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// Post Claude's output
 	if postOutput != "" {
 		footer := formatStatsFooter(usage, completed)
+		// Gated to the Plan stage because preImplement only ever reads the
+		// most-recent comment literally named "Plan" (engine/spawn.go,
+		// findStageComment(item.Comments, "Plan")) — a note posted on any
+		// other stage's comment would promise a spawn that mechanism will
+		// never perform. Later stages receive the Plan comment verbatim as
+		// context (.fabrik-context/stage-Plan.md); if a later stage quotes
+		// its spawn blocks back, this gate stops that quote from producing a
+		// spurious, already-stale note on the wrong stage's comment (#1338
+		// review finding). preImplement's own lookup is equally hardcoded to
+		// "Plan", so generalizing either one always requires touching both
+		// together — there is no silent-drop scenario this gate creates.
+		if stage.Name == "Plan" {
+			footer = formatSpawnReceiptNote(postOutput) + footer
+		}
 		if stage.PostToPR {
 			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 		} else {
