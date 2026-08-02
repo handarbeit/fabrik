@@ -165,6 +165,52 @@ func WarnUndeclaredReviewers(userStages []*Stage, w io.Writer) {
 	}
 }
 
+// SweepStaleWarnings clears stage_drift and undeclared_reviewers warnings
+// for stage names no longer present in userStages (#1348). Both
+// WarnStageDrift and WarnUndeclaredReviewers only reach their own
+// warnings.Clear branch for a name they actually visit this pass — a
+// renamed or deleted stage YAML is therefore never visited again, and its
+// warning is otherwise immortal, the same durable-state-leak shape as
+// allow_auto_merge (see sweepStaleAllowAutoMergeWarnings in engine/).
+//
+// userStages must be the same unfiltered set WarnStageDrift/
+// WarnUndeclaredReviewers themselves consume (including Unmanaged/cleanup
+// stages) — comparing against a filtered subset would wrongly sweep a
+// still-valid stage's warning.
+//
+// Startup-only, not per-poll: the known-good set (stage names) is fixed for
+// the life of the process and only changes across a restart, unlike
+// allow_auto_merge's per-poll-refreshed board repo set.
+//
+// Guards against an empty/nil userStages the same way WarnStageDrift does:
+// cmd/root.go already fails startup before Run() is ever reached if stage
+// loading produces zero configs, so this should be unreachable in practice —
+// but without the guard, an empty present set would make every currently
+// recorded stage_drift/undeclared_reviewers entry look "absent" and wipe
+// them all in one pass. Matching WarnStageDrift's own no-op keeps the two
+// functions consistent and removes that failure mode even if the invariant
+// is ever violated (e.g. a future caller that doesn't go through
+// cmd/root.go's validation).
+func SweepStaleWarnings(userStages []*Stage, w io.Writer) {
+	if len(userStages) == 0 {
+		return
+	}
+	present := make(map[string]bool, len(userStages))
+	for _, s := range userStages {
+		present[s.Name] = true
+	}
+	for _, warningType := range []string{"stage_drift", "undeclared_reviewers"} {
+		cleared, err := warnings.ClearMissing(warningType, present)
+		if err != nil {
+			fmt.Fprintf(w, "[startup] warning: stale %s warning sweep failed: %v\n", warningType, err)
+			continue
+		}
+		for _, key := range cleared {
+			fmt.Fprintf(w, "[startup] cleared stale warning %s: stage no longer configured\n", key)
+		}
+	}
+}
+
 // driftTitle builds the one-line warnings-panel title for a stage-drift entry.
 // It names the missing keys (not just their count) so the summary is actionable
 // without drilling into the detail view.

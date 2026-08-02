@@ -143,10 +143,12 @@ func (e *Engine) Run() error {
 		w := io.MultiWriter(os.Stderr, e.logFile)
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
+		stages.SweepStaleWarnings(e.cfg.Stages, w)
 		logClaudeConfigDir(configDir, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
+		stages.SweepStaleWarnings(e.cfg.Stages, os.Stderr)
 		logClaudeConfigDir(configDir, os.Stderr)
 	}
 
@@ -954,6 +956,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		e.logf(0, "poll", "repos on board: %v\n", repos)
 	}
+
+	// Clear any allow_auto_merge warning whose subject repo has left the
+	// board entirely — see sweepStaleAllowAutoMergeWarnings for why this
+	// can't be reached by checkAllowAutoMerge's own Clear branch (#1348).
+	e.sweepStaleAllowAutoMergeWarnings(seenRepos)
 
 	// Seed labels on repos discovered for the first time this process run.
 	// seededRepos is guarded by e.mu; the poll loop is single-goroutine but

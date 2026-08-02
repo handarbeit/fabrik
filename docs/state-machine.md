@@ -2522,6 +2522,70 @@ A detected stall still applies `StageRetryIncremented` and counts against `MaxRe
 
 **Scope note:** this implements only the "cheaper to detect" trend signal from issue #1146 — a turn-capped attempt followed by a declining, incomplete one. It does not add live NDJSON tool-use parsing to detect backgrounding-then-silence within a single invocation (the issue's other suggested signal); that remains a possible follow-up if the trend signal proves insufficient in practice.
 
+### 7.11 Stale Warning Sweep
+
+`.fabrik/warnings.json` (`warnings/warnings.go`, ADR-052) backs the TUI's Warnings panel. Several
+engine-side detectors record an entry when a condition is true and clear it via `warnings.Clear` when
+the *same* re-checked subject's condition resolves — but a subject that stops being checked at all (a
+repo leaves the board, a stage is renamed or its YAML deleted) never revisits the `Clear` branch, so its
+entry is immortal. This is the same durable-state-leak shape as the orphaned `stage:*:in_progress`
+labels (#1135) and the `fabrik:claude-limit` account-wide label before §7.3's sweep (ADR-1183). Observed
+in production on the `verveguy` project (#1348): four `allow_auto_merge` warnings for repos that had
+left the board persisted indefinitely, pushing live warnings past the panel's row cap.
+
+**`warnings.ClearMissing(warningType string, present map[string]bool) ([]string, error)`** is the shared
+bulk-predicate primitive both sweeps below use. `warnings.Clear(key)` always calls `save()` even when
+`key` was never present — a caller-side loop over N possibly-stale keys would therefore write the file
+on every poll unless every caller independently pre-filters correctly. `ClearMissing` removes that
+footgun structurally: it loads the file once, removes every entry whose `Type == warningType` and whose
+`Key` subject (the portion after `"<warningType>:"`) is absent from `present`, and only calls `save()`
+when at least one entry was actually removed. Entries of other `Type`s are never touched regardless of
+`Key`, and a present-subject entry is preserved whether or not it is `Dismissed` — the sweep is about
+*absent subjects*, not about un-dismissing anything still around. Returns the full `Key` of each cleared
+entry for the caller to log.
+
+**`allow_auto_merge` (repo-keyed, per-poll).** `sweepStaleAllowAutoMergeWarnings`
+(`engine/allow_auto_merge_settle.go`) is called from `poll()` immediately after `seenRepos` — the board
+repo set `poll()` already computes for the label-seeding path (`poll.go` ~line 925) — is built, before
+the label-seeding loop runs. It calls `warnings.ClearMissing("allow_auto_merge", present)` with `present`
+= `seenRepos` unioned with `e.defaultRepo()` (single-repo mode only). The union matters:
+`checkAllowAutoMerge(e.cfg.Owner, e.cfg.Repo)` fires unconditionally at `Run()` startup regardless of
+whether the board currently has any open items for that repo, but `seenRepos` is built purely from
+`board.Items` — without the union, a transient zero-open-items poll for the operator's own configured
+repo (e.g. everything currently in Done) would durably clear a legitimate warning for it, and because
+`checkedAutoMergeRepos` never re-fires for that repo after the first startup call, the warning would not
+reappear until a process restart. Multi-repo mode (`e.cfg.Repo == ""`) has no equivalent always-present
+repo, so `defaultRepo()` returning `""` is a correct no-op there. Runs every poll, because `seenRepos`
+itself is rebuilt every poll (a repo leaving/rejoining the board is visible immediately). No new API
+calls: everything consumed is already computed this poll cycle. Each clear logs one line (tag `"poll"`,
+matching the cadence of the other per-poll log lines it sits next to — not `"startup"`, which the
+codebase reserves for once-per-process/once-per-repo events) naming the full key and the reason ("repo
+no longer on the board").
+
+**`stage_drift` / `undeclared_reviewers` (stage-name-keyed, startup-only).** `stages.SweepStaleWarnings`
+(`stages/drift.go`) is called once from `Run()`, immediately after the existing `WarnStageDrift`/
+`WarnUndeclaredReviewers` calls (both the `e.logFile != nil` and the plain-stderr branch), with the same
+unfiltered `e.cfg.Stages` those two functions themselves consume — using the `Unmanaged`-excluding
+`stageNames` list built later in `poll.go` for `SeedLabels` would wrongly sweep a still-valid `Unmanaged`
+stage's warning. It builds the current stage-name set and calls `warnings.ClearMissing` twice, once per
+`Type`. Startup-only (not per-poll) is correct here, unlike the repo sweep: `e.cfg.Stages` is fixed for
+the life of the process and only changes across a restart (including the in-place SIGHUP restart, which
+re-execs and re-runs `Run()` from scratch), so re-running the sweep every poll would be correct but
+pointless. Each clear logs one line naming the full key and the reason ("stage no longer configured"),
+written to the same `io.Writer` (`os.Stderr`, tee'd to `fabrik.log` when open) as the sibling drift/
+undeclared-reviewers warnings.
+
+**`version_skew`: no sweep needed, by construction.** `checkVersionSkew`'s (`engine/upgrade.go`) key
+subject is the resolved on-disk executable path, re-derived fresh via `filepath.EvalSymlinks` on *every*
+idle-upgrade check (`poll.go`), not looked up against a shrinking discovered set the way a board repo or
+a configured stage name is. Its `Clear` branch (`diskVersion == running`) is therefore reachable on every
+single evaluation, so the warning can never outlive the condition that produced it — see the doc comment
+on `checkVersionSkew` for the same reasoning in code.
+
+**Non-goals.** No change to which conditions *produce* a warning, no TUI rendering change, and this is
+not a general warning-expiry/TTL mechanism — only subjects that have provably gone away (absent from a
+known-good set already computed elsewhere) are ever cleared. See ADR-1348.
+
 ---
 
 ## 8. Invalid / Unexpected States
