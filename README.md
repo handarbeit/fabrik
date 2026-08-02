@@ -285,7 +285,10 @@ CLI flag  >  shell env var  >  .env file  >  .fabrik/config.yaml  >  built-in de
 Run `fabrik init` to generate `.fabrik/config.yaml` in your project. This file holds
 all non-secret project settings and should be committed to git. See the
 [Configuration Reference](docs/USER_GUIDE.md#2-configuration-reference) in the User
-Guide for a full field-by-field description with examples and defaults.
+Guide for a full field-by-field description with examples and defaults, including
+`required_status_contexts` — per-repo required context names the CI gate must see
+confirmed `success` for, needed only when a repo's required CI signal is a classic
+commit status rather than a normal GitHub Actions check run.
 
 **Secrets** (GitHub tokens) belong in a gitignored `.env` file only:
 
@@ -396,8 +399,10 @@ Fabrik uses labels to track state:
 | `effort:<level>` | Override thinking effort for this issue only — valid values: `low`, `medium`, `high`, `max`; precedence: `max > high > medium > low`. Complements `model:` label. |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:auto-merge-enabled` | Applied when Fabrik enables GitHub's native auto-merge on a yolo PR after Validate completes; serves as the idempotency guard and convergence-budget start anchor; removed when the PR merges or is closed |
-| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
+| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only, bypassing the default `--permission-mode dontAsk` posture and the entire tool allowlist. Use only when a stage needs tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains). **Caution:** removes all tool restrictions. |
+| `review-authority:<mode>` | Override the stage's configured `review_authority` for this issue only (`advisory` or `authoritative`); only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](docs/USER_GUIDE.md#authoritative-mode) in the User Guide. |
+| `expected-reviewers:<mode>` | Override the stage's configured `expected_reviewers` for this issue only (`none` or `declared`); only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](docs/USER_GUIDE.md#declaring-expected-reviewers) in the User Guide. |
 | `fabrik:extend-turns` | Pre-grant 2× `max_turns` budget for the next invocation; auto-extends to 3× when stage progress is detected; auto-removed on successful stage completion. |
 | `fabrik:revalidate` | Force re-entry of the Validate stage — the engine clears `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, and itself, then re-runs Validate on the current HEAD SHA. Use as a one-action recovery for stuck-Validate, or as the manual fallback for items that completed Validate before SHA-change auto-revalidation was deployed. |
 | `base:<branch>` | Override the base branch for this issue — Fabrik forks from, rebases onto, and targets PRs at `<branch>` instead of the repository default. Must be set before Research. If the branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment. |
