@@ -37,6 +37,7 @@ CI's `docs-drift` workflow (`.github/workflows/docs-drift.yml`) runs the regen a
 - `engine/claude.go` — Claude Code invocation, prompt building, marker extraction
 - `engine/worktree.go` — Git worktree lifecycle (create, update, push, cleanup)
 - `engine/merge_train.go` — Merge-train worker: trial branch assembly, inline conflict resolution, integration PR creation and CI polling (ADR-059 D3)
+- `engine/ci_settle.go` — `settleAwaitingCIScan`: the per-poll settle scan that owns `fabrik:awaiting-ci` items, sourced directly from `board.Items` so it is independent of `itemMayNeedWork`/`selectDeepFetchCandidates` admission (the fifth instance of the "dedicated settle scan" pattern — ADR-1270). Runs the shared `catchUpPhase1Handlers` chain, primes the store with a live check-run read (`RefreshCheckRunsLive`) so a stale cached PENDING classification cannot wedge the item, and applies an **unconditional `CIWaitTimeout` backstop** ahead of the handler chain so an item escalates even when some gate claims it before `checkCIGate` is ever reached. The main poll loop deliberately no longer processes these items (`poll.go` admits `hasComplete`-only); see ADR-1270 and #1303/#1325.
 - `engine/interfaces.go` — GitHubClient and ClaudeInvoker interfaces (for testing)
 - `github/project.go` — GraphQL board fetching (single query for all items + comments + linked PRs)
 - `github/client.go` — HTTP client construction and shared request helpers
