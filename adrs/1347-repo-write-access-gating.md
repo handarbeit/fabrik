@@ -123,3 +123,17 @@ convention for this one notice was judged unnecessary scope.
   for the remainder of that process's lifetime, even if it is genuinely unwritable —
   self-heals on the next restart, and is strictly no worse than this codebase's
   unconditional pre-#1347 behavior for that one repo.
+- **Cleanup stages are not exempted from the dispatch gate**, unlike the
+  `fabrik:awaiting-done` gate a few lines above it in `itemMayNeedWork`. This was
+  raised in PR review (#1356): doesn't a repo with no write access still need its
+  local worktree cleaned up? No — `handleCleanupStage` is not a pure local
+  filesystem operation, it calls `addLabel`/`removeLabel` (`stage:*:complete`,
+  `fabrik:extend-turns`) and is reached via `acquireLockAndVerify`, which writes
+  lock/`in_progress` labels first — all real GitHub mutations. Exempting cleanup
+  would reopen exactly the write this ADR closes. Accepted consequence: a worktree
+  already on disk for an issue whose repo is later resolved as `CanPush: false`
+  (e.g., a pre-existing worktree from before this fix shipped, or a repo whose
+  access was revoked after Fabrik had legitimately processed it) is never
+  auto-cleaned — a disk-space leak, not a correctness or security issue. Manual
+  removal of the worktree directory is the only path, consistent with this issue's
+  own "retroactively removing labels already seeded" non-goal.

@@ -169,6 +169,18 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// resolveRepoAccess, always resolved earlier in poll() for every board-
 	// discovered repo before this function is reached; a repo not yet in the
 	// cache is admitted (fail-open on "unknown"), never gated on "unknown".
+	//
+	// Deliberately NOT exempted for stage.CleanupWorktree, unlike the
+	// fabrik:awaiting-done gate above: handleCleanupStage is not a pure local
+	// filesystem operation — it calls addLabel/removeLabel (stage:*:complete,
+	// fabrik:extend-turns) and acquireLockAndVerify writes lock/in_progress
+	// labels before that, all real GitHub mutations. Admitting cleanup here
+	// would reopen exactly the unwanted write against an unmanaged repo this
+	// gate exists to close. Accepted trade-off: a worktree that already exists
+	// on disk for an issue whose repo is later resolved as CanPush:false is
+	// never auto-cleaned (a disk-space leak, not a correctness issue); removing
+	// it is a manual, out-of-scope operation, same as this issue's other
+	// manual-cleanup carve-outs. See ADR-1347.
 	if access, ok := e.cachedRepoAccess(itemOwnerRepoString(item, e.defaultRepo())); ok && !access.CanPush {
 		return false
 	}
