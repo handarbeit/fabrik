@@ -30,6 +30,17 @@ import "github.com/handarbeit/fabrik/warnings"
 //
 // Runs every poll (cheap: warnings.ClearMissing performs a single load, and
 // only saves when something was actually stale — R4/AC5). No API calls.
+//
+// present is required to be non-empty before any clearing is attempted: in
+// multi-repo mode, retryOnEmpty (github/project.go) can still exhaust its
+// retries and return a genuinely zero-item board (e.g. a persistent indexer
+// hiccup, or a project that's transiently empty of open items across every
+// configured repo). Unlike single-repo mode, multi-repo has no defaultRepo()
+// to fall back on, so an empty seenRepos would otherwise make every
+// allow_auto_merge warning for every repo look "absent" and wipe them all in
+// one pass. Skipping the sweep entirely when present is empty mirrors the
+// same "never destructively act on zero signal" reasoning behind the
+// single-repo defaultRepo() exemption above.
 func (e *Engine) sweepStaleAllowAutoMergeWarnings(seenRepos map[string]bool) {
 	present := make(map[string]bool, len(seenRepos)+1)
 	for r := range seenRepos {
@@ -37,6 +48,9 @@ func (e *Engine) sweepStaleAllowAutoMergeWarnings(seenRepos map[string]bool) {
 	}
 	if dr := e.defaultRepo(); dr != "" {
 		present[dr] = true
+	}
+	if len(present) == 0 {
+		return
 	}
 	cleared, err := warnings.ClearMissing("allow_auto_merge", present)
 	if err != nil {

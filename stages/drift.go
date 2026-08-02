@@ -181,7 +181,20 @@ func WarnUndeclaredReviewers(userStages []*Stage, w io.Writer) {
 // Startup-only, not per-poll: the known-good set (stage names) is fixed for
 // the life of the process and only changes across a restart, unlike
 // allow_auto_merge's per-poll-refreshed board repo set.
+//
+// Guards against an empty/nil userStages the same way WarnStageDrift does:
+// cmd/root.go already fails startup before Run() is ever reached if stage
+// loading produces zero configs, so this should be unreachable in practice —
+// but without the guard, an empty present set would make every currently
+// recorded stage_drift/undeclared_reviewers entry look "absent" and wipe
+// them all in one pass. Matching WarnStageDrift's own no-op keeps the two
+// functions consistent and removes that failure mode even if the invariant
+// is ever violated (e.g. a future caller that doesn't go through
+// cmd/root.go's validation).
 func SweepStaleWarnings(userStages []*Stage, w io.Writer) {
+	if len(userStages) == 0 {
+		return
+	}
 	present := make(map[string]bool, len(userStages))
 	for _, s := range userStages {
 		present[s.Name] = true

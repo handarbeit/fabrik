@@ -200,3 +200,49 @@ func TestSweepStaleAllowAutoMergeWarnings_MultiRepoModeNoExemption(t *testing.T)
 		t.Fatalf("expected multi-repo mode to have no exemption, got %v", entries)
 	}
 }
+
+// TestSweepStaleAllowAutoMergeWarnings_MultiRepoModeEmptyBoardSkipsSweep
+// guards against the destructive-wipe shape flagged in review: in multi-repo
+// mode there is no defaultRepo() to fall back on, so a genuinely empty
+// seenRepos (e.g. retryOnEmpty in github/project.go exhausting retries on a
+// persistent indexer hiccup) would otherwise make every recorded
+// allow_auto_merge warning look "absent" and clear them all in one pass. The
+// sweep must skip entirely — not just skip clearing a specific repo — when
+// it has zero signal to compare against.
+func TestSweepStaleAllowAutoMergeWarnings_MultiRepoModeEmptyBoardSkipsSweep(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "allow_auto_merge:owner/repo", Type: "allow_auto_merge"}); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewWithDeps(
+		Config{
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+
+	before, err := os.Stat(warnings.WarningsPathOverride)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng.sweepStaleAllowAutoMergeWarnings(map[string]bool{})
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 || entries[0].Key != "allow_auto_merge:owner/repo" {
+		t.Fatalf("expected warning preserved when the board is empty in multi-repo mode, got %v", entries)
+	}
+	after, err := os.Stat(warnings.WarningsPathOverride)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("expected no write when the sweep is skipped; mtime changed from %v to %v", before.ModTime(), after.ModTime())
+	}
+}

@@ -493,6 +493,35 @@ func TestSweepStaleWarnings_IgnoresOtherTypes(t *testing.T) {
 	}
 }
 
+// TestSweepStaleWarnings_EmptyUserStagesPreservesEntries guards against the
+// destructive-wipe shape flagged in review: without an early return for an
+// empty/nil userStages (matching WarnStageDrift's own guard), a present set
+// derived from zero stages would make every recorded stage_drift/
+// undeclared_reviewers entry look "absent" and clear them all in one pass.
+// cmd/root.go already fails startup before Run() is reached if stage loading
+// produces zero configs, so this is normally unreachable — the guard is
+// defense in depth for any future caller that bypasses that validation.
+func TestSweepStaleWarnings_EmptyUserStagesPreservesEntries(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Implement", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := warnings.Record(warnings.Entry{Key: "undeclared_reviewers:Implement", Type: "undeclared_reviewers"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings(nil, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 2 {
+		t.Fatalf("expected both entries preserved when userStages is empty, got %v", entries)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no log output when the sweep is skipped, got: %q", buf.String())
+	}
+}
+
 func TestSweepStaleWarnings_IncludesUnmanagedStages(t *testing.T) {
 	// The sweep must be called with the unfiltered stage set (including
 	// Unmanaged stages) — otherwise a currently-valid Unmanaged stage's
