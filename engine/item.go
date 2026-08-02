@@ -161,6 +161,18 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// A repo the configured token has no write access to is never dispatched
+	// (R6): nearly every stage past Specify/Research needs to push commits and
+	// open/update PRs against this repo, which requires the very write access
+	// already determined to be absent — partial (read-only) processing would
+	// just fail later, less clearly. The access cache is populated by
+	// resolveRepoAccess, always resolved earlier in poll() for every board-
+	// discovered repo before this function is reached; a repo not yet in the
+	// cache is admitted (fail-open on "unknown"), never gated on "unknown".
+	if access, ok := e.cachedRepoAccess(itemOwnerRepoString(item, e.defaultRepo())); ok && !access.CanPush {
+		return false
+	}
+
 	// Cleanup stages bypass the updatedAt cache — their trigger is worktree
 	// existence (a local filesystem check), not issue/PR changes. Board column
 	// moves (Validate→Done by a human) don't always bump updatedAt, so cleanup

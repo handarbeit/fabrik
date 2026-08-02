@@ -57,6 +57,20 @@ func itemOwnerRepo(item gh.ProjectItem, defaultRepo string) (owner, repo string)
 	return parseOwnerRepo(r)
 }
 
+// cachedRepoAccess returns the previously resolved write-access determination
+// for "owner/repo" key, without triggering a probe. Used by itemMayNeedWork's
+// dispatch gate, which must stay a pure in-memory check — the repo-access
+// probe itself always runs earlier in the same poll cycle, in poll()'s
+// seeding block (see resolveRepoAccess). Returns ok=false when the repo
+// hasn't been resolved yet, in which case the caller should admit rather
+// than gate (fail-open on "unknown", not "unwritable").
+func (e *Engine) cachedRepoAccess(key string) (access gh.RepoAccess, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	access, ok = e.repoAccess[key]
+	return access, ok
+}
+
 // parseIssueKey reverses issueKey: parses "owner/repo#N" into (owner, repo, issueNumber).
 // Falls back to (defaultOwner, defaultRepo, 0) on malformed input.
 func parseIssueKey(key, defaultOwner, defaultRepo string) (owner, repo string, issueNumber int) {
