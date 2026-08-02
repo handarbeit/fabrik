@@ -833,3 +833,106 @@ func TestSettleAwaitingCIScan_StaleCachedPendingCheckRuns_EndToEnd(t *testing.T)
 		t.Error("expected the stale fabrik:rebase-needed label to be cleared once checkMergeabilityGate reaches PRMergeBlocked")
 	}
 }
+
+// TestSettleAwaitingCIScan_CacheHitPath_RefreshCheckRunsLiveReached is the
+// #1325 regression test. Unlike
+// TestSettleAwaitingCIScan_StaleCachedPendingCheckRuns_EndToEnd above — whose
+// fetchItemDetailsFn sets item.LinkedPRHeadSHA/LinkedPRNumber directly, so its
+// single FetchItemDetails call is always a cache MISS and never exercises
+// copyDeepFieldsFromState — this test primes the real boardcache.CacheImpl
+// with a genuine prior deep fetch, then calls settleAwaitingCIScan with a
+// fresh/zeroed board item (no pre-populated LinkedPRHeadSHA/LinkedPRNumber,
+// exactly like production's board.Items snapshot) and an unchanged UpdatedAt,
+// so FetchItemDetails takes the cache-HIT branch. Before #1325's fix,
+// copyDeepFieldsFromState never copied LinkedPRHeadSHA from the cached
+// ItemState, so item.LinkedPRHeadSHA stayed "" on the hit path, the
+// RefreshCheckRunsLive guard in settleAwaitingCIScan never fired, and the
+// stale cached PENDING check-run classification would be served forever.
+func TestSettleAwaitingCIScan_CacheHitPath_RefreshCheckRunsLiveReached(t *testing.T) {
+	const sha = "cafefeed0000cafefeed0000cafefeed0000cafe"
+	const prNumber = 4158
+	t0 := time.Date(2026, 8, 1, 23, 0, 0, 0, time.UTC)
+
+	var fetchItemDetailsCalls int
+	var fetchCheckRunsCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchItemDetailsCalls++
+			item.LinkedPRHeadSHA = sha
+			item.LinkedPRNumber = prNumber
+			return nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, HeadSHA: sha, State: "open", Merged: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, checkSHA string) ([]gh.CheckRun, error) {
+			fetchCheckRunsCalls++
+			// Live state: same check name as the stale cached run below, resolved
+			// to a definitive failure at a higher check-run ID.
+			return []gh.CheckRun{
+				{ID: 2, Name: "ci-fix-sentinel", Status: "completed", Conclusion: "failure"},
+			}, nil
+		},
+		addLabelToIssueFn:      func(_, _ string, _ int, _ string) error { return nil },
+		removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 5
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// Prime the cache with a genuine deep fetch (a miss, since the store is
+	// still empty for this item) — mirrors a prior poll's deep fetch. This
+	// seeds LastDeepFetchAt/LastSeenSourceUpdatedAt=t0 and, via
+	// PRHeadSHAUpdated, ItemState.LinkedPR.HeadSHA/.Number.
+	primeItem := gh.ProjectItem{Number: 34, Repo: "owner/repo", Status: "Validate", UpdatedAt: t0}
+	if err := cache.FetchItemDetails(&primeItem); err != nil {
+		t.Fatalf("priming FetchItemDetails: %v", err)
+	}
+	if fetchItemDetailsCalls != 1 {
+		t.Fatalf("priming call: want 1 live fetch, got %d", fetchItemDetailsCalls)
+	}
+
+	// Seed a stale cached PENDING check-run classification for this SHA —
+	// mirrors a dropped/absent check_run webhook, exactly as the sibling
+	// end-to-end test above does.
+	eng.store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo", SHA: sha,
+		Run: gh.CheckRun{ID: 1, Name: "ci-fix-sentinel", Status: "in_progress"},
+	})
+
+	// The board item is fresh/zeroed at the deep-field layer — no pre-populated
+	// LinkedPRHeadSHA/LinkedPRNumber — with the SAME UpdatedAt as the priming
+	// call, so FetchItemDetails below takes the cache-HIT branch.
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:    34,
+				Repo:      "owner/repo",
+				Status:    "Validate",
+				Labels:    []string{"fabrik:awaiting-ci"},
+				UpdatedAt: t0,
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	if fetchItemDetailsCalls != 1 {
+		t.Fatalf("settleAwaitingCIScan pass: fetchItemDetailsCalls = %d, want 1 (this pass must be a genuine cache hit, not a live re-fetch)", fetchItemDetailsCalls)
+	}
+	if fetchCheckRunsCalls == 0 {
+		t.Fatal("expected RefreshCheckRunsLive to reach FetchCheckRuns on the cache-hit path — the call site under test was never reached")
+	}
+
+	snap, _ := eng.store.Get("owner/repo", 34)
+	if got := snap.CIFixCycles("Validate"); got != 1 {
+		t.Errorf("CIFixCycles(Validate) = %d; want 1 — the live FAILED classification observed via the cache-hit RefreshCheckRunsLive call must drive the CI-fix reinvoke, not the stale cached PENDING one", got)
+	}
+}
