@@ -100,7 +100,7 @@ func runUpgrade(args []string) error {
 	}
 
 	// Default path: check three-way state before refreshing.
-	customWorkflow, _, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+	customWorkflow, _, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 	if stateErr != nil {
 		return fmt.Errorf("checking plugin state: %w", stateErr)
 	}
@@ -145,7 +145,7 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 	// Three-way check: detect operator customizations before refreshing.
 	// upgradeNeeded=true only when disk==installed and embedded differs (safe to refresh).
 	// Migration path (installedVer absent) returns (false,false): do nothing until next cycle.
-	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(pluginDir)
+	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(pluginDir, strings.HasPrefix(Version, "dev"))
 	if stateErr != nil {
 		return fmt.Errorf("checking plugin state: %w", stateErr)
 	}

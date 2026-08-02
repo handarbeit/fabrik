@@ -115,14 +115,24 @@ func ReadInstalledVersion(pluginDir string) (string, error) {
 // CheckPluginState performs a three-way comparison (embedded vs installedVer vs
 // disk) and determines whether the operator has local customizations or whether
 // an auto-refresh is needed. It delegates to checkPluginState with the global
-// KnownEmbeddedVersions list.
-func CheckPluginState(pluginDir string) (customWorkflow, upgradeNeeded bool, err error) {
-	return checkPluginState(pluginDir, KnownEmbeddedVersions)
+// KnownEmbeddedVersions list. isDevBuild identifies whether the calling binary
+// is a dev build (see checkPluginState for why this matters).
+func CheckPluginState(pluginDir string, isDevBuild bool) (customWorkflow, upgradeNeeded bool, err error) {
+	return checkPluginState(pluginDir, KnownEmbeddedVersions, isDevBuild)
 }
 
 // checkPluginState is the testable implementation of CheckPluginState.
 // knownVersions is the list of all plugin fingerprints ever legitimately written
 // by a release binary; it is injected so tests can supply custom lists.
+// isDevBuild identifies whether the calling binary is a dev build (built from
+// source, as every developer and every test bed runs) rather than a release
+// binary. A dev build's own embedded content, by construction, can never be a
+// member of knownVersions — that list only ever grows from release-cut
+// fingerprints (scripts/cut-release.sh). Without this distinction, the very
+// first plugin refresh performed by a dev build poisons installedVer with a
+// fingerprint that no release build will ever recognize, permanently
+// misclassifying every subsequent startup as a genuine operator customization
+// (see issue #1297).
 //
 // Migration path (installedVer absent):
 //   - diskVer == ""            → no-op (empty dir is not a customization)
@@ -132,15 +142,22 @@ func CheckPluginState(pluginDir string) (customWorkflow, upgradeNeeded bool, err
 //
 // Corrupted-state guard (installedVer present, disk==installed, embedded differs):
 //   - installedVer in knownVersions → legitimate upgrade; return (false,true)
-//   - installedVer not in knownVersions → buggy v0.0.64 migration wrote a
-//     customized disk hash as installedVer; treat as custom workflow; return (true,false)
+//   - installedVer not in knownVersions and isDevBuild → this binary's own dev
+//     builds can never populate knownVersions, so an unlisted-but-disk-matching
+//     installedVer is trusted as a prior legitimate dev-build write, not
+//     mistaken for the pre-v0.0.64 corruption; return (false,true)
+//   - installedVer not in knownVersions and !isDevBuild → release binary sees
+//     an installedVer it cannot vouch for; buggy v0.0.64 migration wrote a
+//     customized disk hash as installedVer; treat as custom workflow;
+//     return (true,false) — unchanged from pre-#1297 behavior, preserving the
+//     protection that motivated KnownEmbeddedVersions in the first place (#820)
 //
 // Return values:
 //
 //	customWorkflow=true  — disk differs from installedVer; skip auto-refresh.
 //	upgradeNeeded=true   — disk matches installedVer but embedded differs; auto-refresh safe.
 //	both false           — no action needed.
-func checkPluginState(pluginDir string, knownVersions []string) (customWorkflow, upgradeNeeded bool, err error) {
+func checkPluginState(pluginDir string, knownVersions []string, isDevBuild bool) (customWorkflow, upgradeNeeded bool, err error) {
 	installedVer, err := ReadInstalledVersion(pluginDir)
 	if err != nil {
 		return false, false, err
@@ -180,9 +197,19 @@ func checkPluginState(pluginDir string, knownVersions []string) (customWorkflow,
 		// Disk matches installedVer but embedded has changed. Before treating this
 		// as a safe auto-refresh, verify that installedVer was written by a
 		// legitimate release binary (i.e., it is a known embedded hash).
-		// If it is not in the known list, the buggy v0.0.64 migration wrote a
-		// customized disk hash as installedVer — treat as custom workflow.
-		if isKnownEmbedded(installedVer, knownVersions) {
+		// If it is not in the known list, either:
+		//   - this binary is itself a dev build, which can never appear in the
+		//     release-only known list by construction — trust it (see doc comment)
+		//   - or a release binary is looking at an installedVer it cannot vouch
+		//     for — the buggy v0.0.64 migration wrote a customized disk hash as
+		//     installedVer — treat as custom workflow.
+		// NOTE: isDevBuild trusts any unlisted match, not just a fingerprint this
+		// binary itself wrote — a pre-existing install already corrupted by the
+		// old pre-0bd2c57e bug (disk == installedVer holding a real customization)
+		// would also be trusted if first checked by a dev build. Closing that gap
+		// needs persisted provenance, rejected elsewhere for self-heal reasons —
+		// see ADR 1297's "Acknowledged trade-off".
+		if isKnownEmbedded(installedVer, knownVersions) || isDevBuild {
 			return false, true, nil
 		}
 		return true, false, nil
