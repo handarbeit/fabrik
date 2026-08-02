@@ -667,7 +667,8 @@ func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerT
 
 // FetchItemDetails copies cached deep fields into the passed item pointer.
 // Deep fields: Body, URL, Author, Assignees, BlockedBy, Comments, LinkedPRNumber,
-// LinkedPRReviewRequests, LinkedPRReviews, LinkedPRReviewThreadComments, LinkedPRResolvedThreadCount.
+// LinkedPRHeadSHA, LinkedPRReviewRequests, LinkedPRReviews, LinkedPRReviewThreadComments,
+// LinkedPRResolvedThreadCount.
 //
 // Cache freshness contract: the cache is treated as authoritative only while the
 // fresh board's pi.UpdatedAt has not advanced past LastSeenSourceUpdatedAt (the
@@ -1239,7 +1240,10 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 }
 
 // copyDeepFieldsFromState overlays deep fields from an ItemState onto a *gh.ProjectItem.
-// Shallow fields (Labels, Status, Title, UpdatedAt) are left unchanged in dst.
+// Deep fields: Body, URL, Author, Assignees, BlockedBy, Comments, LinkedPRNumber,
+// LinkedPRHeadSHA, LinkedPRReviews, LinkedPRReviewRequests, LinkedPRReviewThreadComments,
+// LinkedPRResolvedThreadCount. Shallow fields (Labels, Status, Title, UpdatedAt) are left
+// unchanged in dst.
 func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
 	dst.Body = s.Body
 	dst.URL = s.URL
@@ -1249,6 +1253,7 @@ func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
 	dst.Comments = cloneComments(s.Comments)
 	if s.LinkedPR != nil {
 		dst.LinkedPRNumber = s.LinkedPR.Number
+		dst.LinkedPRHeadSHA = s.LinkedPR.HeadSHA
 		dst.LinkedPRReviews = clonePRReviews(s.LinkedPR.Reviews)
 		dst.LinkedPRReviewRequests = cloneReviewRequests(s.LinkedPR.ReviewRequests)
 		dst.LinkedPRReviewThreadComments = cloneComments(s.LinkedPR.ThreadComments)
