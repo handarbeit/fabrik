@@ -34,10 +34,41 @@ builds:
       post:
         - cmd: ./.release-tools/verify-release-artifact {{ .Path }} {{ .Env.TAG_COMMIT }}
           output: true
+  # Pruefer ships from the same tag/release as fabrik — one shared release
+  # cadence, not an independent tag flow. See adrs/1197-pruefer-self-upgrade.md
+  # for the rationale (simplicity, matches the monorepo; accepted tradeoff is
+  # every fabrik-only release republishes an unchanged pruefer binary).
+  - id: pruefer
+    binary: pruefer
+    main: ./cmd/pruefer
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - arm64
+      - amd64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/handarbeit/fabrik/pruefer.Version={{.Version}}
+    hooks:
+      # Same VCS-cleanliness verification as the fabrik build above — goreleaser
+      # hooks are per-build-id, not global, so this must be repeated here.
+      post:
+        - cmd: ./.release-tools/verify-release-artifact {{ .Path }} {{ .Env.TAG_COMMIT }}
+          output: true
 
 archives:
   - id: fabrik
+    ids:
+      - fabrik
     name_template: "fabrik_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+  - id: pruefer
+    ids:
+      - pruefer
+    name_template: "pruefer_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
 
