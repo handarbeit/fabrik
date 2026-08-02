@@ -203,6 +203,12 @@ func checkPluginState(pluginDir string, knownVersions []string, isDevBuild bool)
 		//   - or a release binary is looking at an installedVer it cannot vouch
 		//     for — the buggy v0.0.64 migration wrote a customized disk hash as
 		//     installedVer — treat as custom workflow.
+		// NOTE: isDevBuild trusts any unlisted match, not just a fingerprint this
+		// binary itself wrote — a pre-existing install already corrupted by the
+		// old pre-0bd2c57e bug (disk == installedVer holding a real customization)
+		// would also be trusted if first checked by a dev build. Closing that gap
+		// needs persisted provenance, rejected elsewhere for self-heal reasons —
+		// see ADR 1297's "Acknowledged trade-off".
 		if isKnownEmbedded(installedVer, knownVersions) || isDevBuild {
 			return false, true, nil
 		}

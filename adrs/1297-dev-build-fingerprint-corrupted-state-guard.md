@@ -118,16 +118,32 @@ I/O for a "targeted correction" scoped issue.
 
 ### Acknowledged trade-off
 
-A developer who hand-edits `.fabrik/plugin/` on a dev-build machine, at the
-exact moment disk still equals a stale `installedVer` and embedded content has
-changed, is no longer flagged as customized — `isDevBuild` trusts the
-unlisted fingerprint outright in that branch. This narrows the corrupted-state
-guard's protection window, but does not eliminate it: the far more common real
-case — actively editing `.fabrik/plugin/` mid-session, where `diskVer !=
-installedVer` — hits the untouched branch at `checkPluginState`'s line 174 and
-is still protected identically to a release build. The #820 incident this
-guard exists to prevent happened on release-binary installs, which remain
-fully protected.
+`isDevBuild` trusts *any* unlisted-but-disk-matching `installedVer`, not just
+one this specific dev build actually wrote — there is no persisted signal
+distinguishing "an unlisted hash because it's a dev build's own fingerprint"
+from "an unlisted hash because it's a genuine pre-existing customization."
+Live edits are not at risk from this: editing a file changes `diskVer`, which
+diverges from `installedVer` and is caught unconditionally by the untouched
+`diskVer != installedVer` branch (`checkPluginState` line 191) regardless of
+build type — an operator actively customizing `.fabrik/plugin/` is protected
+identically to a release build.
+
+The actual residual risk is a **pre-existing** corrupted install: one where
+`disk == installedVer` already holds a genuine customization hash, written by
+the pre-0bd2c57e migration bug (#820) before `KnownEmbeddedVersions` existed,
+sitting untouched since. If such an install is later checked for the first
+time by a dev build rather than a release build, `isDevBuild` trusts the
+unlisted fingerprint and auto-refreshes over it, permanently erasing the
+customization the corrupted-state guard exists to protect. Per Research, no
+code path in the current codebase can *newly* write such a state — the bug
+that produced it was fixed in 0bd2c57e — so this only threatens installs that
+were already corrupted before that fix shipped and have not been re-checked
+since. Closing this gap fully would require persisting provenance (or an
+allowlist) at write time, both already rejected above for failing to
+self-heal already-poisoned installs without a format change. The intersection
+this leaves exposed — an old pre-0bd2c57e-corrupted install, first inspected
+by a dev build instead of a release build — is judged narrow enough to accept
+given the alternative costs, but it is a real gap, not a hypothetical one.
 
 ## Risks / Dependencies
 
