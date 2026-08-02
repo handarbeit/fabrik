@@ -2534,8 +2534,10 @@ see the next section.
 Setting `CLAUDE_CONFIG_DIR` in the engine's environment points every Claude Code
 invocation at an alternate credentials/config directory — a different account,
 subscription, and billing quota than the engine's own default profile. Fabrik
-does not set, read, or otherwise manage this variable; it simply never strips it,
-so an ambient value passes straight through into every worker subprocess.
+does not set or otherwise manage this variable; it only reads it once, at
+startup, to emit the notice below — it simply never strips it from the
+subprocess environment, so an ambient value passes straight through into every
+worker subprocess.
 
 This is the pattern to use when you want one Fabrik instance's stage invocations
 to bill against a different Claude account than the one the engine itself runs
