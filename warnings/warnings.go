@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -153,6 +154,46 @@ func Clear(key string) error {
 	}
 	wf.Entries = filtered
 	return save(wf)
+}
+
+// ClearMissing removes every entry of the given warningType whose subject —
+// the portion of Key after the "<warningType>:" prefix — is not a key in
+// present. It is the bulk counterpart to Clear, built for settle scans that
+// compare a set of recorded warnings against an already-known-good set (e.g.
+// the current board repos, or the current stage names): rather than looping
+// per-key calls to Clear (which always calls save() even when the key was
+// never present), ClearMissing loads once, filters in memory, and only saves
+// when at least one entry was actually removed — so a poll with nothing
+// stale performs zero writes. Entries of other Types are never touched,
+// regardless of their Key. Dismissed is not special-cased: a stale entry is
+// removed whether or not it was dismissed, matching Clear's behavior; a
+// present-subject entry (dismissed or not) is always preserved. Returns the
+// full Key of each cleared entry, for caller-side logging.
+func ClearMissing(warningType string, present map[string]bool) ([]string, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	wf, err := load()
+	if err != nil {
+		return nil, err
+	}
+	prefix := warningType + ":"
+	var cleared []string
+	filtered := wf.Entries[:0]
+	for _, e := range wf.Entries {
+		if e.Type == warningType && !present[strings.TrimPrefix(e.Key, prefix)] {
+			cleared = append(cleared, e.Key)
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if len(cleared) == 0 {
+		return nil, nil
+	}
+	wf.Entries = filtered
+	if err := save(wf); err != nil {
+		return nil, err
+	}
+	return cleared, nil
 }
 
 // Dismiss sets dismissed=true for the entry with the given key.

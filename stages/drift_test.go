@@ -439,6 +439,107 @@ func TestMissingTopLevelKeys_SortedOutput(t *testing.T) {
 	}
 }
 
+func TestSweepStaleWarnings_ClearsRenamedOrRemovedStage(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:OldName", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := warnings.Record(warnings.Entry{Key: "undeclared_reviewers:OldName", Type: "undeclared_reviewers"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings([]*Stage{{Name: "NewName"}}, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 0 {
+		t.Fatalf("expected both stale entries cleared, got %v", entries)
+	}
+	if !strings.Contains(buf.String(), "stage_drift:OldName") || !strings.Contains(buf.String(), "undeclared_reviewers:OldName") {
+		t.Errorf("expected log to name both cleared keys, got: %q", buf.String())
+	}
+}
+
+func TestSweepStaleWarnings_PreservesConfiguredStage(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Implement", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings([]*Stage{{Name: "Implement"}}, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 || entries[0].Key != "stage_drift:Implement" {
+		t.Fatalf("expected still-configured stage's warning preserved, got %v", entries)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no log output when nothing stale, got: %q", buf.String())
+	}
+}
+
+func TestSweepStaleWarnings_IgnoresOtherTypes(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "allow_auto_merge:owner/repo", Type: "allow_auto_merge"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings(nil, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 || entries[0].Key != "allow_auto_merge:owner/repo" {
+		t.Fatalf("expected unrelated warning type untouched, got %v", entries)
+	}
+}
+
+// TestSweepStaleWarnings_EmptyUserStagesPreservesEntries guards against the
+// destructive-wipe shape flagged in review: without an early return for an
+// empty/nil userStages (matching WarnStageDrift's own guard), a present set
+// derived from zero stages would make every recorded stage_drift/
+// undeclared_reviewers entry look "absent" and clear them all in one pass.
+// cmd/root.go already fails startup before Run() is reached if stage loading
+// produces zero configs, so this is normally unreachable — the guard is
+// defense in depth for any future caller that bypasses that validation.
+func TestSweepStaleWarnings_EmptyUserStagesPreservesEntries(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Implement", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := warnings.Record(warnings.Entry{Key: "undeclared_reviewers:Implement", Type: "undeclared_reviewers"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings(nil, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 2 {
+		t.Fatalf("expected both entries preserved when userStages is empty, got %v", entries)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no log output when the sweep is skipped, got: %q", buf.String())
+	}
+}
+
+func TestSweepStaleWarnings_IncludesUnmanagedStages(t *testing.T) {
+	// The sweep must be called with the unfiltered stage set (including
+	// Unmanaged stages) — otherwise a currently-valid Unmanaged stage's
+	// warning would be wrongly swept.
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Backlog", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings([]*Stage{{Name: "Backlog", Unmanaged: true}}, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 {
+		t.Fatalf("expected Unmanaged stage's warning preserved, got %v", entries)
+	}
+}
+
 func TestDriftTitle_NamesMissingFields(t *testing.T) {
 	// The summary title must name the missing key(s), not just their count, so
 	// the warnings panel is actionable without opening the detail view.

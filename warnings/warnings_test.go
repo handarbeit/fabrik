@@ -207,6 +207,112 @@ func TestLoad_VersionMismatch(t *testing.T) {
 	}
 }
 
+func TestClearMissing_RemovesAbsentSubject(t *testing.T) {
+	setOverride(t)
+	if err := Record(Entry{Key: "allow_auto_merge:owner/gone", Type: "allow_auto_merge", Title: "gone"}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := ClearMissing("allow_auto_merge", map[string]bool{"owner/present": true})
+	if err != nil {
+		t.Fatalf("ClearMissing: %v", err)
+	}
+	if len(cleared) != 1 || cleared[0] != "allow_auto_merge:owner/gone" {
+		t.Fatalf("expected [allow_auto_merge:owner/gone] cleared, got %v", cleared)
+	}
+	entries, _ := Load()
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries remaining, got %v", entries)
+	}
+}
+
+func TestClearMissing_PreservesPresentSubject(t *testing.T) {
+	setOverride(t)
+	if err := Record(Entry{Key: "allow_auto_merge:owner/present", Type: "allow_auto_merge", Title: "present"}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := ClearMissing("allow_auto_merge", map[string]bool{"owner/present": true})
+	if err != nil {
+		t.Fatalf("ClearMissing: %v", err)
+	}
+	if len(cleared) != 0 {
+		t.Fatalf("expected nothing cleared, got %v", cleared)
+	}
+	entries, _ := Load()
+	if len(entries) != 1 || entries[0].Key != "allow_auto_merge:owner/present" {
+		t.Fatalf("expected entry preserved, got %v", entries)
+	}
+}
+
+func TestClearMissing_PreservesDismissedPresentSubject(t *testing.T) {
+	setOverride(t)
+	if err := Record(Entry{Key: "allow_auto_merge:owner/present", Type: "allow_auto_merge", Title: "present"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Dismiss("allow_auto_merge:owner/present"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearMissing("allow_auto_merge", map[string]bool{"owner/present": true}); err != nil {
+		t.Fatalf("ClearMissing: %v", err)
+	}
+	entries, _ := Load()
+	if len(entries) != 1 || !entries[0].Dismissed {
+		t.Fatalf("expected dismissed entry preserved and still dismissed, got %v", entries)
+	}
+}
+
+func TestClearMissing_IgnoresOtherTypes(t *testing.T) {
+	setOverride(t)
+	if err := Record(Entry{Key: "stage_drift:SomeStage", Type: "stage_drift", Title: "drift"}); err != nil {
+		t.Fatal(err)
+	}
+	// Empty present set for allow_auto_merge — a stage_drift entry must never
+	// be swept by a call scoped to a different Type, regardless of subject.
+	cleared, err := ClearMissing("allow_auto_merge", map[string]bool{})
+	if err != nil {
+		t.Fatalf("ClearMissing: %v", err)
+	}
+	if len(cleared) != 0 {
+		t.Fatalf("expected nothing cleared, got %v", cleared)
+	}
+	entries, _ := Load()
+	if len(entries) != 1 || entries[0].Key != "stage_drift:SomeStage" {
+		t.Fatalf("expected stage_drift entry untouched, got %v", entries)
+	}
+}
+
+func TestClearMissing_NoWriteWhenNothingStale(t *testing.T) {
+	setOverride(t)
+	if err := Record(Entry{Key: "allow_auto_merge:owner/present", Type: "allow_auto_merge", Title: "present"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(WarningsPathOverride)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if _, err := ClearMissing("allow_auto_merge", map[string]bool{"owner/present": true}); err != nil {
+		t.Fatalf("ClearMissing: %v", err)
+	}
+	after, err := os.Stat(WarningsPathOverride)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("expected no write (mtime unchanged), before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestClearMissing_NoFileCreatedWhenMissing(t *testing.T) {
+	setOverride(t)
+	// No file exists yet — ClearMissing must not create one.
+	if _, err := ClearMissing("allow_auto_merge", map[string]bool{}); err != nil {
+		t.Fatalf("ClearMissing: %v", err)
+	}
+	if _, err := os.Stat(WarningsPathOverride); !os.IsNotExist(err) {
+		t.Errorf("expected no file created, stat err = %v", err)
+	}
+}
+
 func TestConcurrentRecord(t *testing.T) {
 	setOverride(t)
 	var wg sync.WaitGroup

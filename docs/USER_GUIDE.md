@@ -2438,7 +2438,7 @@ Tab into the Warnings panel to take action:
 - **S** — show/hide dismissed entries
 - **Enter** — expand/collapse the full detail text for the selected entry
 
-Warning entries persist to `.fabrik/warnings.json` and survive auto-upgrade restarts. Dismissed entries are preserved in the file until the underlying condition clears, at which point they are removed entirely.
+Warning entries persist to `.fabrik/warnings.json` and survive auto-upgrade restarts. Dismissed entries are preserved in the file until the underlying condition clears, at which point they are removed entirely. This includes the condition's *subject* going away entirely (e.g. a repo leaving the project board, or a stage being renamed) — a per-poll or startup sweep clears those automatically too, without requiring a restart (see `docs/state-machine.md` §7.11).
 
 ### History Persistence
 
