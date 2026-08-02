@@ -7270,6 +7270,28 @@ All Fabrik markers are stripped from output before posting:
 
 If the Plan stage's posted output contains N > 0 well-formed spawn blocks — as counted by `ParseSpawnBlocks`, never by string-matching the marker text — a deterministic note is appended stating that N sub-issues are declared and will be created when the parent advances to the **Implement** stage. The note is gated to `stage.Name == "Plan"`, matching exactly what `preImplement` itself reads (`findStageComment(item.Comments, "Plan")`, engine/spawn.go): a note on any other stage's comment would promise a spawn that mechanism never performs — for example, a later stage's Claude quoting a spawn block back verbatim from its own context (later stages receive the Plan comment through `.fabrik-context/stage-Plan.md`). The gate applies to both output-posting paths above. The note is folded into the same `footer` value that also carries the stats footer below, computed once and threaded unchanged through every posting path — so it renders identically whether output goes straight to the issue or through `post_to_pr`. N == 0, or a non-Plan stage, produces no note and byte-identical output to before this existed. See ADR-048 and #1338.
 
+### Token Stats Reporting
+
+Every invocation reports token usage in two places: an operator-facing log line (`e.logf(..., "stats", ...)`, emitted from `finalizeStageOutcome` in `engine/item.go` and from comment-processing finalization in `engine/comments.go`) and a human-facing footer appended to the posted comment/PR output (`formatStatsFooter`, `engine/claude.go`). Both are built from the same `TokenUsage` struct, which carries four independent token counts per invocation: `InputTokens` (raw, uncached input), `OutputTokens`, `CacheReadTokens` (context served from Claude's prompt cache), and `CacheCreationTokens` (new context written to the cache this turn).
+
+**Why cached input dominates.** With prompt caching active — which it always is once a conversation has any history — `InputTokens` alone is structurally near-zero: almost all context is served from cache, not resent as fresh input. Reporting only `InputTokens` (as Fabrik did before this reporting was added) makes every stage look like it consumed `0k input` regardless of actual cost, and a short resumed invocation that replays a large accumulated context looks artificially cheap. Cache tokens are not a rounding error; on long-running or resumed invocations they routinely dwarf raw input by two or three orders of magnitude.
+
+**Log line format** (`formatStatsLogLine`, shared by `item.go` and `comments.go`) uses raw, unscaled numbers in the same `key: value | key: value` convention as the pre-existing cumulative line at `engine/poll.go:1172`:
+
+```
+used 41/250 turns | in: 476 | out: 171009 | cache_read: 25003551 | cache_write: 993820
+```
+
+**Footer format** (`formatStatsFooter`, posted into the GitHub comment/PR a human reads) is k/M-scaled and leads with an "effective input" total (`InputTokens + CacheReadTokens + CacheCreationTokens`) so a reader can't mistake the raw figure for total input consumed, with a raw/cache-read/cache-write breakdown in parentheses when cache activity is non-zero. Cache reads and cache writes are broken out separately rather than folded into one "cached" figure, since Anthropic prices them differently per token:
+
+```
+Used 41/250 turns, 26.0M input (476 raw + 25.0M cache-read + 993k cache-write) / 171k output tokens.
+```
+
+**Emptiness guards.** Both formatters return an empty string — suppressing the line entirely — only when *all five* fields (`TurnsUsed`, `InputTokens`, `OutputTokens`, `CacheReadTokens`, `CacheCreationTokens`) are zero. An invocation with meaningful cache activity but zero raw input/output still reports, since caching means that combination is a real, common case rather than a signal of an empty invocation.
+
+`TokenUsage.InputTokens` keeps its existing meaning (raw uncached input) everywhere, including in `internal/itemstate` and the poll-level cumulative log — this is a display change only, not a change to what the field means or how cost (`CostUSD`) is calculated.
+
 ### Comments Marked as Seen
 
 After a stage runs, any pre-existing user comments get a rocket reaction via `markCommentsSeenByStage`. They were included in the prompt as context and should not trigger the awaiting-input unblock logic on subsequent polls.

@@ -1347,22 +1347,74 @@ func formatSpawnReceiptNote(output string) string {
 	return fmt.Sprintf("\n\n---\n%d sub-issues declared above. None exist yet — they will be created when this issue advances to the **Implement** stage.", n)
 }
 
+// scaleTokens renders a token count as a human-readable, k/M-scaled string:
+// raw digits below 1,000; "Nk" below 1,000,000; "N.1M" at or above 1,000,000. No
+// billion-scale unit is provided: a single invocation's token counts realistically
+// stay well under 1B, so values at or above that render as a large-but-readable "M" figure.
+func scaleTokens(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1000000:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1000000)
+	}
+}
+
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
-// Returns empty string when no stats are available (e.g. JSON parse fallback).
+// Returns empty string when no stats are available (e.g. JSON parse fallback). Input is
+// reported as an "effective input" total (raw + cached) since prompt caching means raw
+// InputTokens alone is structurally near-zero once a conversation has any history. Cache
+// reads and cache writes are broken out separately (not folded into one "cached" figure)
+// because Anthropic prices them differently per token, and collapsing them would obscure
+// that distinction from a reader trying to reason about actual spend from the footer alone.
 func formatStatsFooter(usage TokenUsage, completed bool) string {
-	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 {
+	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
 		return ""
 	}
 	var completion string
 	if !completed {
 		completion = " Stage incomplete."
 	}
-	if usage.MaxTurns > 0 {
-		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %dk input / %dk output tokens.%s",
-			usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
+	cached := usage.CacheReadTokens + usage.CacheCreationTokens
+	effectiveInput := usage.InputTokens + cached
+	inputStr := scaleTokens(effectiveInput) + " input"
+	if cached > 0 {
+		breakdown := scaleTokens(usage.InputTokens) + " raw"
+		if usage.CacheReadTokens > 0 {
+			breakdown += " + " + scaleTokens(usage.CacheReadTokens) + " cache-read"
+		}
+		if usage.CacheCreationTokens > 0 {
+			breakdown += " + " + scaleTokens(usage.CacheCreationTokens) + " cache-write"
+		}
+		inputStr = fmt.Sprintf("%s (%s)", inputStr, breakdown)
 	}
-	return fmt.Sprintf("\n\n---\nUsed %d turns, %dk input / %dk output tokens.%s",
-		usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
+	if usage.MaxTurns > 0 {
+		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %s / %s output tokens.%s",
+			usage.TurnsUsed, usage.MaxTurns, inputStr, scaleTokens(usage.OutputTokens), completion)
+	}
+	return fmt.Sprintf("\n\n---\nUsed %d turns, %s / %s output tokens.%s",
+		usage.TurnsUsed, inputStr, scaleTokens(usage.OutputTokens), completion)
+}
+
+// formatStatsLogLine returns a one-line, machine-greppable stats summary for operator logs,
+// matching poll.go's cumulative "in: N | out: N | cache_read: N | cache_write: N" convention.
+// Returns empty string when no stats are available so callers can suppress the log line.
+func formatStatsLogLine(usage TokenUsage) string {
+	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
+		return ""
+	}
+	var turns string
+	if usage.MaxTurns > 0 {
+		turns = fmt.Sprintf("used %d/%d turns", usage.TurnsUsed, usage.MaxTurns)
+	} else {
+		turns = fmt.Sprintf("used %d turns", usage.TurnsUsed)
+	}
+	return fmt.Sprintf("%s | in: %d | out: %d | cache_read: %d | cache_write: %d",
+		turns, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheCreationTokens)
 }
 
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.

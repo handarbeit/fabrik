@@ -91,11 +91,12 @@ func TestLogDirForItem_MultiRepo(t *testing.T) {
 
 func TestFormatStatsFooter(t *testing.T) {
 	tests := []struct {
-		name      string
-		stats     TokenUsage
-		completed bool
-		wantEmpty bool
-		wantSubs  []string
+		name        string
+		stats       TokenUsage
+		completed   bool
+		wantEmpty   bool
+		wantSubs    []string
+		wantNotSubs []string
 	}{
 		{
 			name:      "zero stats returns empty",
@@ -135,6 +136,34 @@ func TestFormatStatsFooter(t *testing.T) {
 			wantEmpty: false,
 			wantSubs:  []string{"2k output"},
 		},
+		{
+			name: "cache-heavy realistic numbers",
+			stats: TokenUsage{
+				TurnsUsed: 41, MaxTurns: 250,
+				InputTokens: 476, OutputTokens: 171009,
+				CacheReadTokens: 25003551, CacheCreationTokens: 993820,
+			},
+			completed: true,
+			wantEmpty: false,
+			wantSubs:  []string{"26.0M input", "476 raw", "25.0M cache-read", "993k cache-write", "171k output"},
+		},
+		{
+			name:      "cache-only, no raw input or output",
+			stats:     TokenUsage{TurnsUsed: 5, MaxTurns: 10, CacheReadTokens: 12000},
+			completed: true,
+			wantEmpty: false,
+			wantSubs:  []string{"12k input", "0 raw", "12k cache-read"},
+		},
+		{
+			name: "cache-read only omits cache-write term",
+			stats: TokenUsage{
+				TurnsUsed: 3, MaxTurns: 10,
+				InputTokens: 100, CacheReadTokens: 5000,
+			},
+			completed: true,
+			wantEmpty: false,
+			wantNotSubs: []string{"cache-write"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -150,6 +179,94 @@ func TestFormatStatsFooter(t *testing.T) {
 				if !strings.Contains(got, sub) {
 					t.Errorf("footer %q missing %q", got, sub)
 				}
+			}
+			for _, notSub := range tt.wantNotSubs {
+				if strings.Contains(got, notSub) {
+					t.Errorf("footer %q unexpectedly contains %q", got, notSub)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatStatsLogLine(t *testing.T) {
+	tests := []struct {
+		name      string
+		stats     TokenUsage
+		wantEmpty bool
+		wantSubs  []string
+	}{
+		{
+			name:      "all zero returns empty",
+			stats:     TokenUsage{},
+			wantEmpty: true,
+		},
+		{
+			name: "normal usage with cache fields",
+			stats: TokenUsage{
+				TurnsUsed: 41, MaxTurns: 250,
+				InputTokens: 476, OutputTokens: 171009,
+				CacheReadTokens: 25003551, CacheCreationTokens: 993820,
+			},
+			wantSubs: []string{
+				"used 41/250 turns",
+				"in: 476",
+				"out: 171009",
+				"cache_read: 25003551",
+				"cache_write: 993820",
+			},
+		},
+		{
+			name:      "no max turns",
+			stats:     TokenUsage{TurnsUsed: 10, InputTokens: 500, OutputTokens: 100},
+			wantSubs:  []string{"used 10 turns", "in: 500", "out: 100", "cache_read: 0", "cache_write: 0"},
+		},
+		{
+			name:      "cache-only usage is not suppressed",
+			stats:     TokenUsage{TurnsUsed: 1, MaxTurns: 100, CacheReadTokens: 500000},
+			wantEmpty: false,
+			wantSubs:  []string{"used 1/100 turns", "in: 0", "out: 0", "cache_read: 500000", "cache_write: 0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatStatsLogLine(tt.stats)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Errorf("expected empty log line, got %q", got)
+				}
+				return
+			}
+			for _, sub := range tt.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("log line %q missing %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
+func TestScaleTokens(t *testing.T) {
+	tests := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1k"},
+		{1500, "1k"},
+		{999999, "999k"},
+		{1000000, "1.0M"},
+		{25003551, "25.0M"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := scaleTokens(tt.n)
+			if got != tt.want {
+				t.Errorf("scaleTokens(%d) = %q, want %q", tt.n, got, tt.want)
 			}
 		})
 	}
