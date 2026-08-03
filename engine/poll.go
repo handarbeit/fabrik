@@ -744,6 +744,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:revalidate",
 	"fabrik:claude-limit",
 	"fabrik:clear-claude-limit",
+	"fabrik:api-key-helper-detected",
 }
 
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
