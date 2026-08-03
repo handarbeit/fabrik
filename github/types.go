@@ -93,6 +93,11 @@ type PRReview struct {
 	// PR's current head SHA or a stale one (Pruefer's GitHub-derived
 	// review-state mechanism; see ADR-1113).
 	CommitID string
+	// SubmittedAt is when the review was submitted (GraphQL "submittedAt" /
+	// REST "submitted_at"). Zero value if unparseable or absent — callers
+	// needing a display timestamp (e.g. buildReviewBodyComments, #1375) must
+	// fall back rather than assume this is always populated.
+	SubmittedAt time.Time
 }
 
 // MergeQueueEntry holds the merge-queue position and state for a pull request.

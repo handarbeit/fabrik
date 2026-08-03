@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSetToken_UpdatesSubsequentRequests(t *testing.T) {
@@ -383,6 +384,33 @@ func TestFetchPRReviews_PopulatesCommitID(t *testing.T) {
 	}
 	if reviews[0].CommitID != "deadbeef" {
 		t.Errorf("CommitID = %q, want deadbeef", reviews[0].CommitID)
+	}
+}
+
+// TestFetchPRReviews_PopulatesSubmittedAt covers Pruefer's #1375 review
+// finding: buildReviewBodyComments needs the review's real submission time
+// (not time.Now()) so a mixed thread-comment/review-body reinvoke batch
+// sorts/reads correctly by chronology. This pins the REST-fetch half of that
+// fix.
+func TestFetchPRReviews_PopulatesSubmittedAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-01-15T10:30:00Z"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("expected 1 review, got %d", len(reviews))
+	}
+	want := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	if !reviews[0].SubmittedAt.Equal(want) {
+		t.Errorf("SubmittedAt = %v, want %v", reviews[0].SubmittedAt, want)
 	}
 }
 

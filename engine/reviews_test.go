@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -1148,6 +1149,60 @@ func TestBuildReviewBodyComments_ChangesRequestedWithBody(t *testing.T) {
 	}
 }
 
+// Pruefer review finding (#1375): buildReviewBodyComments must prefer the
+// review's actual SubmittedAt over time.Now(), so a mixed batch of thread
+// comments (real timestamps) and a review body sorts/reads correctly by
+// chronology in the reinvoke prompt (engine/claude.go renders CreatedAt
+// verbatim) instead of always appearing to be the newest item regardless of
+// actual submission time.
+func TestBuildReviewBodyComments_UsesSubmittedAt(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	submittedAt := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555, SubmittedAt: submittedAt},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if !comments[0].CreatedAt.Equal(submittedAt) {
+		t.Errorf("CreatedAt = %v, want the review's actual SubmittedAt %v", comments[0].CreatedAt, submittedAt)
+	}
+}
+
+// When SubmittedAt is unavailable (zero value — e.g. a data source that
+// doesn't carry it), buildReviewBodyComments must fall back to time.Now()
+// rather than leaving the synthetic comment with a zero timestamp.
+func TestBuildReviewBodyComments_FallsBackToNowWhenSubmittedAtZero(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555},
+		},
+	}
+
+	before := time.Now()
+	comments := eng.buildReviewBodyComments(item)
+	after := time.Now()
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if comments[0].CreatedAt.Before(before) || comments[0].CreatedAt.After(after) {
+		t.Errorf("expected CreatedAt to fall back to time.Now() (between %v and %v), got %v", before, after, comments[0].CreatedAt)
+	}
+}
+
 // buildReviewBodyComments must skip a review with DatabaseID == 0 (not yet
 // fetched/unavailable — no stable ID to key dedup on).
 func TestBuildReviewBodyComments_SkipsZeroDatabaseID(t *testing.T) {
@@ -1230,6 +1285,110 @@ func TestBuildReviewBodyComments_DedupViaCommentProcessed(t *testing.T) {
 
 	if len(comments) != 0 {
 		t.Fatalf("expected 0 comments (already processed), got %d", len(comments))
+	}
+}
+
+// Pruefer review finding (#1375): on a base:<branch> item, item.LinkedPRReviews
+// is always structurally empty (closedByPullRequestsReferences is empty for
+// non-default-base PRs), so buildReviewBodyComments must REST-fallback —
+// mirroring checkReviewGate's own base:<branch> branch — rather than silently
+// returning nothing forever. item.LinkedPRNumber == 0 here (as it always is on
+// a base:<branch> repo), so this also exercises the FetchLinkedPR resolution
+// path.
+func TestBuildReviewBodyComments_NonDefaultBase_RESTFallback(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviews called with resolved PR #77, got #%d", prNumber)
+			}
+			return []gh.PRReview{
+				{Author: "bob", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 900},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+		// LinkedPRReviews deliberately empty — this is the true GraphQL state
+		// for a base:<branch> item; the REST fallback below is what must
+		// populate the result instead.
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment via REST fallback, got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:900" {
+		t.Errorf("expected synthetic ID review-body:900, got %q", comments[0].ID)
+	}
+}
+
+// When item.LinkedPRNumber is already resolved (nonzero), the REST fallback
+// must reuse it rather than calling FetchLinkedPR again.
+func TestBuildReviewBodyComments_NonDefaultBase_ReusesResolvedPRNumber(t *testing.T) {
+	fetchLinkedPRCalls := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchLinkedPRCalls++
+			return &gh.PRDetails{Number: 99, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			if prNumber != 55 {
+				t.Errorf("expected FetchPRReviews called with item.LinkedPRNumber #55, got #%d", prNumber)
+			}
+			return []gh.PRReview{
+				{Author: "bob", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 901},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 55,
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if fetchLinkedPRCalls != 0 {
+		t.Errorf("expected FetchLinkedPR NOT called when LinkedPRNumber is already resolved, got %d calls", fetchLinkedPRCalls)
+	}
+}
+
+// A FetchPRReviews error on the base:<branch> REST fallback must return nil,
+// not panic or silently fall back to the (empty) GraphQL-sourced slice.
+func TestBuildReviewBodyComments_NonDefaultBase_RESTFetchError_ReturnsNil(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, errors.New("transient API error")
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if comments != nil {
+		t.Errorf("expected nil on FetchPRReviews error, got %v", comments)
 	}
 }
 

@@ -168,6 +168,43 @@ already fixed once. `buildReviewFeedbackComments` only returns *unprocessed* fee
 nothing further to dispatch on, so the gate's continued "blocked" state falls through
 to the ordinary cooldown/timeout tail rather than reinvoking again.
 
+**`buildReviewBodyComments` REST-falls-back on a `base:<branch>` item (found in review
+by Pruefer, fixed the same day).** The first draft of this ADR's implementation read
+only `item.LinkedPRReviews`, which — like `item.LinkedPRReviewRequests` before
+`checkReviewGate`'s own #1046/#1047/#1050 fix — is structurally empty on a
+`base:<branch>` item (`closedByPullRequestsReferences` is empty for any PR not
+targeting the repository default branch). Left unfixed, this ADR's central promise —
+that an authoritative `CHANGES_REQUESTED` reinvokes instead of just blocking — would
+have silently never held for `base:<branch>` stages, exactly the configuration
+`TestCheckReviewGate_NonDefaultBase_Authoritative_*` already exercises. `buildReviewBodyComments`
+now mirrors `checkReviewGate`'s existing REST-fallback branch: resolve the PR number
+from `item.LinkedPRNumber`, or — since that's always `0` on a `base:<branch>` item — a
+plain `FetchLinkedPR` call (safe without linkage-repair side effects, since
+`handleReviewGate` only reaches this call after `checkReviewGate`'s own
+`handleBrokenReviewLinkage` already ran this same poll without terminating), then
+`FetchPRReviews` directly. `buildReviewThreadComments` (inline thread comments) is
+deliberately left as-is — its `base:<branch>` gap is the pre-existing, already-documented
+(`docs/state-machine.md`'s Review Gate section) limitation from #1050, out of scope
+here — fixing the review-body half alone is sufficient to make this ADR's target
+scenario (a `CHANGES_REQUESTED` review with a body and zero inline comments — Finding 4)
+reachable on a `base:<branch>` repo too.
+
+**`buildReviewBodyComments` stamps the synthetic comment with the review's real
+`SubmittedAt`, not `time.Now()` (found in the same review pass).** The first draft used
+`time.Now()` for every synthetic body comment's `CreatedAt`, since `gh.PRReview` didn't
+carry a submission timestamp. `engine/claude.go` renders `Comment.CreatedAt` verbatim
+into the reinvoke prompt, so a review submitted hours or days earlier would appear to
+the agent as having just happened — and in a batch mixing real thread comments (real
+timestamps) with a review body, the body would always read as the newest item
+regardless of actual chronology. Fixed by fetching the review's actual submission time:
+`submittedAt` added to the GraphQL `latestReviews` selection and `submitted_at` to the
+REST `FetchPRReviews` parsing, both landing in a new `PRReview.SubmittedAt time.Time`
+field; `buildReviewBodyComments` prefers it, falling back to `time.Now()` only when
+genuinely unavailable (zero value — unparseable or a data source that predates this
+field). Lower-risk than the `base:<branch>` fix above: no schema change to `boardcache`
+delta handling was needed, since `SubmittedAt` is not consulted by any existing gating
+logic (only by this new display path).
+
 ## Alternatives Considered
 
 **Conditional hybrid: reinvoke only when the review carries actionable text, pause

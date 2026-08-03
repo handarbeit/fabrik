@@ -1170,11 +1170,50 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 // pre-existing "synthetic comment" escape hatch in acknowledgeComments/
 // finalizeComments (both already gate on DatabaseID == 0) skips reaction calls
 // for it automatically.
+//
+// base:<branch> repos (Pruefer review finding, #1375): closedByPullRequestsReferences
+// — and everything nested inside it, including latestReviews — is structurally
+// empty there (GitHub only populates it for PRs targeting the repository
+// default branch), so item.LinkedPRReviews is always empty regardless of the
+// PR's actual review state. Mirrors checkReviewGate's own REST-fallback branch
+// (#1046/#1047/#1050): resolves the PR number from item.LinkedPRNumber (always
+// populated on a default-branch item) or, when zero, a plain FetchLinkedPR call
+// — no pause side effects here, since handleReviewGate only ever reaches this
+// call after checkReviewGate has already run handleBrokenReviewLinkage this
+// same poll without returning terminated=true, so linkage is already known
+// good (or genuinely absent). buildReviewThreadComments has the identical
+// base:<branch> gap and remains unfixed — an existing, explicitly documented
+// out-of-scope limitation (docs/state-machine.md's Review Gate section,
+// "Out of scope: LinkedPRReviewThreadComments") that predates this issue and
+// is not addressed here; only the review-body half (this function) gets the
+// REST fallback, which is sufficient to make Finding 1/AC6's target
+// scenario — a CHANGES_REQUESTED review with a body and zero inline
+// comments — reachable on a base:<branch> repo too.
 func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
-	out := make([]gh.Comment, 0, len(item.LinkedPRReviews))
-	for _, r := range item.LinkedPRReviews {
+
+	reviews := item.LinkedPRReviews
+	if itemHasBaseLabel(item) {
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		prNumber := item.LinkedPRNumber
+		if prNumber == 0 {
+			pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+			if err != nil || pr == nil || pr.Number == 0 {
+				return nil
+			}
+			prNumber = pr.Number
+		}
+		restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber)
+		if err != nil {
+			e.logf(item.Number, "warn", "buildReviewBodyComments: FetchPRReviews failed: %v\n", err)
+			return nil
+		}
+		reviews = restReviews
+	}
+
+	out := make([]gh.Comment, 0, len(reviews))
+	for _, r := range reviews {
 		if r.DatabaseID == 0 {
 			continue
 		}
@@ -1188,11 +1227,22 @@ func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
 		if !snap.CommentProcessed(id).IsZero() {
 			continue
 		}
+		// Prefer the review's actual submission time (r.SubmittedAt, now
+		// fetched via both the GraphQL and REST paths) so a mixed batch of
+		// thread comments and a review body sorts/reads correctly by
+		// chronology in the reinvoke prompt (engine/claude.go renders
+		// c.CreatedAt verbatim). Fall back to time.Now() only when it's
+		// genuinely unavailable (unparseable or a data source that doesn't
+		// carry it) — never leave the comment with a zero timestamp.
+		createdAt := r.SubmittedAt
+		if createdAt.IsZero() {
+			createdAt = time.Now()
+		}
 		out = append(out, gh.Comment{
 			ID:        id,
 			Author:    r.Author,
 			Body:      r.Body,
-			CreatedAt: time.Now(),
+			CreatedAt: createdAt,
 		})
 	}
 	return out

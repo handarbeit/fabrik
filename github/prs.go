@@ -72,9 +72,10 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		User *struct {
 			Login string `json:"login"`
 		} `json:"user"`
-		State    string `json:"state"`
-		Body     string `json:"body"`
-		CommitID string `json:"commit_id"`
+		State       string `json:"state"`
+		Body        string `json:"body"`
+		CommitID    string `json:"commit_id"`
+		SubmittedAt string `json:"submitted_at"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -96,13 +97,17 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 			// existing formal verdict.
 			continue
 		}
-		latestByAuthor[r.User.Login] = PRReview{
+		review := PRReview{
 			Author:     r.User.Login,
 			State:      r.State,
 			Body:       r.Body,
 			DatabaseID: r.ID,
 			CommitID:   r.CommitID,
 		}
+		if t, err := parseTime(r.SubmittedAt); err == nil {
+			review.SubmittedAt = t
+		}
+		latestByAuthor[r.User.Login] = review
 	}
 	out := make([]PRReview, 0, len(order))
 	for _, author := range order {
