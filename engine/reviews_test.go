@@ -553,6 +553,79 @@ func TestCheckReviewGate_Authoritative_FetchReviewDecisionError_BlocksConservati
 	}
 }
 
+// Finding 2 (#1375): a declared expected_reviewers bot must never defer a
+// human's authoritative escalation. Here, the requested human (alice) has
+// already responded with CHANGES_REQUESTED (so she's no longer in
+// LinkedPRReviewRequests — GitHub drops a reviewer from the requested list
+// once they submit), review_authority is authoritative (so authorityReason
+// is non-empty), and the stage separately declares a bot via
+// expected_reviewers that has not yet reviewed. Before the fix,
+// reviewGateAllBots's declared-reviewer branch (len(outstanding)==0) would
+// see only the declared bot outstanding and return allBots=true, routing
+// through the Phase 1 bot re-prompt ladder instead of the human-escalation
+// timeout path — deferring the human's CHANGES_REQUESTED verdict by a full
+// ReviewWaitTimeout window. With the fix, authorityReason != "" forces
+// allBots=false, so Phase 1 must not fire (no re-prompt comment, no
+// DeleteReviewRequest/AddReviewRequest mutation, no fabrik:bot-reprompted
+// label) — the item instead falls straight to the standard timeout branch,
+// which is what ultimately carries the authoritative reason to a human via
+// pauseForReviewTimeout. AC2 in the issue requires this scenario to fail
+// against unpatched main.
+func TestCheckReviewGate_DeclaredBotDoesNotDeferAuthoritativeHumanEscalation(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: nil, // alice already responded — GitHub dropped her from the requested list
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED"},
+		},
+	}
+	declared := []string{"some-declared-bot"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative", ExpectedReviewers: &declared}
+
+	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected NOT blocked — timeout branch fires instead (authoritative escalation, not a bot re-prompt)")
+	}
+	if !timedOut {
+		t.Error("expected timedOut — the human escalation must reach the standard pause path, not the bot ladder")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected NO bot re-prompt comment (declared bot must not preempt human escalation), got %d: %v", len(client.addCommentCalls), client.addCommentCalls)
+	}
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected NO DeleteReviewRequest calls, got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 0 {
+		t.Errorf("expected NO AddReviewRequest calls, got %d", len(client.addReviewRequestCalls))
+	}
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:bot-reprompted" {
+			t.Error("expected fabrik:bot-reprompted NOT to be applied — Phase 1 must not fire for an authoritative-blocked human escalation")
+		}
+	}
+}
+
 // Authoritative mode must also work on a base:<branch> repo, where reviews
 // are REST-sourced and the resolved PR number (not item.LinkedPRNumber,
 // always 0 there) is what FetchPRReviewDecision is called with.

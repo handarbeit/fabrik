@@ -222,7 +222,18 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Determine if all outstanding reviewers are bots (or, when nothing was
 	// formally requested, whether a declared reviewer is still outstanding).
 	// Used by Phase 1/2 logic.
-	allBots := reviewGateAllBots(reviewRequests, outstanding, declaredOutstanding)
+	//
+	// Finding 2 (#1375): additionally require authorityReason == "". A
+	// declared expected_reviewers bot must never preempt a human escalation —
+	// authorityReason is only ever non-empty once outstanding is already empty
+	// (a requested human has responded but with a verdict authoritative mode
+	// does not accept), so this can never change behavior for the "human
+	// hasn't responded yet" case (outstanding non-empty already forces
+	// allBots=false via the loop below); it only closes the gap where a human
+	// *has* responded with a blocking verdict but a declared bot is still
+	// outstanding — without this, that declared bot's re-prompt ladder would
+	// defer the human escalation by a full ReviewWaitTimeout window.
+	allBots := reviewGateAllBots(reviewRequests, outstanding, declaredOutstanding) && authorityReason == ""
 
 	// Find the fabrik:bot-reprompted label (idempotency guard for Phase 1 and
 	// timing anchor for Phase 2).
