@@ -2667,7 +2667,8 @@ fatal.
 
 Separately, since a managed repo's own checked-in `.claude/settings.json` isn't
 visible until Fabrik has already checked it out into a worktree, each invocation
-also checks the worktree's own settings file. If it sets `apiKeyHelper`, that
+also checks the worktree's own settings files (`settings.json` and
+`settings.local.json`). If either sets `apiKeyHelper`, that
 invocation is skipped (not run) and the issue is labeled
 `fabrik:api-key-helper-detected` with an explanatory comment — this does not
 count against `max_retries`, and self-clears once a human removes

@@ -631,8 +631,9 @@ A fifth outcome, checked in `runInvocationWithExtension` immediately alongside t
 usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
 before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
 preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
-`.claude/settings.json`: a **repo-resident** setting Fabrik cannot see at engine startup, since the
-worktree doesn't exist yet (#1346, R13). If it sets `apiKeyHelper`, the invocation is skipped and
+`.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file
+coverage for the user/project layers): a **repo-resident** setting Fabrik cannot see at engine startup,
+since the worktree doesn't exist yet (#1346, R13). If either sets `apiKeyHelper`, the invocation is skipped and
 `*apiKeyHelperDetectedError` is returned in place of invoking Claude at all; `finalizeStageOutcome`
 classifies it via `errors.As` (alongside the usage-limit check) and routes to
 `handleAPIKeyHelperDetected`, which mirrors `handleUsageLimitExit` exactly:

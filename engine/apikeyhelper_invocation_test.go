@@ -103,6 +103,49 @@ func TestAPIKeyHelperDetected_ExemptFromRetryAndLabeledDistinctly(t *testing.T) 
 	}
 }
 
+// TestAPIKeyHelperDetected_SettingsLocalJSON confirms the worktree check also
+// covers .claude/settings.local.json, not just settings.json — mirroring the
+// startup preflight's file coverage for the user/project layers (Claude
+// Code's own settings resolution merges both). A regression test for a gap
+// flagged in PR review: the per-invocation check originally checked only
+// settings.json.
+func TestAPIKeyHelperDetected_SettingsLocalJSON(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	commitAPIKeyHelperSettingsFile(t, repoDir, "settings.local.json", `{"apiKeyHelper": "/bin/echo fake-key"}`)
+
+	wm := NewWorktreeManager(repoDir)
+	claude := &mockClaudeInvoker{}
+	client := &mockGitHubClient{}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 202, Title: "apiKeyHelper settings.local.json test", Status: "Research", ItemID: "PVTI_202"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(claude.calls) != 0 {
+		t.Errorf("claude.Invoke was called %d time(s), want 0 — apiKeyHelper in settings.local.json must short-circuit before invocation", len(claude.calls))
+	}
+
+	var sawDetectedLabel bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:api-key-helper-detected" {
+			sawDetectedLabel = true
+		}
+	}
+	if !sawDetectedLabel {
+		t.Error("expected fabrik:api-key-helper-detected label to be added for a settings.local.json detection")
+	}
+}
+
 // TestAPIKeyHelperDetected_ClearsOnNextSuccessfulInvocation confirms that
 // once a human fixes the worktree's .claude/settings.json (removes
 // apiKeyHelper), the next invocation reaches Claude and the
@@ -167,15 +210,32 @@ func TestAPIKeyHelperDetected_ClearsOnNextSuccessfulInvocation(t *testing.T) {
 // repo-resident setting a managed repo's own commit history carries (R13).
 func commitAPIKeyHelperSettings(t *testing.T, repoDir, body string) {
 	t.Helper()
+	commitAPIKeyHelperSettingsFile(t, repoDir, "settings.json", body)
+}
+
+// commitAPIKeyHelperSettingsFile is commitAPIKeyHelperSettings generalized to
+// an arbitrary filename within .claude/, so tests can cover both
+// settings.json and settings.local.json — the worktree check covers both,
+// mirroring the startup preflight's file coverage for the user/project layers.
+// Uses `git add -f` rather than `-A`: settings.local.json is a common global
+// gitignore pattern (personal Claude Code overrides are conventionally
+// untracked), and a test environment's own machine-level excludes must not
+// suppress the fixture — the real-world R13 scenario this guards against
+// (an attacker's branch committing the file) is unaffected by the Fabrik
+// operator's local ignore rules either, since checkout of an already-tracked
+// path ignores them too.
+func commitAPIKeyHelperSettingsFile(t *testing.T, repoDir, filename, body string) {
+	t.Helper()
 	dir := filepath.Join(repoDir, ".claude")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir .claude: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(body), 0644); err != nil {
-		t.Fatalf("write settings.json: %v", err)
+	relPath := filepath.Join(".claude", filename)
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(body), 0644); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
 	}
 	for _, args := range [][]string{
-		{"git", "add", "-A"},
+		{"git", "add", "-f", relPath},
 		{"git", "commit", "-m", "add apiKeyHelper settings"},
 	} {
 		cmd := exec.Command(args[0], args[1:]...)

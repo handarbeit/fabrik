@@ -509,8 +509,8 @@ func findAPIKeyHelper(layers []settingsLayer) (found *settingsLayer, warns []str
 // than silently tolerated (see the issue's Non-goals and ADR-1346). This is
 // the startup-time half of the check; runInvocationWithExtension performs the
 // structurally identical per-invocation check against the worktree's own
-// .claude/settings.json (R13), which doesn't exist until a worktree is
-// materialized.
+// .claude/settings.json and settings.local.json (R13), which don't exist
+// until a worktree is materialized.
 func (e *Engine) checkAPIKeyHelper() error {
 	var layers []settingsLayer
 	if p := managedPolicySettingsPath(); p != "" {

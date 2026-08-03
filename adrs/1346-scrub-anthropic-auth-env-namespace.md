@@ -105,10 +105,12 @@ outside the issue's enumerated Acceptance list), the user layer (`$CLAUDE_CONFIG
 or `~/.claude`), and the `fabrikDir` project layer. A missing or unreadable file is not
 an error; only a present, parseable `apiKeyHelper` key is fatal.
 
-**A repo-resident `.claude/settings.json` needs its own per-invocation check** — it
-doesn't exist at engine startup, only once a worktree is materialized.
-`runInvocationWithExtension` checks it immediately alongside the existing account-wide
-usage-limit suspension gate, sharing `findAPIKeyHelper` with the startup preflight. A
+**A repo-resident `.claude/settings.json`/`settings.local.json` needs its own
+per-invocation check** — neither exists at engine startup, only once a worktree is
+materialized. `runInvocationWithExtension` checks both immediately alongside the
+existing account-wide usage-limit suspension gate, sharing `findAPIKeyHelper` with
+the startup preflight — matching that preflight's file coverage for the user/project
+layers. A
 hit returns `apiKeyHelperDetectedError`, structurally identical to `claudeUsageLimitError`
 (`StageAttempted` recorded, `StageRetryIncremented` never called — the stage never
 ran, so this does not count against `max_retries`; no `stage:<name>:failed`, no

@@ -695,6 +695,17 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)
 	env = append(env, scrubAnthropicAuthEnv(baseEnv, passthrough)...)
 	for _, key := range claudeAnthropicEnvPassthrough {
+		// FABRIK_ANTHROPIC_API_KEY/FABRIK_ANTHROPIC_ENV_PASSTHROUGH are never
+		// re-added here even if a caller names one of them in its own
+		// passthrough list. mergeEnv's bare removal sentinel (appended below)
+		// only strips a key from base — it cannot retract an earlier
+		// "KEY=VALUE" entry already present in this same overrides slice, so
+		// without this guard a self-referential passthrough entry would
+		// forward the control variable's own ambient value to the worker,
+		// violating R8/R17.
+		if key == "FABRIK_ANTHROPIC_API_KEY" || key == "FABRIK_ANTHROPIC_ENV_PASSTHROUGH" {
+			continue
+		}
 		if val, ok := envLookup(baseEnv, key); ok {
 			env = append(env, key+"="+val)
 		}

@@ -254,6 +254,33 @@ func TestBuildClaudeEnv_AnthropicEnvPassthrough(t *testing.T) {
 		}
 	})
 
+	// Regression: naming a Fabrik-internal control variable *inside* its own
+	// passthrough list must not forward that variable's ambient value. mergeEnv's
+	// bare removal sentinel (emitted unconditionally by buildClaudeEnv for both
+	// control vars) only strips a key from base — it cannot retract an earlier
+	// "KEY=VALUE" entry already present in the same overrides slice, so without an
+	// explicit skip in the passthrough re-add loop, this self-referential case
+	// would leak the control variable's own value straight through, violating R8/R17.
+	t.Run("naming FABRIK_ANTHROPIC_API_KEY inside its own passthrough list does not leak it (R8)", func(t *testing.T) {
+		resetAnthropicEnvVars(t)
+		claudeAnthropicEnvPassthrough = []string{"FABRIK_ANTHROPIC_API_KEY"}
+		baseEnv := []string{"FABRIK_ANTHROPIC_API_KEY=leaked-secret"}
+		got := constructedEnv(baseEnv, InvokeOptions{})
+		if containsPrefix(got, "FABRIK_ANTHROPIC_API_KEY=") {
+			t.Errorf("expected FABRIK_ANTHROPIC_API_KEY never forwarded even when self-named in passthrough, got %v", got)
+		}
+	})
+
+	t.Run("naming FABRIK_ANTHROPIC_ENV_PASSTHROUGH inside its own passthrough list does not leak it (R17)", func(t *testing.T) {
+		resetAnthropicEnvVars(t)
+		claudeAnthropicEnvPassthrough = []string{"FABRIK_ANTHROPIC_ENV_PASSTHROUGH"}
+		baseEnv := []string{"FABRIK_ANTHROPIC_ENV_PASSTHROUGH=FABRIK_ANTHROPIC_ENV_PASSTHROUGH"}
+		got := constructedEnv(baseEnv, InvokeOptions{})
+		if containsPrefix(got, "FABRIK_ANTHROPIC_ENV_PASSTHROUGH=") {
+			t.Errorf("expected FABRIK_ANTHROPIC_ENV_PASSTHROUGH never forwarded even when self-named in passthrough, got %v", got)
+		}
+	})
+
 	t.Run("named variable absent from ambient environment is a no-op, not an error (R15)", func(t *testing.T) {
 		resetAnthropicEnvVars(t)
 		claudeAnthropicEnvPassthrough = []string{"CLAUDE_CODE_USE_BEDROCK"}

@@ -196,8 +196,8 @@ and should recognize.
   next invocation that isn't itself a usage-limit exit, or account-wide
   once the suspension lifts. Distinct from GitHub's own API rate limiting.
 - **`fabrik:api-key-helper-detected`** — Set when a stage invocation is
-  skipped because the worktree's own `.claude/settings.json` sets
-  `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the
+  skipped because the worktree's own `.claude/settings.json` or
+  `settings.local.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the
   worktree exists. Mirrors `fabrik:claude-limit`'s shape: does not count
   against `max_retries`, no `fabrik:paused`/`stage:<name>:failed`. Clears
   automatically once `apiKeyHelper` is removed and a later invocation

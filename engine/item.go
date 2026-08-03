@@ -975,15 +975,21 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		return output, completed, usage, totalMultiple, err
 	}
 
-	// R13: the worktree's own .claude/settings.json is repo-resident content
-	// Fabrik cannot see at engine startup (checkAPIKeyHelper only covers the
-	// managed-policy/user/fabrikDir-project layers). Check it here, before
-	// building InvokeOptions or consuming the stall hint, for the same reason
-	// as the suspension gate above — this dispatch will never actually invoke
-	// Claude if apiKeyHelper is set. Detection here fails only this invocation
-	// (via apiKeyHelperDetectedError, mirroring claudeUsageLimitError's shape);
-	// it is deliberately not a stage failure — see handleAPIKeyHelperDetected.
-	if found, warns := findAPIKeyHelper([]settingsLayer{{layer: "worktree", path: filepath.Join(workDir, ".claude", "settings.json")}}); found != nil {
+	// R13: the worktree's own .claude/settings.json (and settings.local.json,
+	// mirroring the startup preflight's file coverage for the user/project
+	// layers — Claude Code's own settings resolution merges both) is
+	// repo-resident content Fabrik cannot see at engine startup
+	// (checkAPIKeyHelper only covers the managed-policy/user/fabrikDir-project
+	// layers). Check it here, before building InvokeOptions or consuming the
+	// stall hint, for the same reason as the suspension gate above — this
+	// dispatch will never actually invoke Claude if apiKeyHelper is set.
+	// Detection here fails only this invocation (via apiKeyHelperDetectedError,
+	// mirroring claudeUsageLimitError's shape); it is deliberately not a stage
+	// failure — see handleAPIKeyHelperDetected.
+	if found, warns := findAPIKeyHelper([]settingsLayer{
+		{layer: "worktree", path: filepath.Join(workDir, ".claude", "settings.json")},
+		{layer: "worktree", path: filepath.Join(workDir, ".claude", "settings.local.json")},
+	}); found != nil {
 		e.logf(item.Number, "warn", "apiKeyHelper detected in worktree settings %s; skipping invocation\n", found.path)
 		err = &apiKeyHelperDetectedError{Layer: found.layer, Path: found.path}
 		return output, completed, usage, totalMultiple, err
@@ -2385,7 +2391,8 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 }
 
 // apiKeyHelperDetectedError signals that a Claude invocation was skipped
-// because the worktree's own .claude/settings.json sets apiKeyHelper (R13).
+// because the worktree's own .claude/settings.json or settings.local.json
+// sets apiKeyHelper (R13).
 // This mirrors claudeUsageLimitError's shape exactly: the stage never ran, so
 // this must be excluded from max_retries — see handleAPIKeyHelperDetected in
 // this file, the sole consumer (via errors.As). Unlike the startup-time
@@ -2457,8 +2464,9 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 }
 
 // handleAPIKeyHelperDetected is called by finalizeStageOutcome when a Claude
-// invocation was skipped because the worktree's own .claude/settings.json
-// sets apiKeyHelper (see apiKeyHelperDetectedError above, R13). It mirrors
+// invocation was skipped because the worktree's own .claude/settings.json or
+// settings.local.json sets apiKeyHelper (see apiKeyHelperDetectedError above,
+// R13). It mirrors
 // handleUsageLimitExit exactly: StageAttempted is recorded so the normal
 // dispatch cooldown applies, but StageRetryIncremented is never called — the
 // stage never ran, so this must not count against max_retries, and no
