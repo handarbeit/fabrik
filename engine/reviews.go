@@ -1515,21 +1515,22 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 }
 
 // dispatchReviewReinvoke re-invokes the stage agent via processComments with
-// synthetic review comments. A thin wrapper over dispatchReinvoke, supplying
-// only review's pre-dispatch emptiness precheck and its comment builder —
-// the shared goroutine scaffold (WorkerEntered/semaphore/processComments)
-// lives in reinvoke.go.
+// synthetic review comments (unresolved inline thread comments plus
+// unaddressed review bodies, Finding 4 — see buildReviewFeedbackComments). A
+// thin wrapper over dispatchReinvoke, supplying only review's pre-dispatch
+// emptiness precheck and its comment builder — the shared goroutine scaffold
+// (WorkerEntered/semaphore/processComments) lives in reinvoke.go.
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
 		// precheck runs synchronously before WorkerEntered/goroutine dispatch —
-		// buildReviewThreadComments needs no workDir, so there's no reason to
+		// buildReviewFeedbackComments needs no workDir, so there's no reason to
 		// incur ensureRepoReady/WorkerEntered churn for a same-poll no-op.
 		precheck: func() bool {
-			return len(e.buildReviewThreadComments(item)) > 0
+			return len(e.buildReviewFeedbackComments(item)) > 0
 		},
 		build: func(workDir string) []gh.Comment {
-			return e.buildReviewThreadComments(item)
+			return e.buildReviewFeedbackComments(item)
 		},
 	})
 }

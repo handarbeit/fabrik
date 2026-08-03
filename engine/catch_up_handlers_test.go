@@ -576,6 +576,205 @@ func TestHandleReviewGate_Terminated_Claims(t *testing.T) {
 	}
 }
 
+// ---- handleReviewGate Finding 1 (#1375) reorder tests ----
+//
+// These pin the crux of Finding 1: a review-reinvoke dispatches whenever
+// buildReviewFeedbackComments has something actionable, regardless of
+// checkReviewGate's blocked/timedOut return — not only when the gate has
+// cleared naturally. Before the fix, an authoritative CHANGES_REQUESTED verdict
+// kept checkReviewGate returning blocked=true indefinitely, which short-circuited
+// handleReviewGate before the reinvoke path was ever reached.
+
+// TestHandleReviewGate_AuthoritativeBlocked_ReinvokesOnActionableBody verifies
+// that a CHANGES_REQUESTED review's body dispatches a reinvoke even though
+// checkReviewGate reports blocked=true (review_authority: authoritative, no
+// approving verdict). This is the exact e2e harness shape (AC1/AC6): a review
+// body with zero inline thread comments.
+func TestHandleReviewGate_AuthoritativeBlocked_ReinvokesOnActionableBody(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete"},
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 900},
+		},
+	}
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	if !advancedItems["owner/repo#10"] {
+		t.Error("expected advancedItems[owner/repo#10] set — the reinvoke must dispatch despite blocked=true")
+	}
+	snap, _ := eng.store.Get("owner/repo", 10)
+	if snap.ReviewCycles("Implement") != 1 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 1 (reinvoke must have dispatched)", snap.ReviewCycles("Implement"))
+	}
+	if !snap.CooldownAt("review-blocked").IsZero() {
+		t.Error("expected NO review-blocked cooldown recorded — the reinvoke path must take priority over the blocked-cooldown tail")
+	}
+	eng.wg.Wait()
+}
+
+// TestHandleReviewGate_AuthoritativeBlocked_AlreadyProcessed_FallsThroughToCooldown
+// verifies R7's dedup bound: once the same review body has already been
+// recorded via CommentProcessed (a prior poll's reinvoke already addressed
+// it) and no new thread comments exist, handleReviewGate must fall through to
+// the pre-existing blocked-cooldown tail unchanged — not dispatch again for
+// the same review every poll (the #1083 runaway-reinvoke shape).
+func TestHandleReviewGate_AuthoritativeBlocked_AlreadyProcessed_FallsThroughToCooldown(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete"},
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 900},
+		},
+	}
+	// Simulate the review body already having been addressed by a prior reinvoke.
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 10, CommentID: "review-body:900", At: time.Now()})
+
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed via blocked-cooldown fallback), got false")
+	}
+	if advancedItems["owner/repo#10"] {
+		t.Error("expected NO reinvoke dispatch — the review body was already processed")
+	}
+	snap, _ := eng.store.Get("owner/repo", 10)
+	if snap.ReviewCycles("Implement") != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0 (no dispatch should have occurred)", snap.ReviewCycles("Implement"))
+	}
+	if snap.CooldownAt("review-blocked").IsZero() {
+		t.Error("expected review-blocked cooldown recorded — falls through to the pre-existing blocked tail")
+	}
+}
+
+// TestHandleReviewGate_AuthoritativeBlocked_CycleLimitReached_Pauses is AC4's
+// unit-level analog: a fresh, distinct, still-actionable authoritative
+// CHANGES_REQUESTED review at MaxReviewCycles routes to
+// pauseForReviewCycleLimit (not an unbounded reinvoke loop) even though the
+// gate is still blocked, not cleared.
+func TestHandleReviewGate_AuthoritativeBlocked_CycleLimitReached_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 3
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete"},
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			// A fresh, distinct review (new DatabaseID) — not yet processed —
+			// so buildReviewFeedbackComments is non-empty even at the cycle limit.
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this too", DatabaseID: 901},
+		},
+	}
+	for i := 0; i < eng.cfg.MaxReviewCycles; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{
+			Repo: "owner/repo", Number: 10, StageName: "Implement",
+		})
+	}
+
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+	if advancedItems["owner/repo#10"] {
+		t.Error("advancedItems must not be set on cycle limit pause")
+	}
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused (cycle limit reached) even though the gate is still authoritative-blocked; labels added: %v", labelNames)
+	}
+}
+
 // ---- handleMergeAndCIGates rebase reinvoke dispatch tests ----
 
 // makeMergeGatePctx returns a phase1Ctx for merge-gate/CI-gate handler tests.
