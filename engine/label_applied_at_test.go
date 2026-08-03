@@ -147,18 +147,20 @@ func TestLabelAppliedAt_ColdStartFallback_SelfHeals(t *testing.T) {
 // regression the issue explicitly required: "most recent application," not
 // "any application." It exercises the actual guarded write path —
 // classifyCIFromCheckRuns's applyLabelAdd on a confirmed CI failure, followed
-// by removeAwaitingCILabel, followed by a later genuine re-application — and
-// asserts the cache-backed read returns the *second* application's timestamp,
-// not the first. fetchLabelAppliedAtFn fails the test if ever called, proving
-// this all happens without falling back to a live fetch (the cache never goes
-// cold across the sequence).
+// by removeAwaitingCILabel (which now clears the cache entry via
+// clearLabelAppliedAtNow, see the PR #1369 review fix below), followed by a
+// later genuine re-application — and asserts the cache-backed read returns
+// the *second* application's timestamp, not the first. fetchLabelAppliedAtFn
+// fails the test if ever called, proving this all happens without falling
+// back to a live fetch (the cache never needs the live fallback across the
+// sequence, even though it does go briefly cold between removal and re-apply).
 func TestLabelAppliedAt_AppliedRemovedReapplied_ReadsLatest(t *testing.T) {
 	failingCheckRuns := []gh.CheckRun{{Name: "test", Status: "completed", Conclusion: "failure"}}
 	client := &mockGitHubClient{
 		addLabelToIssueFn:      func(_, _ string, _ int, _ string) error { return nil },
 		removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return nil },
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
-			t.Fatal("FetchLabelAppliedAt must not be called: the cache stays warm for this entire apply/remove/re-apply sequence")
+			t.Fatal("FetchLabelAppliedAt must not be called: the guarded write path never needs the live fallback")
 			return time.Time{}, nil
 		},
 	}
@@ -177,17 +179,22 @@ func TestLabelAppliedAt_AppliedRemovedReapplied_ReadsLatest(t *testing.T) {
 
 	time.Sleep(2 * time.Millisecond) // ensure the re-application's timestamp is distinguishable from the first
 
-	// Removal: the cache entry must be untouched — no mutation clears it —
-	// until the next genuine re-application overwrites it.
+	// Removal: a genuine removal now clears the cache entry (syncLabelRemoval
+	// -> clearLabelAppliedAtNow) rather than leaving it stale. This is what
+	// makes recordLabelAppliedAtNow's "don't overwrite an existing entry"
+	// guard (the PR #1369 review fix) safe: the entry is only ever non-empty
+	// when the label is genuinely still applied, so the guard never blocks a
+	// legitimate re-application.
 	eng.removeAwaitingCILabel("owner", "repo", item)
 	snapAfterRemove, _ := eng.store.Get("owner/repo", 63)
-	if got := snapAfterRemove.LabelAppliedAt("fabrik:awaiting-ci"); !got.Equal(first) {
-		t.Errorf("removal must not touch the LabelAppliedAt cache entry; got %v, want the untouched first application %v", got, first)
+	if got := snapAfterRemove.LabelAppliedAt("fabrik:awaiting-ci"); !got.IsZero() {
+		t.Errorf("removal must clear the LabelAppliedAt cache entry; got %v, want zero", got)
 	}
 	item.Labels = nil // reflect the removal locally, as a fresh re-fetch would
 
-	// Re-application: label absent again, CI still failing — a genuine
-	// re-apply, not a defensive idempotent no-op.
+	// Re-application: label absent again (both in item.Labels and in the
+	// now-cleared cache), CI still failing — a genuine re-apply, not a
+	// defensive idempotent no-op.
 	eng.classifyCIFromCheckRuns("owner", "repo", item, failingCheckRuns)
 	snap2, _ := eng.store.Get("owner/repo", 63)
 	second := snap2.LabelAppliedAt("fabrik:awaiting-ci")
@@ -203,5 +210,52 @@ func TestLabelAppliedAt_AppliedRemovedReapplied_ReadsLatest(t *testing.T) {
 	}
 	if !got.Equal(second) {
 		t.Errorf("labelAppliedAt = %v; want the most recent application %v (a first-match-wins bug would return the stale %v)", got, second, first)
+	}
+}
+
+// TestLabelAppliedAt_StaleGuardDoesNotResetTimestamp is the direct regression
+// test for the PR #1369 review finding: recordLabelAppliedAtNow's write sites
+// guard on item.Labels, an in-memory snapshot that can be stale relative to
+// GitHub's true state. Since AddLabelToIssue is idempotent (GitHub silently
+// no-ops a duplicate add), a stale snapshot showing a label as absent when
+// it's genuinely still present can still reach applyLabelAdd's success path.
+// Before this fix, that would blindly overwrite the cache with a bogus
+// time.Now(), silently resetting every downstream timeout with no
+// corresponding real GitHub event. This test simulates exactly that: the
+// label is genuinely applied once (real timestamp cached), then a second
+// guarded write site fires again against a stale item.Labels view that still
+// shows the label absent — and asserts the cache is left untouched at the
+// true, original timestamp rather than being reset to time.Now().
+func TestLabelAppliedAt_StaleGuardDoesNotResetTimestamp(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(_, _ string, _ int, _ string) error { return nil }, // idempotent no-op on GitHub's side too
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			t.Fatal("FetchLabelAppliedAt must not be called: the cache is warm from the first genuine application")
+			return time.Time{}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 64, Repo: "owner/repo"}
+
+	// Genuine first application, recorded with the real timestamp.
+	eng.applyLabelAdd(item, "fabrik:awaiting-ci", false)
+	snap, _ := eng.store.Get("owner/repo", 64)
+	original := snap.LabelAppliedAt("fabrik:awaiting-ci")
+	if original.IsZero() {
+		t.Fatal("expected fabrik:awaiting-ci LabelAppliedAt to be recorded after the genuine application")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+
+	// Simulate a stale-guard re-add: a write site's item.Labels snapshot still
+	// shows the label absent (item.Labels was never updated to include it —
+	// modeling GraphQL/webhook lag or a pre-write item snapshot), so its
+	// !hasLabel guard passes and applyLabelAdd fires again for a label that,
+	// on GitHub, was never actually removed.
+	eng.applyLabelAdd(item, "fabrik:awaiting-ci", false)
+
+	snapAfter, _ := eng.store.Get("owner/repo", 64)
+	if got := snapAfter.LabelAppliedAt("fabrik:awaiting-ci"); !got.Equal(original) {
+		t.Errorf("stale-guard re-add must not reset the cache; got %v, want the untouched original %v", got, original)
 	}
 }
