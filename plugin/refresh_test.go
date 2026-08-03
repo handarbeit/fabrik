@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+// TestFabrikPlugin_EmbedsLabelsMd is the direct assertion for #1339 AC1:
+// LABELS.md must be present in the built binary's embed FS, asserted
+// against plugin.FabrikPlugin itself (not the source tree, which
+// TestRunInit_WritesPluginFiles-style tests would only indirectly cover).
+func TestFabrikPlugin_EmbedsLabelsMd(t *testing.T) {
+	content, err := FabrikPlugin.ReadFile("fabrik-workflows/LABELS.md")
+	if err != nil {
+		t.Fatalf("LABELS.md not present in FabrikPlugin embed: %v", err)
+	}
+	const minNonTrivialBytes = 1024
+	if len(content) < minNonTrivialBytes {
+		t.Errorf("LABELS.md embed content suspiciously small: %d bytes (want at least %d)", len(content), minNonTrivialBytes)
+	}
+}
+
 func TestComputeEmbeddedVersion_Deterministic(t *testing.T) {
 	v1 := ComputeEmbeddedVersion()
 	v2 := ComputeEmbeddedVersion()

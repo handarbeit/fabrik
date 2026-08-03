@@ -120,6 +120,13 @@ The `### Repositories` section is **mandatory** in every Research output. It lis
 5. Incorporate answers and update findings
 6. When you have a thorough understanding and all questions are resolved, signal completion
 
+## Labels You Interact With
+
+- **`fabrik:paused` + `fabrik:awaiting-input`** — applied by the engine when you emit `FABRIK_BLOCKED_ON_INPUT`; cleared automatically when the user comments. You never set or remove these yourself.
+- **`model:opus`** — you don't apply this label directly, but the Complexity Assessment below has you *recommend* it as an open question when the issue warrants a more capable model for Implement/Review.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Engine Context
 
 **Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — your worktree will be stashed/restored.

@@ -71,6 +71,13 @@ gh issue view <number> --json comments \
 
 Then update the relevant checkbox in the comment body.
 
+## Labels You Interact With
+
+- **`fabrik:extend-turns`** — if present, this and future comment-processing invocations get a pre-granted 2× turn budget.
+- **`fabrik:paused`** — repeated non-advancing comment-processing invocations can trip a circuit breaker that applies this label; you don't set it yourself, but it's why comment processing might stop being dispatched.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Completion
 
 Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Implement returns control to the engine without advancing the pipeline. The Implement stage continues with the remaining tasks after the comment is processed.

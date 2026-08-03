@@ -247,6 +247,14 @@ Example:
 
 Plans typically complete in a single pass. If the spec and research are solid, there shouldn't be open questions. If there are, something was missed upstream — flag it clearly.
 
+## Labels You Interact With
+
+- **`fabrik:paused` + `fabrik:awaiting-input`** — applied by the engine when you emit `FABRIK_BLOCKED_ON_INPUT`; cleared automatically when the user comments. You never set or remove these yourself.
+- **`fabrik:awaiting-done`** — applied by the engine the instant you emit `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` (see "No Work Needed" above); it's the durable record of that decision until the Done move and issue close both succeed.
+- **`fabrik:children-spawned` / `fabrik:sub-issue`** — engine-applied consequences of the `FABRIK_SPAWN_CHILD_*` blocks you emit (see "Sub-issue Decomposition" above): `children-spawned` goes on this (parent) issue once all children are created and linked; `sub-issue` goes on each new child.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Engine Context
 
 **Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage.

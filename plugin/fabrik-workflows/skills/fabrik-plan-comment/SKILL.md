@@ -39,6 +39,13 @@ Your output should be the full updated Plan stage content: implementation approa
 
 Do **not** use `FABRIK_ISSUE_UPDATE` markers — plan content lives in the stage comment, not the issue body. The issue body is the spec and is not updated by Plan comment processing.
 
+## Labels You Interact With
+
+- **`fabrik:paused` + `fabrik:awaiting-input`** — the engine cleared these to invoke you (a human comment is what resumes a blocked-on-input issue). You don't set or remove them yourself.
+- **`fabrik:children-spawned` / `fabrik:sub-issue`** — if the plan already declared sub-issue decomposition, these may already be applied by the time you're invoked; you don't act on them directly, but revising `FABRIK_SPAWN_CHILD_*` blocks in your output is still expected per the parent skill's decomposition rules.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Completion
 
 When all feedback has been incorporated, open questions resolved, and the plan is concrete and complete enough for implementation to begin, signal completion:

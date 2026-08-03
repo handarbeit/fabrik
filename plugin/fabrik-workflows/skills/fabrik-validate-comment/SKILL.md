@@ -55,6 +55,13 @@ After making any code changes:
 2. Commit with a clear message
 3. Push to the remote branch
 
+## Labels You Interact With
+
+- **`fabrik:awaiting-ci`** — may be present if you're processing a comment during an active CI-fix cycle; relevant to any "re-run checks" request in the user's comment.
+- **`fabrik:rebase-needed`** — may be present if a mergeability conflict is what's being discussed; resolving it clears the label on the next successful rebase, same as in the main Validate flow.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Completion
 
 By default, do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Validate returns control to the engine without advancing the pipeline.

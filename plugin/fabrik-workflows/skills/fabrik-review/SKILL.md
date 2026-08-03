@@ -220,6 +220,15 @@ So: prefer making steady, committed progress over racing to finish inside one sl
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
 
+## Labels You Interact With
+
+- **`fabrik:awaiting-review`** — applied by the engine when `wait_for_reviews: true` and outstanding PR reviewer requests remain after you signal completion; cleared once all reviewers respond or the wait times out.
+- **`review-authority:<mode>`** (`advisory`/`authoritative`) — if present, overrides this stage's configured `review_authority` for this issue: `authoritative` additionally requires no outstanding CHANGES_REQUESTED and satisfied approvals before the gate clears, beyond the `advisory` default of "reviewers responded, whatever they said."
+- **`expected-reviewers:<mode>`** (`none`/`declared`) / the stage's `expected_reviewers` config — declares self-submitting bot reviewers (Copilot, Gemini, CodeRabbit-style) that never appear in GitHub's formal requested-reviewer list but are still expected to respond before the gate clears.
+- **`fabrik:bot-reprompted`** — applied by the engine's bot-reviewer re-prompt ladder if every outstanding reviewer is a bot and the wait timeout elapses once; you don't act on it directly, but its presence means a re-prompt already happened this gate cycle.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Engine Context
 
 **Before you run**: Worktree exists with the implementation commits. The engine rebases onto main on first run.
