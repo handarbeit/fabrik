@@ -1656,6 +1656,60 @@ printf '%%s\n' '{"result":"passthrough test\nFABRIK_STAGE_COMPLETE\n","session_i
 	}
 }
 
+// TestInvokeClaude_AnthropicAPIKeyOptInWinsOverPassthrough is the subprocess-
+// level confirmation of the ordering-dependent collision case R7 permits: a
+// passthrough entry and the FABRIK_ANTHROPIC_API_KEY translation both naming
+// ANTHROPIC_API_KEY. buildClaudeEnv emits both as separate "ANTHROPIC_API_KEY="
+// entries in Cmd.Env (mergeEnv does not deduplicate them), so this confirms
+// what the real subprocess's environment actually resolves to via os/exec's
+// documented last-occurrence-wins duplicate-key behavior — not just what
+// mergeEnv's returned slice contains. See also
+// TestBuildClaudeEnv_AnthropicAPIKeyOptIn's pure-function pin of the same
+// ordering at the mergeEnv-slice level.
+func TestInvokeClaude_AnthropicAPIKeyOptInWinsOverPassthrough(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"collision test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_collision","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("ANTHROPIC_API_KEY", "sk-passthrough-loses")
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = "sk-fabrik-wins"
+	claudeAnthropicEnvPassthrough = []string{"ANTHROPIC_API_KEY"}
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1349, Title: "collision subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "\nANTHROPIC_API_KEY=sk-fabrik-wins\n") {
+		t.Errorf("expected ANTHROPIC_API_KEY=sk-fabrik-wins (the translation) to be what the real subprocess sees, got:\n%s", env)
+	}
+	if strings.Contains(env, "sk-passthrough-loses") {
+		t.Errorf("expected the passthrough value to not be what survives in the subprocess's actual environment, got:\n%s", env)
+	}
+}
+
 // TestBuildClaudeArgs_PermissionModeDontAsk verifies that --permission-mode dontAsk
 // is passed for non-unrestricted invocations.
 func TestBuildClaudeArgs_PermissionModeDontAsk(t *testing.T) {

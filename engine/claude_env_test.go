@@ -220,6 +220,46 @@ func TestBuildClaudeEnv_AnthropicAPIKeyOptIn(t *testing.T) {
 			t.Errorf("expected the ambient value gone, got %v", got)
 		}
 	})
+
+	// Regression: the ordering-dependent collision case R7 explicitly permits
+	// (a passthrough entry and the FABRIK_ANTHROPIC_API_KEY translation both
+	// naming ANTHROPIC_API_KEY) was previously untested — buildClaudeEnv emits
+	// the passthrough re-add before the translation, so overrides ends up with
+	// two ANTHROPIC_API_KEY entries; mergeEnv does not deduplicate them (by
+	// design — its own doc comment already relies on Cmd.Env's last-occurrence-
+	// wins resolution rather than special-casing this), so the *last* one in
+	// the constructed slice is what actually reaches the subprocess. This pins
+	// that ordering: a future refactor that moves the translation block before
+	// the passthrough loop (or vice versa) would silently invert which value
+	// wins, and this test would catch it. See also
+	// TestInvokeClaude_AnthropicAPIKeyOptInWinsOverPassthrough for the
+	// subprocess-level confirmation that this is what os/exec actually does.
+	t.Run("passthrough names ANTHROPIC_API_KEY too: translation still wins over the passthrough re-add (R7)", func(t *testing.T) {
+		resetAnthropicEnvVars(t)
+		claudeAnthropicAPIKey = "sk-fabrik-wins"
+		claudeAnthropicEnvPassthrough = []string{"ANTHROPIC_API_KEY"}
+		baseEnv := []string{"ANTHROPIC_API_KEY=sk-passthrough-loses"}
+		got := constructedEnv(baseEnv, InvokeOptions{})
+		if lastValue(got, "ANTHROPIC_API_KEY") != "sk-fabrik-wins" {
+			t.Errorf("expected the last ANTHROPIC_API_KEY entry (what os/exec honors) to be the FABRIK_-prefixed value, got %v", got)
+		}
+	})
+}
+
+// lastValue returns the value of the *last* "KEY=VALUE" entry in env matching
+// key, mirroring Go's os/exec duplicate-Cmd.Env-key resolution (last
+// occurrence wins) — see mergeEnv's doc comment. mergeEnv deliberately does
+// not deduplicate its output, so a caller-level check for "the value" must
+// replicate that same last-occurrence semantics rather than assume uniqueness.
+func lastValue(env []string, key string) string {
+	prefix := key + "="
+	var val string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			val = kv[len(prefix):]
+		}
+	}
+	return val
 }
 
 // TestBuildClaudeEnv_AnthropicEnvPassthrough covers R14-R19.
