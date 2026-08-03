@@ -33,6 +33,21 @@ import (
 // WaitForIssueClosed returns, the comment is guaranteed to already exist if
 // the no-work-needed path actually ran; no polling race is needed.
 //
+// The "guaranteed to already exist" guarantee is conditional, not absolute:
+// settleNoWorkNeeded only posts a skip comment for stages strictly between
+// the emitter and Done (engine/no_work_needed_settle.go's loop guard,
+// `s.Order <= stage.Order || s.Order >= doneOrder || s.Unmanaged`). The
+// invariant this assertion actually relies on is "at least one non-cleanup,
+// non-unmanaged stage exists strictly between the emitting stage and Done" —
+// true today because this scenario emits at Plan, leaving Implement, Review,
+// Queued, and Validate in range (four skip comments observed live against
+// handarbeit/fabrik-test-alpha#4162, matching exactly). If a future variant
+// of this scenario moved the emitting stage to the one immediately before
+// Done, the loop body would never execute, no skip comment would be posted,
+// and this assertion would fail against a correctly-working engine — not a
+// regression, but a discriminator that no longer applies to that shape.
+//
+
 // Wall-clock: ~10-15 min. Cost: ~$0.30-0.50.
 func TestNoWorkNeeded(t *testing.T) {
 	t.Parallel()
