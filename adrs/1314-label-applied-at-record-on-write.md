@@ -1,0 +1,88 @@
+# ADR 1314: Record label-applied-at timestamps on write to eliminate FetchLabelAppliedAt duplication
+
+**Date**: 2026-08-03
+**Status**: Accepted
+**Issue**: #1314 — perf(engine): CIWaitTimeout backstop duplicates checkCIGate's FetchLabelAppliedAt call
+
+## Context
+
+`GitHubClient.FetchLabelAppliedAt` (`github/labels.go`) pages through an issue's entire events history, oldest-first, with no early exit — it is searching for the *most recent* `labeled` event, so the loop can only terminate on an empty page (`for page := 1; ; page++`). Cost is `ceil(events/100) + 1` REST requests per call. It is not cached anywhere: it does not appear in `boardcache`'s `ReadClient` interface or `CacheImpl`, so every call from every call site is a live paginated sweep.
+
+`settleAwaitingCIScan`'s `CIWaitTimeout` backstop (`engine/ci_settle.go`, added by #1303/PR #1309) calls `FetchLabelAppliedAt(..., "fabrik:awaiting-ci")` unconditionally for every `fabrik:awaiting-ci` item on every poll. For an item that goes on to reach `checkCIGate` normally — the common case — `classifyCIFromCheckRuns` (and its sibling call sites in `engine/ci.go`) then calls `FetchLabelAppliedAt` again for the *same* label and item, moments later in the same poll iteration.
+
+An initial pass over the codebase claimed ~23 non-test call sites of `FetchLabelAppliedAt`, inflating the case for fixing the shared primitive over the narrower duplication. A corrected count — verified by counting actual `FetchLabelAppliedAt(` invocations rather than every comment/interface/doc reference — found the real footprint is 10 calls across 5 files, querying 5 distinct labels:
+
+| file | calls | label(s) |
+|---|---|---|
+| `engine/ci.go` | 4 | `fabrik:awaiting-ci` (all four) |
+| `engine/reviews.go` | 2 | `fabrik:bot-reprompted`, `fabrik:awaiting-review` |
+| `engine/merge_gate.go` | 2 | `fabrik:auto-merge-enabled` (both) |
+| `engine/ci_settle.go` | 1 | `fabrik:awaiting-ci` |
+| `engine/archive_done_settle.go` | 1 | `stage:<name>:complete` |
+
+All five queried labels are applied exclusively by the engine itself — no external actor (human, bot, webhook) ever applies `fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:bot-reprompted`, `fabrik:auto-merge-enabled`, or `stage:<name>:complete`. This is the load-bearing fact for the design below: the engine always knows exactly when it applied a label, because it is the one applying it.
+
+Research measured real issues in this repo (#1338: 50 events, #1301: 52, #1303: 65 — all ≤1 REST page at `per_page=100`) and live-verified GitHub's issue-events pagination behavior: `Link: rel="last"` is a working reverse-pagination signal, but `direction=desc` is silently ignored by this endpoint (confirmed by identical output with and without it), and a single-page issue returns *no* `Link` header at all — indistinguishable, without an additional `len(events) < per_page` check, from a malformed response. Reverse pagination's saving is also recency-dependent: worst case is identical to forward pagination when the sought label event isn't near the end of a long history.
+
+`archive_done_settle.go` (ADR-068) had already solved this exact cost for `stage:<name>:complete`: a `CooldownAt`-cached *computed eligible-at* timestamp plus a per-poll fetch budget, bounding `FetchLabelAppliedAt` to at most once per item per engine lifetime for that one label.
+
+## Decision
+
+**Record-at-write for the 4 labels `archive_done_settle.go` doesn't already cover: `fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:bot-reprompted`, `fabrik:auto-merge-enabled`.** Rather than fetching (and re-fetching) "when was this label applied" from GitHub, the engine records the timestamp itself at the moment it applies the label — exact, not approximate, and needs no TTL or invalidation logic, because the engine is the sole writer.
+
+`stage:<name>:complete` is explicitly out of scope: `archive_done_settle.go` already has a working mitigation for it (ADR-068), and instrumenting its 5 additional direct `AddLabelToIssue` call sites (`ci.go:270`, `no_work_needed_settle.go:94`, `pr_terminal_advance.go:119`, `stages.go:173`, `stages.go:562`) for zero marginal benefit was rejected as unnecessary risk.
+
+### Design
+
+- **`internal/itemstate.ItemState.LabelAppliedAt map[string]time.Time`** — a new map, keyed by label name, deliberately **separate from `CooldownAt`**, not a repurposing of it. `Snapshot.HasExpiredCooldown` (`internal/itemstate/snapshot.go`, consumed by `itemMayNeedWork` in `engine/poll.go`) treats *any* non-zero, past `CooldownAt` entry as "a cooldown expired — wake this item." A label-applied-at timestamp is *always* in the past the instant it's recorded, so storing it in `CooldownAt` would make `HasExpiredCooldown` return `true` for that item permanently — spurious dispatch churn on every subsequent check, not a cache. This was caught during Plan by tracing `HasExpiredCooldown`'s actual callers before implementing, not assumed from Research's open question.
+- **`LabelAppliedAtRecorded{Repo, Number, Label, At}`** mutation, dispatched in `Store.applyToItem` exactly like `CooldownRecorded`, always **overwriting** any prior entry for the same label — this is what makes "applied → removed → re-applied" correctness automatic: removal doesn't touch the cache (there is no mutation for it), and the next genuine re-application simply overwrites the stale entry with the new timestamp.
+- **`engine.recordLabelAppliedAtNow(item, label)`** — applies `LabelAppliedAtRecorded` with `time.Now()`. Called unconditionally from `applyLabelAdd`'s success path (`engine/mutate.go`), which covers 5 of the 10 relevant write sites for free (plus every other label `applyLabelAdd` is used for — harmless unread map entries), and explicitly at the 5 direct `client.AddLabelToIssue` call sites in `engine/stages.go` that bypass `applyLabelAdd`.
+- **`engine.labelAppliedAt(item, owner, repo, label) (time.Time, error)`** — the shared read path. Checks `e.store.Get(...).LabelAppliedAt(label)` first; a non-zero hit returns immediately with zero REST calls. On a miss (cold start after a restart, or the label was most recently applied by a different engine instance — see the caveat below), it falls through to `e.client.FetchLabelAppliedAt` **unchanged** and self-heals the cache with the result, so later calls in the same process become free. Same `(time.Time, error)` signature and fail-open contract as `FetchLabelAppliedAt` itself — every one of the 9 read call sites (all of `engine/ci.go`, `engine/ci_settle.go`, `engine/reviews.go`, `engine/merge_gate.go` except `archive_done_settle.go`) was a pure substitution, no caller-side logic changed.
+
+### Correctness verified before implementation, not assumed
+
+Every one of the 10 write sites for the 4 target labels was individually read and confirmed to already guard on the label's *absence* (`!hasLabel(...)` or equivalent) before calling add — `ci.go:164/197`, `reviews.go:829/962` (via `holdLandingForReview`)/`1034`, `stages.go:146-151/234-240/287/402/417/454`. This means an unconditional `time.Now()` record at every write site is always a genuine new application, never a defensive idempotent re-add racing to overwrite a correct earlier timestamp with a spurious later one.
+
+### Options considered and rejected
+
+- **Reverse pagination** (request `Link: rel="last"` first, scan backward). Not implemented: Research's live measurement found it provides **zero improvement** on this repo's actual issue sizes (50–65 events, all ≤1 REST page either way), while adding real complexity — `restGetJSON` discards `*http.Response` entirely, so a new header-preserving client primitive would be needed, plus explicit fail-open handling for a missing/malformed `Link` header that must be distinguished from "definitely the only page." Record-at-write already makes the *recurring* cost zero; the only place reverse pagination would still matter is the one-time cold fetch per item-label per engine lifetime, which current forward pagination already handles adequately at measured sizes. Deferred as a follow-up if issue event counts start regularly exceeding ~100, not rejected as a bad idea.
+- **Poll-native GraphQL** (`timelineItems(itemTypes: LABELED_EVENT)` on the existing per-item `FetchItemDetails` deep-fetch query). Rejected: the issue explicitly required costing this against the GraphQL node budget specifically before selecting it — REST and GraphQL are separate, independently exhaustible pools, and the risk context at issue time (GraphQL budget exhausted 2026-08-01, shared budget down to ~700/5000 on 2026-08-02) meant moving cost onto the tighter pool was the wrong trade without a probe proving otherwise. No such probe was taken (deliberately, to avoid spending against an already-tight shared token during read-only Research). It also doesn't dodge the "filter after fetch" problem — `timelineItems` can't filter by label server-side any more than the REST events endpoint can — or the same recency-dependent cost profile as reverse pagination. Not worth the added complexity once record-at-write already solves the actual problem for free.
+- **Narrow `phase1Ctx`-threading fix** (thread the backstop's already-fetched value through to `checkCIGate`, scoped to the `fabrik:awaiting-ci`/`settleAwaitingCIScan` path only — the issue's originally-scoped option). Rejected as unnecessary, not merely deprioritized: record-at-write's shared cache achieves the identical de-duplication for the `ci_settle.go`/`ci.go` pair automatically (whichever runs first in a poll populates the cache; the other is a cache hit), plus covers the other 8 read call sites this narrower fix would have left untouched.
+
+### Two-engine-instance caveat (stated explicitly, per issue requirement)
+
+`LabelAppliedAt` is an in-process map. If two Fabrik instances ever manage the same repo concurrently, a label applied by instance A is invisible to instance B's cache — B falls through to `FetchLabelAppliedAt` (identical to today's pre-#1314 behavior, not a regression) for that item-label until B itself later re-applies it. The `fabrik:locked:<user>` label convention means a given item is normally driven end-to-end by one instance while locked, so this caveat mostly matters during a lock handoff or a genuinely concurrent multi-instance deployment against one repo — a configuration this codebase's label conventions anticipate but which was not confirmed to actually run in production. The design is fail-open in this case: worst case is the pre-#1314 REST cost for that one item, never an incorrect timestamp or a missed timeout.
+
+## Rationale
+
+### Why record-at-write over a TTL/invalidate-on-write cache?
+
+A TTL cache still requires deciding an expiry window and invalidating on removal. Since the engine is confirmed to be the *sole* applier of every label `FetchLabelAppliedAt` is called for, the exact timestamp is already known at the moment of the write — recording it then is strictly cheaper (no expiry bookkeeping) and strictly more correct (no staleness window) than any TTL scheme, and needs no invalidation logic at all: removal simply doesn't touch the cache, and the next genuine re-application overwrites it.
+
+### Why is a separate `LabelAppliedAt` map required instead of reusing `CooldownAt`?
+
+Because `CooldownAt` and `LabelAppliedAt` have opposite temporal semantics that happen to look similar (`map[string]time.Time`, one entry per reason/label). `CooldownAt` entries are *future* expiry times whose *past-ness* is the "fire" signal `HasExpiredCooldown` scans for; `LabelAppliedAt` entries are *past* apply times that are supposed to stay quietly past without triggering anything. Aliasing them would silently break `itemMayNeedWork`'s wake-up triage the moment the first label got recorded — a bug that unit tests targeting `CooldownAt`/`HasExpiredCooldown` in isolation would never catch, since the two maps only interact if merged. See `internal/itemstate/mutation_test.go`'s `TestLabelAppliedAtRecorded_DoesNotAliasCooldown` for the regression test pinning this.
+
+### Why not scope `recordLabelAppliedAtNow`'s call inside `applyLabelAdd` to only the 4 target labels?
+
+Because doing so buys nothing and adds a maintenance trap: every other label `applyLabelAdd` handles (`fabrik:paused`, `fabrik:editing`, etc.) simply accumulates an unread `LabelAppliedAt` entry, which costs one map write and is never consulted by anything. Scoping the call would mean a future label that *does* start needing this pattern requires remembering to add it to an allowlist inside `applyLabelAdd`, rather than the read side (`labelAppliedAt`) simply working the moment a write site starts calling `recordLabelAppliedAtNow` or routing through `applyLabelAdd`.
+
+## Consequences
+
+**Positive:**
+- Steady state (cache warm) is **0 REST calls/item/poll** for the 4 target labels, down from up to 2 (the exact duplication this issue was filed against) or more as issues accumulate events — versus reverse pagination's measured **0 improvement** at this repo's actual issue sizes.
+- The `settleAwaitingCIScan`/`checkCIGate` duplication that motivated this issue is eliminated as a side effect of the shared cache, without any `phase1Ctx` threading or new plumbing between the two call sites.
+- The fail-open contract and `(time.Time, error)` signature are preserved byte-for-byte at every one of the 9 substituted read call sites — no caller-side logic changed, only the cost behind the call.
+- "Most recent application" semantics survive record-at-write automatically: `LabelAppliedAtRecorded` always overwrites, and removal never touches the cache, so applied → removed → re-applied reads back the latest application, not the first. Regression-tested end-to-end through the real guarded write path (`classifyCIFromCheckRuns` → `removeAwaitingCILabel` → re-apply) in `engine/label_applied_at_test.go`.
+
+**Negative / Trade-offs:**
+- **Cold start (engine restart) still pays the full forward-paginated `FetchLabelAppliedAt` cost once per item-label**, exactly as before this change — this is the explicitly-required fallback, not a regression.
+- **Multi-instance deployments get no perf benefit for cross-instance label applications**, only same-instance ones. Documented as an accepted assumption above, not a silent gap; fail-open, never fail-closed.
+- **`stage:<name>:complete` (the 5th queried label) is unaddressed by this change** — its existing ADR-068 mitigation in `archive_done_settle.go` already bounds it to ≤1 fetch per item per engine lifetime, so this was judged not worth the risk of touching its 5 additional bypassing write sites for the marginal benefit of unifying it under the same mechanism.
+- **Reverse pagination and poll-native GraphQL are not implemented** — both remain available as follow-ups if issue event counts grow past ~100 (reverse pagination) or the GraphQL budget picture changes materially (poll-native), per the Rationale above.
+
+## Related Work
+
+- #1303 / PR #1309 — introduced the `CIWaitTimeout` backstop whose duplication this issue was filed against.
+- ADR-1270 — `settleAwaitingCIScan`, the settle-scan pattern the backstop is part of; unchanged by this fix.
+- ADR-068 — `archive_done_settle.go`'s `CooldownAt`-cached-eligible-at + per-poll-fetch-budget mitigation for `stage:<name>:complete`; the prior art this design's record-at-write approach builds on (cache a GitHub-sourced fact locally, bound the REST cost) while going one step further (recording exactly, at write time, rather than caching a computed value fetched lazily).
