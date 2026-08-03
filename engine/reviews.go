@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,27 @@ import (
 // because the guard is bot-agnostic: Phase 1 fires once per gate cycle for all
 // outstanding bots in one round. Must stay ≤50 chars (GitHub REST API limit).
 const botRepromptedLabel = "fabrik:bot-reprompted"
+
+// reviewBodyIDPrefix marks a synthetic gh.Comment derived from a PR review's
+// top-level body (Finding 4, #1375) rather than a real inline thread comment.
+// GitHub's REST reactions API has no endpoint for a pulls/.../reviews/{id}
+// object itself, so a review body has no ROCKET-reaction dedup backstop the
+// way a real thread comment does (acknowledgeComments/finalizeComments skip
+// reaction calls for DatabaseID==0 synthetics) — snap.CommentProcessed keyed
+// on this ID is the *only* idempotency guard (R7). The prefix is structurally
+// distinct from GraphQL node IDs (thread comments use those verbatim as ID),
+// so a synthetic body ID can never collide with a real comment ID. Also
+// doubles as the isReviewReinvoke/buildThreadEntries discriminator for a
+// review-reinvoke batch that mixes thread comments and review bodies.
+const reviewBodyIDPrefix = "review-body:"
+
+// reviewBodyCommentID derives the stable synthetic ID for review's top-level
+// body, keyed on PRReview.DatabaseID (the numeric PR review ID, already
+// fetched — see github/types.go). Stable across polls so snap.CommentProcessed
+// dedup (R7) actually works: the same review always produces the same ID.
+func reviewBodyCommentID(review gh.PRReview) string {
+	return reviewBodyIDPrefix + strconv.Itoa(review.DatabaseID)
+}
 
 // checkReviewGate inspects item.LinkedPRReviewRequests and item.LinkedPRReviews
 // to determine whether the review gate is blocking review reinvoke or stage
@@ -1111,6 +1133,93 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 		}
 		out = append(out, c)
 	}
+	return out
+}
+
+// buildReviewBodyComments returns synthetic gh.Comments derived from the
+// top-level body of each unaddressed PR review (Finding 4, #1375) —
+// buildReviewThreadComments only ever looks at inline thread comments, which
+// GitHub does not require, and misses the guaranteed part of a
+// CHANGES_REQUESTED/COMMENTED review: its body (see reviewGateAuthorityVerdict's
+// doc comment and GitHub's REST "Create a review for a pull request" contract).
+//
+// A review is skipped when:
+//   - DatabaseID == 0 (not yet fetched/unavailable — no stable ID to key
+//     dedup on)
+//   - State == "APPROVED" (a body here is typically "LGTM", not something to
+//     act on, and GitHub only *requires* a body for REQUEST_CHANGES/COMMENT)
+//   - State == "DISMISSED" (no longer an active verdict — mirrors
+//     reviewGateOutstanding's hasReviews computation)
+//   - Body == "" (nothing to act on)
+//   - already recorded via snap.CommentProcessed(reviewBodyCommentID(r)) — the
+//     only dedup mechanism available, since no GitHub reaction endpoint exists
+//     for a top-level review body (see reviewBodyIDPrefix's doc comment, R7)
+//
+// The returned gh.Comment carries DatabaseID: 0 and no ReviewThreadID — the
+// pre-existing "synthetic comment" escape hatch in acknowledgeComments/
+// finalizeComments (both already gate on DatabaseID == 0) skips reaction calls
+// for it automatically.
+func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
+	out := make([]gh.Comment, 0, len(item.LinkedPRReviews))
+	for _, r := range item.LinkedPRReviews {
+		if r.DatabaseID == 0 {
+			continue
+		}
+		if r.State == "APPROVED" || r.State == "DISMISSED" {
+			continue
+		}
+		if r.Body == "" {
+			continue
+		}
+		id := reviewBodyCommentID(r)
+		if !snap.CommentProcessed(id).IsZero() {
+			continue
+		}
+		out = append(out, gh.Comment{
+			ID:        id,
+			Author:    r.Author,
+			Body:      r.Body,
+			CreatedAt: time.Now(),
+		})
+	}
+	return out
+}
+
+// buildReviewFeedbackComments returns the full set of actionable review
+// feedback for a review-reinvoke dispatch: unresolved inline thread comments
+// (buildReviewThreadComments) plus unaddressed review bodies
+// (buildReviewBodyComments, Finding 4). This is the set dispatchReviewReinvoke
+// and handleReviewGate's reinvoke-before-block ordering (Finding 1) actually
+// dispatch on — buildReviewThreadComments alone is retained standalone because
+// its dedup/shape is also exercised independently by existing tests and the
+// #1207 auto-merge-disable guard's isOutdated-aware narrowing
+// (currentHeadReviewThreadComments).
+func (e *Engine) buildReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
+	out := e.buildReviewThreadComments(item)
+	out = append(out, e.buildReviewBodyComments(item)...)
+	return out
+}
+
+// currentHeadReviewFeedbackComments narrows buildReviewFeedbackComments to
+// comments safe to trigger the #1207 auto-merge-disable guard: current-head
+// thread comments (currentHeadReviewThreadComments) plus all review-body
+// comments.
+//
+// R8 decision: a review body has no thread and therefore no GitHub-computed
+// isOutdated signal — CommitID (the SHA a review was submitted against) is
+// only ever populated via the REST path (FetchPRReviews), not the GraphQL
+// latestReviews selection the default-branch path uses, so comparing it
+// against the PR's current head SHA would require a schema change. Every
+// review-body comment is therefore treated as always-current-head — an
+// explicit, documented simplification (see adrs/1375-review-authority-reinvoke-not-pause.md),
+// not an oversight. This is over-conservative, not unsafe: at worst it holds
+// auto-merge for a review body that actually targets a stale commit, which is
+// consistent with this file's established "block on unknown state" pattern.
+func (e *Engine) currentHeadReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
+	out := e.currentHeadReviewThreadComments(item)
+	out = append(out, e.buildReviewBodyComments(item)...)
 	return out
 }
 

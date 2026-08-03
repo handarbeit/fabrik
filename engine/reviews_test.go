@@ -1044,6 +1044,172 @@ func TestCurrentHeadReviewThreadComments_AllOutdatedReturnsEmpty(t *testing.T) {
 	}
 }
 
+// Finding 4 (#1375): buildReviewBodyComments must pick up a CHANGES_REQUESTED
+// review's body even when it has zero inline thread comments — the exact
+// shape GitHub's REST API guarantees (body required for REQUEST_CHANGES) and
+// the exact shape the e2e harness's SubmitPRReview produces.
+func TestBuildReviewBodyComments_ChangesRequestedWithBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 555},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:555" {
+		t.Errorf("expected synthetic ID review-body:555, got %q", comments[0].ID)
+	}
+	if comments[0].DatabaseID != 0 {
+		t.Errorf("expected synthetic comment to carry DatabaseID 0, got %d", comments[0].DatabaseID)
+	}
+	if comments[0].Body != "please fix the error handling" {
+		t.Errorf("expected body to be carried through, got %q", comments[0].Body)
+	}
+}
+
+// buildReviewBodyComments must skip a review with DatabaseID == 0 (not yet
+// fetched/unavailable — no stable ID to key dedup on).
+func TestBuildReviewBodyComments_SkipsZeroDatabaseID(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 0},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments for DatabaseID==0 review, got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip APPROVED reviews (a body there is
+// typically "LGTM", not something to act on) and DISMISSED reviews (no
+// longer an active verdict).
+func TestBuildReviewBodyComments_SkipsApprovedAndDismissed(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "APPROVED", Body: "LGTM!", DatabaseID: 601},
+			{Author: "bob", State: "DISMISSED", Body: "please fix this", DatabaseID: 602},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (APPROVED/DISMISSED skipped), got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip a review with an empty body — nothing to
+// act on.
+func TestBuildReviewBodyComments_SkipsEmptyBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "", DatabaseID: 701},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments for empty-body review, got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must dedup via snap.CommentProcessed keyed on the
+// synthetic review-body: ID (R7) — no GitHub reaction endpoint exists for a
+// top-level review body, so this is the only idempotency guard.
+func TestBuildReviewBodyComments_DedupViaCommentProcessed(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 801},
+		},
+	}
+
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 10, CommentID: "review-body:801", At: time.Now()})
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (already processed), got %d", len(comments))
+	}
+}
+
+// buildReviewFeedbackComments combines inline thread comments and review-body
+// comments into a single actionable set.
+func TestBuildReviewFeedbackComments_CombinesThreadAndBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "inline finding", ReviewThreadID: "RT_1"},
+		},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555},
+		},
+	}
+
+	comments := eng.buildReviewFeedbackComments(item)
+
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments (1 thread + 1 body), got %d", len(comments))
+	}
+}
+
+// currentHeadReviewFeedbackComments includes review-body comments
+// unconditionally (R8: no isOutdated signal exists for a body-only review)
+// alongside current-head thread comments, excluding outdated ones.
+func TestCurrentHeadReviewFeedbackComments_IncludesBodyRegardlessOfOutdated(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_stale", DatabaseID: 102, Author: "pruefer", Body: "stale finding", ReviewThreadID: "RT_stale", IsOutdated: true},
+		},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555},
+		},
+	}
+
+	comments := eng.currentHeadReviewFeedbackComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (body only — outdated thread excluded), got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:555" {
+		t.Errorf("expected the remaining comment to be the review body, got %q", comments[0].ID)
+	}
+}
+
 // (f3) catch-up loop skips dispatchReviewReinvoke when a goroutine is already
 // in-flight for the item, and does NOT increment ReviewCycles.
 func TestCatchUpLoop_InFlightGuard(t *testing.T) {
