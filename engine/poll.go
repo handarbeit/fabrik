@@ -246,8 +246,10 @@ func (e *Engine) Run() error {
 		stageNames = append(stageNames, s.Name)
 	}
 	if e.cfg.Repo != "" {
-		if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
-			e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+		if e.resolveRepoAccess(e.cfg.Owner, e.cfg.Repo).CanPush {
+			if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
+				e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+			}
 		}
 		e.mu.Lock()
 		e.seededRepos[e.cfg.Owner+"/"+e.cfg.Repo] = true
@@ -991,8 +993,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				continue
 			}
 			e.checkAllowAutoMerge(owner, repo)
-			if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
-				e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+			if e.resolveRepoAccess(owner, repo).CanPush {
+				if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
+					e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+				}
 			}
 			e.mu.Lock()
 			e.seededRepos[ownerRepo] = true

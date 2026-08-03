@@ -723,8 +723,8 @@ func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return false, nil
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -748,8 +748,8 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return true, nil
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -763,12 +763,78 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 	}
 }
 
+// TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning verifies AC2/R2: a repo
+// with no write access produces no allow_auto_merge warning even when
+// AllowAutoMerge is false — the unfixable-without-admin-rights warning must
+// not fire for a repo the operator can't administer at all.
+func TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: false}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("expected no WARNING for a repo with no write access, even with allow_auto_merge disabled; got: %q", out)
+	}
+	if strings.Contains(out, "gh api -X PATCH") {
+		t.Errorf("expected no admin-only remediation for a repo with no write access; got: %q", out)
+	}
+}
+
+// TestCheckAllowAutoMerge_NoWriteAccessClearsStaleWarning verifies that a
+// previously recorded allow_auto_merge warning is cleared, not left immortal,
+// when a later run finds the repo's write access has been revoked. Without
+// this, the !CanPush early return would skip past checkAllowAutoMerge's own
+// Clear branch forever, since checkedAutoMergeRepos never lets this function
+// re-run for the repo a second time in the same process (raised in PR review
+// on #1347).
+func TestCheckAllowAutoMerge_NoWriteAccessClearsStaleWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+
+	if err := warnings.Record(warnings.Entry{
+		Key:    "allow_auto_merge:owner/repo",
+		Type:   "allow_auto_merge",
+		Title:  "allow_auto_merge disabled on owner/repo",
+		Detail: "stale entry from a prior run when access was still present",
+	}); err != nil {
+		t.Fatalf("seeding stale warning: %v", err)
+	}
+
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: false}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	eng.checkAllowAutoMerge("owner", "repo")
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	for _, e := range entries {
+		if e.Key == "allow_auto_merge:owner/repo" {
+			t.Errorf("expected stale allow_auto_merge warning to be cleared once access is revoked; still present: %+v", e)
+		}
+	}
+}
+
 func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return false, errors.New("network error")
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{}, errors.New("network error")
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -778,7 +844,9 @@ func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 		eng.checkAllowAutoMerge("owner", "repo")
 	})
 
-	// No WARNING block should be emitted for an API error.
+	// No WARNING block should be emitted for an API error. A probe error fails
+	// open (CanPush: true, AllowAutoMerge: true), so no allow_auto_merge
+	// warning fires either.
 	if strings.Contains(out, "WARNING") {
 		t.Errorf("should not print WARNING on API error; got: %q", out)
 	}
@@ -789,9 +857,9 @@ func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	var callCount int
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
 			callCount++
-			return false, nil
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})

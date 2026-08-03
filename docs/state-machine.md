@@ -3356,6 +3356,7 @@ Shallow pre-filtering is a two-pass process that avoids the expensive `FetchItem
 |-------|-----------|
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
+| Repo write access | Repo not yet resolved by `resolveRepoAccess` (fail-open on "unknown"), OR resolved with `CanPush: true`. A repo cached with `CanPush: false` is never admitted, regardless of stage or status — see ADR-1347. Purely in-memory (no API call); the probe itself always runs earlier in the same poll cycle, in `poll()`'s seeding block. |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 

@@ -66,7 +66,7 @@ type mockGitHubClient struct {
 	enqueuePullRequestFn          func(owner, repo string, prNumber int, expectedHeadOID string) error
 	dequeuePullRequestFn          func(owner, repo string, prNumber int) error
 	fetchCommitsBehindFn          func(owner, repo, base, head string) (int, error)
-	fetchAllowAutoMergeFn         func(owner, repo string) (bool, error)
+	fetchRepoAccessFn             func(owner, repo string) (gh.RepoAccess, error)
 	fetchIssueFn                  func(owner, repo string, issueNumber int) (*gh.IssueData, error)
 	createPRFn                    func(owner, repo, title, head, base, body string) (int, error)
 	listPRsFn                     func(owner, repo string) ([]gh.PRDetails, error)
@@ -514,14 +514,14 @@ func (m *mockGitHubClient) FetchLatestRelease(owner, repo string) (*gh.LatestRel
 	return nil, nil
 }
 
-func (m *mockGitHubClient) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+func (m *mockGitHubClient) FetchRepoAccess(owner, repo string) (gh.RepoAccess, error) {
 	m.mu.Lock()
-	fn := m.fetchAllowAutoMergeFn
+	fn := m.fetchRepoAccessFn
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo)
 	}
-	return true, nil
+	return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
 }
 
 func (m *mockGitHubClient) FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error) {
