@@ -1557,6 +1557,29 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 			continue
 		}
+		// fabrik:paused means "a human must act before anything else happens" — that
+		// should suppress the per-item FetchItemDetails cost too, not just dispatch
+		// (#1379). Gated on !cycleSet[iKey], not on pause alone: item.Labels is always
+		// this poll's live snapshot (refreshed by the probe/webhook path independent of
+		// this gate), so removing fabrik:paused on GitHub is visible here on the very
+		// next poll with no extra plumbing (R2/AC2). cycleSet[iKey] guards the case
+		// where the item has genuinely changed (new comment, label mutation) — those
+		// changes land in cycleSet via the mayNeedWork observer and must still fetch so
+		// itemNeedsWork's human-comment-resume check (item.go) sees fresh item.Comments.
+		// The item is still appended to deepFetchCandidates (unfetched) so downstream
+		// consumers that only need list membership — runValidatePRTerminalAdvance's
+		// merged-while-paused self-heal (ADR-056 D2) and settleRevalidateScan's FR-5
+		// guarantee — are unaffected; only the FetchItemDetails call itself is skipped.
+		if hasLabel(board.Items[i].Labels, "fabrik:paused") && !cycleSet[iKey] {
+			repo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
+			if _, snapErr := e.store.Get(repo, board.Items[i].Number); snapErr == nil {
+				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
+				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
+				continue
+			}
+			// Not yet in the store (first sighting): fall through and fetch once to
+			// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
+		}
 		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
 		} else {
