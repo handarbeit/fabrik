@@ -660,8 +660,20 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 // mergeEnv builds a subprocess environment from base (typically os.Environ()),
 // with overrides applied on top. Keys present in overrides are removed from
 // base first so that overrides take effect even when the base already contains
-// the same key (Go's os/exec does not deduplicate; first-occurrence wins on
-// POSIX systems, so appending alone is not sufficient).
+// the same key (Go's os/exec does not deduplicate on its own; if a key
+// appeared twice in cmd.Env, the value from the *last* occurrence wins, so
+// stripping the base entry before appending the override is what guarantees
+// the override — not the append order alone).
+//
+// An override entry may take one of two forms:
+//   - "KEY=VALUE" — the normal add/shadow form. KEY is stripped from base (if
+//     present) and "KEY=VALUE" is appended to the result.
+//   - "KEY" (no "=") — a removal-only sentinel. KEY is stripped from base (if
+//     present) and nothing is appended in its place. This is distinct from
+//     "KEY=" (an intentional empty value, which IS appended — see
+//     buildClaudeEnv's FABRIK_REPO handling) and is how a caller expresses
+//     "remove this key from whatever the subprocess would otherwise inherit,
+//     full stop" with no replacement value of its own.
 func mergeEnv(base, overrides []string) []string {
 	if len(overrides) == 0 {
 		return base
@@ -670,16 +682,24 @@ func mergeEnv(base, overrides []string) []string {
 	for _, kv := range overrides {
 		if i := strings.IndexByte(kv, '='); i > 0 {
 			keys[kv[:i]] = true
+		} else if i < 0 && kv != "" {
+			keys[kv] = true // bare removal sentinel
 		}
 	}
 	result := make([]string, 0, len(base)+len(overrides))
 	for _, kv := range base {
 		if i := strings.IndexByte(kv, '='); i > 0 && keys[kv[:i]] {
-			continue // overrides provides this key
+			continue // overrides provides or removes this key
 		}
 		result = append(result, kv)
 	}
-	return append(result, overrides...)
+	for _, kv := range overrides {
+		if strings.IndexByte(kv, '=') < 0 {
+			continue // removal sentinel only — nothing to append
+		}
+		result = append(result, kv)
+	}
+	return result
 }
 
 // probeClaudeNameFlagSupport runs `claude --help` once with a short timeout to
