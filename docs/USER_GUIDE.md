@@ -1155,11 +1155,9 @@ The `Closes #N` first line links the PR to the issue so Fabrik can discover PR c
 
 ### How do I ask Fabrik to change something on an open PR?
 
-Leave an **inline review thread comment** on the specific line(s) you want changed — start a review on the PR, comment on the relevant diff lines, and submit it. Fabrik picks up unresolved inline thread comments and re-invokes the stage agent to address them, commit, and push.
+Leave an **inline review thread comment** on the specific line(s) you want changed, or write your feedback in the **top-level review body** — start a review on the PR (either commenting on specific diff lines, or just writing a summary, or both) and submit it. Fabrik picks up unresolved inline thread comments and unaddressed review bodies (for `CHANGES_REQUESTED`/`COMMENT` reviews — an `APPROVED` review's body is not treated as feedback to act on) and re-invokes the stage agent to address them, commit, and push.
 
-**Top-level PR review bodies are ignored.** A review submitted with only a general summary comment — no inline thread comments on specific lines — provides nothing for Fabrik to act on, even if it says things like "please also handle X." The feedback has to be attached to a line via an inline thread comment.
-
-This works **regardless of `wait_for_reviews`** — re-invocation from inline thread comments is unconditional, not gated behind that setting. See [Pending Reviewer Gate](#pending-reviewer-gate) for the full mechanism, including how this interacts with auto-advance and the `fabrik:awaiting-review` label.
+This works **regardless of `wait_for_reviews`** — re-invocation from review feedback is unconditional, not gated behind that setting. See [Pending Reviewer Gate](#pending-reviewer-gate) for the full mechanism, including how this interacts with auto-advance and the `fabrik:awaiting-review` label.
 
 ### Retry and Escalation
 
@@ -1474,15 +1472,15 @@ The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
 2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates the dual condition: the gate clears only when no requested reviewers are outstanding **and** at least one review has been submitted. Requiring at least one review (not just an empty pending list) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhook without ever appearing in the formal requested-reviewer list — if only the pending list were checked, the gate would race through while bots were still processing. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
-3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review`, and the cycle returns to Phase 2 until the gate clears again under the same dual condition — no requested reviewers outstanding **and** at least one review submitted — or, if that does not happen before the wait limit, Fabrik falls back to `fabrik:awaiting-input`. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with submitted inline feedback, regardless of `wait_for_reviews` (when the gate is off, Phases 1–2 above simply never run, and Fabrik goes straight to this Phase 3 dispatch) and regardless of whether auto-advance is active.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present — or, under `review_authority: authoritative`, even while the verdict itself is still unresolved (see [Authoritative Mode](#authoritative-mode)) — Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved review feedback as input: unresolved inline review thread comments, **and** the top-level body of any review that has one (a `CHANGES_REQUESTED`/`COMMENT` review is guaranteed by GitHub to have a body; this is what lets a reviewer's written explanation trigger a re-invocation on its own, with no inline comments needed). Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments); a review body carries no such location context, just the reviewer's text. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review`, and the cycle returns to Phase 2 until the gate clears again under the same dual condition — no requested reviewers outstanding **and** at least one review submitted — or, if that does not happen before the wait limit, Fabrik falls back to `fabrik:awaiting-input`. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with submitted inline feedback, regardless of `wait_for_reviews` (when the gate is off, Phases 1–2 above simply never run, and Fabrik goes straight to this Phase 3 dispatch) and regardless of whether auto-advance is active.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
 
-#### No Inline-Thread Feedback Skip
+#### No Actionable Feedback Skip
 
-If a submitted-review batch leaves no unresolved inline PR review thread comments to process, Fabrik skips re-invocation entirely and advances the issue normally. Top-level review bodies are ignored for this decision, so a review body containing text like "APPROVED" does not trigger re-invocation unless there is unresolved line-level thread feedback to address.
+If a submitted-review batch leaves nothing unresolved to process — no inline PR review thread comments **and** no unaddressed review body — Fabrik skips re-invocation entirely and advances the issue normally. An `APPROVED` or `DISMISSED` review's body is not treated as actionable regardless of its text (a body on an approval is typically "LGTM," not feedback to act on), so a bare approval does not trigger re-invocation on its own. A `CHANGES_REQUESTED` or `COMMENT` review's body, however, is always treated as actionable when non-empty — which, per GitHub's own requirement that those verdicts carry a body, means such a review always triggers re-invocation even with zero inline thread comments.
 
-This prevents spurious re-invocation cycles when reviews contain no actionable inline thread feedback for the agent to address.
+This prevents spurious re-invocation cycles when reviews contain no actionable feedback (inline or written) for the agent to address, while still catching the common case of a reviewer who writes an explanation but leaves no inline comments.
 
 #### PR Summary Comment
 
@@ -1567,6 +1565,8 @@ In `authoritative` mode, the gate additionally requires:
 
 This applies at **both** decision points: the stage-advance gate (the mechanism described above) and the landing/auto-merge gate at Validate completion — a `CHANGES_REQUESTED` review blocks auto-merge under `yolo`, not just stage advancement.
 
+**`authoritative` governs merging, never working.** An unresolved `CHANGES_REQUESTED` does not make Fabrik sit idle waiting for a human to resolve it — Fabrik re-invokes the stage to address the reviewer's feedback (both inline PR comments and the review's own written explanation), pushes a fix, and waits for the reviewer to re-review. This is the same "review reinvoke" mechanism described above for the default (advisory) mode; `authoritative` does not disable it. The reinvoke loop is bounded by `FABRIK_MAX_REVIEW_CYCLES` exactly as before — if a reviewer keeps requesting changes past that limit, *then* Fabrik pauses for a human (see below). Pausing is the fallback for a loop that fails to converge, not the first response to a change request.
+
 **`yolo`/`cruise` never bypass an authoritative gate.** They still control *when* Fabrik acts once the gate is satisfied — not *whether* it's satisfied:
 
 | Mode | Behavior |
@@ -1575,7 +1575,7 @@ This applies at **both** decision points: the stage-advance gate (the mechanism 
 | `authoritative` + `yolo` | Auto-merge fires as soon as `CHANGES_REQUESTED` is cleared and required approvals are met — no human click needed for the merge itself, but Fabrik waits for a still-blocking verdict rather than forcing through it. |
 | `authoritative` + `cruise` | Cruise's existing "stop before auto-merge" behavior is unaffected — a cruise item never reaches the authoritative check at all. |
 
-If the verdict never resolves — an unfixable review finding, or a required human who never approves — the issue falls into the same pause-for-human path as an unresponsive reviewer: the existing `FABRIK_MAX_REVIEW_CYCLES` / `FABRIK_REVIEW_WAIT_TIMEOUT` machinery above applies unchanged. There is no separate timeout or cycle limit for authoritative mode.
+If the verdict never resolves — an unfixable review finding, or a required human who never approves — Fabrik keeps reinvoking on each new round of feedback (the primary response, above) until `FABRIK_MAX_REVIEW_CYCLES` is reached, at which point it pauses for a human. There is no separate cycle limit for authoritative mode — it reuses the same `FABRIK_MAX_REVIEW_CYCLES` bound advisory mode's review reinvoke already has. A plain "reviewer hasn't responded at all yet" block (nothing to reinvoke on) still falls back to the existing `FABRIK_REVIEW_WAIT_TIMEOUT` pause, unchanged.
 
 `review_authority` defaults to `advisory` (equivalent to leaving it unset) — existing repos and stages are unaffected until you opt in.
 
