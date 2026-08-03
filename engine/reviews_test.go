@@ -1245,6 +1245,56 @@ func TestBuildReviewBodyComments_SkipsApprovedAndDismissed(t *testing.T) {
 	}
 }
 
+// buildReviewBodyComments must skip COMMENTED reviews even though they carry
+// a non-empty body (Pruefer review finding, #1375). Automated reviewers like
+// Copilot routinely submit a COMMENTED review whose body is a generic
+// "Pull request overview" summary with zero inline comments — treating that
+// as actionable feedback would trigger a reinvoke/Claude invocation on every
+// wait_for_reviews stage (advisory included, not just authoritative), far
+// beyond a CHANGES_REQUESTED verdict's scope. reviewGateAuthorityVerdict draws
+// the identical line — only CHANGES_REQUESTED blocks its fallback verdict.
+func TestBuildReviewBodyComments_SkipsCommented(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "copilot-pull-request-reviewer", State: "COMMENTED", Body: "## Pull request overview\n\nLGTM.", DatabaseID: 603},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (COMMENTED skipped), got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip a PENDING review — a draft review not yet
+// submitted (Pruefer review finding, #1375). The actionable-state check is an
+// allow-list (State == "CHANGES_REQUESTED" only, not a APPROVED/DISMISSED
+// deny-list), so PENDING — and any other state neither data source is
+// documented to return here — is excluded structurally, not by relying on it
+// never occurring in practice.
+func TestBuildReviewBodyComments_SkipsPending(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "PENDING", Body: "draft, not submitted yet", DatabaseID: 604},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (PENDING skipped), got %d", len(comments))
+	}
+}
+
 // buildReviewBodyComments must skip a review with an empty body — nothing to
 // act on.
 func TestBuildReviewBodyComments_SkipsEmptyBody(t *testing.T) {

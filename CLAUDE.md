@@ -154,10 +154,12 @@ review_authority: authoritative # Optional: advisory (default) | authoritative. 
                                 # computation otherwise. Governs MERGING, never WORKING: an unresolved
                                 # CHANGES_REQUESTED does not make Fabrik sit idle — it reinvokes the stage
                                 # to address the reviewer's feedback (both inline thread comments and the
-                                # review's top-level body, which GitHub requires non-empty for
-                                # REQUEST_CHANGES/COMMENT), bounded by MaxReviewCycles, with
-                                # pauseForReviewCycleLimit as the terminal fallback only if the loop never
-                                # converges — never as the first response to a change request. yolo/cruise
+                                # body of any CHANGES_REQUESTED review, which GitHub requires non-empty;
+                                # COMMENTED review bodies are deliberately excluded, since automated
+                                # reviewers routinely submit a generic summary as one), bounded by
+                                # MaxReviewCycles, with pauseForReviewCycleLimit as the terminal fallback
+                                # only if the loop never converges — never as the first response to a
+                                # change request. yolo/cruise
                                 # never bypass an authoritative gate's MERGE decision — they still control
                                 # auto-advance/auto-merge timing, only once the gate itself is satisfied.
                                 # See ADR-1250, ADR-1375.

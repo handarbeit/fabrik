@@ -85,12 +85,14 @@ with those values, not in `checkReviewGate` itself. This preserves ADR-1250's
 adds a second predicate for what "satisfied" means, it only changes when the *existing*
 predicate's blocked state is allowed to produce a pause versus a reinvoke.
 
-**The reinvoke set now includes review bodies, not only thread comments.**
-`buildReviewBodyComments` (`engine/reviews.go`) is new, additive alongside the
-unmodified `buildReviewThreadComments`: it turns each unaddressed review's top-level
-body into a synthetic `gh.Comment`, skipping `APPROVED` and `DISMISSED` reviews (a body
-there is not something to act on), reviews with an empty body, and reviews with
-`DatabaseID == 0` (no stable ID to key dedup on).
+**The reinvoke set now includes review bodies, not only thread comments — scoped to
+`CHANGES_REQUESTED` only.** `buildReviewBodyComments` (`engine/reviews.go`) is new,
+additive alongside the unmodified `buildReviewThreadComments`: it turns each
+unaddressed `CHANGES_REQUESTED` review's top-level body into a synthetic
+`gh.Comment`, skipping any other state — `APPROVED` and `DISMISSED` (a body there is
+not something to act on) and `COMMENTED` (see the dedicated Consequences paragraph
+below) — plus reviews with an empty body, and reviews with `DatabaseID == 0` (no
+stable ID to key dedup on).
 `buildReviewFeedbackComments`/`currentHeadReviewFeedbackComments` are additive
 combinators (thread comments + body comments) that `handleReviewGate` and
 `dispatchReviewReinvoke` now dispatch on, in place of the thread-only functions.
@@ -246,6 +248,27 @@ reinvoke-feedback path, so this is safe. `checkReviewGate`'s three existing bool
 values are unchanged — only a fourth value was appended — so none of its own extensive
 unit-test coverage of `blocked`/`timedOut`/`terminated` needed to change, only mechanical
 updates to each test's destructuring to also capture (and discard) the new value.
+
+**`COMMENTED` reviews excluded from body actionability, despite also carrying a
+guaranteed body (found in review by Pruefer).** The first draft treated any review
+state other than `APPROVED`/`DISMISSED` as actionable — which includes `COMMENTED`,
+since GitHub also requires a body for `event: COMMENT`. In practice, automated
+reviewers (Copilot's `copilot-pull-request-reviewer`, Gemini) routinely submit a
+`COMMENTED` review whose body is a generic "Pull request overview" summary with zero
+inline comments — under the pre-fix code this produced no signal at all
+(`buildReviewThreadComments` only looked at inline comments), but the first draft of
+this fix would have picked it up as actionable feedback and dispatched a full
+`dispatchReviewReinvoke`/Claude invocation on it. Because `buildReviewBodyComments` is
+consulted from `handleReviewGate` unconditionally — for every `wait_for_reviews`
+stage, `advisory` included, not just `authoritative` — this would have been a much
+larger behavioral and cost change than this issue's stated problem (authoritative
+mode blocking indefinitely on `CHANGES_REQUESTED`): a new class of reinvoke, and a new
+per-poll Claude invocation cost, triggered by a review verdict that carries no signal
+Fabrik needs to act on. Fixed by narrowing the actionable-state check to
+`State == "CHANGES_REQUESTED"` only, matching the line `reviewGateAuthorityVerdict`
+already draws for its own fallback verdict (only an active `CHANGES_REQUESTED` blocks
+it). `TestBuildReviewBodyComments_SkipsCommented` (`engine/reviews_test.go`) pins this
+with the exact Copilot-summary shape.
 
 ## Alternatives Considered
 

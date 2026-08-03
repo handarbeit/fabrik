@@ -120,6 +120,17 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// on, so it resolves fresh via the no-arg buildReviewFeedbackComments.
 	syntheticComments := e.buildReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews)
 	if len(syntheticComments) > 0 {
+		// Observability (Pruefer review finding, #1375): when timedOut is also
+		// true here, checkAwaitingReviewTimeout has already removed
+		// fabrik:awaiting-review as its own side effect, but the reinvoke below
+		// — not pauseForReviewTimeout — is what actually happens. Without this
+		// line, a real ReviewWaitTimeout elapsing produces no visible signal in
+		// the logs; only the eventual MaxReviewCycles pause would. blocked is
+		// not logged the same way — it is the common, expected steady state
+		// while a reinvoke is outstanding, not a noteworthy transition.
+		if timedOut {
+			e.logf(pctx.item.Number, "review-gate", "review wait timeout reached, but actionable feedback exists — dispatching reinvoke instead of pausing\n")
+		}
 		// #1207 guard 2: an item already in the GitHub auto-merge convergence
 		// flow (fabrik:auto-merge-enabled present) that has grown fresh
 		// unresolved feedback on its current head must have auto-merge disabled
