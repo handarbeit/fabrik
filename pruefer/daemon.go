@@ -40,8 +40,13 @@ type Daemon struct {
 	// Clients maps each watched-repo owner to the GitHubLister whose token
 	// is scoped to that owner's App installation — installation tokens are
 	// strictly owner-scoped, so using the wrong one is a 403, not a soft
-	// failure (see AuthSet/BootstrapMulti in auth.go). Every owner present
-	// in Config.WatchedRepos must have an entry.
+	// failure (see internal/githubauth.Reconcile). An owner present in
+	// Config.WatchedRepos may still be missing an entry — e.g. the App
+	// hasn't been installed on that account yet. Reconcile runs once, at
+	// startup, only — this map is never refreshed afterward — so a missing
+	// entry does not resolve itself; the operator must install the App
+	// (Reconcile logs the guided-install URL) and then restart Pruefer.
+	// See the poll() nil-check below.
 	Clients  map[string]GitHubLister
 	Claude   ClaudeInvoker
 	Clone    CloneFunc
@@ -59,6 +64,16 @@ type Daemon struct {
 	// ReviewPR's decision logic: every emit call here wraps ReviewPR from
 	// the outside, never alters its inputs, return value, or control flow.
 	Emit func(ptui.Event)
+
+	// preAcquiredLock, when set, is an already-open, already-flocked lock
+	// file Run should use instead of acquiring its own — see Execute's
+	// call site, which must hold this same lock across
+	// githubauth.Reconcile (not just the poll loop) so two concurrently
+	// started Pruefer processes can't both race through App
+	// bootstrap/self-heal at once. nil (the default, and what every
+	// existing test constructs) preserves Run's original
+	// self-contained acquire-then-release behavior exactly.
+	preAcquiredLock *os.File
 }
 
 // emit is a nil-checked convenience wrapper around d.Emit.
@@ -76,35 +91,68 @@ func (d *Daemon) lockPath() string {
 	return filepath.Join(dir, ".pruefer", "pruefer.lock")
 }
 
-// Run acquires an exclusive file lock (preventing two Pruefer instances from
-// double-polling the same watched repos, mirroring engine/poll.go's
-// Engine.Run) and polls on Config.PollInterval until ctx is cancelled.
-func (d *Daemon) Run(ctx context.Context) (err error) {
-	lockPath := d.lockPath()
+// acquireLock opens (creating if needed) and non-blockingly, exclusively
+// flocks .pruefer/pruefer.lock under fabrikDir ("" defaults to "."),
+// returning the open, locked file for the caller to release via
+// releaseLock when done. Extracted so Execute can hold the same lock across
+// githubauth.Reconcile (which mutates on-disk credentials and can talk to
+// GitHub) and not just Daemon.Run's poll loop — see Daemon.preAcquiredLock
+// and this function's call sites in both places.
+func acquireLock(fabrikDir string) (*os.File, error) {
+	dir := fabrikDir
+	if dir == "" {
+		dir = "."
+	}
+	lockPath := filepath.Join(dir, ".pruefer", "pruefer.lock")
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
-		return fmt.Errorf("creating lock dir: %w", err)
+		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return fmt.Errorf("opening lock file %s: %w", lockPath, err)
+		return nil, fmt.Errorf("opening lock file %s: %w", lockPath, err)
 	}
-	// A failed Close on a writable handle can mean a lost write (though the
-	// lock file's own contents are never written to — this guards against
-	// the general case). Surface it as the function's error when nothing
-	// else already failed; otherwise log it so it isn't silently dropped.
-	defer func() {
-		if cerr := lockFile.Close(); cerr != nil {
-			if err == nil {
-				err = fmt.Errorf("closing lock file %s: %w", lockPath, cerr)
-			} else {
-				logf(0, "poll", "closing lock file %s after prior error: %v\n", lockPath, cerr)
-			}
-		}
-	}()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
+		if closeErr := lockFile.Close(); closeErr != nil {
+			return nil, fmt.Errorf("another pruefer instance is already running (lock file: %s), and closing our own handle to it also failed: %v", lockPath, closeErr)
+		}
+		return nil, fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return lockFile, nil
+}
+
+// releaseLock unlocks and closes a *os.File returned by acquireLock.
+func releaseLock(lockFile *os.File) error {
+	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return lockFile.Close()
+}
+
+// Run acquires an exclusive file lock (preventing two Pruefer instances from
+// double-polling the same watched repos, mirroring engine/poll.go's
+// Engine.Run) — unless d.preAcquiredLock is already set, in which case Run
+// uses that instead of acquiring (or releasing) its own — and polls on
+// Config.PollInterval until ctx is cancelled.
+func (d *Daemon) Run(ctx context.Context) (err error) {
+	lockFile := d.preAcquiredLock
+	if lockFile == nil {
+		lockFile, err = acquireLock(d.FabrikDir)
+		if err != nil {
+			return err
+		}
+		// A failed Close on a writable handle can mean a lost write (though
+		// the lock file's own contents are never written to — this guards
+		// against the general case). Surface it as the function's error
+		// when nothing else already failed; otherwise log it so it isn't
+		// silently dropped.
+		defer func() {
+			if cerr := releaseLock(lockFile); cerr != nil {
+				if err == nil {
+					err = fmt.Errorf("releasing lock file %s: %w", d.lockPath(), cerr)
+				} else {
+					logf(0, "poll", "releasing lock file %s after prior error: %v\n", d.lockPath(), cerr)
+				}
+			}
+		}()
+	}
 
 	interval := d.Config.PollInterval
 	if interval <= 0 {
@@ -144,13 +192,15 @@ func (d *Daemon) poll(ctx context.Context) {
 			logf(0, "warn", "skipping malformed watched repo %q (want owner/repo)\n", repoSpec)
 			continue
 		}
-		client, ok := d.Clients[owner]
+		client, ok := d.Clients[strings.ToLower(owner)]
 		if !ok {
-			// Should not happen: BootstrapMulti validates every watched
-			// owner has a resolved installation before the daemon starts.
-			// Defensive skip rather than a nil-pointer panic if it ever
-			// does (e.g. a hand-built Daemon in a future caller).
-			logf(0, "warn", "no client for owner %q (repo %s) — skipping this repo this cycle\n", owner, repoSpec)
+			// Expected when an owner has no resolved App installation (see
+			// internal/githubauth.Reconcile, which already logged a guided-
+			// install URL for this owner at startup). Reconcile does not
+			// re-run after startup, so this is not transient: it recurs
+			// every poll cycle until the operator installs the App and
+			// restarts Pruefer. Skip rather than panic.
+			logf(0, "warn", "no client for owner %q (repo %s) — install the GitHub App on %q, then restart Pruefer to pick it up; skipping this repo until then\n", owner, repoSpec, owner)
 			continue
 		}
 		repoName := owner + "/" + repo
@@ -196,7 +246,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	wg.Wait()
 
 	for _, owner := range distinctOwners(d.Config.WatchedRepos) {
-		client, ok := d.Clients[owner]
+		client, ok := d.Clients[strings.ToLower(owner)]
 		if !ok {
 			continue
 		}
@@ -215,4 +265,34 @@ func splitOwnerRepo(spec string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// distinctOwners returns the distinct owners of every well-formed
+// "owner/repo" entry in watchedRepos, in first-seen order. Malformed entries
+// are skipped here — poll() already logs and skips them independently.
+//
+// Dedup is case-insensitive (keyed on the lower-cased owner, keeping the
+// first-seen literal casing in the result), mirroring
+// internal/githubauth's distinctOwnersLogging: GitHub org/user logins are
+// case-insensitive, so "MyOrg/repo1" and "myorg/repo2" name the same
+// account. d.Clients (built by execute.go from this same function) is
+// itself keyed by lower-cased owner for the same reason — an exact-case
+// dedup here would produce a second "distinct" owner with no corresponding
+// d.Clients entry, silently dropping that repo from every poll cycle.
+func distinctOwners(watchedRepos []string) []string {
+	seen := make(map[string]bool)
+	var owners []string
+	for _, spec := range watchedRepos {
+		owner, _, ok := splitOwnerRepo(spec)
+		if !ok {
+			continue
+		}
+		key := strings.ToLower(owner)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		owners = append(owners, owner)
+	}
+	return owners
 }

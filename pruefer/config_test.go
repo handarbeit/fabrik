@@ -43,6 +43,12 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if cfg.AppPrivateKeyPath != DefaultPrivateKeyPath {
 		t.Errorf("AppPrivateKeyPath = %q, want %q", cfg.AppPrivateKeyPath, DefaultPrivateKeyPath)
 	}
+	if cfg.AppStatePath != DefaultAppStatePath {
+		t.Errorf("AppStatePath = %q, want %q", cfg.AppStatePath, DefaultAppStatePath)
+	}
+	if cfg.NoBrowser {
+		t.Errorf("NoBrowser = true, want false (default)")
+	}
 	if len(cfg.WatchedRepos) != 0 {
 		t.Errorf("WatchedRepos = %v, want empty", cfg.WatchedRepos)
 	}
@@ -274,6 +280,49 @@ func TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue(t *testing.T
 
 	if _, err := LoadConfig([]string{"-config", path}); err == nil {
 		t.Fatal("LoadConfig: expected an error for an unrecognized request_changes_threshold value, got nil")
+	}
+}
+
+func TestLoadConfig_AppStatePathAndNoBrowserPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+github_app_state_path: /yaml/app-state.json
+no_browser: true
+`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppStatePath != "/yaml/app-state.json" {
+		t.Errorf("AppStatePath = %q, want /yaml/app-state.json (from YAML)", cfg.AppStatePath)
+	}
+	if !cfg.NoBrowser {
+		t.Errorf("NoBrowser = false, want true (from YAML)")
+	}
+
+	t.Setenv("PRUEFER_GITHUB_APP_STATE_PATH", "/env/app-state.json")
+	t.Setenv("PRUEFER_NO_BROWSER", "false")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppStatePath != "/env/app-state.json" {
+		t.Errorf("AppStatePath = %q, want /env/app-state.json (env should override YAML)", cfg.AppStatePath)
+	}
+	if cfg.NoBrowser {
+		t.Errorf("NoBrowser = true, want false (env should override YAML)")
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-github-app-state-path", "/flag/app-state.json", "-no-browser"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppStatePath != "/flag/app-state.json" {
+		t.Errorf("AppStatePath = %q, want /flag/app-state.json (flag should override env)", cfg.AppStatePath)
+	}
+	if !cfg.NoBrowser {
+		t.Errorf("NoBrowser = false, want true (flag should override env)")
 	}
 }
 

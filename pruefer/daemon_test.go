@@ -234,7 +234,10 @@ func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
 	}
 
 	d := &Daemon{
-		Clients: map[string]GitHubLister{"ownerA": clientA, "ownerB": clientB},
+		// Clients is keyed by lower-cased owner — see distinctOwners' and
+		// poll()'s doc comments for why (execute.go, the real caller,
+		// always lower-cases when populating this map).
+		Clients: map[string]GitHubLister{"ownera": clientA, "ownerb": clientB},
 		Claude:  claude,
 		Clone:   clone,
 		Config: Config{
@@ -356,6 +359,19 @@ func TestSplitOwnerRepo(t *testing.T) {
 		owner, repo, ok := splitOwnerRepo(tc.spec)
 		if ok != tc.wantOK || owner != tc.wantOwner || repo != tc.wantRepo {
 			t.Errorf("splitOwnerRepo(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.spec, owner, repo, ok, tc.wantOwner, tc.wantRepo, tc.wantOK)
+		}
+	}
+}
+
+func TestDistinctOwners(t *testing.T) {
+	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
+	want := []string{"a", "b"}
+	if len(got) != len(want) {
+		t.Fatalf("distinctOwners = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("distinctOwners[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }
