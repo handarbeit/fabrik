@@ -755,6 +755,39 @@ func WaitForLogLine(t *testing.T, env *Env, substring string, startOffset int64,
 	return ""
 }
 
+// tryLogLineContaining does a single, non-fatal scan of the test bed's
+// fabrik.log starting at startOffset for a line containing substring —
+// unlike WaitForLogLine, it does not wait/retry and does not fail the test;
+// it returns ("", nil) if no matching line is present yet. Used to assert the
+// *absence* of a log line over a bounded settle window (e.g. AC7's "did not
+// re-dispatch" check), where WaitForLogLine's fail-on-timeout semantics are
+// the wrong shape — the caller wants "confirm this didn't happen," not "wait
+// until it does."
+func tryLogLineContaining(env *Env, substring string, startOffset int64) (string, error) {
+	f, err := os.Open(env.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		return "", err
+	}
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadString('\n')
+		if strings.Contains(line, substring) {
+			return line, nil
+		}
+		if err != nil {
+			return "", nil
+		}
+	}
+}
+
 // ── small internals ────────────────────────────────────────────────────────
 
 func getenvOr(key, fallback string) string {
@@ -1355,6 +1388,24 @@ func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
 	n, err := strconv.Atoi(strings.TrimSpace(val))
 	if err != nil {
 		t.Fatalf("FABRIK_MAX_CI_FIX_CYCLES in %s is not an integer: %q", envFile, val)
+	}
+	return n
+}
+
+// readEnvFileMaxReviewCycles reads FABRIK_MAX_REVIEW_CYCLES from the test
+// bed's .env file. Returns 5 (the engine default) if the key is absent.
+// Fails the test if the key is present but not a valid integer.
+func readEnvFileMaxReviewCycles(t *testing.T, env *Env) int {
+	t.Helper()
+	envFile := filepath.Join(env.FabrikTestDir, ".env")
+	val, err := readEnvFileValue(envFile, "FABRIK_MAX_REVIEW_CYCLES")
+	if err != nil {
+		// Key absent — return engine default.
+		return 5
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil {
+		t.Fatalf("FABRIK_MAX_REVIEW_CYCLES in %s is not an integer: %q", envFile, val)
 	}
 	return n
 }
