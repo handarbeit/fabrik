@@ -174,10 +174,33 @@ Rules:
 - `FABRIK_SPAWN_CHILD_BEGIN` and `FABRIK_SPAWN_CHILD_END` must each be on their own line
 - The `owner/repo` follows `BEGIN` on the same line, separated by a space
 - `TITLE:` must be the first non-empty line after `BEGIN`
-- Body starts after a blank line following the title, and continues until `END`
+- Body starts after a blank line following the title (or after `DEPENDS_ON:`, when present), and continues until `END`
 - Scope each block to only the work belonging to that repo/unit; provide enough context for autonomous operation
 
 **These blocks are preserved in the Plan comment** — they are not stripped. The engine reads them at Implement time.
+
+#### Declaring sibling ordering with `DEPENDS_ON`
+
+When a decomposition produces **sequentially dependent** slices — the common case for a single-repo feature split done for PR hygiene — declare that ordering with an optional `DEPENDS_ON:` header, instead of writing "Depends on: Slice N" in prose. Prose is invisible to the engine's dependency gate; `DEPENDS_ON:` is not.
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Retry-same-input: turn-attempt capture (slice 3/4)
+DEPENDS_ON: 2
+
+Full scoped spec body...
+FABRIK_SPAWN_CHILD_END
+```
+
+Rules:
+- `DEPENDS_ON:` is optional. Omit it entirely for independent (parallel) siblings — this is unchanged, default behavior.
+- When present, `DEPENDS_ON:` must be the line **immediately after** `TITLE:`, with no blank line between them.
+- The value is a **1-based index into this Plan output's own block list** — `DEPENDS_ON: 2` means "block 2, in the order you emitted the blocks in this comment," not an issue number (children don't have issue numbers yet when Plan runs).
+- References must be **forward-only**: a block may only depend on a strictly earlier block (`DEPENDS_ON: 2` is valid on block 3 or later, never on block 1 or 2). This makes dependency cycles structurally impossible — no need to check your own ordering for loops.
+- An out-of-range or non-forward index is a **hard error at spawn time** — the parent is paused with an explanatory comment rather than silently dropping the edge. Get the index right; there is no silent fallback.
+- Each block may declare at most one `DEPENDS_ON`. Diamond-shaped dependencies (multiple parents) are not yet supported — reach for a strict chain instead.
+
+Use it whenever slices modify overlapping surfaces or one slice's implementation depends on an API another slice introduces — exactly the case where you would otherwise write "Note: this only works if Slice N lands first" in the body.
 
 ### Signaling
 

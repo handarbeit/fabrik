@@ -1365,13 +1365,30 @@ These blocks are **declarative data**, not immediate actions. They persist in th
 
 When the parent advances to Implement, the engine's `preImplement` step fires **before** Claude is invoked:
 
-1. Creates each child issue in its target repo (same repo or cross-repo)
-2. Adds each child to the same project board
-3. Links each child as a `blockedBy` dependency of the parent
-4. Applies `fabrik:sub-issue` label to each child (informational)
-5. Applies `fabrik:children-spawned` to the parent (idempotency guard)
+1. Validates any `DEPENDS_ON:` headers declared in the blocks (see below); an invalid one pauses the parent before any child is created
+2. Creates each child issue in its target repo (same repo or cross-repo)
+3. Adds each child to the same project board
+4. Links each child as a `blockedBy` dependency of the parent
+5. Applies `fabrik:sub-issue` label to each child (informational)
+6. Wires any declared `DEPENDS_ON` sibling edges, once all children exist
+7. Applies `fabrik:children-spawned` to the parent (idempotency guard, applied only after step 6 succeeds)
 
-If step 2's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
+If step 3's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
+
+#### Ordering Siblings with `DEPENDS_ON`
+
+By default, every spawned child is an independent unit — all of them start Specify at the same time, gated only on the parent (a "parallel star"). For a decomposition into **sequentially dependent** slices — the common case when splitting a single-repo feature into ordered chunks for PR hygiene — Plan can declare that ordering with an optional `DEPENDS_ON:` header:
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Retry-same-input: turn-attempt capture (slice 3/4)
+DEPENDS_ON: 2
+
+Full scoped spec body...
+FABRIK_SPAWN_CHILD_END
+```
+
+`DEPENDS_ON: 2` means "this block depends on block 2 of this same Plan output" — a 1-based index into the blocks as emitted, not an issue number. The engine wires it as an additional `blockedBy` edge between the two children (alongside the unchanged parent edge), so the dependent child carries `fabrik:blocked` until its sibling closes — exactly like any other dependency Fabrik tracks. References must point to a strictly earlier block; an out-of-range or non-forward `DEPENDS_ON` value fails the spawn step loudly (the parent is paused with an explanatory comment) rather than being silently dropped. Without this, ordering could only be expressed as prose in the child's body ("Depends on: Slice 2") — invisible to Fabrik's dependency gate, so nothing would stop the sibling worktrees from running concurrently and colliding on shared files.
 
 After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
 
