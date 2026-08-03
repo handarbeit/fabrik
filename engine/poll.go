@@ -1503,12 +1503,19 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// Items with an active CooldownAt but no other signal are suppressed.
 		item := board.Items[i]
 		iKey := issueKey(item, e.defaultRepo())
+		repo := itemOwnerRepoString(item, e.defaultRepo())
+		// Single store lookup for this item, reused below by the terminal skip, the
+		// cooldown check, and the paused-deep-fetch gate (#1379) — folded into one
+		// call rather than three redundant e.store.Get calls per item per poll.
+		// Safe to reuse after the TerminalFlagSet Apply below: that mutation only
+		// touches the Terminal field, which none of the later reuses inspect.
+		admitSnap, admitErr := e.store.Get(repo, item.Number)
 		// Terminal skip: skip items flagged terminal while still in the same cleanup
 		// stage — external board activity (label-bot, PR comments, GitHub bookkeeping)
 		// bumps updatedAt but Fabrik has nothing left to do for them.
 		// item.Status == admitSnap.Status() guards against items that moved between two
 		// cleanup stages: in that case we must process normally to update the store.
-		if admitSnap, admitErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); admitErr == nil {
+		if admitErr == nil {
 			if admitSnap.IsTerminal() {
 				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree && item.Status == admitSnap.Status() {
 					continue // terminal + still in same cleanup stage: skip entirely
@@ -1516,7 +1523,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				// Status changed (left cleanup or moved to a different cleanup stage) —
 				// clear the flag and fall through.
 				e.store.Apply(itemstate.TerminalFlagSet{
-					Repo:     itemOwnerRepoString(item, e.defaultRepo()),
+					Repo:     repo,
 					Number:   item.Number,
 					Terminal: false,
 				})
@@ -1529,11 +1536,10 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			hasAwaitingLabel := hasLabel(item.Labels, "fabrik:rebase-needed") || hasLabel(item.Labels, "fabrik:awaiting-review") || hasLabel(item.Labels, "fabrik:auto-merge-enabled") || hasLabel(item.Labels, "fabrik:revalidate")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
-				repo := itemOwnerRepoString(item, e.defaultRepo())
-				if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
+				if admitErr == nil {
 					now := time.Now()
-					hasExpiredCooldown = snap.HasExpiredCooldown(now)
-					if snap.HasActiveCooldown(now) && !hasExpiredCooldown {
+					hasExpiredCooldown = admitSnap.HasExpiredCooldown(now)
+					if admitSnap.HasActiveCooldown(now) && !hasExpiredCooldown {
 						continue // within cooldown window: no change + no expired window
 					}
 				} else {
@@ -1570,9 +1576,8 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// consumers that only need list membership — runValidatePRTerminalAdvance's
 		// merged-while-paused self-heal (ADR-056 D2) and settleRevalidateScan's FR-5
 		// guarantee — are unaffected; only the FetchItemDetails call itself is skipped.
-		if hasLabel(board.Items[i].Labels, "fabrik:paused") && !cycleSet[iKey] {
-			repo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
-			if _, snapErr := e.store.Get(repo, board.Items[i].Number); snapErr == nil {
+		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
+			if admitErr == nil {
 				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
 				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 				continue
