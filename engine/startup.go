@@ -2,9 +2,13 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -418,4 +422,146 @@ func (e *Engine) checkURLRewrite() bool {
 		}
 	}
 	return false
+}
+
+// claudeSettingsFile is the subset of a Claude Code settings.json this
+// preflight cares about — just apiKeyHelper (R10-R12). Other keys are
+// ignored, so a settings file with unrelated content still parses fine.
+type claudeSettingsFile struct {
+	APIKeyHelper string `json:"apiKeyHelper"`
+}
+
+// settingsLayer names one file in the Claude Code settings-resolution chain
+// checked by findAPIKeyHelper/checkAPIKeyHelper (R11): a human-readable layer
+// label plus the file path.
+type settingsLayer struct {
+	layer string
+	path  string
+}
+
+// managedPolicySettingsPath returns the OS-specific managed-policy settings
+// file path Claude Code itself resolves (R11), or "" on an unsupported
+// runtime.GOOS. Fabrik has no supported Windows host today (darwin/linux
+// only, per CLAUDE.md/the Plan stage's Constraints), so no third path is
+// defined here.
+func managedPolicySettingsPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "/Library/Application Support/ClaudeCode/managed-settings.json"
+	case "linux":
+		return "/etc/claude-code/managed-settings.json"
+	default:
+		return ""
+	}
+}
+
+// claudeUserConfigDir returns the directory Claude Code resolves user-level
+// settings from: $CLAUDE_CONFIG_DIR if set (the same "Alternate Claude
+// Profile" variable Fabrik already documents and pins subprocess invocations
+// to), else ~/.claude. Empty if the home directory cannot be resolved.
+func claudeUserConfigDir() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// findAPIKeyHelper checks each layer in order and returns the first one
+// whose settings file sets a non-empty apiKeyHelper (R10), plus any
+// warnings collected along the way. A missing file is not an error —
+// absence means the layer contributes nothing (R12). A present but
+// unreadable or malformed file is collected into warnings and the scan
+// continues rather than failing outright (R12) — only a present and
+// parseable apiKeyHelper key is fatal.
+func findAPIKeyHelper(layers []settingsLayer) (found *settingsLayer, warns []string) {
+	for i := range layers {
+		layer := layers[i]
+		data, err := os.ReadFile(layer.path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				warns = append(warns, fmt.Sprintf("could not read %s (%s layer): %v", layer.path, layer.layer, err))
+			}
+			continue
+		}
+		var settings claudeSettingsFile
+		if err := json.Unmarshal(data, &settings); err != nil {
+			warns = append(warns, fmt.Sprintf("could not parse %s (%s layer) as JSON: %v", layer.path, layer.layer, err))
+			continue
+		}
+		if settings.APIKeyHelper != "" {
+			return &layer, warns
+		}
+	}
+	return nil, warns
+}
+
+// checkAPIKeyHelper is the R10-R12 startup preflight: it resolves the Claude
+// Code settings chain (managed-policy, user, fabrikDir-project layers) and
+// fails startup with a non-zero exit if apiKeyHelper is set anywhere in it.
+// apiKeyHelper is a settings.json key, not an environment variable — a
+// command Claude Code shells out to for credentials — so no amount of
+// environment scrubbing (buildClaudeEnv, R2-R9) can prevent it from supplying
+// an API key to a Fabrik-spawned invocation. It is refused outright rather
+// than silently tolerated (see the issue's Non-goals and ADR-1346). This is
+// the startup-time half of the check; runInvocationWithExtension performs the
+// structurally identical per-invocation check against the worktree's own
+// .claude/settings.json and settings.local.json (R13), which don't exist
+// until a worktree is materialized.
+func (e *Engine) checkAPIKeyHelper() error {
+	var layers []settingsLayer
+	if p := managedPolicySettingsPath(); p != "" {
+		layers = append(layers, settingsLayer{layer: "managed-policy", path: p})
+	}
+	if dir := claudeUserConfigDir(); dir != "" {
+		layers = append(layers,
+			settingsLayer{layer: "user", path: filepath.Join(dir, "settings.json")},
+			settingsLayer{layer: "user", path: filepath.Join(dir, "settings.local.json")},
+		)
+	}
+	layers = append(layers,
+		settingsLayer{layer: "project", path: filepath.Join(e.fabrikDir, ".claude", "settings.json")},
+		settingsLayer{layer: "project", path: filepath.Join(e.fabrikDir, ".claude", "settings.local.json")},
+	)
+
+	found, warns := findAPIKeyHelper(layers)
+	for _, w := range warns {
+		e.logf(0, "startup", "warning: %s\n", w)
+	}
+	if found != nil {
+		return fmt.Errorf("apiKeyHelper is set in %s (%s layer) — Fabrik refuses to run with apiKeyHelper configured, "+
+			"since it can supply API credentials outside Fabrik's control regardless of environment scrubbing; "+
+			"remove it and restart. See docs/USER_GUIDE.md", found.path, found.layer)
+	}
+	return nil
+}
+
+// logAnthropicAPIKeyOptIn is the testable core of the R9 startup notice: when
+// FABRIK_ANTHROPIC_API_KEY is set, invocations are billed to the Anthropic
+// API rather than a subscription. A no-op when inactive, so the unset case
+// stays byte-for-byte silent. The value itself is never logged, in whole or
+// in part — only the fact that the opt-in is active.
+func logAnthropicAPIKeyOptIn(active bool, w io.Writer) {
+	if !active {
+		return
+	}
+	fmt.Fprintf(w, "[startup] notice: FABRIK_ANTHROPIC_API_KEY is set — Claude invocations will be billed to the "+
+		"Anthropic API rather than a subscription. See docs/USER_GUIDE.md.\n")
+}
+
+// logAnthropicEnvPassthrough is the testable core of the R18 startup notice:
+// when the FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list is non-empty, it names
+// which variables were passed through and warns that invocations may not be
+// subscription-billed as a result. A no-op when names is empty, so the
+// unset/empty case stays byte-for-byte silent. Values are never logged, in
+// whole or in part — only the variable names.
+func logAnthropicEnvPassthrough(names []string, w io.Writer) {
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "[startup] notice: FABRIK_ANTHROPIC_ENV_PASSTHROUGH passes through %s — Claude invocations may not "+
+		"be subscription-billed as a result. See docs/USER_GUIDE.md.\n", strings.Join(names, ", "))
 }

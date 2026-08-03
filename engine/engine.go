@@ -194,6 +194,8 @@ func New(cfg Config) (*Engine, error) {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
 	claudeGHToken = cfg.Token
+	claudeAnthropicAPIKey = os.Getenv("FABRIK_ANTHROPIC_API_KEY")
+	claudeAnthropicEnvPassthrough = parseAnthropicEnvPassthrough(os.Getenv("FABRIK_ANTHROPIC_ENV_PASSTHROUGH"))
 
 	// One-time, process-lifetime capability probe (see claudeNameFlagSupported):
 	// older claude binaries reject unknown flags outright, which would kill

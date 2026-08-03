@@ -303,6 +303,22 @@ The stage-name component is passed through `sanitizeSentinelComponent`, which co
 
 The Claude worker subprocess's environment is assembled as `mergeEnv(os.Environ(), extraEnv)` — the base is the engine process's own environment, with `extraEnv` entries taking precedence on key collision (last-wins). Alongside `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` and `CLAUDE_CODE_EFFORT_LEVEL`, `extraEnv` includes `GH_TOKEN` and `GITHUB_TOKEN`, both set to the engine's resolved GitHub token (`Config.Token`, the same value used for the engine's own `gh.NewClient` calls). This guarantees the worker's `gh` invocations (available via the default `Bash(gh:*)` allowed tool) always authenticate as the same identity as the engine itself, regardless of what `GH_TOKEN`/`GITHUB_TOKEN` the launching shell happens to export. Injection is skipped only when the engine's resolved token is empty, which should not occur in practice since a token is mandatory at startup.
 
+### Worker Environment: Anthropic Auth Namespace Scrub
+
+`mergeEnv` gained a bare-key removal sentinel (#1346, R1): an entry in `extraEnv` with no `=` (just `KEY`) strips that key from `baseEnv` without supplying a replacement, in addition to the pre-existing `KEY=VALUE` add/shadow/last-wins semantics, which are unchanged. `buildClaudeEnv` uses this to scrub the Anthropic/Claude-Code auth namespace out of the worker's environment by default, so no ambient credential the engine process happens to have (e.g. from a `.env` a human or an agent added locally) can silently redirect a Fabrik invocation from subscription billing to metered API billing.
+
+**Default-deny over a namespace, not a deny-list.** Every inherited variable whose name starts with `ANTHROPIC_` is removed unconditionally (`scrubAnthropicAuthEnv`, `engine/claude.go`) — matching on the exact parsed key, the same "up to the first `=`" extraction `mergeEnv` itself uses, never a substring, so `FANTASY_ANTHROPIC_API_KEY` passes through untouched (R5). This is deliberately wildcard-wide: a newly-introduced upstream `ANTHROPIC_*` billing variable is denied automatically, with no Fabrik code change required (R2). It also means non-auth `ANTHROPIC_*` variables (`ANTHROPIC_MODEL`, `ANTHROPIC_CONFIG_DIR`, etc.) are scrubbed too — an accepted, deliberate side effect of "namespace, not deny-list," documented in `docs/USER_GUIDE.md` and [ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md).
+
+`CLAUDE_CODE_*` is a much broader general-configuration namespace — it already carries Fabrik's own non-auth `CLAUDE_CODE_EFFORT_LEVEL`/`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` — so it is not wildcard-scrubbed. Instead, `claudeCodeAuthSelectors` enumerates the specific `CLAUDE_CODE_*` names verified (against the installed Claude Code binary) to select a non-subscription auth path or supply raw credentials: `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, and the `CLAUDE_CODE_USE_*` provider selectors (`BEDROCK`, `VERTEX`, `FOUNDRY`, `ANTHROPIC_AWS`, `ANTHROPIC_GOOGLE_CLOUD`, `MANTLE`, `GATEWAY`). A not-yet-enumerated future selector would require a Fabrik code change to be scrubbed — an accepted residual risk, since wildcard-scrubbing all of `CLAUDE_CODE_*` would also block legitimate non-billing configuration.
+
+**Explicit API-billing opt-in.** `FABRIK_ANTHROPIC_API_KEY`, resolved once at engine construction into the package-level `claudeAnthropicAPIKey` (mirroring the existing `claudeGHToken` pattern), is translated into an explicit `ANTHROPIC_API_KEY=<value>` override when non-empty (R6) — the only supported way to obtain API billing through this variable. When unset or empty, `ANTHROPIC_API_KEY` never reaches the worker regardless of what the engine inherited (R7). `FABRIK_ANTHROPIC_API_KEY` itself is never forwarded (R8) — `buildClaudeEnv` emits it as a bare removal token, since it is itself present in `os.Environ()`, the very `baseEnv` the worker would otherwise inherit unfiltered (the same ambient-leak reasoning `FABRIK_REPO`'s always-emitted override already documents above). When active, a one-time `[startup]` notice (`logAnthropicAPIKeyOptIn`) states that invocations will be billed to the Anthropic API — never logging the value (R9).
+
+**Explicit passthrough allow-list, for the long tail.** `FABRIK_ANTHROPIC_ENV_PASSTHROUGH`, resolved once into `claudeAnthropicEnvPassthrough` via `parseAnthropicEnvPassthrough` (comma-separated exact variable names), names keys to re-inherit from the ambient environment unchanged, overriding the scrub for only those names (R14). A named variable absent from the ambient environment is a no-op, not an error (R15); a variable not named remains scrubbed even if present (R16); a named variable outside the scrubbed namespace (e.g. `PATH`) is a redundant no-op, not an error (R19) — it was never going to be removed. `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` itself is never forwarded, mirroring R8 (R17). The re-add loop is itself restricted to `isAnthropicAuthNamespaceKey` (`ANTHROPIC_*`-prefixed or a `claudeCodeAuthSelectors` entry) — this is what makes R19's "no-op" claim actually hold for *every* key outside the namespace, including Fabrik's own computed overrides (`GH_TOKEN`, the `FABRIK_*` invocation facts, `CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`): naming one of those in the passthrough list is a no-op rather than letting a stale or attacker-controlled ambient value silently win over Fabrik's own value via `mergeEnv`/`os/exec`'s last-occurrence-wins duplicate-key resolution. This exists specifically for Bedrock/Vertex-style non-subscription auth: their actual credential chains (`AWS_ACCESS_KEY_ID`, `GOOGLE_APPLICATION_CREDENTIALS`, etc.) already fall outside the scrubbed namespace and need no passthrough entry — only the `ANTHROPIC_*`/`CLAUDE_CODE_*`-namespaced selectors do, e.g. `FABRIK_ANTHROPIC_ENV_PASSTHROUGH=CLAUDE_CODE_USE_BEDROCK,ANTHROPIC_AWS_API_KEY`. When non-empty, a one-time `[startup]` notice (`logAnthropicEnvPassthrough`) names which variables were passed through and warns that invocations may not be subscription-billed as a result — never logging values (R18).
+
+**Ordering.** `buildClaudeEnv` emits the scrub removals, then the passthrough re-adds, then the `FABRIK_ANTHROPIC_API_KEY` translation last — so if a passthrough entry and the translation both name `ANTHROPIC_API_KEY` (an edge case R7 permits but nobody is expected to actually hit), the translation wins deterministically via `mergeEnv`/`os/exec`'s last-occurrence-wins duplicate-key resolution.
+
+**`apiKeyHelper` is refused outright, not scrubbed.** `apiKeyHelper` is a `settings.json` key, not an environment variable — a command Claude Code shells out to for credentials — so no amount of environment scrubbing can prevent it from supplying an API key. `checkAPIKeyHelper` (`engine/startup.go`) fails startup (non-zero exit) if it is set anywhere in the resolved managed-policy/user/`fabrikDir`-project settings chain; see "apiKeyHelper Detection Path (Worktree)" below for the structurally identical per-invocation check against a worktree's own repo-resident settings, and `docs/USER_GUIDE.md`/[ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md) for the full rationale and accepted residual risks.
+
 ### Worker Environment: Invocation Facts (`FABRIK_*`)
 
 Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects five facts Fabrik uniquely holds about the current invocation, so repo-side scripts running inside the worktree can provision or namespace a resource (a database schema, a port, a fixture namespace, a preview environment) without guessing. This is deliberately **expose-the-facts**, not a lifecycle-hook mechanism: Fabrik publishes what it knows; the consuming repo owns what happens, when, and how (see ADR-1288). No credential is added to this set, and nothing in the engine reads or branches on these variables — they exist solely for repo-side consumption.
@@ -608,6 +624,36 @@ early, without restarting the engine, by applying `fabrik:clear-claude-limit` to
 why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
 Audit above (with the opposite pause/fail outcome — a usage limit is transient and self-resolving, a
 boundary violation is not).
+
+### apiKeyHelper Detection Path (Worktree)
+
+A fifth outcome, checked in `runInvocationWithExtension` immediately alongside the account-wide
+usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
+before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
+preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
+`.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file
+coverage for the user/project layers): a **repo-resident** setting Fabrik cannot see at engine startup,
+since the worktree doesn't exist yet (#1346, R13). If either sets `apiKeyHelper`, the invocation is skipped and
+`*apiKeyHelperDetectedError` is returned in place of invoking Claude at all; `finalizeStageOutcome`
+classifies it via `errors.As` (alongside the usage-limit check) and routes to
+`handleAPIKeyHelperDetected`, which mirrors `handleUsageLimitExit` exactly:
+
+1. `StageAttempted` recorded — the normal cooldown applies, so the item does not retry on the very
+   next poll.
+2. Retry count is **not** incremented — the stage never ran.
+3. If `fabrik:api-key-helper-detected` is absent, an explanatory comment naming the offending file is
+   posted and the label is added — gated on the label's own absence, matching `fabrik:claude-limit`'s
+   non-spamming behavior. Neither `fabrik:paused` nor `stage:<name>:failed` is applied.
+4. No partial-progress commit, no branch push — nothing was produced.
+5. Lock released.
+
+`fabrik:api-key-helper-detected` clears on the next invocation that is not itself classified as a
+usage-limit exit or an `apiKeyHelper` detection (the same unconditional label-clear site as
+`fabrik:claude-limit`, later in `finalizeStageOutcome`) — a human removing `apiKeyHelper` from the
+worktree's `.claude/settings.json` and letting the next poll reach Claude successfully is enough to
+self-resolve; no manual label removal is required. Unlike `fabrik:claude-limit`, there is no
+account-wide settle sweep for this label — the condition is inherently per-worktree, not
+account-wide. See [ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md).
 
 ### Branch Pushing
 

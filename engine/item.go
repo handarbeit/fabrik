@@ -975,6 +975,30 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		return output, completed, usage, totalMultiple, err
 	}
 
+	// R13: the worktree's own .claude/settings.json (and settings.local.json,
+	// mirroring the startup preflight's file coverage for the user/project
+	// layers — Claude Code's own settings resolution merges both) is
+	// repo-resident content Fabrik cannot see at engine startup
+	// (checkAPIKeyHelper only covers the managed-policy/user/fabrikDir-project
+	// layers). Check it here, before building InvokeOptions or consuming the
+	// stall hint, for the same reason as the suspension gate above — this
+	// dispatch will never actually invoke Claude if apiKeyHelper is set.
+	// Detection here fails only this invocation (via apiKeyHelperDetectedError,
+	// mirroring claudeUsageLimitError's shape); it is deliberately not a stage
+	// failure — see handleAPIKeyHelperDetected.
+	if found, warns := findAPIKeyHelper([]settingsLayer{
+		{layer: "worktree", path: filepath.Join(workDir, ".claude", "settings.json")},
+		{layer: "worktree", path: filepath.Join(workDir, ".claude", "settings.local.json")},
+	}); found != nil {
+		e.logf(item.Number, "warn", "apiKeyHelper detected in worktree settings %s; skipping invocation\n", found.path)
+		err = &apiKeyHelperDetectedError{Layer: found.layer, Path: found.path}
+		return output, completed, usage, totalMultiple, err
+	} else {
+		for _, w := range warns {
+			e.logf(item.Number, "warn", "%s\n", w)
+		}
+	}
+
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
@@ -1153,6 +1177,14 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.handleUsageLimitExit(p, limitErr)
 			return
 		}
+
+		// apiKeyHelper detected in the worktree's own settings (R13) is likewise
+		// not a stage failure — see apiKeyHelperDetectedError in this file.
+		var apiKeyErr *apiKeyHelperDetectedError
+		if errors.As(err, &apiKeyErr) {
+			e.handleAPIKeyHelperDetected(p, apiKeyErr)
+			return
+		}
 	}
 
 	// A Claude turn-limit exit (CLI subtype error_max_turns) is not a genuine
@@ -1176,6 +1208,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// is safe and correctly signals "not currently limited."
 	if hasLabel(item.Labels, "fabrik:claude-limit") {
 		e.removeLabel(item, "fabrik:claude-limit")
+	}
+	if hasLabel(item.Labels, "fabrik:api-key-helper-detected") {
+		e.removeLabel(item, "fabrik:api-key-helper-detected")
 	}
 
 	// Capture git metadata for the comment header
@@ -2355,6 +2390,29 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 	releaseLock()
 }
 
+// apiKeyHelperDetectedError signals that a Claude invocation was skipped
+// because the worktree's own .claude/settings.json or settings.local.json
+// sets apiKeyHelper (R13).
+// This mirrors claudeUsageLimitError's shape exactly: the stage never ran, so
+// this must be excluded from max_retries — see handleAPIKeyHelperDetected in
+// this file, the sole consumer (via errors.As). Unlike the startup-time
+// checkAPIKeyHelper (engine/startup.go, R10-R12), this is a repo-resident
+// setting that doesn't exist until a worktree is materialized, so it can only
+// be checked per-invocation, not once at engine startup.
+type apiKeyHelperDetectedError struct {
+	// Layer is always "worktree" — kept as a field (rather than a hardcoded
+	// string in the error message) so this stays structurally parallel to
+	// settingsLayer/findAPIKeyHelper in startup.go.
+	Layer string
+	// Path is the worktree settings file that set apiKeyHelper, for logging
+	// and for the comment posted to the issue.
+	Path string
+}
+
+func (e *apiKeyHelperDetectedError) Error() string {
+	return fmt.Sprintf("apiKeyHelper detected in %s settings %s", e.Layer, e.Path)
+}
+
 // handleUsageLimitExit is called by finalizeStageOutcome when a Claude
 // invocation exited because the account's usage limit was hit (see
 // claudeUsageLimitError in claude.go), not because the stage genuinely
@@ -2400,6 +2458,46 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:claude-limit")
+	}
+
+	p.release()
+}
+
+// handleAPIKeyHelperDetected is called by finalizeStageOutcome when a Claude
+// invocation was skipped because the worktree's own .claude/settings.json or
+// settings.local.json sets apiKeyHelper (see apiKeyHelperDetectedError above,
+// R13). It mirrors
+// handleUsageLimitExit exactly: StageAttempted is recorded so the normal
+// dispatch cooldown applies, but StageRetryIncremented is never called — the
+// stage never ran, so this must not count against max_retries, and no
+// stage:<name>:failed/fabrik:paused is applied. The explanatory comment and
+// fabrik:api-key-helper-detected label are applied only on the transition
+// into the condition (label absent -> applied); a human fixing the worktree
+// file is enough to self-resolve on the next poll — see the label clear in
+// finalizeStageOutcome, structurally identical to fabrik:claude-limit's.
+func (e *Engine) handleAPIKeyHelperDetected(p stageOutcomeParams, apiKeyErr *apiKeyHelperDetectedError) {
+	item := p.item
+	stage := p.stage
+	repoStr := p.repoStr
+
+	e.logf(item.Number, "warn", "stage %q did not run — apiKeyHelper detected in %s\n", stage.Name, apiKeyErr.Path)
+
+	// Record StageAttempted so the normal dispatch cooldown applies — the
+	// stage never ran, so StageRetryIncremented is deliberately never called.
+	e.store.Apply(itemstate.StageAttempted{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		At:        time.Now(),
+	})
+
+	if !hasLabel(item.Labels, "fabrik:api-key-helper-detected") {
+		comment := fmt.Sprintf(
+			"🏭 **Fabrik — apiKeyHelper refused**\n\nStage **%s** did not run because `%s` sets `apiKeyHelper`. Fabrik refuses to invoke Claude while apiKeyHelper is configured anywhere in the resolved settings chain, since it can supply API credentials outside Fabrik's control regardless of environment scrubbing. This is not a stage failure — it does not count against `max_retries`. Remove `apiKeyHelper` from `%s` to resolve; the `fabrik:api-key-helper-detected` label clears automatically on the next successful invocation. See docs/USER_GUIDE.md.",
+			stage.Name, apiKeyErr.Path, apiKeyErr.Path,
+		)
+		e.postItemComment(item, comment, false)
+		e.addLabel(item, "fabrik:api-key-helper-detected")
 	}
 
 	p.release()
