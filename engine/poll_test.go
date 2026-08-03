@@ -1426,6 +1426,119 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 	}
 }
 
+// TestPoll_ClosedAtValidate_AwaitingCI_NeverDispatched is the regression test
+// for the loop described in issue #1387 / ADR-1387: an issue closed
+// out-of-band while parked at a gate-checked (wait_for_ci) Validate stage,
+// with stage:Validate:complete deferred (the conjunctive gate) and no gate
+// label present — the exact state left behind once cleanupClosedIssueTransient
+// Labels has swept fabrik:awaiting-ci off a closed issue (the field-observed
+// mechanism from handarbeit/fabrik-test-alpha#4246 — 87 post-close Validate
+// invocations over ~14 hours: fabrik:awaiting-ci suppresses dispatch on its
+// own via the CI-gate-in-flight check, so the loop only manifests once that
+// label is gone). Before ADR-1387, this state was admitted to dispatch every
+// poll (the closed-issue guard's `!stageIsGateChecked` widening), producing a
+// real Claude invocation on every cycle. After ADR-1387, the item is never
+// admitted — it is healed exclusively by the board-sourced
+// settleClosedValidateAdvance settle scan. Across two full poll cycles,
+// mockClaudeInvoker.Invoke must be called zero times, and the item must
+// advance to Done.
+func TestPoll_ClosedAtValidate_AwaitingCI_NeverDispatched(t *testing.T) {
+	// A real git-backed worktree is required: dispatch happens on a goroutine
+	// (dispatchCandidates -> go func -> processItem), and with the placeholder
+	// non-git WorktreeManager, ensureRepoReady/worktree setup fails before ever
+	// reaching Invoke — which would make this test pass vacuously (zero
+	// invocations for the wrong reason) both before and after the fix. Using a
+	// real repo lets dispatch, if it happens at all, actually reach Invoke, so
+	// the Invoke-count assertion below is a genuine test of dispatch admission.
+	skipIfNoGit(t)
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+
+	fixedTime := time.Now().Add(-time.Hour)
+	tr := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Validate", Order: 2, Prompt: "validate", WaitForCI: &tr},
+		{Name: "Done", Order: 3, Prompt: "done", CleanupWorktree: true},
+	}
+
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number:    4246,
+						ItemID:    "PVTI_4246",
+						Status:    "Validate",
+						Repo:      "owner/repo",
+						IsClosed:  true,
+						UpdatedAt: fixedTime,
+						Labels:    []string{"stage:Implement:complete"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 9001, Merged: true, State: "closed"}, nil
+		},
+	}
+
+	invoker := &mockClaudeInvoker{}
+	eng := NewWithDeps(Config{
+		Owner:         "owner",
+		Repo:          "repo",
+		ProjectNum:    1,
+		User:          "testuser",
+		Token:         "token",
+		MaxConcurrent: 5,
+		PollSeconds:   1,
+		Stages:        stgs,
+	}, client, invoker, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+
+	ctx := context.Background()
+
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	eng.wg.Wait()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	eng.wg.Wait()
+
+	invoker.mu.Lock()
+	invokeCalls := len(invoker.calls)
+	invoker.mu.Unlock()
+	if invokeCalls != 0 {
+		t.Errorf("mockClaudeInvoker.Invoke called %d time(s) across 2 polls for a closed item; want 0 — closed items must never be dispatched (R1, ADR-1387)", invokeCalls)
+	}
+
+	client.mu.Lock()
+	statusCalls := append([]updateStatusCall(nil), client.updateStatusCalls...)
+	client.mu.Unlock()
+	advancedToDone := false
+	for _, c := range statusCalls {
+		if c.optionID == "OPT_Done" {
+			advancedToDone = true
+			break
+		}
+	}
+	if !advancedToDone {
+		t.Errorf("expected item to be advanced to Done via settleClosedValidateAdvance; status calls: %+v", statusCalls)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Layer 2 — updatedAt gate in poll loop
 // ---------------------------------------------------------------------------
