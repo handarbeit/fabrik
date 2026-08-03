@@ -537,6 +537,90 @@ func TestItemNeedsWork_UnmanagedStage(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_NoWriteAccessSkipsDispatch verifies R6: an item whose
+// repo is cached as CanPush: false is never admitted for dispatch, regardless
+// of stage or status.
+func TestItemMayNeedWork_NoWriteAccessSkipsDispatch(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.repoAccess["owner/repo"] = gh.RepoAccess{AllowAutoMerge: true, CanPush: false}
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("item in a repo with no write access should not need work")
+	}
+}
+
+// TestItemMayNeedWork_UnresolvedRepoAccessAdmits verifies the fail-open default:
+// a repo not yet present in the repoAccess cache (resolveRepoAccess hasn't run
+// for it yet) is admitted, not gated — the gate only fires once the access
+// determination is actually known.
+func TestItemMayNeedWork_UnresolvedRepoAccessAdmits(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item in a repo with no cached access determination should be admitted (fail-open on unknown)")
+	}
+}
+
+// TestItemMayNeedWork_WriteAccessAdmits verifies a repo cached as CanPush: true
+// is unaffected by the new gate.
+func TestItemMayNeedWork_WriteAccessAdmits(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.repoAccess["owner/repo"] = gh.RepoAccess{AllowAutoMerge: true, CanPush: true}
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item in a writable repo should still need work")
+	}
+}
+
+// TestItemMayNeedWork_NoWriteAccessSkipsCleanupStage verifies that, unlike the
+// fabrik:awaiting-done gate, the repo-access gate is NOT exempted for
+// stage.CleanupWorktree: handleCleanupStage performs real GitHub label writes
+// (stage:*:complete, fabrik:extend-turns removal), so admitting a cleanup-stage
+// item for a repo with no write access would reopen exactly the unwanted write
+// this gate exists to prevent. A worktree that already exists on disk for such
+// an issue is left uncleaned (a disk-space leak, not a correctness issue) —
+// see the comment above the gate in item.go and ADR-1347.
+func TestItemMayNeedWork_NoWriteAccessSkipsCleanupStage(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	eng.repoAccess["owner/repo"] = gh.RepoAccess{AllowAutoMerge: true, CanPush: false}
+	const issueNum = 99
+	if err := os.MkdirAll(wm.WorktreeDir(issueNum), 0755); err != nil {
+		t.Fatal(err)
+	}
+	item := gh.ProjectItem{
+		Number:   issueNum,
+		Status:   "Done",
+		IsClosed: true,
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("cleanup-stage item in a repo with no write access should not need work — cleanup writes labels via GitHub")
+	}
+}
+
 // TestItemMayNeedWork_ClosedIssue_CleanupStage verifies that a closed issue in
 // a cleanup stage still passes itemMayNeedWork when the worktree directory exists.
 func TestItemMayNeedWork_ClosedIssue_CleanupStage(t *testing.T) {

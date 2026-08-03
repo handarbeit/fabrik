@@ -643,6 +643,65 @@ func TestApplyCooldownRecorded(t *testing.T) {
 	}
 }
 
+// ---- LabelAppliedAtRecorded ----
+
+func TestApplyLabelAppliedAtRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Now()
+	snap := applyExpect(t, s, LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: at}, LabelAppliedAtChanged)
+	got := snap.LabelAppliedAt("fabrik:awaiting-ci")
+	if !got.Equal(at) {
+		t.Errorf("LabelAppliedAt(fabrik:awaiting-ci) = %v; want %v", got, at)
+	}
+}
+
+// TestLabelAppliedAtRecorded_AppliedRemovedReapplied proves the record-at-write
+// cache survives the "most recent application" correctness requirement (#1314):
+// a label applied, (conceptually) removed, and re-applied must read back the
+// *latest* timestamp, not the first. LabelAppliedAtRecorded always overwrites
+// (see its doc comment) — this test pins that overwrite behavior directly
+// against the mutation, independent of any engine-level guard.
+func TestLabelAppliedAtRecorded_AppliedRemovedReapplied(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	first := time.Now().Add(-time.Hour)
+	second := time.Now()
+
+	s.Apply(LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: first})
+	// Removal doesn't touch the cache (no mutation for it) — the entry from the
+	// first application is still readable until the next genuine re-apply.
+	if got := getItem(t, s, testRepo, 1).LabelAppliedAt["fabrik:awaiting-ci"]; !got.Equal(first) {
+		t.Fatalf("after first apply: LabelAppliedAt = %v; want %v", got, first)
+	}
+	s.Apply(LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: second})
+
+	got := getItem(t, s, testRepo, 1).LabelAppliedAt["fabrik:awaiting-ci"]
+	if !got.Equal(second) {
+		t.Errorf("after re-apply: LabelAppliedAt = %v; want the latest (second) application %v, not the first %v", got, second, first)
+	}
+}
+
+// TestLabelAppliedAtRecorded_DoesNotAliasCooldown pins the reason LabelAppliedAt
+// is a distinct map from CooldownAt (see ItemState.LabelAppliedAt's doc
+// comment): a raw applied-at timestamp is always in the past the instant it's
+// recorded, so if it were folded into CooldownAt, HasExpiredCooldown would
+// misread it as a permanently expired cooldown and spuriously wake dispatch
+// for the item on every check thereafter.
+func TestLabelAppliedAtRecorded_DoesNotAliasCooldown(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	past := time.Now().Add(-time.Hour)
+	snap := applyExpect(t, s, LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: past}, LabelAppliedAtChanged)
+
+	if snap.HasExpiredCooldown(time.Now()) {
+		t.Error("HasExpiredCooldown should be false: LabelAppliedAtRecorded must never populate CooldownAt")
+	}
+	if snap.HasActiveCooldown(time.Now()) {
+		t.Error("HasActiveCooldown should be false: LabelAppliedAtRecorded must never populate CooldownAt")
+	}
+	if len(getItem(t, s, testRepo, 1).CooldownAt) != 0 {
+		t.Error("CooldownAt should remain empty; LabelAppliedAtRecorded must write only to LabelAppliedAt")
+	}
+}
+
 // ---- WorkerEntered / WorkerHeartbeat / WorkerExited ----
 
 func TestApplyWorkerEntered(t *testing.T) {

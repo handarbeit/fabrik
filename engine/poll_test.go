@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1681,6 +1682,191 @@ func TestSeedLabels_ExcludesUnmanagedStage(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected Done (cleanup stage) included in seeded stage names, got %v", calls[0].stageNames)
+	}
+}
+
+// TestSeedLabels_NoWriteAccessSkipsSeeding verifies AC1/R1: a repo whose
+// FetchRepoAccess reports CanPush: false receives zero SeedLabels calls, while
+// a sibling repo with write access is seeded exactly as before (AC3/R5).
+func TestSeedLabels_NoWriteAccessSkipsSeeding(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 1, Title: "Managed", Status: "Research", Repo: "owner/managed"},
+			{Number: 2, Title: "Unmanaged", Status: "Research", Repo: "owner/unmanaged"},
+		},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{FieldID: "F1", Options: map[string]string{"Research": "OPT_1"}}, nil
+		},
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			if repo == "unmanaged" {
+				return gh.RepoAccess{AllowAutoMerge: true, CanPush: false}, nil
+			}
+			return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	calls := make([]seedLabelsCall, len(client.seedLabelsCalls))
+	copy(calls, client.seedLabelsCalls)
+	client.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 SeedLabels call (managed repo only), got %d: %+v", len(calls), calls)
+	}
+	if calls[0].owner+"/"+calls[0].repo != "owner/managed" {
+		t.Errorf("expected SeedLabels called for owner/managed, got %s/%s", calls[0].owner, calls[0].repo)
+	}
+}
+
+// TestResolveRepoAccess_ProbedOncePerRepoAcrossConsumers verifies AC4/R3: the
+// underlying FetchRepoAccess probe fires at most once per repo per process
+// run, even though seeding, checkAllowAutoMerge, and the dispatch gate all
+// consult resolveRepoAccess for the same repo across multiple poll cycles.
+func TestResolveRepoAccess_ProbedOncePerRepoAcrossConsumers(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 1, Title: "Issue 1", Status: "Research", Repo: "owner/repo1"},
+		},
+	}
+	var probeCount int32
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{FieldID: "F1", Options: map[string]string{"Research": "OPT_1"}}, nil
+		},
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			atomic.AddInt32(&probeCount, 1)
+			return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+
+	for i := 0; i < 3; i++ {
+		if _, err := eng.poll(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", i, err)
+		}
+		eng.wg.Wait()
+	}
+
+	if got := atomic.LoadInt32(&probeCount); got != 1 {
+		t.Errorf("FetchRepoAccess called %d times across 3 polls; want exactly 1", got)
+	}
+}
+
+// TestPoll_UnmanagedRepoSkippedFromDispatch verifies AC5/AC6: an item whose
+// repo has no write access is never deep-fetched (and therefore never
+// stage-invoked), while a sibling item in a managed repo is processed
+// normally in the same poll cycle.
+func TestPoll_UnmanagedRepoSkippedFromDispatch(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 1, Title: "Managed", Status: "Research", Repo: "owner/managed"},
+			{Number: 2, Title: "Unmanaged", Status: "Research", Repo: "owner/unmanaged"},
+		},
+	}
+	var deepFetched []string
+	var mu sync.Mutex
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{FieldID: "F1", Options: map[string]string{"Research": "OPT_1"}}, nil
+		},
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			if repo == "unmanaged" {
+				return gh.RepoAccess{AllowAutoMerge: true, CanPush: false}, nil
+			}
+			return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			mu.Lock()
+			deepFetched = append(deepFetched, item.Repo)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	eng.wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	sawManaged, sawUnmanaged := false, false
+	for _, r := range deepFetched {
+		if r == "owner/managed" {
+			sawManaged = true
+		}
+		if r == "owner/unmanaged" {
+			sawUnmanaged = true
+		}
+	}
+	if sawUnmanaged {
+		t.Error("item in an unmanaged (no write access) repo must not be deep-fetched")
+	}
+	if !sawManaged {
+		t.Error("item in a managed (write access) repo should still be deep-fetched and processed normally")
 	}
 }
 

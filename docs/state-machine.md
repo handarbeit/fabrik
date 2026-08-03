@@ -1741,12 +1741,15 @@ There is therefore no poll pass in which the item sits at Validate with `hasComp
 ```
 FABRIK_SPAWN_CHILD_BEGIN owner/repo
 TITLE: <single-line title for the new issue>
+DEPENDS_ON: <n>                          # optional — see below
 
 <full scoped spec body — multiple paragraphs OK>
 FABRIK_SPAWN_CHILD_END
 ```
 
 These blocks persist in the Plan stage comment — they are data, not consumed-and-stripped signals. The `preImplement` engine step reads them from the most-recent Plan comment body at Implement dispatch time.
+
+**`DEPENDS_ON:` (ADR-1337, sibling ordering):** an optional header line expressing a forward-only dependency on an *earlier* block in the same Plan output — the mechanism for the common case of sequentially dependent, same-repo decomposition slices, where without it Plan could only encode the ordering as prose ("Depends on: Slice N") that `checkDependencies` cannot see. When present, `DEPENDS_ON:` must immediately follow `TITLE:` with no blank line between them; a `DEPENDS_ON:`-looking line separated from `TITLE:` by a blank line is parsed as ordinary body content, not a header. The value is a 1-based index into this Plan output's own block list — `DEPENDS_ON: 2` on block 3 means "block 3 depends on block 2" — never an issue number, since children don't have issue numbers yet when Plan runs. References must be strictly forward (`1 <= DEPENDS_ON < ownIndex`); this makes sibling dependency cycles structurally impossible without any graph walk. An absent header leaves the block's dependency behavior exactly as before this feature — the parallel-star graph. `DEPENDS_ON` is not restricted to same-repo blocks; the underlying `AddBlockedByIssue` primitive is already repo-agnostic.
 
 **On-thread spawn receipt (#1338):** at the moment the Plan comment is posted — well before `preImplement` ever runs — the engine appends a deterministic note naming the count of well-formed blocks it parsed (via the same `ParseSpawnBlocks` `preImplement` itself uses) and stating that no sub-issues exist yet, that they will be created when the parent advances to Implement. This makes the declarative nature of the blocks visible on the thread itself, rather than only in `docs/USER_GUIDE.md` or the engine log; see `docs/stage-lifecycle.md`'s "Spawn Receipt Note" section for the posting-path details. A parse failure (malformed markers, e.g. #1263) produces zero blocks and therefore no note, even though the raw marker text is still visible — a loud, on-thread mismatch that surfaces the failure immediately instead of silently at Implement time. The note is gated to the Plan stage specifically, matching `preImplement`'s own hardcoded `findStageComment(item.Comments, "Plan")` lookup above — a note appearing on any other stage's comment would promise a spawn that lookup will never act on.
 
@@ -1769,20 +1772,22 @@ These blocks persist in the Plan stage comment — they are data, not consumed-a
   A recovered live-read's `Comments` are used locally for this call only — they are not written back into the cache/store; this keeps the fix scoped to the `preImplement` decision point rather than becoming a general-purpose cache-refresh utility.
 
 **Flow (when spawn blocks are present and not yet spawned):**
-1. Validate all target repos: call `ensureRepoReady` for each unique target repo in the spawn blocks. If any repo is not in Fabrik's managed set, post an error comment listing the gaps, add `fabrik:paused`, and stop — no children are created.
-2. For each `FABRIK_SPAWN_CHILD_BEGIN/END` block in document order:
+1. **Validate all `DEPENDS_ON` headers upfront**, before any GitHub mutation: `validateSpawnDependsOn` checks that every declared index is a strictly-forward reference to an earlier block (`1 <= DEPENDS_ON < ownIndex`) — purely structural, no created-issue data needed. Any invalid value (out-of-range, non-forward/self-referencing, or syntactically malformed — non-numeric, empty, zero, negative) is a **hard failure**: post an error comment (`Created so far: none`), add `fabrik:paused`, and stop — no children are created. A silent drop here would reproduce the exact bug `DEPENDS_ON` exists to fix.
+2. Validate all target repos: call `ensureRepoReady` for each unique target repo in the spawn blocks. If any repo is not in Fabrik's managed set, post an error comment listing the gaps, add `fabrik:paused`, and stop — no children are created.
+3. For each `FABRIK_SPAWN_CHILD_BEGIN/END` block in document order (creation pass — unchanged by `DEPENDS_ON`, except that the block-index → child node-ID mapping is now retained for step 4):
    - `CreateIssue(owner, repo, title, body+footer)` via REST — returns `(number, nodeID)`
    - `AddProjectV2ItemById(board.ProjectID, nodeID)` — adds child to the same project board; returns `childItemID`
-   - `AddBlockedByIssue(parent.NodeID, nodeID)` — links child as a `blockedBy` dependency of the parent
+   - `AddBlockedByIssue(parent.NodeID, nodeID)` — links child as a `blockedBy` dependency of the parent (unchanged)
    - `AddLabelToIssue` for `fabrik:sub-issue` on the child (informational)
    - `UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, specifyOptionID)` — moves child to the `Specify` column (or first non-Backlog, non-terminal column as fallback). **Non-fatal**: if the call fails, `e.statusField` is nil (startup fetch failed), or no viable column exists, the child lands in Backlog, a warning is logged, spawn continues — and `recordChildPlacementFailure` writes the durable `fabrik:awaiting-placement` marker on the child so the board-placement settle scan retries it (§6.9, ADR-062).
    - Conditional `AddLabelToIssue` for `fabrik:yolo` on the child if the parent has `fabrik:yolo`; conditional `AddLabelToIssue` for `fabrik:cruise` if the parent has `fabrik:cruise`. Both are **non-fatal** (failure logs a warning, spawn continues). `base:<branch>` labels are **not** inherited.
    - On any failure in the fatal steps (CreateIssue, AddProjectV2ItemById, AddBlockedByIssue): post error comment naming completed and failed children, add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned`
-3. After all children are created and linked, add `fabrik:children-spawned` to the parent.
+4. **Sibling-wiring pass** (second pass, after all children in step 3 exist): for each block that declared `DEPENDS_ON`, call `AddBlockedByIssue(childNodeIDs[ownIndex], childNodeIDs[dependsOnIndex])` — the same primitive used for the parent edge in step 3, now linking two children. A block may depend on any earlier sibling regardless of where in step 3 its own creation happened to land. On failure: post an error comment (all children created so far are listed), add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned` — the same partial-creation-on-failure shape step 3 already uses, not a new failure mode.
+5. After all children are created, linked to the parent, **and** all declared sibling edges are wired, add `fabrik:children-spawned` to the parent. This is the idempotency guard for the full two-phase operation (steps 3+4) — moved from immediately-after-step-3 specifically so a sibling-wiring failure is retried on the next attempt rather than silently accepted as "done."
 
-**After spawn:** `preImplement` returns `(true, nil)` (spawned=true). `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges and adds `fabrik:blocked`, gating the parent until all children close.
+**After spawn:** `preImplement` returns `(true, nil)` (spawned=true). `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges — both parent edges and any sibling edges — and adds `fabrik:blocked`, gating the parent until all children close. `checkDependencies` and `PushUnblockObserver` require **no changes** for sibling edges: both already operate generically over any `item.BlockedBy` entry regardless of whether it originated from the parent-wiring step or the sibling-wiring step.
 
-**Partial spawn failure:** `fabrik:children-spawned` is NOT applied if any step fails. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the beginning — v1 does not skip already-created children. Users must manually close orphaned children before re-advancing.
+**Partial spawn failure:** `fabrik:children-spawned` is NOT applied if any step fails — including a `DEPENDS_ON` validation failure (step 1, before any child exists) or a sibling-wiring failure (step 4, after all children exist but some sibling edges may be unwired). On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the beginning — v1 does not skip already-created children. Users must manually close orphaned children before re-advancing.
 
 **Recursive decomposition:** A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created identically. There is no depth limit.
 
@@ -3356,6 +3361,7 @@ Shallow pre-filtering is a two-pass process that avoids the expensive `FetchItem
 |-------|-----------|
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
+| Repo write access | Repo not yet resolved by `resolveRepoAccess` (fail-open on "unknown"), OR resolved with `CanPush: true`. A repo cached with `CanPush: false` is never admitted, regardless of stage or status — see ADR-1347. Purely in-memory (no API call); the probe itself always runs earlier in the same poll cycle, in `poll()`'s seeding block. |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 

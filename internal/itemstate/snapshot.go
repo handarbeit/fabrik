@@ -26,6 +26,7 @@ type Snapshot struct {
 //   - ItemState.Comments
 //   - ItemState.BlockedBy
 //   - ItemState.CooldownAt
+//   - ItemState.LabelAppliedAt
 //   - ItemState.BaseBranchWarned
 //   - ItemState.StageState.Attempts
 //   - ItemState.StageState.LastAttemptAt
@@ -49,6 +50,7 @@ func newSnapshot(s ItemState) Snapshot {
 	c.Comments = copyComments(s.Comments)
 	c.BlockedBy = copyDeps(s.BlockedBy)
 	c.CooldownAt = copyMap(s.CooldownAt)
+	c.LabelAppliedAt = copyMap(s.LabelAppliedAt)
 	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)
 	c.StageState = copyStageState(s.StageState)
 	c.CommentBreaker.InvocationsAt = copyTimes(s.CommentBreaker.InvocationsAt)
@@ -168,6 +170,15 @@ func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
 		}
 	}
 	return false
+}
+
+// LabelAppliedAt returns the time the engine itself most recently applied the
+// given label to this issue, or zero if no record-at-write has been made for
+// it (cold cache — the caller should fall back to a live fetch). See
+// ItemState.LabelAppliedAt's doc comment for why this is a distinct map from
+// CooldownAt.
+func (s Snapshot) LabelAppliedAt(label string) time.Time {
+	return s.state.LabelAppliedAt[label]
 }
 
 // LastAttemptAt returns the last invocation timestamp for a given stage, or zero.

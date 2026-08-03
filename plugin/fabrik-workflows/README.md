@@ -37,6 +37,12 @@ The skills contain:
 - **What NOT to do** (scope boundaries between stages)
 - **Common pitfalls** to avoid
 
+## Fabrik Labels
+
+Each skill documents the labels it reads or writes on a normal run in its own
+"Labels You Interact With" section. [`LABELS.md`](./LABELS.md) is the
+long-tail reference covering the rest of Fabrik's label protocol.
+
 ## Fabrik Markers
 
 Skills reference these markers that the Fabrik engine processes:

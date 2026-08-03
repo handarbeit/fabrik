@@ -198,15 +198,21 @@ func (c *Client) FetchLatestRelease(owner, repo string) (*LatestRelease, error) 
 	return &release, nil
 }
 
-// FetchAllowAutoMerge calls GET /repos/{owner}/{repo} and returns the value of
-// the allow_auto_merge field. Returns an error if the request fails.
-func (c *Client) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+// FetchRepoAccess calls GET /repos/{owner}/{repo} and returns the allow_auto_merge
+// setting alongside the authenticated token's push access (permissions.push) —
+// both decoded from the same response, so this adds no extra API round-trip
+// beyond what the allow_auto_merge check already required. Returns an error if
+// the request fails.
+func (c *Client) FetchRepoAccess(owner, repo string) (RepoAccess, error) {
 	url := c.baseURL + "/repos/" + owner + "/" + repo
 	var result struct {
 		AllowAutoMerge bool `json:"allow_auto_merge"`
+		Permissions    struct {
+			Push bool `json:"push"`
+		} `json:"permissions"`
 	}
 	if err := c.restGetJSON(url, &result); err != nil {
-		return false, fmt.Errorf("fetching allow_auto_merge for %s/%s: %w", owner, repo, err)
+		return RepoAccess{}, fmt.Errorf("fetching repo access for %s/%s: %w", owner, repo, err)
 	}
-	return result.AllowAutoMerge, nil
+	return RepoAccess{AllowAutoMerge: result.AllowAutoMerge, CanPush: result.Permissions.Push}, nil
 }

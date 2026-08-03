@@ -60,7 +60,7 @@ type GitHubClient interface {
 	EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error
 	DequeuePullRequest(owner, repo string, prNumber int) error
 	FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error)
-	FetchAllowAutoMerge(owner, repo string) (bool, error)
+	FetchRepoAccess(owner, repo string) (gh.RepoAccess, error)
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)

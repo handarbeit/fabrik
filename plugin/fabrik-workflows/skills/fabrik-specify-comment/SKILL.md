@@ -67,6 +67,12 @@ FABRIK_ISSUE_UPDATE_END
 
 Include the ENTIRE body — not just changed sections.
 
+## Labels You Interact With
+
+- **`fabrik:paused` + `fabrik:awaiting-input`** — the engine cleared these to invoke you (a human comment is what resumes a blocked-on-input issue). You don't set or remove them yourself.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Completion
 
 When all questions are resolved and the spec is clear and complete, signal completion:

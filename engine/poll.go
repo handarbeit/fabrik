@@ -246,8 +246,10 @@ func (e *Engine) Run() error {
 		stageNames = append(stageNames, s.Name)
 	}
 	if e.cfg.Repo != "" {
-		if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
-			e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+		if e.resolveRepoAccess(e.cfg.Owner, e.cfg.Repo).CanPush {
+			if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
+				e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+			}
 		}
 		e.mu.Lock()
 		e.seededRepos[e.cfg.Owner+"/"+e.cfg.Repo] = true
@@ -756,6 +758,12 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 					if c := e.cache(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 					}
+					// #1314: this sweep bypasses syncLabelRemoval (it does its own
+					// narrower cache write-through above), so it must also clear the
+					// record-at-write cache directly — otherwise a stale entry survives
+					// a reopen and could suppress recordLabelAppliedAtNow's next
+					// genuine re-application.
+					e.clearLabelAppliedAtNow(item, label)
 				} else {
 					e.logf(num, "warn", "could not remove transient label %q from closed issue: %v\n", label, err)
 				}
@@ -764,6 +772,7 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 				if c := e.cache(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 				}
+				e.clearLabelAppliedAtNow(item, label)
 			}
 		}
 	}
@@ -991,8 +1000,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				continue
 			}
 			e.checkAllowAutoMerge(owner, repo)
-			if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
-				e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+			if e.resolveRepoAccess(owner, repo).CanPush {
+				if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
+					e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+				}
 			}
 			e.mu.Lock()
 			e.seededRepos[ownerRepo] = true

@@ -172,17 +172,19 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
   ```
   FABRIK_SPAWN_CHILD_BEGIN owner/repo
   TITLE: <single-line title>
+  DEPENDS_ON: <n>                  # optional — forward-only 1-based index into this block list
 
   <scoped spec body>
   FABRIK_SPAWN_CHILD_END
   ```
-  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately.
+  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately. `DEPENDS_ON:`, when present, must immediately follow `TITLE:` (no blank line between) — see [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full grammar and validation rules (ADR-1337).
 - **`fabrik:children-spawned` label** — idempotency guard. If present on the parent issue, `preImplement` returns immediately without making any mutations.
 
 ### Flow (when spawn blocks are present and guard label is absent)
 
-1. **Repo validation**: Call `ensureRepoReady(owner, repo)` for each unique target repo across all blocks. If any repo is not in Fabrik's managed set (clone fails), post an error comment listing the unmanaged repos, add `fabrik:paused`, and stop — no children are created.
-2. **Per-child mutations** (for each block in document order):
+1. **`DEPENDS_ON` validation**: `validateSpawnDependsOn` checks every declared index upfront, before any GitHub mutation — a purely structural forward-reference check (`1 <= DEPENDS_ON < ownIndex`). Any invalid value (out-of-range, non-forward, or malformed) is a hard failure: post an error comment (`Created so far: none`), add `fabrik:paused`, and stop — no children are created.
+2. **Repo validation**: Call `ensureRepoReady(owner, repo)` for each unique target repo across all blocks. If any repo is not in Fabrik's managed set (clone fails), post an error comment listing the unmanaged repos, add `fabrik:paused`, and stop — no children are created.
+3. **Per-child mutations** (for each block in document order — the block-index → child node-ID mapping is retained for step 4):
    - `CreateIssue(owner, repo, title, body)` — REST `POST /repos/{owner}/{repo}/issues`; body = block body + engine-appended back-reference footer
    - `AddProjectV2ItemById(board.ProjectID, childNodeID)` — adds child to the same project board; returns `childItemID`
    - `AddBlockedByIssue(parent.NodeID, childNodeID)` — links child as a `blockedBy` dependency of the parent
@@ -190,15 +192,16 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
    - `UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, specifyOptionID)` — moves child to the `Specify` column (or first non-Backlog, non-terminal column as fallback). **Non-fatal**: if `e.statusField` is nil or no viable column exists, child lands in Backlog and a warning is logged.
    - Conditional `AddLabelToIssue` for `fabrik:yolo` if the parent has `fabrik:yolo`; conditional `AddLabelToIssue` for `fabrik:cruise` if the parent has `fabrik:cruise`. Both are **non-fatal**. `base:<branch>` labels are **not** inherited.
    - On any failure in the fatal steps (CreateIssue, AddProjectV2ItemById, AddBlockedByIssue): post error comment naming completed and failed children, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added
-3. **After all children succeed**: Add `fabrik:children-spawned` label to the parent.
+4. **Sibling-wiring pass** (after all children from step 3 exist): for each block that declared `DEPENDS_ON`, call `AddBlockedByIssue(childNodeID, blockerChildNodeID)` linking it to the earlier sibling it referenced. On failure: post an error comment listing children created so far, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added.
+5. **After all children and sibling edges succeed**: Add `fabrik:children-spawned` label to the parent.
 
 ### After spawn
 
-`preImplement` returns `(spawned=true, nil)`. `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges and adds `fabrik:blocked`, gating the parent's Implement until all children close.
+`preImplement` returns `(spawned=true, nil)`. `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges — parent edges and any sibling edges alike — and adds `fabrik:blocked`, gating the parent's Implement until all children close. No changes were needed to `checkDependencies` or `PushUnblockObserver` to support this: both already operate generically over `item.BlockedBy` regardless of edge origin.
 
 ### Idempotency and retry
 
-`fabrik:children-spawned` is the durable idempotency guard. If pre-Implement fails after creating some but not all children (partial spawn), it pauses the parent without adding `fabrik:children-spawned`. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the start — v1 does not skip already-created children. The error comment names the orphaned children so the user knows what to close before re-advancing.
+`fabrik:children-spawned` is the durable idempotency guard, applied only after both the creation pass (step 3) and the sibling-wiring pass (step 4) succeed. If pre-Implement fails after creating some but not all children, or after creating all children but failing to wire some `DEPENDS_ON` edges, it pauses the parent without adding `fabrik:children-spawned`. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the start — v1 does not skip already-created children. The error comment names the orphaned children so the user knows what to close before re-advancing.
 
 To trigger a fresh spawn (e.g., after Plan is revised), the user must manually remove `fabrik:children-spawned` and close any orphaned children.
 

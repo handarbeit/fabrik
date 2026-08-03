@@ -72,6 +72,12 @@ const (
 	// (engine/observers.go) so it never wakes the poll loop or bypasses the
 	// dispatch cooldown.
 	SelfWriteBaselineChanged
+	// LabelAppliedAtChanged indicates ItemState.LabelAppliedAt was written by a
+	// LabelAppliedAtRecorded mutation (#1314). Informational only — like
+	// SelfWriteBaselineChanged, intentionally excluded from wakeChFlags/
+	// cycleSetFlags so it never wakes the poll loop or bypasses the dispatch
+	// cooldown.
+	LabelAppliedAtChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer
