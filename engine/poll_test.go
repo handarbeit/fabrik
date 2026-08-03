@@ -885,6 +885,95 @@ func TestCleanupClosedIssueTransientLabels_APIErrorContinues(t *testing.T) {
 	}
 }
 
+// TestCleanupClosedIssueTransientLabels_ValidateStage_SkipsGateOwnedLabels
+// verifies R6 (ADR-1387): for a closed item resolved to the Validate stage,
+// fabrik:awaiting-ci / fabrik:awaiting-review / fabrik:rebase-needed are left
+// alone — they are cleared atomically by the settle-owner pair
+// (runValidatePRTerminalAdvance / settleClosedValidateAdvance) as part of its
+// own transition, not stripped independently by this generic sweep. Every
+// other transient label (including fabrik:auto-merge-enabled, which never
+// participates in the stranding mechanism) still sweeps unconditionally.
+func TestCleanupClosedIssueTransientLabels_ValidateStage_SkipsGateOwnedLabels(t *testing.T) {
+	tr := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Validate", Order: 2, Prompt: "validate", WaitForCI: &tr},
+		{Name: "Done", Order: 3, CleanupWorktree: true},
+	}
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   50,
+				Status:   "Validate",
+				IsClosed: true,
+				Labels: []string{
+					"fabrik:awaiting-ci",
+					"fabrik:awaiting-review",
+					"fabrik:rebase-needed",
+					"fabrik:auto-merge-enabled",
+					"fabrik:bot-reprompted",
+				},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	removed := removedLabelNames(client.removeLabelCalls)
+	for _, gateOwned := range []string{"fabrik:awaiting-ci", "fabrik:awaiting-review", "fabrik:rebase-needed"} {
+		if containsLabel(removed, gateOwned) {
+			t.Errorf("expected %q to be left for the settle-owner at Validate, but it was swept; removed = %v", gateOwned, removed)
+		}
+	}
+	for _, stillSwept := range []string{"fabrik:auto-merge-enabled", "fabrik:bot-reprompted"} {
+		if !containsLabel(removed, stillSwept) {
+			t.Errorf("expected %q to still be swept at Validate; removed = %v", stillSwept, removed)
+		}
+	}
+}
+
+// TestCleanupClosedIssueTransientLabels_ReviewStage_GateCheckedButNotValidate_StillSwept
+// is a regression guard for a real bug caught during implementation: R6 must
+// key on stage.Name == "Validate" specifically, not stageIsGateChecked(stage)
+// generally. The default Review stage also carries wait_for_reviews: true
+// (making it gate-checked), but the settle-owner pair only ever processes
+// stage.Name == "Validate" (a pre-existing, deliberately unchanged
+// inconsistency — see ADR-1387's discussion of runValidatePRTerminalAdvance's
+// hardcoded stage name). Excluding fabrik:awaiting-review from the sweep at
+// Review would strand it forever, since nothing else would ever clear it.
+func TestCleanupClosedIssueTransientLabels_ReviewStage_GateCheckedButNotValidate_StillSwept(t *testing.T) {
+	tr := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review", WaitForReviews: &tr},
+		{Name: "Validate", Order: 3, Prompt: "validate", WaitForCI: &tr},
+		{Name: "Done", Order: 4, CleanupWorktree: true},
+	}
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   51,
+				Status:   "Review",
+				IsClosed: true,
+				Labels:   []string{"fabrik:awaiting-review"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	removed := removedLabelNames(client.removeLabelCalls)
+	if !containsLabel(removed, "fabrik:awaiting-review") {
+		t.Errorf("expected fabrik:awaiting-review to still be swept at a gate-checked stage other than Validate (no settle-owner processes Review); removed = %v", removed)
+	}
+}
+
 // TestYoloCatchUpEnablesAutoMerge verifies that when an item sits in the
 // Validate column with stage:Validate:complete + fabrik:yolo, the catch-up loop
 // calls EnablePullRequestAutoMerge (not MergePR) and does NOT immediately advance

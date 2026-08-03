@@ -750,17 +750,17 @@ var transientLifecycleLabels = []string{
 // gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
 // that settleClosedValidateAdvance / runValidatePRTerminalAdvance clear
 // themselves, atomically, as part of a real merge/pause transition (ADR-1387,
-// R6). For a closed item resolved to a gate-checked stage, cleanupClosedIssue-
-// TransientLabels must not strip these out from under the settle-owner before
-// it gets a chance to observe them: doing so was the second half of the
-// mechanism behind the pre-ADR-1387 unbounded post-close dispatch loop — the
-// generic sweep removed fabrik:awaiting-ci (the label suppressing re-dispatch)
-// without ever supplying the stage:Validate:complete it was deferring, leaving
-// the item with neither. fabrik:auto-merge-enabled is deliberately NOT
-// included: attemptMergeOnValidate's auto-merge/enqueue/direct-merge branches
-// only ever apply it once stage:Validate:complete already exists, so it never
-// participates in the stranding mechanism and excluding it here would be a
-// no-op, not a fix.
+// R6). For a closed item resolved to the Validate stage specifically,
+// cleanupClosedIssueTransientLabels must not strip these out from under the
+// settle-owner before it gets a chance to observe them: doing so was the
+// second half of the mechanism behind the pre-ADR-1387 unbounded post-close
+// dispatch loop — the generic sweep removed fabrik:awaiting-ci (the label
+// suppressing re-dispatch) without ever supplying the stage:Validate:complete
+// it was deferring, leaving the item with neither. fabrik:auto-merge-enabled
+// is deliberately NOT included: attemptMergeOnValidate's auto-merge/enqueue/
+// direct-merge branches only ever apply it once stage:Validate:complete
+// already exists, so it never participates in the stranding mechanism and
+// excluding it here would be a no-op, not a fix.
 var gateSettleOwnedTransientLabels = map[string]struct{}{
 	"fabrik:awaiting-ci":     {},
 	"fabrik:awaiting-review": {},
@@ -771,19 +771,25 @@ var gateSettleOwnedTransientLabels = map[string]struct{}{
 // closed issues on the board. It runs every poll cycle as a defensive sweep so
 // issues do not carry stale operational labels into terminal state (#617).
 //
-// For a closed item resolved to a gate-checked stage (Validate), the labels in
-// gateSettleOwnedTransientLabels are skipped (R6, ADR-1387) — they are owned by
-// the settle-owner pair (runValidatePRTerminalAdvance / settleClosedValidate-
-// Advance), which clears them itself as part of a real transition; this sweep
-// racing ahead of that transition previously stranded the item with neither
-// the gate label nor the completion label it was deferring.
+// For a closed item resolved specifically to the Validate stage — not
+// stageIsGateChecked generally, which also matches any other stage configured
+// with wait_for_reviews: true (e.g. the default Review stage): the settle-
+// owner pair (runValidatePRTerminalAdvance / settleClosedValidateAdvance)
+// only ever processes stage.Name == "Validate" (a pre-existing, deliberately
+// unchanged inconsistency — see ADR-1387), so excluding a label at any other
+// gate-checked stage would strand it with no owner left to clear it — the
+// labels in gateSettleOwnedTransientLabels are skipped (R6, ADR-1387). They
+// are owned by that settle-owner pair, which clears them itself as part of a
+// real transition; this sweep racing ahead of that transition previously
+// stranded the item with neither the gate label nor the completion label it
+// was deferring.
 func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 	for _, item := range board.Items {
 		if !item.IsClosed {
 			continue
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		atGateCheckedStage := stageIsGateChecked(stage)
+		atValidateStage := stage != nil && stage.Name == "Validate"
 		labelSet := make(map[string]struct{}, len(item.Labels))
 		for _, l := range item.Labels {
 			labelSet[l] = struct{}{}
@@ -794,7 +800,7 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 			if _, has := labelSet[label]; !has {
 				continue
 			}
-			if atGateCheckedStage {
+			if atValidateStage {
 				if _, owned := gateSettleOwnedTransientLabels[label]; owned {
 					continue
 				}
