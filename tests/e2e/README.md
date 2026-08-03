@@ -213,6 +213,61 @@ A repo-wide search (`grep -rn "🏭" tests/e2e/*.go`) found every call site in
 No other `tests/e2e/*.go` file references the `🏭` emoji or a
 `"🏭 **Fabrik —"` literal.
 
+### `TestNoWorkNeeded` discriminator verification (#1355)
+
+`TestNoWorkNeeded` used to assert only `WaitForIssueClosed` (plus a
+best-effort "no open PR" spot-check) — insufficient by itself, since closing
+proves the pipeline finished, not that it took the no-work-needed path
+specifically (the same vacuity class as #1320/#1319). It now additionally
+asserts the engine's own no-work-needed skip comment
+(`noWorkNeededSkipComment`, `engine/no_work_needed_settle.go`) is present,
+matched by body prefix via `hasNoWorkNeededSkipComment`
+(`no_work_needed_marker_test.go`) — never by substring-anywhere, for the same
+reason `hasEngineCycleLimitComment` matches by prefix.
+
+**Verified so far:** `TestHasNoWorkNeededSkipComment` is a fast, no-live-bed
+unit test that proves the helper accepts both genuine comment variants
+`noWorkNeededSkipComment` can produce and rejects a fixture where an agent
+quotes the marker text in prose (the #4049/#1320 false-pass shape) — run it
+with `go test -tags e2e -run TestHasNoWorkNeededSkipComment ./tests/e2e/`.
+This establishes the matching logic itself discriminates correctly.
+
+**Not yet verified: a genuine red/green cycle against the live e2e bed**
+(the issue's own Verification Note calls this the load-bearing step). Doing
+so requires temporarily neutralizing `noWorkNeededSkipComment`'s posting in
+a locally-built engine binary, deploying that binary to the shared
+`~/dev/fabrik-test` bed, and restarting the bed's Fabrik instance — all
+outside the `tests/e2e/` worktree, and outside the sandbox boundary an
+automated Fabrik Implement/Review/Validate stage operates under (see
+CLAUDE.md's "Worktree Boundary"). No pipeline stage in this repo can safely
+perform that step; it requires a human operator with direct access to the
+bed. Steps to complete AC3 before merge:
+
+```bash
+cd ~/dev/fabrik-test
+# Stop the running instance (Ctrl-C in its session, or: kill $(cat .fabrik/fabrik.lock))
+
+# RED: neutralize the skip-comment posting, uncommitted
+#   in engine/no_work_needed_settle.go, make noWorkNeededSkipComment return ""
+go build -o fabrik .
+./fabrik -notui &   # do NOT pass --auto-upgrade, it would overwrite this build
+cd -   # back to this branch's checkout
+go test -tags e2e -run TestNoWorkNeeded ./tests/e2e/ -timeout 25m -v
+# Expect FAIL: "no engine-authored no-work-needed skip comment ... found"
+
+cd ~/dev/fabrik-test
+git diff --stat engine/   # confirm the neutralization is still the only engine change
+git checkout -- engine/no_work_needed_settle.go   # revert
+go build -o fabrik .
+# restart the instance (Ctrl-C the red one first): ./fabrik -notui --auto-upgrade &
+cd -
+go test -tags e2e -run TestNoWorkNeeded ./tests/e2e/ -timeout 25m -v
+# Expect PASS
+```
+
+Record both outcomes (pass/fail, timestamps, relevant log lines) in the PR
+or as a follow-up comment on handarbeit/fabrik#1355 once run.
+
 ### Additional prerequisites for `TestPausedMergedPRRecovery`
 
 9. **Gate labels seeded** in `handarbeit/fabrik-test-alpha`: `fabrik:awaiting-ci`,
@@ -428,14 +483,13 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
 ### Additional prerequisites for `TestExpectedReviewers*` scenarios
 
 `TestExpectedReviewersFastAdvance`, `TestExpectedReviewersDeclaredWaitsAndReprompts`,
-`TestExpectedReviewersPrecedenceGuard`, and
-`TestExpectedReviewersFastAdvanceComposesWithAuthoritative` cover ADR-1283's
+and `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` cover ADR-1283's
 `expected_reviewers` (declared unrequested reviewers for the review gate).
-`TestExpectedReviewersUndeclaredRegressionGuard` is the fifth scenario and has no
-dependency described below. All five run against the bed's existing `Review`
+`TestExpectedReviewersUndeclaredRegressionGuard` is the fourth scenario and has no
+dependency described below. All four run against the bed's existing `Review`
 column/stage (default, untouched config) — **no bed column or stage-YAML setup is
-required**, beyond `FABRIK_REVIEW_WAIT_TIMEOUT`/`FABRIK_REVIEWER_TOKEN` (already
-documented above) and the two labels below.
+required**, beyond `FABRIK_REVIEW_WAIT_TIMEOUT` (already documented above) and the
+two labels below.
 
 **Mechanism: two per-issue labels, not a bed column.** A declared `expected_reviewers`
 value is applied per item via one of two labels, passed as an extra label at seed
@@ -452,8 +506,7 @@ separate, decoupled follow-up issue (not yet filed as of #1298's PR — see that
 PR's description for the exact spec: the four call sites to update, the
 `declared` > `none` precedence rule, and the `github/labels.go` pre-seeding step).
 `TestExpectedReviewersFastAdvance`, `TestExpectedReviewersDeclaredWaitsAndReprompts`,
-`TestExpectedReviewersPrecedenceGuard`, and
-`TestExpectedReviewersFastAdvanceComposesWithAuthoritative` cannot pass until that
+and `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` cannot pass until that
 follow-up merges and both labels exist on the bed repo — they either run for real
 or fail loudly (not skip) if the follow-up hasn't landed yet, mirroring #1258's
 rejection of silent skips. `TestExpectedReviewersUndeclaredRegressionGuard` sets
@@ -474,11 +527,7 @@ scenarios — taking every other in-flight parallel scenario down with it.
 a stage literally named `Validate`, and seeding on `Review` cannot reach it. This
 is a documented, accepted e2e gap.
 
-26. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT as
-    prerequisite #21, required only by `TestExpectedReviewersPrecedenceGuard`
-    (the others don't need a submitted review). Skips with an instructional
-    message if unset.
-27. **`expected-reviewers:none` and `expected-reviewers:declared` labels seeded**
+26. **`expected-reviewers:none` and `expected-reviewers:declared` labels seeded**
     in `handarbeit/fabrik-test-alpha` (the only repo these scenarios use).
     `FileIssue` passes extra labels straight through to `gh issue create --label`,
     which — like `AddLabel` (prerequisite #9) and prerequisite #22's
@@ -493,7 +542,7 @@ is a documented, accepted e2e gap.
     that *interprets* a label an issue already carries, not the GitHub label
     object itself — the objects must exist before any of these scenarios can even
     file their seed issue.
-28. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
+27. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
     (~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer, similar to
     `TestReviewAuthorityBlocksAndPausesOnChangesRequested`) — Phase 1 and Phase 2
     of the bot re-prompt ladder are folded into one continuation. The same
@@ -501,12 +550,12 @@ is a documented, accepted e2e gap.
     (e.g. `5`) applies here too; a very short value risks a legitimate Phase 1/2
     transition racing this test's own bounded-window assertions in
     `TestExpectedReviewersFastAdvance`/`...ComposesWithAuthoritative`.
-29. **The synthetic declared-reviewer name (`e2e-synthetic-declared-reviewer`)
+28. **The synthetic declared-reviewer name (`e2e-synthetic-declared-reviewer`)
     must never resolve to a real, active GitHub account** on the bed's org —
     same rationale as prerequisite #23's warning against reusing a real installed
     bot: an unrelated real actor submitting a review would race the deterministic
     re-prompt-ladder assertions in `TestExpectedReviewersDeclaredWaitsAndReprompts`.
-30. **Draft-PR determinism technique (#1312)**: `TestExpectedReviewersFastAdvance`,
+29. **Draft-PR determinism technique (#1312)**: `TestExpectedReviewersFastAdvance`,
     `TestExpectedReviewersDeclaredWaitsAndReprompts`,
     `TestExpectedReviewersUndeclaredRegressionGuard`, and
     `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` seed via
@@ -687,6 +736,39 @@ reports), and **never started** (parked waiting for a free `-parallel` slot,
 which the built-in panic dump omits entirely). The full JSON log is kept for
 follow-up debugging at the path printed above.
 
+#### Per-test wall-clock summary (#1355)
+
+Unlike the failure classification above, `report_test_timings` runs
+unconditionally — pass or fail — right after each leg's suite invocation
+finishes, so "which scenarios cost the most" is a measured number from every
+gate run rather than a guess:
+
+```
+== per-test wall-clock (leg: off), slowest first ==
+2312.4s  pass  TestConvergenceRace
+1382.1s  pass  TestPausedMergedPRRecovery
+612.0s   pass  TestNoWorkNeeded
+58.3s    pass  TestSmokeSingleRepoDispatch
+0s       skip  TestMergeTrainHappyPathLanding
+```
+
+Elapsed is Go's own per-test `Elapsed` field from the `go test -json` stream
+(only meaningful on a test's terminal pass/fail/skip event), sorted
+descending; subtests are folded into their parent, same as the failure
+classification above. Printed once per leg — a combined cross-leg table
+isn't possible without changing `switch_and_run`'s per-leg `jsonlog` scoping
+(see the function's own doc comment for why).
+
+**Verification status:** the `jq` pipeline itself is proven against
+synthetic `go test -json` fixtures (multiple tests, a subtest, all three
+terminal actions, sorted correctly) — not by inspection. A full smoke test
+of the integrated `scripts/e2e/run.sh` output (AC4) against a live gate run
+was not performed for the same reason as `TestNoWorkNeeded`'s live-bed
+verification above: doing so touches `~/dev/fabrik-test`, outside any
+automated Fabrik stage's worktree sandbox. Run `scripts/e2e/run.sh -run
+TestSmokeSingleRepoDispatch` manually to confirm the table prints in
+context.
+
 #### Teardown on kill
 
 A run killed by `E2E_TIMEOUT` (or an external signal) skips every in-flight
@@ -789,7 +871,6 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestReviewAuthorityAdvisoryRegressionGuard` | Regression guard: advisory (default) mode still clears on any submitted review regardless of verdict — proves the additive authoritative check didn't narrow the default path | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersFastAdvance` | ADR-1283 `expected_reviewers: []` (via `expected-reviewers:none` label, requires follow-up engine issue): nothing requested/reviewed → gate fast-advances instead of waiting out the review timeout (the #1080 stall this feature fixes) | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283 `expected_reviewers: [<name>]` (via `expected-reviewers:declared` label, requires follow-up engine issue): declared-but-unrequested reviewer holds the gate open, Phase 1 re-prompt ladder fires with an @mention comment, Phase 2 pauses for human when no response arrives | Both | ~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer | ~$0.05 (no Claude) |
-| `TestExpectedReviewersPrecedenceGuard` | ADR-1283 precedence guard (via `expected-reviewers:none` label, requires follow-up engine issue): a genuinely requested reviewer holds the gate open despite `expected_reviewers: []` being declared | Both | 5–10 min | ~$0.03 (no Claude) |
 | `TestExpectedReviewersUndeclaredRegressionGuard` | Regression guard: undeclared (`nil`) `expected_reviewers` still never fast-advances — pins the `expected != nil` check and proves the shipped default (FR-5) is unchanged | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
@@ -827,7 +908,6 @@ shape, not just the single-mode total.
 | `TestReviewAuthorityAdvisoryRegressionGuard` | ADR-1250 additive-check regression guard, #1258 |
 | `TestExpectedReviewersFastAdvance` | ADR-1283 (`expected_reviewers`), #1298 (this scenario), the #1080 stall the feature exists to eliminate |
 | `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283, #1298 — first e2e coverage of the bot re-prompt ladder (`fabrik:bot-reprompted`, Phase 1/2 of `checkAwaitingReviewTimeout`) |
-| `TestExpectedReviewersPrecedenceGuard` | ADR-1283, #1298 — declared reviewers narrow waiting for unrequested reviewers only, never bypass a genuinely requested one |
 | `TestExpectedReviewersUndeclaredRegressionGuard` | ADR-1283 FR-5 regression guard, #1298 — pins `reviewGateFastAdvance`'s `expected != nil` check |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283, #1298 — fast-advance independence from `review_authority` (ADR-1250) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
@@ -847,6 +927,52 @@ Every escape-from-release regression earns a new scenario in this table.
    the test bed (`t.Cleanup` is your friend).
 4. Document what regression the scenario protects against. Reference the
    originating issue or PR.
+5. **Assert on something that can only be produced by the engine, on the
+   specific path under test** (handarbeit/fabrik#1355). A scenario that
+   passes just as easily against a broken engine as a working one is worse
+   than no scenario at all — it looks like coverage but proves nothing, and
+   the failure is invisible until someone happens to ask why the test
+   passed. Two incidents motivated this rule:
+   - **#1320**: `TestCIFixReinvokeCycleLimit` matched the engine's
+     `🏭 **Fabrik — CI fix cycle limit reached**` marker via
+     `strings.Contains` across *every* comment on the issue, including
+     stage-output comments the Claude agent itself wrote. On
+     `handarbeit/fabrik-test-alpha#4049` a Research-stage comment quoted the
+     marker text in prose while describing the feature — the engine never
+     posted the marker at all, but the substring scan matched the prose
+     instead and the test passed green.
+   - **#1319**: `TestExpectedReviewersPrecedenceGuard` passed identically
+     against an engine with zero `expected_reviewers` support and against
+     the fixed engine — its assertion (`fabrik:awaiting-review` held while a
+     reviewer is outstanding) was true under both, so it never actually
+     exercised the feature it was named for. It was deleted rather than
+     fixed (see handarbeit/fabrik#1355 R1) once shown the property it wanted
+     to prove is unreachable in e2e by construction: `reviewGateFastAdvance`
+     (`engine/reviews.go`) short-circuits on the outstanding-reviewer check
+     before the `expected_reviewers` branch is ever reached.
+
+   In practice:
+   - **Match engine-authored comments by body prefix, never by substring
+     anywhere in the body.** Mirror `findNewComments`
+     (`engine/comments.go:17`), which uses `strings.HasPrefix(c.Body, "🏭
+     **Fabrik")` to distinguish Fabrik's own output from anything an agent
+     wrote. See the "Marker-substring assertion audit (#1320)" section above
+     for the full audit of every `🏭`-marker call site in this package, and
+     `ci_fix_reinvoke_marker_test.go` / `no_work_needed_marker_test.go` for
+     the concrete pattern to copy: a literal prefix `const`, a
+     `strings.HasPrefix`-based helper, and a companion fast (no live bed)
+     unit test with fixtures proving the helper accepts genuine engine
+     output and rejects a fixture shaped like the #4049 false-pass (prose
+     that quotes the marker text).
+   - Before writing the assertion, ask what a *broken* version of the
+     feature under test would do differently. If the answer is "nothing
+     observable," the scenario doesn't yet discriminate — strengthen it
+     (per the `TestNoWorkNeeded`/#1355 R2 fix above) or don't add it.
+   - **Prefer a loud, diagnostic `t.Skip` over an assertion that can be
+     satisfied by accident.** A skip with a clear reason ("prerequisite X
+     not configured") is honest about missing coverage; a green check that
+     doesn't actually exercise the path under test is worse, because it
+     hides the gap.
 
 ## Design notes
 
