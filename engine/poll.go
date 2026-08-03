@@ -758,6 +758,12 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 					if c := e.cache(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 					}
+					// #1314: this sweep bypasses syncLabelRemoval (it does its own
+					// narrower cache write-through above), so it must also clear the
+					// record-at-write cache directly — otherwise a stale entry survives
+					// a reopen and could suppress recordLabelAppliedAtNow's next
+					// genuine re-application.
+					e.clearLabelAppliedAtNow(item, label)
 				} else {
 					e.logf(num, "warn", "could not remove transient label %q from closed issue: %v\n", label, err)
 				}
@@ -766,6 +772,7 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 				if c := e.cache(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 				}
+				e.clearLabelAppliedAtNow(item, label)
 			}
 		}
 	}

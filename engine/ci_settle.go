@@ -203,7 +203,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// item), and a FetchLabelAppliedAt error or zero timestamp leaves this
 		// a no-op, falling through to the normal gate-driven path unchanged.
 		owner, repoName := itemOwnerRepo(item, e.defaultRepo())
-		if appliedAt, err := e.client.FetchLabelAppliedAt(owner, repoName, item.Number, "fabrik:awaiting-ci"); err != nil {
+		if appliedAt, err := e.labelAppliedAt(item, owner, repoName, "fabrik:awaiting-ci"); err != nil {
 			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIWaitTimeout backstop: %v\n", err)
 		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
 			e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())

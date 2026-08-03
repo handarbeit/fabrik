@@ -489,6 +489,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.CooldownAt[v.Reason] = v.Until
 		return CooldownChanged
 
+	case LabelAppliedAtRecorded:
+		if item.LabelAppliedAt == nil {
+			item.LabelAppliedAt = make(map[string]time.Time)
+		}
+		item.LabelAppliedAt[v.Label] = v.At
+		return LabelAppliedAtChanged
+
 	case WorkerEntered:
 		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
 		return WorkerChanged | WorkerLifecycleChanged

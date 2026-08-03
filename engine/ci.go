@@ -125,7 +125,7 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 	status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
 
 	if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+		appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
 		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
@@ -183,7 +183,7 @@ func (e *Engine) classifyCIFromRequiredContexts(owner, repo string, item gh.Proj
 	}
 
 	if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+		appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
 		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
@@ -216,7 +216,7 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 		// R3: OPEN+BLOCKED+no check runs ever observed — a required check is
 		// configured but never triggered by PR events.
 		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
@@ -231,7 +231,7 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 
 	if mergeableState != "" && mergeableState != "unknown" {
 		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {

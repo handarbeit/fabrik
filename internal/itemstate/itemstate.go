@@ -61,6 +61,17 @@ type ItemState struct {
 	StageState StageState
 	// CooldownAt maps reason → expiry time (e.g. "retry", "review-blocked", "ci-await").
 	CooldownAt map[string]time.Time
+	// LabelAppliedAt maps label name → the time the engine itself most recently
+	// applied that label to this issue (record-at-write, #1314). Deliberately a
+	// separate map from CooldownAt, not a repurposing of it: CooldownAt's
+	// HasExpiredCooldown treats any non-zero, past timestamp as "wake this item"
+	// (engine/poll.go), but an applied-at timestamp is always in the past the
+	// instant it's recorded — aliasing the two would make every recorded label
+	// application look like a permanently expired cooldown. Populated only for
+	// labels the engine writes exclusively through applyLabelAdd or an explicit
+	// recordLabelAppliedAtNow call (engine/mutate.go); a label this map has no
+	// entry for simply falls back to the live FetchLabelAppliedAt REST fetch.
+	LabelAppliedAt map[string]time.Time
 	// Worker is present when a worker is in-flight for this item.
 	Worker *WorkerHandle
 
