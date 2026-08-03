@@ -864,7 +864,7 @@ func reviewGateAllBots(reviewRequests []gh.ReviewRequest, outstanding, declaredO
 // done=false means the caller should fall through to the next phase (the
 // label timestamp fetch failed, or the timeout window hasn't elapsed yet).
 func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) (blocked, timedOut, done bool) {
-	repromptedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, botRepromptedLabel)
+	repromptedAt, err := e.labelAppliedAt(item, owner, repo, botRepromptedLabel)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not fetch bot-reprompted label timestamp: %v\n", err)
 		return false, false, false
@@ -950,7 +950,7 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 		if l != "fabrik:awaiting-review" {
 			continue
 		}
-		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-review")
+		appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-review")
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
 			return false, false, false

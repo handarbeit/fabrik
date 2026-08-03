@@ -160,6 +160,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				if e.webhookMgr != nil {
 					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 				}
+				e.recordLabelAppliedAtNow(item, "fabrik:awaiting-ci")
 			}
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
@@ -247,6 +248,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 					if e.webhookMgr != nil {
 						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-review")
 					}
+					e.recordLabelAppliedAtNow(item, "fabrik:awaiting-review")
 				}
 				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
 			}
@@ -409,6 +411,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 			}
+			e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 		}
 		e.logf(item.Number, "info", "PR #%d merged directly (auto-merge unavailable fallback)\n", pr.Number)
 		return true, false, nil
@@ -424,6 +427,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
+		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 	}
 
 	e.logf(item.Number, "info", "GitHub auto-merge enabled on PR #%d (%s) — awaiting GitHub atomic merge\n", pr.Number, strategy)
@@ -465,6 +469,7 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
+		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 	}
 	e.logf(item.Number, "info", "PR #%d enqueued into merge queue — awaiting GitHub merge\n", prNumber)
 	return true, nil

@@ -348,7 +348,7 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		// applied-at (set at first enqueue) so it survives restarts. Guard on
 		// CIWaitTimeout > 0 so operators can disable the check.
 		if e.cfg.CIWaitTimeout > 0 {
-			appliedAt, faErr := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:auto-merge-enabled")
+			appliedAt, faErr := e.labelAppliedAt(item, owner, repo, "fabrik:auto-merge-enabled")
 			if faErr != nil {
 				e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at for stall check: %v\n", faErr)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.cfg.CIWaitTimeout {
@@ -392,7 +392,7 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 
 	// Check convergence budget.
 	if e.cfg.ConvergenceBudget > 0 {
-		budgetStart, berr := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:auto-merge-enabled")
+		budgetStart, berr := e.labelAppliedAt(item, owner, repo, "fabrik:auto-merge-enabled")
 		if berr != nil {
 			e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at: %v\n", berr)
 		} else if !budgetStart.IsZero() {
