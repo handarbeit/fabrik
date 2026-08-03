@@ -484,6 +484,22 @@ type CooldownRecorded struct {
 func (CooldownRecorded) isMutation()       {}
 func (m CooldownRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// LabelAppliedAtRecorded records the time the engine itself applied Label to
+// this issue (record-at-write, #1314). Always overwrites any prior entry for
+// the same label — a genuine re-application (applied → removed → re-applied)
+// must yield the latest timestamp, not the first. Callers are expected to
+// only record here on a genuine new application (guarded by a "not already
+// present" check at the write site), never as a defensive idempotent no-op.
+type LabelAppliedAtRecorded struct {
+	Repo   string
+	Number int
+	Label  string
+	At     time.Time
+}
+
+func (LabelAppliedAtRecorded) isMutation()       {}
+func (m LabelAppliedAtRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // WorkerHeartbeat updates the LastSignAt timestamp for the active worker.
 type WorkerHeartbeat struct {
 	Repo   string
