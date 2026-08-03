@@ -345,6 +345,51 @@ func TestBuildClaudeEnv_AnthropicEnvPassthrough(t *testing.T) {
 			t.Errorf("expected exactly one PATH=/usr/bin entry (same value in, same value out), got %v in %v", count, got)
 		}
 	})
+
+	// Regression (Validate-stage review finding): naming one of Fabrik's own
+	// computed override keys in FABRIK_ANTHROPIC_ENV_PASSTHROUGH must not let
+	// an ambient value silently win. mergeEnv appends every "KEY=VALUE"
+	// override in order and never dedupes within a single overrides slice, so
+	// a second, later entry for an already-emitted key (e.g. GH_TOKEN) would
+	// have won per os/exec's last-occurrence-wins semantics, letting a stale
+	// or attacker-controlled ambient value silently override Fabrik's own
+	// computed token/effort-level/invocation-fact value.
+	t.Run("naming a Fabrik-owned override key does not let the ambient value override it", func(t *testing.T) {
+		resetAnthropicEnvVars(t)
+		old := claudeGHToken
+		claudeGHToken = "fabrik-computed-token"
+		t.Cleanup(func() { claudeGHToken = old })
+		claudeAnthropicEnvPassthrough = []string{"GH_TOKEN", "CLAUDE_CODE_EFFORT_LEVEL", "FABRIK_ISSUE"}
+		baseEnv := []string{
+			"GH_TOKEN=stale-ambient-token",
+			"CLAUDE_CODE_EFFORT_LEVEL=low",
+			"FABRIK_ISSUE=99999",
+		}
+		got := constructedEnv(baseEnv, InvokeOptions{})
+		for _, want := range []string{"GH_TOKEN=fabrik-computed-token", "CLAUDE_CODE_EFFORT_LEVEL=high", "FABRIK_ISSUE=1346"} {
+			if !containsExact(got, want) {
+				t.Errorf("expected Fabrik's own value %q to survive, got %v", want, got)
+			}
+		}
+		for _, unwanted := range []string{"GH_TOKEN=stale-ambient-token", "CLAUDE_CODE_EFFORT_LEVEL=low", "FABRIK_ISSUE=99999"} {
+			if containsExact(got, unwanted) {
+				t.Errorf("expected ambient value %q to never appear, got %v", unwanted, got)
+			}
+		}
+		// Confirm there's exactly one entry per key — not just that Fabrik's
+		// value happens to be found somewhere in a duplicated slice.
+		for _, key := range []string{"GH_TOKEN=", "CLAUDE_CODE_EFFORT_LEVEL=", "FABRIK_ISSUE="} {
+			count := 0
+			for _, kv := range got {
+				if strings.HasPrefix(kv, key) {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Errorf("expected exactly one %s entry, got %d in %v", key, count, got)
+			}
+		}
+	})
 }
 
 func TestParseAnthropicEnvPassthrough(t *testing.T) {

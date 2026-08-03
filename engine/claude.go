@@ -695,15 +695,25 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)
 	env = append(env, scrubAnthropicAuthEnv(baseEnv, passthrough)...)
 	for _, key := range claudeAnthropicEnvPassthrough {
-		// FABRIK_ANTHROPIC_API_KEY/FABRIK_ANTHROPIC_ENV_PASSTHROUGH are never
-		// re-added here even if a caller names one of them in its own
-		// passthrough list. mergeEnv's bare removal sentinel (appended below)
-		// only strips a key from base — it cannot retract an earlier
-		// "KEY=VALUE" entry already present in this same overrides slice, so
-		// without this guard a self-referential passthrough entry would
-		// forward the control variable's own ambient value to the worker,
-		// violating R8/R17.
-		if key == "FABRIK_ANTHROPIC_API_KEY" || key == "FABRIK_ANTHROPIC_ENV_PASSTHROUGH" {
+		// A passthrough entry only ever re-adds a key inside the scrubbed
+		// Anthropic auth namespace (ANTHROPIC_*-prefixed or a
+		// claudeCodeAuthSelectors entry) — never one of Fabrik's own
+		// computed overrides emitted earlier in this function (GH_TOKEN,
+		// GITHUB_TOKEN, the FABRIK_* invocation facts,
+		// CLAUDE_CODE_EFFORT_LEVEL, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING),
+		// and never the two control variables themselves. mergeEnv's bare
+		// removal sentinel (appended below) only strips a key from base — it
+		// cannot retract an earlier "KEY=VALUE" entry already present in
+		// this same overrides slice, so without this namespace restriction
+		// an operator naming e.g. GH_TOKEN in FABRIK_ANTHROPIC_ENV_PASSTHROUGH
+		// (deliberately or by typo) would append a second, later GH_TOKEN
+		// entry from the ambient environment — and since os/exec resolves a
+		// duplicate cmd.Env key by last occurrence, that stale/attacker
+		// ambient value would silently win over the token Fabrik computed.
+		// This also makes R19's "outside the namespace is a no-op" claim
+		// actually true for every key, not just ones buildClaudeEnv never
+		// itself overrides. (#1346 Validate-stage review finding.)
+		if !isAnthropicAuthNamespaceKey(key) {
 			continue
 		}
 		if val, ok := envLookup(baseEnv, key); ok {
@@ -786,6 +796,26 @@ func scrubAnthropicAuthEnv(baseEnv []string, passthrough map[string]bool) []stri
 		removals = append(removals, key)
 	}
 	return removals
+}
+
+// isAnthropicAuthNamespaceKey reports whether key belongs to the scrubbed
+// Anthropic auth namespace — the same universe scrubAnthropicAuthEnv removes
+// from and buildClaudeEnv's passthrough loop is allowed to re-add from:
+// every ANTHROPIC_*-prefixed key, plus the enumerated claudeCodeAuthSelectors.
+// Used to keep FABRIK_ANTHROPIC_ENV_PASSTHROUGH scoped to that namespace so a
+// passthrough entry can never re-add one of Fabrik's own computed override
+// keys (GH_TOKEN, the FABRIK_* invocation facts, CLAUDE_CODE_EFFORT_LEVEL,
+// CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING) from the ambient environment.
+func isAnthropicAuthNamespaceKey(key string) bool {
+	if strings.HasPrefix(key, "ANTHROPIC_") {
+		return true
+	}
+	for _, sel := range claudeCodeAuthSelectors {
+		if key == sel {
+			return true
+		}
+	}
+	return false
 }
 
 // passthroughSet builds a lookup set from the resolved
