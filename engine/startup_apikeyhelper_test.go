@@ -274,3 +274,57 @@ func TestManagedPolicySettingsPath_MatchesRunningGOOS(t *testing.T) {
 		t.Errorf("managedPolicySettingsPath() = %q, unexpected shape", p)
 	}
 }
+
+// TestLogAnthropicAPIKeyOptIn_Inactive confirms the R9 startup notice stays
+// byte-for-byte silent when the opt-in is inactive.
+func TestLogAnthropicAPIKeyOptIn_Inactive(t *testing.T) {
+	var buf strings.Builder
+	logAnthropicAPIKeyOptIn(false, &buf)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when inactive, got: %q", buf.String())
+	}
+}
+
+// TestLogAnthropicAPIKeyOptIn_Active confirms the R9 startup notice fires
+// exactly one line naming FABRIK_ANTHROPIC_API_KEY when active, and never
+// contains a value (there is none passed to this function to leak, but the
+// assertion pins the exact message shape so a future edit can't
+// accidentally start interpolating one).
+func TestLogAnthropicAPIKeyOptIn_Active(t *testing.T) {
+	var buf strings.Builder
+	logAnthropicAPIKeyOptIn(true, &buf)
+	out := buf.String()
+	if !strings.Contains(out, "FABRIK_ANTHROPIC_API_KEY") {
+		t.Fatalf("expected output to name FABRIK_ANTHROPIC_API_KEY, got: %q", out)
+	}
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("expected exactly one line, got: %q", out)
+	}
+}
+
+// TestLogAnthropicEnvPassthrough_Empty confirms the R18 startup notice stays
+// byte-for-byte silent when the passthrough list is empty.
+func TestLogAnthropicEnvPassthrough_Empty(t *testing.T) {
+	var buf strings.Builder
+	logAnthropicEnvPassthrough(nil, &buf)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when passthrough list is empty, got: %q", buf.String())
+	}
+}
+
+// TestLogAnthropicEnvPassthrough_NonEmpty confirms the R18 startup notice
+// fires exactly one line naming every passed-through variable, and never
+// contains a value.
+func TestLogAnthropicEnvPassthrough_NonEmpty(t *testing.T) {
+	var buf strings.Builder
+	logAnthropicEnvPassthrough([]string{"CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_AWS_API_KEY"}, &buf)
+	out := buf.String()
+	for _, name := range []string{"CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_AWS_API_KEY"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("expected output to name %s, got: %q", name, out)
+		}
+	}
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("expected exactly one line, got: %q", out)
+	}
+}
