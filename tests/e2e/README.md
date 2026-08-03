@@ -716,8 +716,10 @@ necessarily by 4 being too high a concurrency cap. The one scenario failure
 plausibly linked to bed starvation in the observed run
 (`TestReviewAuthorityClearsOnApproval` timing out waiting for
 `fabrik:awaiting-review` alongside a 5½-minute processing gap in the bed log)
-is explicitly unconfirmed — its sibling `TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
-same helper, same assertion, passed in the same leg. Lowering `E2E_PARALLEL`
+is explicitly unconfirmed — its sibling (at the time of this run,
+`TestReviewAuthorityBlocksAndPausesOnChangesRequested`; renamed to
+`TestReviewAuthorityReinvokesOnChangesRequested` by #1375), same helper, same
+assertion, passed in the same leg. Lowering `E2E_PARALLEL`
 without stronger evidence would itself be an unmeasured, guessed change, and
 risks masking real `t.Parallel()` interleaving defects for no demonstrated
 benefit. Instead, the risk this requirement is aimed at — a scenario failing
