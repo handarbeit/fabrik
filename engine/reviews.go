@@ -1190,9 +1190,23 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 // scenario — a CHANGES_REQUESTED review with a body and zero inline
 // comments — reachable on a base:<branch> repo too.
 func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	snap, _ := e.store.Get(repoStr, item.Number)
+	return e.buildReviewBodyCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
+}
 
+// resolveReviewsForFeedback returns item.LinkedPRReviews when already
+// populated by GraphQL (default-branch items), falling back to a live
+// FetchPRReviews REST call for base:<branch> items — see
+// buildReviewBodyComments' base:<branch> doc comment above for why the
+// fallback is needed. Split out from buildReviewBodyComments (Pruefer review
+// finding, #1375) so a single synchronous call chain — handleReviewGate's own
+// two uses plus dispatchReviewReinvoke's precheck — can resolve reviews once
+// and reuse the result, instead of each issuing its own live REST call for
+// the same PR on the same poll. build() (dispatchReviewReinvoke, run inside
+// the reinvoke goroutine after an unbounded semaphore wait) deliberately does
+// not reuse a memoized result — it calls buildReviewBodyComments fresh, since
+// real time may have passed and review state may have changed since the
+// synchronous chain resolved it.
+func (e *Engine) resolveReviewsForFeedback(item gh.ProjectItem) []gh.PRReview {
 	reviews := item.LinkedPRReviews
 	if itemHasBaseLabel(item) {
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -1206,11 +1220,20 @@ func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
 		}
 		restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber)
 		if err != nil {
-			e.logf(item.Number, "warn", "buildReviewBodyComments: FetchPRReviews failed: %v\n", err)
+			e.logf(item.Number, "warn", "resolveReviewsForFeedback: FetchPRReviews failed: %v\n", err)
 			return nil
 		}
 		reviews = restReviews
 	}
+	return reviews
+}
+
+// buildReviewBodyCommentsFromReviews turns already-resolved reviews into
+// synthetic gh.Comments — the skip conditions and dedup logic are documented
+// on buildReviewBodyComments above.
+func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
 
 	out := make([]gh.Comment, 0, len(reviews))
 	for _, r := range reviews {
@@ -1570,14 +1593,21 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // thin wrapper over dispatchReinvoke, supplying only review's pre-dispatch
 // emptiness precheck and its comment builder — the shared goroutine scaffold
 // (WorkerEntered/semaphore/processComments) lives in reinvoke.go.
-func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+//
+// precomputed is handleReviewGate's already-computed syntheticComments
+// (Pruefer review finding, #1375): the caller established len(precomputed) >
+// 0 immediately before invoking this dispatch, in the same synchronous call
+// chain, so precheck reuses that result instead of re-deriving it — which,
+// for a base:<branch> item, would otherwise mean a second live FetchPRReviews
+// REST call for a value nothing async could have changed since the first.
+func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, precomputed []gh.Comment) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
-		// precheck runs synchronously before WorkerEntered/goroutine dispatch —
-		// buildReviewFeedbackComments needs no workDir, so there's no reason to
-		// incur ensureRepoReady/WorkerEntered churn for a same-poll no-op.
+		// precheck runs synchronously before WorkerEntered/goroutine dispatch,
+		// immediately after handleReviewGate computed precomputed — reusing it
+		// here avoids a redundant re-fetch for a same-poll no-op.
 		precheck: func() bool {
-			return len(e.buildReviewFeedbackComments(item)) > 0
+			return len(precomputed) > 0
 		},
 		build: func(workDir string) []gh.Comment {
 			return e.buildReviewFeedbackComments(item)

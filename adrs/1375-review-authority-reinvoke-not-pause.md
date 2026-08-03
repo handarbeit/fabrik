@@ -205,6 +205,25 @@ field). Lower-risk than the `base:<branch>` fix above: no schema change to `boar
 delta handling was needed, since `SubmittedAt` is not consulted by any existing gating
 logic (only by this new display path).
 
+**Review resolution memoized within `handleReviewGate`'s synchronous call chain (found
+in a second Pruefer review pass on the `base:<branch>` fix above).** The REST fallback
+above means `buildReviewBodyComments` issues a live, uncached `FetchPRReviews` call for
+every `base:<branch>` item it runs on. Before this fix, a single `handleReviewGate`
+dispatch invoked it up to three times with nothing async in between — once via its own
+`buildReviewFeedbackComments` check, again via `currentHeadReviewFeedbackComments` (the
+`#1207` auto-merge-disable guard, when reached), and a third time via
+`dispatchReviewReinvoke`'s `precheck` — plus a fourth, in `build()`, and a fifth from
+`checkReviewGate`'s own pre-existing fetch two calls earlier in the same poll. None of
+that state can change between three purely-synchronous calls, so the extra round-trips
+were pure multiplier, not correctness insurance. `buildReviewBodyComments` is now split
+into `resolveReviewsForFeedback` (the fetch) and `buildReviewBodyCommentsFromReviews`
+(pure comment-building from an already-resolved slice); `handleReviewGate` resolves once
+and reuses the result for its own auto-merge-disable check and passes it through to
+`dispatchReviewReinvoke` as `precomputed`, cutting the synchronous portion from three
+live fetches to one. `build()` deliberately keeps its own fresh call — it runs inside the
+reinvoke goroutine after an unbounded semaphore wait, where review state may genuinely
+have moved on, so reusing a pre-wait snapshot there would trade one hazard for another.
+
 ## Alternatives Considered
 
 **Conditional hybrid: reinvoke only when the review carries actionable text, pause

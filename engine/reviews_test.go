@@ -1387,8 +1387,8 @@ func TestBuildReviewBodyComments_NonDefaultBase_RESTFetchError_ReturnsNil(t *tes
 
 	comments := eng.buildReviewBodyComments(item)
 
-	if comments != nil {
-		t.Errorf("expected nil on FetchPRReviews error, got %v", comments)
+	if len(comments) != 0 {
+		t.Errorf("expected no comments on FetchPRReviews error, got %v", comments)
 	}
 }
 

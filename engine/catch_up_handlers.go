@@ -102,7 +102,21 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	}
 	// Actionable review feedback (thread comments and/or review bodies) is
 	// dispatched regardless of blocked/timedOut — see the doc comment above.
-	if syntheticComments := e.buildReviewFeedbackComments(pctx.item); len(syntheticComments) > 0 {
+	//
+	// bodyComments is resolved once here (Pruefer review finding, #1375) and
+	// reused below for the #1207 auto-merge-disable check and passed through
+	// to dispatchReviewReinvoke's precheck — resolveReviewsForFeedback issues
+	// a live FetchPRReviews REST call for a base:<branch> item, and nothing
+	// async happens between these uses, so recomputing it a second or third
+	// time in this same synchronous chain would only multiply API calls for
+	// an answer that cannot have changed. dispatchReviewReinvoke's build()
+	// deliberately re-resolves fresh instead of reusing this value — it runs
+	// inside the reinvoke goroutine after an unbounded semaphore wait, where
+	// review state may genuinely have moved on.
+	bodyComments := e.buildReviewBodyCommentsFromReviews(pctx.item, e.resolveReviewsForFeedback(pctx.item))
+	threadComments := e.buildReviewThreadComments(pctx.item)
+	syntheticComments := append(append([]gh.Comment{}, threadComments...), bodyComments...)
+	if len(syntheticComments) > 0 {
 		// #1207 guard 2: an item already in the GitHub auto-merge convergence
 		// flow (fabrik:auto-merge-enabled present) that has grown fresh
 		// unresolved feedback on its current head must have auto-merge disabled
@@ -116,7 +130,9 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// claims and stops the chain below — so the disable must happen here,
 		// not there.
 		if hasLabel(pctx.item.Labels, "fabrik:auto-merge-enabled") {
-			if blocking := e.currentHeadReviewFeedbackComments(pctx.item); len(blocking) > 0 {
+			currentHeadThreadComments := e.currentHeadReviewThreadComments(pctx.item)
+			blocking := append(append([]gh.Comment{}, currentHeadThreadComments...), bodyComments...)
+			if len(blocking) > 0 {
 				e.disableAutoMergeForReviewThreads(pctx.item, len(blocking))
 			}
 		}
@@ -135,7 +151,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			func(repoStr string) {
 				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
 			},
-			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
+			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
 			func(cycleCount int) {
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
