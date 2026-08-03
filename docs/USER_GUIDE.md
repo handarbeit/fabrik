@@ -120,6 +120,12 @@ FABRIK_TOKEN=ghp_...
 # Optional: run this instance's Claude invocations against a different Claude
 # account/subscription. See "Alternate Claude Profile (CLAUDE_CONFIG_DIR)" below.
 # CLAUDE_CONFIG_DIR=/home/user/.claude-alt-profile
+
+# Optional: explicit opt-in to API billing instead of subscription billing.
+# An ambient ANTHROPIC_API_KEY here is scrubbed by default and never reaches
+# Claude invocations on its own — see "Anthropic Auth Namespace Scrub &
+# apiKeyHelper Refusal" below.
+# FABRIK_ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 > **Note:** When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories **without** `.git/` — containers, CI workspaces, or bare directories — this check is skipped and `.env` is loaded normally without requiring a `.gitignore` entry.
@@ -762,6 +768,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_KILL_GRACE_SIGTERM` | *(no config.yaml key)* | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGTERM step, SIGKILL fires immediately after SIGINT) | `""` (10s) |
 | `FABRIK_ARCHIVE_AFTER` | *(no config.yaml key)* | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration string: `"168h"`, `"24h"`; empty or unset = use default of 168h/1 week; `"0s"` archives immediately once eligible; invalid or negative values fall back to the default) | `""` (168h = 1 week) |
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
+| `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -2250,6 +2258,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `fabrik:awaiting-placement` | Set on a spawned child issue when its initial project-board Status placement fails (the child, board item, and `blockedBy` link already exist — only the column placement is missing). Retried every poll from `board.Items` directly. Cleared on successful placement, or when the child is observed closed. Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on both child and parent (ADR-062). |
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
+| `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal-1). |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
@@ -2550,27 +2559,132 @@ working directory. Useful for diagnosing prompt issues or unexpected behavior.
 
 ### Subprocess Environment
 
-Claude Code is invoked with the engine's full parent-process environment as its
-base — every ambient variable in the engine's own environment is inherited by
-Claude subprocesses. Fabrik does not isolate or clear this environment; instead
-it shadows a small, explicit set of keys it cares about (`CLAUDE_CODE_EFFORT_LEVEL`,
-`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, the `FABRIK_*` invocation facts,
-`GH_TOKEN`/`GITHUB_TOKEN`) so that Fabrik's own value for those specific keys
-always wins over an ambient one, no matter which happened to be set first.
-Everything else — anything not on that list — passes through untouched. If you
-want a stage-specific variable to reach Claude reliably regardless of what's
-ambient, pass it explicitly via your stage YAML or a shell wrapper script rather
-than relying on shell export order.
+Claude Code is invoked with the engine's parent-process environment as its base,
+but it is not inherited unfiltered: Fabrik scrubs the Anthropic/Claude-Code auth
+namespace by default (see below) so no ambient credential can silently redirect
+billing, then shadows a small, explicit set of keys it cares about
+(`CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, the
+`FABRIK_*` invocation facts, `GH_TOKEN`/`GITHUB_TOKEN`) so that Fabrik's own value
+for those specific keys always wins over an ambient one, no matter which happened
+to be set first. Everything else — anything outside the scrubbed namespace and
+not on the shadowed-keys list — passes through untouched. If you want a
+stage-specific variable to reach Claude reliably regardless of what's ambient,
+pass it explicitly via your stage YAML or a shell wrapper script rather than
+relying on shell export order.
+
+### Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal
+
+Claude Code resolves its API key **before** consulting any subscription path. An
+`ANTHROPIC_API_KEY` (or several other Anthropic/Claude-Code environment
+variables) present in the engine's own environment — for example, added to a
+managed repo's `.env` by a human or an agent doing something locally reasonable —
+would otherwise silently redirect every Fabrik stage invocation from subscription
+billing to metered API billing, with no log line, no label, and no board signal.
+Fabrik closes this by scrubbing the Anthropic/Claude-Code auth namespace out of
+every worker's environment **by default**, and gating any exception behind an
+explicit, `FABRIK_`-prefixed variable.
+
+**What's scrubbed.** Every inherited variable whose name starts with `ANTHROPIC_`
+is removed unconditionally — default-deny over the whole namespace, not a
+deny-list of currently-known-bad names, so a newly introduced upstream
+`ANTHROPIC_*` billing variable is denied automatically with no Fabrik upgrade
+required. This also scrubs non-auth `ANTHROPIC_*` variables you might otherwise
+expect to pass through (`ANTHROPIC_MODEL`, `ANTHROPIC_CONFIG_DIR`, etc.) — a
+deliberate consequence of scrubbing the namespace rather than an enumerated list.
+A specific, enumerated set of `CLAUDE_CODE_*` auth-selector variables
+(`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN` and its
+file-descriptor variant, and the `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/`_FOUNDRY`/
+`_ANTHROPIC_AWS`/`_ANTHROPIC_GOOGLE_CLOUD`/`_MANTLE`/`_GATEWAY` provider
+selectors) is also removed — `CLAUDE_CODE_*` as a whole is too broad a
+general-configuration namespace to wildcard-scrub, since it already carries
+Fabrik's own non-auth `CLAUDE_CODE_EFFORT_LEVEL`/`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`.
+A variable that merely mentions "anthropic" without matching one of these exact
+names (e.g. a hypothetical `FANTASY_ANTHROPIC_API_KEY`) is left untouched — the
+scrub matches on the parsed variable name, never a substring.
+
+**Explicit API-billing opt-in.** API billing is not forbidden — some
+environments (corporate deployments especially) have no Claude subscription
+available. Set `FABRIK_ANTHROPIC_API_KEY` in `.env` to opt in explicitly:
+
+```
+FABRIK_ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Fabrik translates this into `ANTHROPIC_API_KEY` on every worker invocation. This
+is the only supported way to get `ANTHROPIC_API_KEY` into the worker — an
+ambient `ANTHROPIC_API_KEY` already in the engine's environment is scrubbed and
+never reaches the worker on its own, regardless of this setting. When active, a
+one-time startup notice confirms it (the value itself is never logged):
+
+```
+[startup] notice: FABRIK_ANTHROPIC_API_KEY is set — Claude invocations will be billed to the Anthropic API rather than a subscription. See docs/USER_GUIDE.md.
+```
+
+**Passthrough escape hatch, for the long tail.** `FABRIK_ANTHROPIC_API_KEY`
+covers the common case; `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` covers everything
+else non-subscription auth might need — Bedrock, Vertex, or a future
+provider-selector this doc hasn't caught up with yet. It names an exact,
+comma-separated allow-list of variables to re-inherit from the engine's ambient
+environment unchanged, overriding the scrub for only those names:
+
+```
+FABRIK_ANTHROPIC_ENV_PASSTHROUGH=CLAUDE_CODE_USE_BEDROCK,ANTHROPIC_AWS_API_KEY
+```
+
+Bedrock and Vertex are examples of a growing list — Claude Code has at least
+seven `CLAUDE_CODE_USE_*` provider selectors today, not just these two — so treat
+this as "name whatever selector your provider needs," not a fixed set. Note that
+most Bedrock/Vertex credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`GOOGLE_APPLICATION_CREDENTIALS`, etc.) already fall outside the scrubbed
+namespace and need no passthrough entry at all — only the `ANTHROPIC_*`/
+`CLAUDE_CODE_*`-namespaced selector variables do. A name listed but absent from
+the ambient environment is a harmless no-op; a name listed but outside the
+scrubbed namespace (e.g. `PATH`) is likewise a no-op — it was never going to be
+removed. When the list is non-empty, a one-time startup notice names which
+variables were passed through (never their values), and warns that invocations
+may not be subscription-billed as a result:
+
+```
+[startup] notice: FABRIK_ANTHROPIC_ENV_PASSTHROUGH passes through CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_AWS_API_KEY — Claude invocations may not be subscription-billed as a result. See docs/USER_GUIDE.md.
+```
+
+No line means the passthrough list is empty — the scrub applies to every
+`ANTHROPIC_*`/enumerated `CLAUDE_CODE_*` variable with no exceptions.
+
+**`apiKeyHelper` is refused, not scrubbed.** `apiKeyHelper` is a `settings.json`
+key, not an environment variable — a command Claude Code shells out to for
+credentials — so no amount of environment scrubbing can prevent it from
+supplying an API key. Fabrik refuses to start if `apiKeyHelper` is set anywhere
+in the resolved Claude Code settings chain: the managed-policy layer
+(`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+`/etc/claude-code/managed-settings.json` on Linux), the user layer
+(`$CLAUDE_CONFIG_DIR` or `~/.claude`, `settings.json`/`settings.local.json`), and
+the project layer (`.claude/settings.json`/`.claude/settings.local.json` in the
+directory Fabrik itself runs from). The startup error names the specific file
+and layer; remove `apiKeyHelper` from it and restart. A missing or unreadable
+settings file is not an error — only a present, parseable `apiKeyHelper` key is
+fatal.
+
+Separately, since a managed repo's own checked-in `.claude/settings.json` isn't
+visible until Fabrik has already checked it out into a worktree, each invocation
+also checks the worktree's own settings file. If it sets `apiKeyHelper`, that
+invocation is skipped (not run) and the issue is labeled
+`fabrik:api-key-helper-detected` with an explanatory comment — this does not
+count against `max_retries`, and self-clears once a human removes
+`apiKeyHelper` from the repo and a later invocation reaches Claude successfully.
+There is no support for actually using `apiKeyHelper` with Fabrik; it is refused
+outright.
 
 ### Alternate Claude Profile (`CLAUDE_CONFIG_DIR`)
 
 `CLAUDE_CONFIG_DIR` is not special-cased by Fabrik — it is simply one instance of
-the general passthrough rule above, which is what makes this pattern work at all.
-Setting it in the engine's environment points every Claude Code invocation at an
-alternate credentials/config directory — a different account, subscription, and
-billing quota than the engine's own default profile. Fabrik does not set or
-otherwise manage this variable; it only reads it once, at startup, to emit the
-notice below.
+the general passthrough rule above (it is not `ANTHROPIC_`/`CLAUDE_CODE_*`-namespaced,
+so the auth scrub above never touches it), which is what makes this pattern work
+at all. Setting it in the engine's environment points every Claude Code
+invocation at an alternate credentials/config directory — a different account,
+subscription, and billing quota than the engine's own default profile. Fabrik
+does not set or otherwise manage this variable; it only reads it once, at
+startup, to emit the notice below.
 
 This is the pattern to use when you want one Fabrik instance's stage invocations
 to bill against a different Claude account than the one the engine itself runs
