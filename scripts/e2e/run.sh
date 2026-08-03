@@ -149,6 +149,39 @@ report_test_outcomes() {
       '
 }
 
+# report_test_timings prints a ranked (slowest-first) per-test wall-clock
+# summary from a `go test -json` log, labeled with which leg (mode) it came
+# from. This is the evidence #1355's R3 exists to produce: "which scenarios
+# cost the most" should be a measured number from a real gate run, not a
+# guess, so future cost/value tradeoffs on expensive-and-thin scenarios are
+# evidence-based.
+#
+# Elapsed is only meaningful on a test's terminal event (Go's test2json emits
+# it on pass/fail/skip; run/cont/pause events carry no useful duration), so
+# the filter selects those three actions directly rather than reusing
+# report_test_outcomes's "last action, any type" grouping. Subtests (names
+# containing "/") are excluded — same per-test (not per-subtest) granularity
+# as report_test_outcomes. Called unconditionally (pass or fail) so a timing
+# table is always emitted for every leg that actually ran, not just failing
+# ones — see switch_and_run below for why this can't be a single combined
+# report across both legs.
+report_test_timings() {
+  local jsonlog="$1"
+  local mode="$2"
+  echo "== per-test wall-clock (leg: ${mode}), slowest first =="
+  jq -R 'fromjson? // empty' "$jsonlog" \
+    | jq -s -r '
+        [ .[] | select(.Test != null and (.Test | contains("/") | not)
+            and (.Action == "pass" or .Action == "fail" or .Action == "skip")) ]
+        | group_by(.Test)
+        | map({test: .[0].Test, result: .[-1].Action, elapsed: (.[-1].Elapsed // 0)})
+        | sort_by(-.elapsed)
+        | .[]
+        | [(.elapsed | tostring) + "s", .result, .test] | @tsv
+      ' \
+    | { column -t -s "$(printf '\t')" 2>/dev/null || cat; }
+}
+
 # switch_and_run stops the bed, flips FABRIK_MERGE_TRAIN to $1 in its .env,
 # restarts it (via the dedicated TestSwitchTrainMode invocation — a separate
 # `go test` process so the restart completes, bed fully back up, before the
@@ -195,6 +228,9 @@ switch_and_run() {
     | tee "$jsonlog" \
     | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
     || rc=$?
+
+  report_test_timings "$jsonlog" "$mode" \
+    || echo "warning: failed to compute test timings (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
 
   if [ "$rc" -ne 0 ]; then
     echo "== suite FAILED (leg: ${mode}, exit ${rc}) — classifying test outcomes ==" >&2

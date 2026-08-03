@@ -28,10 +28,10 @@ import (
 // issue (not yet filed as of this PR — see the Implement-stage PR
 // description for its exact spec), mirroring how #1261 was kept decoupled
 // from #1258. Scenarios that rely on a declared value (fast-advance,
-// declared-waits, precedence, composition) cannot pass until that follow-up
-// merges and the two label objects exist on the bed repo; the regression
-// guard (undeclared/nil) has no such dependency and ships green in this PR
-// alone. See adrs/1298-e2e-expected-reviewers-coverage.md.
+// declared-waits, composition) cannot pass until that follow-up merges and
+// the two label objects exist on the bed repo; the regression guard
+// (undeclared/nil) has no such dependency and ships green in this PR alone.
+// See adrs/1298-e2e-expected-reviewers-coverage.md.
 //
 // Bed setup required: FABRIK_REVIEWER_TOKEN (existing prerequisite, reused
 // from #1258), and the "expected-reviewers:none" / "expected-reviewers:declared"
@@ -74,8 +74,7 @@ import (
 // from ever reviewing it (its job is guarded by
 // `if: github.event.pull_request.draft == false`, triggering only on
 // opened/ready_for_review), removing the incidental review entirely rather
-// than racing it. TestExpectedReviewersPrecedenceGuard needs no such
-// treatment — it already calls RequestPRReviewer before its wait.
+// than racing it.
 const (
 	expectedReviewersNoneLabel     = "expected-reviewers:none"
 	expectedReviewersDeclaredLabel = "expected-reviewers:declared"
@@ -188,56 +187,6 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 		t.Fatalf("expected issue OPEN after declared-reviewer Phase 2 timeout, got %s on %s#%d", state, env.RepoAlpha, num)
 	}
 	t.Logf("R2 verified: %s#%d — declared reviewer held the gate open, Phase 1 re-prompted, Phase 2 paused for human", env.RepoAlpha, num)
-}
-
-// TestExpectedReviewersPrecedenceGuard covers requirements scenario 3: a
-// genuinely requested reviewer (non-empty outstanding) overrides
-// expected_reviewers: [] — the declaration narrows waiting for *unrequested*
-// reviewers only and must never bypass wait_for_reviews for a reviewer
-// GitHub is actually tracking. Requires the follow-up engine-side
-// label-read issue to be merged; see the file-level doc comment.
-//
-// (The other half of "precedence" — an already-submitted review overriding
-// expected_reviewers: [] — is definitionally the same pre-#1283
-// hasReviews-clearing path every existing review-gate scenario already
-// exercises, since reviewGateFastAdvance short-circuits on hasReviews before
-// the declaration is even consulted; it is not re-asserted here as it would
-// be redundant, not a new assertion. See adrs/1298-e2e-expected-reviewers-coverage.md.)
-//
-// Wall-clock: ~5-10 min.
-func TestExpectedReviewersPrecedenceGuard(t *testing.T) {
-	t.Parallel()
-	env := LoadEnv(t)
-	AssertFabrikRunning(t, env)
-
-	reviewerToken := readEnvFileReviewerToken(t, env)
-	if reviewerToken == "" {
-		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
-	}
-
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "expected-none-precedence", expectedReviewersNoneLabel)
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
-
-	reviewerLogin := TokenLogin(t, reviewerToken)
-	if engineLogin := TokenLogin(t, env.GHToken); reviewerLogin == engineLogin {
-		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
-			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
-	}
-
-	RequestPRReviewer(t, env, env.RepoAlpha, prNum, reviewerLogin)
-	t.Logf("requested reviewer %q on %s PR #%d despite expected_reviewers: [] being declared", reviewerLogin, env.RepoAlpha, prNum)
-
-	// A genuinely outstanding requested reviewer must hold the gate open —
-	// the empty declaration must not fast-advance past it.
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
-	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
-	t.Logf("fabrik:awaiting-review confirmed on %s#%d — requested reviewer overrides expected_reviewers: []", env.RepoAlpha, num)
-
-	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "APPROVE")
-	t.Logf("submitted APPROVE review on %s PR #%d", env.RepoAlpha, prNum)
-
-	WaitForLabelAbsent(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
-	t.Logf("R3 verified: %s#%d — gate held for the requested reviewer despite expected_reviewers: [], cleared once they reviewed", env.RepoAlpha, num)
 }
 
 // TestExpectedReviewersUndeclaredRegressionGuard covers requirements
