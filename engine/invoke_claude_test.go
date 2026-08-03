@@ -1509,6 +1509,153 @@ printf '%%s\n' '{"result":"gh token test\nFABRIK_STAGE_COMPLETE\n","session_id":
 	})
 }
 
+// TestInvokeClaude_AnthropicNamespaceScrubbed asserts directly on the
+// literal constructed subprocess environment (#1346 acceptance: "asserted
+// directly on the constructed environment, not inferred from behavior")
+// that ambient ANTHROPIC_API_KEY and CLAUDE_CODE_* auth-selector variables
+// present in the engine's own process environment never reach the worker.
+func TestInvokeClaude_AnthropicNamespaceScrubbed(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"scrub test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_scrub","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ambient-should-not-leak")
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = ""
+	claudeAnthropicEnvPassthrough = nil
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1346, Title: "scrub subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
+		if strings.Contains(env, key+"=") {
+			t.Errorf("expected %s scrubbed from the constructed subprocess environment, got:\n%s", key, env)
+		}
+	}
+}
+
+// TestInvokeClaude_AnthropicAPIKeyOptIn covers the FABRIK_ANTHROPIC_API_KEY
+// translation end to end via a real subprocess invocation.
+func TestInvokeClaude_AnthropicAPIKeyOptIn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"api key opt-in test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_apikey","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = "sk-fabrik-opt-in"
+	claudeAnthropicEnvPassthrough = nil
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1347, Title: "opt-in subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "\nANTHROPIC_API_KEY=sk-fabrik-opt-in\n") {
+		t.Errorf("expected ANTHROPIC_API_KEY=sk-fabrik-opt-in in env, got:\n%s", env)
+	}
+	if strings.Contains(env, "FABRIK_ANTHROPIC_API_KEY=") {
+		t.Errorf("expected FABRIK_ANTHROPIC_API_KEY never forwarded, got:\n%s", env)
+	}
+}
+
+// TestInvokeClaude_AnthropicEnvPassthrough covers FABRIK_ANTHROPIC_ENV_PASSTHROUGH
+// end to end via a real subprocess invocation: a named variable is inherited,
+// an unnamed one is still scrubbed, and the passthrough variable itself is
+// never forwarded.
+func TestInvokeClaude_AnthropicEnvPassthrough(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"passthrough test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_passthrough","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = ""
+	claudeAnthropicEnvPassthrough = []string{"CLAUDE_CODE_USE_BEDROCK"}
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1348, Title: "passthrough subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "\nCLAUDE_CODE_USE_BEDROCK=1\n") {
+		t.Errorf("expected named passthrough CLAUDE_CODE_USE_BEDROCK=1 inherited, got:\n%s", env)
+	}
+	if strings.Contains(env, "CLAUDE_CODE_USE_VERTEX=") {
+		t.Errorf("expected non-passthrough-named CLAUDE_CODE_USE_VERTEX still scrubbed, got:\n%s", env)
+	}
+	if strings.Contains(env, "FABRIK_ANTHROPIC_ENV_PASSTHROUGH=") {
+		t.Errorf("expected FABRIK_ANTHROPIC_ENV_PASSTHROUGH never forwarded, got:\n%s", env)
+	}
+}
+
 // TestBuildClaudeArgs_PermissionModeDontAsk verifies that --permission-mode dontAsk
 // is passed for non-unrestricted invocations.
 func TestBuildClaudeArgs_PermissionModeDontAsk(t *testing.T) {

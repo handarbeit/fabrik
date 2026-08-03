@@ -189,6 +189,28 @@ var claudeKillGraceSigTerm = 10 * time.Second
 // of the launching shell's ambient environment. Empty skips injection.
 var claudeGHToken string
 
+// claudeAnthropicAPIKey is the engine's resolved FABRIK_ANTHROPIC_API_KEY
+// (read from os.Getenv, which reflects .env by the time Engine.New runs —
+// see config.LoadDotenv). Set once by the Engine during construction,
+// mirroring claudeGHToken's package-var pattern, since this value is read
+// once at process start and never changes mid-run. When non-empty,
+// buildClaudeEnv translates it into an explicit ANTHROPIC_API_KEY override
+// on every worker invocation (R6); FABRIK_ANTHROPIC_API_KEY itself is never
+// forwarded (R8). Empty (the default) means API billing is not opted into —
+// buildClaudeEnv's default-deny scrub (R2-R5) still removes any ambient
+// ANTHROPIC_API_KEY regardless of what this variable holds (R7).
+var claudeAnthropicAPIKey string
+
+// claudeAnthropicEnvPassthrough is the engine's resolved, parsed
+// FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list (R14-R19): exact variable
+// names to re-inherit from the ambient environment into every worker
+// invocation, overriding the Anthropic auth namespace scrub (R2-R5) for
+// only the names listed. Set once by the Engine during construction via
+// parseAnthropicEnvPassthrough, mirroring claudeGHToken/claudeAnthropicAPIKey.
+// Nil/empty (the default) means no passthrough — the scrub applies
+// unconditionally.
+var claudeAnthropicEnvPassthrough []string
+
 // killReasonCtxKey is the context key for kill reason annotation.
 type killReasonCtxKey struct{}
 
@@ -500,7 +522,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
 	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir, sessionName)
 
-	extraEnv := buildClaudeEnv(stage, issue, workDir, opts)
+	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = effectiveBudget
@@ -535,7 +557,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
 	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir, sessionName)
 
-	extraEnv := buildClaudeEnv(stage, issue, workDir, opts)
+	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = limit
@@ -582,7 +604,8 @@ func commentMaxTurns(stage *stages.Stage) int {
 }
 
 // buildClaudeEnv returns environment variable overrides to inject into the claude subprocess.
-// Fabrik's values are appended after os.Environ() so they take precedence (last-wins semantics).
+// Fabrik's values are appended after baseEnv (typically os.Environ()) so they
+// take precedence (last-wins semantics, via mergeEnv).
 //
 // opts.EffortOverride, when non-empty, supersedes stage.EffortLevel.
 //
@@ -608,7 +631,21 @@ func commentMaxTurns(stage *stages.Stage) int {
 // so a naive consumer never mistakes "no PR yet" for a real PR number; this is
 // safe because FABRIK_PR's documented contract is conditional presence, unlike
 // FABRIK_REPO's "always."
-func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, opts InvokeOptions) []string {
+//
+// Anthropic auth namespace scrub (#1346, R2-R9, R14-R19): baseEnv (the true
+// ambient environment the subprocess would otherwise inherit) is scanned for
+// every ANTHROPIC_*-prefixed key plus the enumerated claudeCodeAuthSelectors,
+// and a mergeEnv removal sentinel (see mergeEnv) is emitted for each —
+// default-deny, so a newly-introduced upstream ANTHROPIC_* billing variable
+// is denied automatically, without a Fabrik code change. A key named in the
+// resolved claudeAnthropicEnvPassthrough allow-list is exempted from the
+// scrub and re-inherited from baseEnv unchanged. Finally, claudeAnthropicAPIKey
+// (resolved once from FABRIK_ANTHROPIC_API_KEY) is translated into an explicit
+// ANTHROPIC_API_KEY override — the only supported way to opt into API billing
+// through this variable — emitted last so it wins even over a passthrough
+// entry also naming ANTHROPIC_API_KEY (Go's os/exec resolves a duplicate
+// cmd.Env key by last occurrence).
+func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, opts InvokeOptions, baseEnv []string) []string {
 	var env []string
 	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
 	// any ambient value from the parent process. Default (nil) disables it.
@@ -654,7 +691,130 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	if opts.PRNumber != 0 {
 		env = append(env, "FABRIK_PR="+strconv.Itoa(opts.PRNumber))
 	}
+
+	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)
+	env = append(env, scrubAnthropicAuthEnv(baseEnv, passthrough)...)
+	for _, key := range claudeAnthropicEnvPassthrough {
+		if val, ok := envLookup(baseEnv, key); ok {
+			env = append(env, key+"="+val)
+		}
+	}
+	// FABRIK_ANTHROPIC_API_KEY and FABRIK_ANTHROPIC_ENV_PASSTHROUGH are
+	// Fabrik-internal control variables, read by the engine from its own
+	// process environment (os.Getenv in Engine.New) — which means they are
+	// themselves present in os.Environ(), the very baseEnv the subprocess
+	// would otherwise inherit unfiltered. Without an explicit removal
+	// sentinel here, they would leak straight through to the worker (R8,
+	// R17), the same ambient-leak failure mode FABRIK_REPO's own handling
+	// above already guards against.
+	env = append(env, "FABRIK_ANTHROPIC_API_KEY", "FABRIK_ANTHROPIC_ENV_PASSTHROUGH")
+	if claudeAnthropicAPIKey != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+claudeAnthropicAPIKey)
+	}
 	return env
+}
+
+// claudeCodeAuthSelectors is the enumerated set of CLAUDE_CODE_*-prefixed
+// variables that select a non-subscription auth/billing path or supply raw
+// credentials directly, verified against the installed Claude Code binary
+// (#1346 Research). Unlike ANTHROPIC_*, CLAUDE_CODE_* is a much broader
+// general-configuration namespace — it already carries Fabrik's own non-auth
+// CLAUDE_CODE_EFFORT_LEVEL/CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING — so it is
+// not wildcard-scrubbed; only these specific names are removed. A new,
+// not-yet-enumerated CLAUDE_CODE_* billing selector introduced upstream would
+// require a Fabrik code change to be scrubbed; this is an accepted residual
+// risk, documented in ADR-1346.
+var claudeCodeAuthSelectors = []string{
+	"CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_ANTHROPIC_AWS",
+	"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+	"CLAUDE_CODE_USE_MANTLE",
+	"CLAUDE_CODE_USE_GATEWAY",
+}
+
+// scrubAnthropicAuthEnv returns bare mergeEnv removal-sentinel entries (see
+// mergeEnv) for every inherited ANTHROPIC_*-prefixed key found in baseEnv,
+// plus every name in claudeCodeAuthSelectors (emitted unconditionally,
+// regardless of presence in baseEnv — mirroring buildClaudeEnv's FABRIK_REPO
+// reasoning: a removal sentinel for a key baseEnv doesn't have is a harmless
+// no-op, but omitting it would leave mergeEnv with nothing to strip if the
+// key were present). Keys named in passthrough (the resolved
+// FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list, R14-R19) are exempted. This is
+// a default-deny namespace scrub, not a deny-list: a newly-introduced
+// upstream ANTHROPIC_* variable is denied automatically, without a Fabrik
+// code change (R2). Matching is on the exact parsed key — the same "up to
+// the first '='" extraction mergeEnv itself uses — never a substring, so
+// e.g. FANTASY_ANTHROPIC_API_KEY is untouched (R5).
+func scrubAnthropicAuthEnv(baseEnv []string, passthrough map[string]bool) []string {
+	var removals []string
+	seen := make(map[string]bool)
+	for _, kv := range baseEnv {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			continue
+		}
+		key := kv[:i]
+		if !strings.HasPrefix(key, "ANTHROPIC_") {
+			continue
+		}
+		if passthrough[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		removals = append(removals, key)
+	}
+	for _, key := range claudeCodeAuthSelectors {
+		if passthrough[key] {
+			continue
+		}
+		removals = append(removals, key)
+	}
+	return removals
+}
+
+// passthroughSet builds a lookup set from the resolved
+// FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list (R14-R19, claudeAnthropicEnvPassthrough).
+func passthroughSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// envLookup returns the value of key in env (a "KEY=VALUE" slice, typically
+// os.Environ()) and whether it was found. Matches mergeEnv's own key
+// extraction convention (up to the first '=').
+func envLookup(env []string, key string) (string, bool) {
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i > 0 && kv[:i] == key {
+			return kv[i+1:], true
+		}
+	}
+	return "", false
+}
+
+// parseAnthropicEnvPassthrough parses the raw FABRIK_ANTHROPIC_ENV_PASSTHROUGH
+// value (R14) into a list of exact variable names: comma-separated, each
+// entry trimmed of surrounding whitespace, empty entries (from a leading/
+// trailing/doubled comma, or an entirely blank input) dropped.
+func parseAnthropicEnvPassthrough(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var names []string
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(part)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // mergeEnv builds a subprocess environment from base (typically os.Environ()),
