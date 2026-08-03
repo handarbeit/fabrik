@@ -103,22 +103,22 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// Actionable review feedback (thread comments and/or review bodies) is
 	// dispatched regardless of blocked/timedOut — see the doc comment above.
 	//
-	// bodyComments is resolved once here (Pruefer review finding, #1375) and
-	// reused below for the #1207 auto-merge-disable check and passed through
-	// to dispatchReviewReinvoke's precheck. resolvedReviews is checkReviewGate's
-	// own already-resolved reviews slice (a second Pruefer finding, #1375): for a
-	// base:<branch> item, checkReviewGate — called two lines above — already issued
-	// the live FetchPRReviews REST call needed to compute blocked/timedOut, so
-	// calling resolveReviewsForFeedback here would silently repeat that exact same
-	// call for an answer that cannot have changed since (nothing async runs between
-	// the two calls). Passing resolvedReviews straight into
-	// buildReviewBodyCommentsFromReviews avoids the repeat entirely.
-	// dispatchReviewReinvoke's build() deliberately does not reuse this value — it
-	// runs inside the reinvoke goroutine after an unbounded semaphore wait, where
-	// review state may genuinely have moved on.
-	bodyComments := e.buildReviewBodyCommentsFromReviews(pctx.item, resolvedReviews)
-	threadComments := e.buildReviewThreadComments(pctx.item)
-	syntheticComments := append(append([]gh.Comment{}, threadComments...), bodyComments...)
+	// Delegates to buildReviewFeedbackCommentsFromReviews/
+	// currentHeadReviewFeedbackCommentsFromReviews (reviews.go) rather than
+	// hand-rolling the thread+body composition here (Pruefer review finding,
+	// #1375) — one definition of "actionable feedback" shared with
+	// dispatchReviewReinvoke's build(), instead of two that could silently
+	// drift. resolvedReviews is checkReviewGate's own already-resolved
+	// reviews slice (a second Pruefer finding, #1375): for a base:<branch>
+	// item, checkReviewGate — called two lines above — already issued the
+	// live FetchPRReviews REST call needed to compute blocked/timedOut, so
+	// resolving again here would silently repeat that exact same call for an
+	// answer that cannot have changed since (nothing async runs between the
+	// two calls). dispatchReviewReinvoke's build() deliberately does not
+	// reuse this value — it runs inside the reinvoke goroutine after an
+	// unbounded semaphore wait, where review state may genuinely have moved
+	// on, so it resolves fresh via the no-arg buildReviewFeedbackComments.
+	syntheticComments := e.buildReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews)
 	if len(syntheticComments) > 0 {
 		// #1207 guard 2: an item already in the GitHub auto-merge convergence
 		// flow (fabrik:auto-merge-enabled present) that has grown fresh
@@ -133,9 +133,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// claims and stops the chain below — so the disable must happen here,
 		// not there.
 		if hasLabel(pctx.item.Labels, "fabrik:auto-merge-enabled") {
-			currentHeadThreadComments := e.currentHeadReviewThreadComments(pctx.item)
-			blocking := append(append([]gh.Comment{}, currentHeadThreadComments...), bodyComments...)
-			if len(blocking) > 0 {
+			if blocking := e.currentHeadReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews); len(blocking) > 0 {
 				e.disableAutoMergeForReviewThreads(pctx.item, len(blocking))
 			}
 		}

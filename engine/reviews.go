@@ -1284,25 +1284,35 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 	return out
 }
 
+// buildReviewFeedbackCommentsFromReviews is buildReviewFeedbackComments with
+// an already-resolved reviews slice, so a caller that has already paid for
+// resolveReviewsForFeedback's REST fallback (e.g. handleReviewGate, which
+// gets it from checkReviewGate) can reuse it instead of resolving twice.
+// This is the single definition of "actionable review feedback" — both
+// buildReviewFeedbackComments and handleReviewGate delegate here (Pruefer
+// review finding, #1375) so the two could never silently diverge as this
+// function's composition evolves.
+func (e *Engine) buildReviewFeedbackCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
+	out := e.buildReviewThreadComments(item)
+	out = append(out, e.buildReviewBodyCommentsFromReviews(item, reviews)...)
+	return out
+}
+
 // buildReviewFeedbackComments returns the full set of actionable review
 // feedback for a review-reinvoke dispatch: unresolved inline thread comments
 // (buildReviewThreadComments) plus unaddressed review bodies
 // (buildReviewBodyComments, Finding 4). This is the set dispatchReviewReinvoke
-// and handleReviewGate's reinvoke-before-block ordering (Finding 1) actually
-// dispatch on — buildReviewThreadComments alone is retained standalone because
-// its dedup/shape is also exercised independently by existing tests and the
-// #1207 auto-merge-disable guard's isOutdated-aware narrowing
+// dispatches on — buildReviewThreadComments alone is retained standalone
+// because its dedup/shape is also exercised independently by existing tests
+// and the #1207 auto-merge-disable guard's isOutdated-aware narrowing
 // (currentHeadReviewThreadComments).
 func (e *Engine) buildReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
-	out := e.buildReviewThreadComments(item)
-	out = append(out, e.buildReviewBodyComments(item)...)
-	return out
+	return e.buildReviewFeedbackCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
 }
 
-// currentHeadReviewFeedbackComments narrows buildReviewFeedbackComments to
-// comments safe to trigger the #1207 auto-merge-disable guard: current-head
-// thread comments (currentHeadReviewThreadComments) plus all review-body
-// comments.
+// currentHeadReviewFeedbackCommentsFromReviews is currentHeadReviewFeedbackComments
+// with an already-resolved reviews slice — see buildReviewFeedbackCommentsFromReviews's
+// doc comment for why this split exists.
 //
 // R8 decision: a review body has no thread and therefore no GitHub-computed
 // isOutdated signal — CommitID (the SHA a review was submitted against) is
@@ -1314,10 +1324,19 @@ func (e *Engine) buildReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
 // not an oversight. This is over-conservative, not unsafe: at worst it holds
 // auto-merge for a review body that actually targets a stale commit, which is
 // consistent with this file's established "block on unknown state" pattern.
-func (e *Engine) currentHeadReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
+func (e *Engine) currentHeadReviewFeedbackCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
 	out := e.currentHeadReviewThreadComments(item)
-	out = append(out, e.buildReviewBodyComments(item)...)
+	out = append(out, e.buildReviewBodyCommentsFromReviews(item, reviews)...)
 	return out
+}
+
+// currentHeadReviewFeedbackComments narrows buildReviewFeedbackComments to
+// comments safe to trigger the #1207 auto-merge-disable guard: current-head
+// thread comments (currentHeadReviewThreadComments) plus all review-body
+// comments. See currentHeadReviewFeedbackCommentsFromReviews for the R8
+// isOutdated decision this makes.
+func (e *Engine) currentHeadReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
+	return e.currentHeadReviewFeedbackCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
 }
 
 // pauseForReviewTimeout pauses the issue when the review wait timeout elapses.
