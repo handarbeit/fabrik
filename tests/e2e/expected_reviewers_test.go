@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -266,4 +268,109 @@ func TestExpectedReviewersFastAdvanceComposesWithAuthoritative(t *testing.T) {
 	}
 	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
 	t.Logf("R5 verified: %s#%d fast-advanced despite review-authority:authoritative — fast-advance composes independently of authority mode", env.RepoAlpha, num)
+}
+
+// TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation covers AC2
+// (Finding 2/R2, #1375): a stage-declared expected_reviewers bot must never
+// defer an outstanding human reviewer's authoritative escalation behind its
+// own re-prompt ladder. Before the fix, reviewGateAllBots's declared-reviewer
+// branch (len(outstanding)==0) saw only the declared bot once the human
+// responded and returned true — routing the item into the bot re-prompt
+// ladder (Phase 1: an @mention comment to the synthetic declared name,
+// fabrik:bot-reprompted applied) instead of the human's authoritative
+// escalation, deferring a CHANGES_REQUESTED verdict the declared bot cannot
+// possibly resolve. Per the Verification Note, this must fail against
+// current main.
+//
+// Unlike this file's other scenarios, this test seeds via seedReviewGateItem
+// (not …Draft) and calls RequestPRReviewer: the property under test requires
+// a genuinely outstanding *human* reviewer, mirroring
+// tests/e2e/review_authority_test.go's determinism technique (#1312) rather
+// than this file's usual "nothing requested" construction.
+//
+// Human requested (real outstanding reviewer) + bot declared via
+// expected-reviewers:declared + review-authority:authoritative. The human
+// submits REQUEST_CHANGES; the human path must win. Per R1's reinvoke model
+// (#1375), "the human path wins" concretely means the review-reinvoke fires
+// to address the feedback (Finding 1) — this test asserts that AND that the
+// declared bot's ladder never engages, waiting out a full
+// FABRIK_REVIEW_WAIT_TIMEOUT window (the window Phase 1 would fire in, if
+// buggy, timed from the original fabrik:awaiting-review application — not
+// from the review submission) to make the absence conclusive rather than a
+// race.
+//
+// Wall-clock (worst case): ~FABRIK_REVIEW_WAIT_TIMEOUT + ~15 min.
+func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
+	t.Parallel()
+	env := LoadEnv(t)
+	AssertFabrikRunning(t, env)
+
+	reviewerToken := readEnvFileReviewerToken(t, env)
+	if reviewerToken == "" {
+		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
+	}
+	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
+
+	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "declared-bot-no-defer",
+		"review-authority:authoritative", expectedReviewersDeclaredLabel)
+
+	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
+	reviewerLogin := TokenLogin(t, reviewerToken)
+	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
+		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
+			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
+	}
+
+	// Request the reviewer so outstanding is genuinely non-empty by
+	// construction, before confirming the gate's pre-verdict block — same
+	// determinism technique as review_authority_test.go (#1312).
+	RequestPRReviewer(t, env, env.RepoAlpha, prNum, reviewerLogin)
+	t.Logf("requested reviewer %q on %s PR #%d — outstanding is non-empty by construction", reviewerLogin, env.RepoAlpha, prNum)
+
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
+	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
+	t.Logf("fabrik:awaiting-review confirmed on %s#%d before any review submitted — human requested, bot %q declared",
+		env.RepoAlpha, num, expectedReviewersSyntheticName)
+
+	logOffset := LogOffset(t, env)
+	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
+	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d — outstanding now empty, declared bot still unresponsive", env.RepoAlpha, prNum)
+
+	// The human path must win: the reinvoke fires to address the feedback
+	// (Finding 1, #1375) — this alone would already fail against current
+	// main, where the authoritative reinvoke path is unreachable while
+	// blocked.
+	WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), logOffset, 10*time.Minute)
+	t.Logf("review-reinvoke dispatched for %s#%d on the human's CHANGES_REQUESTED verdict", env.RepoAlpha, num)
+
+	// Wait out a full FABRIK_REVIEW_WAIT_TIMEOUT window from the original
+	// fabrik:awaiting-review application — the window Phase 1's bot
+	// re-prompt would fire in, if reviewGateAllBots incorrectly read
+	// allBots=true for the still-outstanding declared bot once the human's
+	// verdict dropped outstanding to empty. Poll throughout rather than a
+	// single sleep, failing immediately (not just at the end) if the wrong
+	// escalation fires.
+	deadline := time.Now().Add(time.Duration(reviewWaitTimeout+10) * time.Minute)
+	for time.Now().Before(deadline) {
+		if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && slices.Contains(labels, "fabrik:bot-reprompted") {
+			t.Fatalf("fabrik:bot-reprompted applied to %s#%d — the declared bot's re-prompt ladder fired instead of "+
+				"deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)", env.RepoAlpha, num)
+		}
+		pollSleep(pollBase())
+	}
+	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:bot-reprompted")
+
+	bodies, err := tryPRComments(env, env.RepoAlpha, prNum)
+	if err != nil {
+		t.Fatalf("read PR comments on %s PR #%d: %v", env.RepoAlpha, prNum, err)
+	}
+	for _, b := range bodies {
+		if strings.Contains(b, "@"+expectedReviewersSyntheticName) {
+			t.Fatalf("PR #%d on %s carries an @mention of the declared bot %q — the bot ladder re-prompted it "+
+				"instead of deferring to the human's authoritative escalation (Finding 2 regression): %q",
+				prNum, env.RepoAlpha, expectedReviewersSyntheticName, b)
+		}
+	}
+	t.Logf("AC2 verified: %s#%d — declared bot %q never re-prompted; human's authoritative CHANGES_REQUESTED escalation won",
+		env.RepoAlpha, num, expectedReviewersSyntheticName)
 }
