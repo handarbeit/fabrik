@@ -145,11 +145,15 @@ func (e *Engine) Run() error {
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
 		stages.SweepStaleWarnings(e.cfg.Stages, w)
 		logClaudeConfigDir(configDir, w)
+		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", w)
+		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
 		stages.SweepStaleWarnings(e.cfg.Stages, os.Stderr)
 		logClaudeConfigDir(configDir, os.Stderr)
+		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", os.Stderr)
+		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -214,6 +218,14 @@ func (e *Engine) Run() error {
 				}
 			}
 		}()
+	}
+
+	// apiKeyHelper preflight (R10-R12): an unconditional security/billing
+	// gate, independent of board configuration, so it runs before the
+	// board-column check — a misconfigured install should see this failure
+	// first rather than have it masked behind an unrelated mismatch.
+	if err := e.checkAPIKeyHelper(); err != nil {
+		return err
 	}
 
 	// Validate stage names against project board columns before first poll.
