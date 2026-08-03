@@ -113,28 +113,26 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// No matching stage = nothing to do
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 
-	// Closed issues are skipped unless the current stage is a cleanup stage
-	// (so cleanup can remove the worktree) OR the current stage is marked
-	// complete (so the yolo catch-up can advance to the next stage — e.g.,
-	// a PR merge closes an issue sitting in Validate; it needs to move to
-	// Done for cleanup).
+	// Closed issues are never dispatched to a Claude stage invocation (R1,
+	// ADR-1387) — the sole exception is a cleanup stage, where dispatch
+	// legitimately performs worktree reaping rather than computation. A closed
+	// item has no computable work left; everything it legitimately needs
+	// (advancing to Done, clearing stale labels, reaping a worktree, retrying a
+	// failed close) is a board/label reconciliation, not a Claude invocation —
+	// and belongs to one of the board-sourced settle scans in poll.go
+	// (settleClosedItemsToDone, settleClosedValidateAdvance, etc.), never to
+	// dispatch admission. In particular, a closed item at a gate-checked stage
+	// (Validate) lacking stage:<stage>:complete is healed exclusively by
+	// settleClosedValidateAdvance (ADR-1387) — admitting it here to reach that
+	// healing logic was the mechanism behind an unbounded post-close dispatch
+	// loop (#874-class healing conflated with dispatch eligibility); it is no
+	// longer necessary since the settle-owner has its own board.Items-sourced
+	// feed, independent of this admission guard.
 	if item.IsClosed {
 		if stage == nil {
 			return false
 		}
-		// Admit closed items so the catch-up loop / settle-owner can advance or
-		// heal them after a PR merge closes the issue. Beyond stage:<stage>:complete
-		// (already past the gate) and fabrik:awaiting-ci / fabrik:auto-merge-enabled
-		// (the CI-gate catch-up and checkAutoMergeConvergence), admit any item at a
-		// gate-checked stage (wait_for_ci / wait_for_reviews — i.e. Validate) that
-		// is not yet complete. A merge can close the issue while it sits at Validate
-		// carrying ANY gate label (fabrik:awaiting-review, fabrik:paused, …) or none;
-		// the gate-label-agnostic settle-owner (runValidatePRTerminalAdvance,
-		// ADR-056 D2) must still observe the terminal PR and advance/heal it. Keying
-		// the admit on the gate-checked stage rather than a fixed label allowlist
-		// removes the label coupling that previously stranded paused / awaiting-review
-		// merges (the #874 class) one layer upstream of the settle-owner.
-		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item.Labels, "fabrik:awaiting-ci") && !hasLabel(item.Labels, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
+		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 			return false
 		}
 	}
@@ -240,21 +238,16 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 
-	// Closed issues are skipped unless the current stage is a cleanup stage
-	// (so cleanup can remove the worktree) OR the current stage is already
-	// marked complete (so the catch-up loop can advance to the next stage) OR
-	// fabrik:awaiting-ci is present (so the catch-up loop can finish the CI gate) OR
-	// fabrik:auto-merge-enabled is present (so checkAutoMergeConvergence can detect
-	// the merged PR and advance to Done after GitHub closes the issue).
+	// Mirror of the itemMayNeedWork closed-issue gate (R1, ADR-1387): a closed
+	// issue is never dispatched to a Claude stage invocation except at a
+	// cleanup stage (worktree reaping). Healing a closed item at a gate-checked
+	// stage (Validate) is the exclusive responsibility of the board-sourced
+	// settleClosedValidateAdvance settle scan, not this dispatch guard.
 	if item.IsClosed {
 		if stage == nil {
 			return false
 		}
-		// Mirror of the itemMayNeedWork closed-issue gate: admit closed items at a
-		// gate-checked stage (Validate) lacking stage:complete so the gate-label-
-		// agnostic settle-owner can heal paused / awaiting-review merges (ADR-056 D2,
-		// #874 class) — not only fabrik:awaiting-ci / fabrik:auto-merge-enabled.
-		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item.Labels, "fabrik:awaiting-ci") && !hasLabel(item.Labels, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
+		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 			return false
 		}
 	}

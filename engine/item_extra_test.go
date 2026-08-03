@@ -1309,10 +1309,14 @@ func TestItemNeedsWork_AwaitingCI_NonCIGatedStage_Dispatches(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes verifies that a closed item
-// with fabrik:awaiting-ci passes the closed-issue guard in itemMayNeedWork, so
-// the catch-up loop can complete the CI gate after a PR merge closes the issue.
-func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
+// TestItemMayNeedWork_ClosedIssue_AwaitingCI_NotAdmitted verifies that a closed
+// item with fabrik:awaiting-ci no longer passes the closed-issue guard in
+// itemMayNeedWork (R1/R3, ADR-1387) — this was exactly the state that produced
+// an unbounded post-close dispatch loop before ADR-1387 (the deferred
+// stage:Validate:complete plus a swept-away fabrik:awaiting-ci left the item
+// admitted with neither label). Healing now belongs exclusively to the
+// board-sourced settleClosedValidateAdvance, not dispatch admission.
+func TestItemMayNeedWork_ClosedIssue_AwaitingCI_NotAdmitted(t *testing.T) {
 	tr := true
 	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
 	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
@@ -1322,16 +1326,16 @@ func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 		IsClosed: true,
 		Labels:   []string{"fabrik:awaiting-ci"},
 	}
-	// itemMayNeedWork should NOT filter this closed item — it has fabrik:awaiting-ci
-	if !eng.itemMayNeedWork(item) {
-		t.Error("closed item with fabrik:awaiting-ci should pass itemMayNeedWork closed-issue guard")
+	if eng.itemMayNeedWork(item) {
+		t.Error("closed item with fabrik:awaiting-ci must NOT pass itemMayNeedWork closed-issue guard (R1/ADR-1387)")
 	}
 }
 
-// TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes verifies that a closed item
-// with fabrik:awaiting-ci on a wait_for_ci stage passes the closed-issue guard
-// but is still filtered by the awaiting-ci dispatch gate (no Claude invocation).
-func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
+// TestItemNeedsWork_ClosedIssue_AwaitingCI_NotAdmitted mirrors the above for
+// itemNeedsWork: a closed item with fabrik:awaiting-ci is now rejected by the
+// closed-issue guard itself, not merely filtered downstream by the awaiting-ci
+// dispatch gate.
+func TestItemNeedsWork_ClosedIssue_AwaitingCI_NotAdmitted(t *testing.T) {
 	tr := true
 	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
 	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
@@ -1341,10 +1345,8 @@ func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 		IsClosed: true,
 		Labels:   []string{"fabrik:awaiting-ci"},
 	}
-	// Passes the closed-issue guard (fabrik:awaiting-ci present) but is filtered
-	// by the awaiting-ci dispatch gate — the catch-up loop handles the CI gate.
 	if eng.itemNeedsWork(item) {
-		t.Error("closed item with fabrik:awaiting-ci on wait_for_ci stage should be filtered by awaiting-ci dispatch gate")
+		t.Error("closed item with fabrik:awaiting-ci on wait_for_ci stage must NOT pass itemNeedsWork (R1/ADR-1387)")
 	}
 }
 
