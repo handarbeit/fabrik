@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -641,6 +642,97 @@ func TestHandleReviewGate_AuthoritativeBlocked_ReinvokesOnActionableBody(t *test
 		t.Error("expected NO review-blocked cooldown recorded — the reinvoke path must take priority over the blocked-cooldown tail")
 	}
 	eng.wg.Wait()
+}
+
+// TestHandleReviewGate_NonDefaultBase_AuthoritativeBlocked_SingleFetchPRReviewsCall
+// is a regression test for a Pruefer review finding (#1375, PR #1376): on a
+// base:<branch> item, checkReviewGate already issues a live FetchPRReviews
+// REST call internally to compute blocked/timedOut, and handleReviewGate must
+// reuse that same result (via checkReviewGate's resolvedReviews return value)
+// rather than calling resolveReviewsForFeedback, which would silently repeat
+// the identical call in the same synchronous chain — for an answer that
+// cannot have changed, since nothing async runs in between.
+//
+// The expected total is 2, not 1: dispatchReviewReinvoke's build() runs
+// inside the async reinvoke goroutine (after an unbounded semaphore wait) and
+// deliberately re-resolves reviews fresh rather than reusing the synchronous
+// chain's result, since real time may have passed by then — a second,
+// intentional call, documented on buildReviewBodyComments/build() above. This
+// test pins the fix's actual effect: cutting the synchronous chain's own
+// redundant call (checkReviewGate's internal fetch duplicated by
+// resolveReviewsForFeedback), from 3 total calls per dispatch down to 2.
+func TestHandleReviewGate_NonDefaultBase_AuthoritativeBlocked_SingleFetchPRReviewsCall(t *testing.T) {
+	var mu sync.Mutex
+	var fetchPRReviewsCalls int
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			mu.Lock()
+			fetchPRReviewsCalls++
+			mu.Unlock()
+			if prNumber != 55 {
+				t.Errorf("expected FetchPRReviews called with resolved PR #55, got #%d", prNumber)
+			}
+			return []gh.PRReview{
+				{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 900},
+			}, nil
+		},
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete", "base:develop"},
+		LinkedPRNumber: 55,
+		// LinkedPRReviews deliberately empty — closedByPullRequestsReferences
+		// (and everything nested inside it) is structurally empty for a
+		// base:<branch> item; the REST fallback inside checkReviewGate is what
+		// must populate reviews instead. See buildReviewBodyComments' doc
+		// comment for the same base:<branch> gap.
+	}
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	if !advancedItems["owner/repo#10"] {
+		t.Error("expected advancedItems[owner/repo#10] set — the reinvoke must dispatch despite blocked=true")
+	}
+	snap, _ := eng.store.Get("owner/repo", 10)
+	if snap.ReviewCycles("Implement") != 1 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 1 (reinvoke must have dispatched)", snap.ReviewCycles("Implement"))
+	}
+	// Wait for the async reinvoke goroutine's own build()-time fetch to
+	// complete (establishes happens-before via sync.WaitGroup) before reading
+	// the counter — reading beforehand raced with that goroutine's write.
+	eng.wg.Wait()
+	mu.Lock()
+	got2 := fetchPRReviewsCalls
+	mu.Unlock()
+	if got2 != 2 {
+		t.Errorf("FetchPRReviews called %d times; want 2 (1 synchronous in handleReviewGate's own chain + 1 from build()'s intentional fresh re-resolve) — checkReviewGate's resolved reviews must be reused by the synchronous chain, not re-fetched a second time there", got2)
+	}
 }
 
 // TestHandleReviewGate_AuthoritativeBlocked_AlreadyProcessed_FallsThroughToCooldown

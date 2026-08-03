@@ -224,6 +224,29 @@ live fetches to one. `build()` deliberately keeps its own fresh call — it runs
 reinvoke goroutine after an unbounded semaphore wait, where review state may genuinely
 have moved on, so reusing a pre-wait snapshot there would trade one hazard for another.
 
+**`checkReviewGate`'s own fetch threaded out too (found in a third Pruefer review pass on
+the same commit).** The prior fix's "cutting to one" claim was scoped only to the three
+consumers *inside* `handleReviewGate`'s own body — it did not account for `checkReviewGate`,
+called two lines earlier in the same synchronous chain, which for a `base:<branch>` item
+independently issues its own live `FetchPRReviews`/`FetchPRReviewRequests` REST calls to
+compute `blocked`/`timedOut`. Because Finding 1's reordering made the reinvoke-feedback
+computation unconditional (no longer gated on `blocked`), that made the net effect of this
+feature for `base:<branch>` repos *more* REST calls per poll than before Finding 1, not
+fewer. Fixed by threading `checkReviewGate`'s already-resolved `reviews` slice back to the
+caller as a fourth return value (`resolvedReviews`); `handleReviewGate` passes it straight
+into `buildReviewBodyCommentsFromReviews` instead of calling `resolveReviewsForFeedback`,
+which would otherwise re-run the identical call for an answer that cannot have changed
+since (nothing async runs between the two calls). This cuts the synchronous chain's total
+from two live fetches to one, for two live fetches per full dispatch overall (one
+synchronous, plus `build()`'s one intentional fresh fetch inside the async goroutine,
+unchanged from above). The two early-return paths inside `checkReviewGate` that precede
+review resolution (the `WaitForReviews` opt-out and the broken-linkage pause) return
+`resolvedReviews` as `nil`; neither is ever consumed by a caller that reaches the
+reinvoke-feedback path, so this is safe. `checkReviewGate`'s three existing boolean return
+values are unchanged — only a fourth value was appended — so none of its own extensive
+unit-test coverage of `blocked`/`timedOut`/`terminated` needed to change, only mechanical
+updates to each test's destructuring to also capture (and discard) the new value.
+
 ## Alternatives Considered
 
 **Conditional hybrid: reinvoke only when the review carries actionable text, pause

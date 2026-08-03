@@ -323,7 +323,7 @@ func TestCheckReviewGate_LabelOverride_AuthoritativeOnAdvisoryStage_Blocks(t *te
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset (advisory)
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected review-authority:authoritative label to make an advisory stage block on CHANGES_REQUESTED")
@@ -356,7 +356,7 @@ func TestCheckReviewGate_LabelOverride_AdvisoryOnAuthoritativeStage_Clears(t *te
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected review-authority:advisory label to clear the gate despite an authoritative stage and CHANGES_REQUESTED review")
@@ -390,7 +390,7 @@ func TestCheckReviewGate_Advisory_ChangesRequestedReview_StillClears(t *testing.
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("advisory mode must clear regardless of CHANGES_REQUESTED verdict (unchanged pre-existing behavior)")
@@ -421,7 +421,7 @@ func TestCheckReviewGate_Authoritative_ReviewDecisionApproved_Clears(t *testing.
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear when reviewDecision=APPROVED")
@@ -449,7 +449,7 @@ func TestCheckReviewGate_Authoritative_ReviewDecisionChangesRequested_Blocks(t *
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked when reviewDecision=CHANGES_REQUESTED")
@@ -483,7 +483,7 @@ func TestCheckReviewGate_Authoritative_NoBranchProtection_NoChangesRequested_Cle
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear via fallback computation when no CHANGES_REQUESTED review exists")
@@ -514,7 +514,7 @@ func TestCheckReviewGate_Authoritative_NoBranchProtection_ChangesRequested_Block
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked via fallback computation on a repo with no branch protection")
@@ -544,7 +544,7 @@ func TestCheckReviewGate_Authoritative_FetchReviewDecisionError_BlocksConservati
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to block conservatively when FetchPRReviewDecision errors")
@@ -603,7 +603,7 @@ func TestCheckReviewGate_DeclaredBotDoesNotDeferAuthoritativeHumanEscalation(t *
 	declared := []string{"some-declared-bot"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative", ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected NOT blocked — timeout branch fires instead (authoritative escalation, not a bot re-prompt)")
@@ -661,7 +661,7 @@ func TestCheckReviewGate_NonDefaultBase_Authoritative_ChangesRequested_Blocks(t 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked on a base:<branch> repo with an outstanding CHANGES_REQUESTED review")
@@ -688,7 +688,7 @@ func TestCheckReviewGate_NoReviewersNoReviews_Blocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected blocked when no reviews submitted yet (bots may still be processing)")
@@ -720,7 +720,7 @@ func TestCheckReviewGate_NoReviewersNoDeclaration_LogsExpectedReviewersRemedy(t 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // no ExpectedReviewers declared
 
-	blocked, _, _ := eng.checkReviewGate(board, item, stage)
+	blocked, _, _, _ := eng.checkReviewGate(board, item, stage)
 	if !blocked {
 		t.Fatal("expected blocked when no reviews submitted yet")
 	}
@@ -766,7 +766,7 @@ func TestCheckReviewGate_NoReviewersWithReview_Clears(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked once a review has been submitted")
@@ -794,7 +794,7 @@ func TestCheckReviewGate_GateDisabled_ReturnsFalse(t *testing.T) {
 	// WaitForReviews is nil (not set)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: nil}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when WaitForReviews is nil")
@@ -821,7 +821,7 @@ func TestCheckReviewGate_ReviewerRequested_NoReview_Blocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected blocked when reviewer has not submitted")
@@ -858,7 +858,7 @@ func TestCheckReviewGate_AlreadyWaiting_NoLabelAdd(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked")
@@ -890,7 +890,7 @@ func TestCheckReviewGate_AllReviewersSubmitted_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when all reviewers submitted")
@@ -929,7 +929,7 @@ func TestCheckReviewGate_TimeoutElapsed_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when timeout elapsed")
@@ -977,7 +977,7 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected re-blocked after reviewer dismissal and re-request")
@@ -1010,7 +1010,7 @@ func TestCheckReviewGate_DismissedReviewDoesNotClear(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked when only review is DISMISSED")
@@ -1680,7 +1680,7 @@ func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -1756,7 +1756,7 @@ func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked between Phase 1 and Phase 2")
@@ -1805,7 +1805,7 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked on Phase 2 (should return false, true)")
@@ -1861,7 +1861,7 @@ func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when bot submitted a review")
@@ -1903,7 +1903,7 @@ func TestCheckReviewGate_MixedBotHuman_PausesWithoutReprompt(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked (timeout elapsed → timedOut)")
@@ -1953,7 +1953,7 @@ func TestCheckReviewGate_PureHuman_PausesWithoutReprompt(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked (timeout elapsed → timedOut)")
@@ -2710,7 +2710,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_AdvancesImmediately(t *testing.T)
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked || timedOut || terminated {
 		t.Errorf("expected (false, false, false) fast-advance, got (%v, %v, %v)", blocked, timedOut, terminated)
@@ -2738,7 +2738,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_ReviewerRequested_StillWaits(t *t
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked — a requested reviewer takes precedence over expected_reviewers: []")
@@ -2775,7 +2775,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_AuthoritativeMode_StillAdvancesIm
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none, ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked || timedOut || terminated {
 		t.Errorf("expected (false, false, false) fast-advance under authoritative mode, got (%v, %v, %v)", blocked, timedOut, terminated)
@@ -2812,7 +2812,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_NoPRResolved_DoesNotFastAdvance(t
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, _, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, _, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if terminated {
 		t.Error("expected not terminated — no PR found should fall through to normal logic, not pause")
@@ -2851,7 +2851,7 @@ func TestCheckReviewGate_DeclaredReviewer_EmptyReviewRequests_Phase1PostsMention
 	declared := []string{"handarbeit-pruefer"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -2924,7 +2924,7 @@ func TestCheckReviewGate_DeclaredReviewer_MentionUsesCanonicalHandle(t *testing.
 	declared := []string{"copilot-pull-request-reviewer"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -2978,7 +2978,7 @@ func TestCheckReviewGate_DeclaredReviewer_AlsoFormallyRequested_NotDoubleRepromp
 	declared := []string{"copilot"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -3014,7 +3014,7 @@ func TestCheckReviewGate_MultipleDeclaredReviewers_AnyOneResponds_Clears(t *test
 	declared := []string{"handarbeit-pruefer", "gemini-code-assist"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear once any one declared reviewer has responded")
@@ -3055,7 +3055,7 @@ func TestCheckReviewGate_DeclaredReviewer_NeverResponds_Phase2PausesNamingBot(t 
 	declared := []string{"nonexistent-reviewer"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked on Phase 2 (should return false, true)")
@@ -3089,7 +3089,7 @@ func TestCheckReviewGate_BrokenLinkage_PRFound_Pauses(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	// Gate returns (false, false, true) — not blocked-for-reviews, not timed
 	// out, but processing was terminated via a direct pause — the caller must
@@ -3151,7 +3151,7 @@ func TestCheckReviewGate_BrokenLinkage_NoPRFound_FallsThrough(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, _, _ := eng.checkReviewGate(board, item, stage)
+	blocked, _, _, _ := eng.checkReviewGate(board, item, stage)
 
 	// No PR found → falls through to normal reviewer logic. With no reviews, gate blocks.
 	if !blocked {
@@ -3193,7 +3193,7 @@ func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_ConfirmedViaBody_ClearsNor
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	// Falls through to normal reviewer logic: no reviewers requested, no reviews yet → blocks.
 	if !blocked {
@@ -3235,7 +3235,7 @@ func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_BodyMissing_StillPauses(t 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("gate should not report blocked when broken linkage detected")
@@ -3309,7 +3309,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTReviewSubmitted_ClearsNaturally(t *t
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear naturally once a REST-sourced review is submitted with no outstanding requests")
@@ -3358,7 +3358,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTOutstandingReviewer_Blocks(t *testin
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked while a REST-sourced outstanding reviewer hasn't submitted")
@@ -3412,7 +3412,7 @@ func TestCheckReviewGate_NonDefaultBase_BotPhase1_Reprompts(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -3478,7 +3478,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTFetchError_StaysBlocked(t *testing.T
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked on a partial REST fetch failure (conservative no-data fallback)")
@@ -3520,7 +3520,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTFetchError_ExpectedReviewersNone_Doe
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked on a REST fetch failure even though expected_reviewers: [] is declared — a fetch failure must never look like 'nothing requested, nothing expected'")
@@ -3620,7 +3620,7 @@ func TestCheckReviewGate_DefaultBranch_DoesNotCallRESTReviewFetch(t *testing.T) 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear using the existing GraphQL-sourced data")

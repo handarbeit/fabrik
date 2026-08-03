@@ -95,10 +95,23 @@ func reviewBodyCommentID(review gh.PRReview) string {
 // Side effects when unblocking (naturally or by timeout):
 //   - Removes fabrik:awaiting-review label if present (idempotent).
 //   - Removes fabrik:bot-reprompted label if present (idempotent).
-func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut, terminated bool) {
+//
+// resolvedReviews is the same reviews slice this call used internally to
+// compute the gate (item.LinkedPRReviews, or — on a base:<branch> item — the
+// live REST-fetched replacement, see the base-label branch below). Threaded
+// back to the caller (Pruefer review finding, #1375) so handleReviewGate can
+// pass it straight to buildReviewBodyCommentsFromReviews instead of calling
+// resolveReviewsForFeedback, which would otherwise re-run the identical
+// FetchPRReviews REST call a second time in the same synchronous chain for a
+// base:<branch> item. Only meaningful when the function reaches the
+// reviews-resolution step below; the two early returns (gate not opt-in,
+// broken-linkage pause) return it as nil, which the caller never consumes
+// since terminated==true or the stage doesn't use the gate at all in those
+// cases.
+func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut, terminated bool, resolvedReviews []gh.PRReview) {
 	// Gate is opt-in — only active when wait_for_reviews: true.
 	if stage.WaitForReviews == nil || !*stage.WaitForReviews {
-		return false, false, false
+		return false, false, false, nil
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -108,7 +121,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		// handleBrokenReviewLinkage already paused the item directly — report
 		// terminated=true so the caller claims it instead of reading this as
 		// "gate cleared naturally".
-		return false, false, true
+		return false, false, true, nil
 	}
 
 	reviewRequests, reviews := item.LinkedPRReviewRequests, item.LinkedPRReviews
@@ -167,7 +180,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if !fetchFailed && prNumber > 0 && reviewGateFastAdvance(outstanding, hasReviews, expectedReviewers) {
 		e.logf(item.Number, "awaiting-review", "expected_reviewers declared none expected and nothing was requested — advancing immediately\n")
 		e.removeAwaitingReviewLabel(owner, repo, item)
-		return false, false, false
+		return false, false, false, reviews
 	}
 
 	var declaredReviewers []string
@@ -201,7 +214,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if len(outstanding) == 0 && hasReviews {
 		if e.effectiveReviewAuthority(item, stage) != "authoritative" {
 			e.removeAwaitingReviewLabel(owner, repo, item)
-			return false, false, false
+			return false, false, false, reviews
 		}
 		if prNumber <= 0 {
 			// No PR number resolved — can't fetch a verdict. Block
@@ -213,7 +226,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			authorityReason = "review verdict unreadable (fetch failed), blocking conservatively"
 		} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); satisfied {
 			e.removeAwaitingReviewLabel(owner, repo, item)
-			return false, false, false
+			return false, false, false, reviews
 		} else {
 			authorityReason = reason
 		}
@@ -249,7 +262,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// window has elapsed without response, pause for human.
 	if reprompted && allBots {
 		if blocked, timedOut, done := e.checkBotPhase2Timeout(owner, repo, item); done {
-			return blocked, timedOut, false
+			return blocked, timedOut, false, reviews
 		}
 	}
 
@@ -257,7 +270,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
 	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, declaredOutstanding, allBots, reprompted, authorityReason); done {
-		return blocked, timedOut, false
+		return blocked, timedOut, false, reviews
 	}
 
 	if authorityReason != "" {
@@ -282,7 +295,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		e.applyLabelAdd(item, "fabrik:awaiting-review", false)
 	}
 
-	return true, false, false
+	return true, false, false, reviews
 }
 
 // handleBrokenReviewLinkage detects FR-013's broken-linkage case: the item

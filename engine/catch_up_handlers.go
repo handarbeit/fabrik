@@ -91,7 +91,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	if !pctx.hasComplete {
 		return false
 	}
-	blocked, timedOut, terminated := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+	blocked, timedOut, terminated, resolvedReviews := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
 	if terminated {
 		// checkReviewGate already paused the item directly via
 		// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
@@ -105,15 +105,18 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	//
 	// bodyComments is resolved once here (Pruefer review finding, #1375) and
 	// reused below for the #1207 auto-merge-disable check and passed through
-	// to dispatchReviewReinvoke's precheck — resolveReviewsForFeedback issues
-	// a live FetchPRReviews REST call for a base:<branch> item, and nothing
-	// async happens between these uses, so recomputing it a second or third
-	// time in this same synchronous chain would only multiply API calls for
-	// an answer that cannot have changed. dispatchReviewReinvoke's build()
-	// deliberately re-resolves fresh instead of reusing this value — it runs
-	// inside the reinvoke goroutine after an unbounded semaphore wait, where
+	// to dispatchReviewReinvoke's precheck. resolvedReviews is checkReviewGate's
+	// own already-resolved reviews slice (a second Pruefer finding, #1375): for a
+	// base:<branch> item, checkReviewGate — called two lines above — already issued
+	// the live FetchPRReviews REST call needed to compute blocked/timedOut, so
+	// calling resolveReviewsForFeedback here would silently repeat that exact same
+	// call for an answer that cannot have changed since (nothing async runs between
+	// the two calls). Passing resolvedReviews straight into
+	// buildReviewBodyCommentsFromReviews avoids the repeat entirely.
+	// dispatchReviewReinvoke's build() deliberately does not reuse this value — it
+	// runs inside the reinvoke goroutine after an unbounded semaphore wait, where
 	// review state may genuinely have moved on.
-	bodyComments := e.buildReviewBodyCommentsFromReviews(pctx.item, e.resolveReviewsForFeedback(pctx.item))
+	bodyComments := e.buildReviewBodyCommentsFromReviews(pctx.item, resolvedReviews)
 	threadComments := e.buildReviewThreadComments(pctx.item)
 	syntheticComments := append(append([]gh.Comment{}, threadComments...), bodyComments...)
 	if len(syntheticComments) > 0 {
