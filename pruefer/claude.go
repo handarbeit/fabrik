@@ -63,6 +63,14 @@ type ReviewRequest struct {
 	Effort      string
 	WorkDir     string        // ephemeral clone directory; claude's cwd
 	MaxWallTime time.Duration // 0 = no wall-time cap
+	// ExcludedPaths lists paths ReviewPR has already excluded from its own
+	// size measurement (via config exclusion or FR-5's auto-trim) that
+	// Claude must also exclude from its own `git diff`. Claude re-derives
+	// its diff itself rather than consuming the Go-fetched diff text (see
+	// buildReviewPrompt), so telling Go what to skip is not enough on its
+	// own — without this, an excluded oversized file would still blow
+	// Claude's context even though the Go-side size gate passed.
+	ExcludedPaths []string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -98,6 +106,22 @@ func buildReviewPrompt(req ReviewRequest) string {
 	if req.BaseBranch != "" {
 		fmt.Fprintf(&b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
 	}
+	if len(req.ExcludedPaths) > 0 {
+		b.WriteString("## Out of scope for this review\n\n")
+		b.WriteString("The following path(s) are excluded from this review — too large to review productively, or explicitly configured out of scope. Do not read or diff their content; exclude them from your own `git diff` with a pathspec, e.g. `git diff")
+		if req.BaseBranch != "" {
+			fmt.Fprintf(&b, " %s...HEAD", req.BaseBranch)
+		}
+		b.WriteString(" -- . ")
+		for _, p := range req.ExcludedPaths {
+			fmt.Fprintf(&b, "%s ", singleQuoteShell(":(exclude)"+p))
+		}
+		b.WriteString("`. Note in your summary that these paths were omitted from review:\n\n")
+		for _, p := range req.ExcludedPaths {
+			fmt.Fprintf(&b, "- %s\n", p)
+		}
+		b.WriteString("\n")
+	}
 	if req.Body != "" {
 		b.WriteString("## PR description\n\n")
 		b.WriteString(req.Body)
@@ -117,6 +141,15 @@ func buildReviewPrompt(req ReviewRequest) string {
 	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only.\n\n")
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
 	return b.String()
+}
+
+// singleQuoteShell escapes s for safe embedding inside a single-quoted shell
+// string. req.ExcludedPaths entries are PR-controlled (parsed off diff
+// headers), so without this a path containing a single quote could break out
+// of the pathspec example's quoting and inject arbitrary shell/git arguments
+// into the command the prompt tells Claude to run verbatim.
+func singleQuoteShell(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // buildReviewArgs constructs the claude CLI argument list for a review

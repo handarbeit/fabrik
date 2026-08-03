@@ -260,6 +260,50 @@ func TestRealClaudeInvoker_Review_ContextCancelKillsProcess(t *testing.T) {
 	}
 }
 
+func TestBuildReviewPrompt_NoExcludedPaths_NoOutOfScopeSection(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{Owner: "o", Repo: "r", PRNumber: 1})
+	if strings.Contains(prompt, "Out of scope for this review") {
+		t.Errorf("prompt contains an out-of-scope section with no ExcludedPaths set:\n%s", prompt)
+	}
+}
+
+func TestBuildReviewPrompt_ExcludedPaths_AddsOutOfScopeSection(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{
+		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main",
+		ExcludedPaths: []string{"packages/evals/corpus/quality-bench-corpus.jsonl"},
+	})
+	if !strings.Contains(prompt, "Out of scope for this review") {
+		t.Fatalf("prompt missing out-of-scope section:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "packages/evals/corpus/quality-bench-corpus.jsonl") {
+		t.Errorf("prompt does not name the excluded path:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, ":(exclude)packages/evals/corpus/quality-bench-corpus.jsonl") {
+		t.Errorf("prompt does not instruct excluding the path via a git pathspec:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "main...HEAD") {
+		t.Errorf("prompt's pathspec example must still reference the base branch comparison:\n%s", prompt)
+	}
+}
+
+func TestBuildReviewPrompt_ExcludedPathWithSingleQuote_EscapedNotBrokenOut(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{
+		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main",
+		ExcludedPaths: []string{"it's/evil.jsonl"},
+	})
+	// The malicious path must appear only inside a properly escaped
+	// single-quoted shell token — never a bare, unescaped single quote that
+	// could close the pathspec's quoting and let the rest of the path (or a
+	// path crafted to look like additional shell/git arguments) be
+	// interpreted outside the quoted string.
+	if !strings.Contains(prompt, `:(exclude)it'\''s/evil.jsonl`) {
+		t.Errorf("prompt does not safely escape the embedded single quote:\n%s", prompt)
+	}
+	if strings.Contains(prompt, `:(exclude)it's/evil.jsonl'`) {
+		t.Errorf("prompt contains an unescaped single quote that would break out of the pathspec quoting:\n%s", prompt)
+	}
+}
+
 func TestMockClaudeInvoker_RecordsCalls(t *testing.T) {
 	m := &mockClaudeInvoker{}
 	req := ReviewRequest{PRNumber: 7}

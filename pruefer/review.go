@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -36,6 +37,11 @@ type ReviewOutcome struct {
 	Err      error      // non-nil on a genuine failure (clone, claude invocation, API call)
 	NumTurns int        // set iff Reviewed; turns used by the claude invocation
 	CostUSD  float64    // set iff Reviewed; cost of the claude invocation
+	// SizeDetail is set iff Skipped and Reason == SkipDiffTooLarge from a
+	// fresh measurement (not the pre-diff-fetch "already noticed" skip,
+	// which returns before any measurement exists). Mirrors the too-large
+	// notice's own content — see notice.go's buildTooLargeNoticeBody.
+	SizeDetail *DiffSizeDetail
 }
 
 // ReviewPR runs the full per-PR pipeline: on-demand-comment detection,
@@ -51,13 +57,31 @@ type ReviewOutcome struct {
 // Cheap checks (draft, self-authored, excluded author/label, already-
 // reviewed-at-SHA) run before any diff fetch; only a PR that passes those
 // triggers the FetchPRDiff call used for the size guard and path exclusion,
-// so a skip never costs an extra network round-trip.
+// so a skip never costs an extra network round-trip. The already-noticed-
+// too-large-at-this-SHA check is also pre-diff-fetch, but — unlike the
+// other cheap checks — an unprocessed "/pruefer review" comment bypasses it:
+// an operator who fixes excluded_paths or max_diff_bytes after a notice
+// fires and asks for a re-check gets a genuine fresh measurement, not a
+// second silent-feeling skip of the same shape this issue exists to fix.
+// Configured path exclusions are applied to the diff, per file, BEFORE it is
+// measured against MaxDiffBytes (FR-1) — an excluded file can no longer
+// consume the size budget or suppress review of everything else. If
+// exclusion alone isn't enough, ReviewPR makes one best-effort attempt to
+// drop the largest remaining file(s) and review the rest (FR-5); only if
+// that still doesn't fit does it post a one-per-head-SHA notice comment and
+// skip (FR-2/FR-3), rather than failing silently — a forced re-check that
+// still doesn't fit does not duplicate that notice, but does mark the
+// "/pruefer review" command processed so it isn't retried forever.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
-	forceReview, err := PendingForceReview(client, owner, repo, pr.Number)
-	if err != nil {
-		logf(pr.Number, "warn", "checking for /pruefer review command on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
-		forceReview = false // not fatal to the poll cycle — treat as no forced review this round
+	comments, commentsErr := client.FetchIssueComments(owner, repo, pr.Number)
+	if commentsErr != nil {
+		logf(pr.Number, "warn", "fetching comments for %s/%s#%d: %v\n", owner, repo, pr.Number, commentsErr)
+		comments = nil // fail open for force-review detection only: not fatal to the poll cycle, and
+		// self-correcting once comments are fetchable again. The too-large-notice path below does NOT
+		// fail open on this same error — see the commentsErr check guarding client.AddComment — since
+		// treating a fetch failure as "no notice exists" there could post a duplicate for this head SHA.
 	}
+	forceReview := len(pendingReviewComments(comments)) > 0
 
 	reviews, err := client.FetchPRReviews(owner, repo, pr.Number)
 	if err != nil {
@@ -77,22 +101,95 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		return ReviewOutcome{Skipped: true, Reason: reason}
 	}
 
+	if forceReview {
+		// Acknowledge immediately, before any skip path below, so an
+		// operator who comments "/pruefer review" always gets visible
+		// confirmation their request was seen — regardless of what the
+		// fresh check below finds. Idempotent (checks for the EYES
+		// reaction itself), so it's safe to no-op on a re-poll.
+		if err := AcknowledgeForceReview(client, owner, repo, pr.Number); err != nil {
+			logf(pr.Number, "warn", "acknowledging /pruefer review comment on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+		}
+	}
+
+	noticeAlreadyExists := alreadyNoticedTooLarge(comments, pr.HeadSHA)
+	if noticeAlreadyExists && !forceReview {
+		logf(pr.Number, "select", "skipping %s/%s#%d: already noticed as too-large at head %s — not re-fetching the diff\n", owner, repo, pr.Number, pr.HeadSHA)
+		return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
+	}
+
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("fetching diff: %w", err)}
 	}
-	if cfg.MaxDiffBytes > 0 && int64(len(diff)) > cfg.MaxDiffBytes {
-		logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, len(diff), cfg.MaxDiffBytes)
-		return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
-	}
-	if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(ParseChangedPaths(diff), cfg.ExcludedPaths) {
+
+	files, preamble := splitDiffFiles(diff)
+	preambleBytes := int64(len(preamble))
+
+	kept, excluded := filterExcludedPaths(files, cfg.ExcludedPaths)
+	if len(cfg.ExcludedPaths) > 0 && len(files) > 0 && len(kept) == 0 {
 		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
+		if forceReview {
+			// The forced re-check happened and every touched file is
+			// excluded — there's nothing to review. Mark the command
+			// processed so it isn't re-acknowledged and re-skipped forever;
+			// unlike the too-large path there's no notice to act as the
+			// durable "nothing to do here" signal, so this is the only one.
+			if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
+				logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+			}
+		}
 		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
 	}
 
-	if forceReview {
-		if err := AcknowledgeForceReview(client, owner, repo, pr.Number); err != nil {
-			logf(pr.Number, "warn", "acknowledging /pruefer review comment on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+	reviewFiles := kept
+	omittedPaths := pathsOf(excluded)
+
+	if cfg.MaxDiffBytes > 0 {
+		measured := preambleBytes
+		for _, f := range kept {
+			measured += f.Bytes
+		}
+		if measured > cfg.MaxDiffBytes {
+			trimmedKept, trimmedDropped, fits := trimToFit(kept, preambleBytes, cfg.MaxDiffBytes)
+			if fits {
+				logf(pr.Number, "select", "trimmed oversized diff for %s/%s#%d: dropping %d file(s) to review the rest\n", owner, repo, pr.Number, len(trimmedDropped))
+				reviewFiles = trimmedKept
+				omittedPaths = append(omittedPaths, pathsOf(trimmedDropped)...)
+			} else {
+				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, kept, pathsOf(excluded), pathsOf(trimmedDropped))
+				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after exclusions, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, measured, cfg.MaxDiffBytes)
+				if noticeAlreadyExists {
+					// forceReview bypassed the pre-check above to get this
+					// fresh measurement, but the diff still doesn't fit —
+					// the existing notice for this head SHA already says
+					// so; don't post a second one for the same SHA.
+					logf(pr.Number, "select", "not re-posting too-large notice for %s/%s#%d — one already exists at head %s\n", owner, repo, pr.Number, pr.HeadSHA)
+				} else if commentsErr != nil {
+					// The comments fetch at the top of ReviewPR failed, so
+					// noticeAlreadyExists is a guess (nil comments always
+					// evaluate to "not noticed"), not a fact. Posting here
+					// could duplicate an existing notice for this exact head
+					// SHA — skip and let a future poll, once comments are
+					// fetchable again, make the real determination. This
+					// relies on a single Pruefer instance polling a given
+					// PR at a time (see AddComment call below); a concurrent
+					// second poller could still race past this guard.
+					logf(pr.Number, "warn", "skipping too-large notice post for %s/%s#%d: comments fetch failed earlier, can't confirm no notice already exists at head %s\n", owner, repo, pr.Number, pr.HeadSHA)
+				} else if _, addErr := client.AddComment(owner, repo, pr.Number, buildTooLargeNoticeBody(detail, pr.HeadSHA)); addErr != nil {
+					logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, addErr)
+				}
+				if forceReview {
+					// The forced re-check happened and the verdict didn't
+					// change; mark the command processed so it isn't
+					// retried forever — the notice (existing or just
+					// posted) is the durable "still too large" signal now.
+					if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
+						logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+					}
+				}
+				return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge, SizeDetail: &detail}
+			}
 		}
 	}
 
@@ -105,19 +202,20 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	result, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
-		WorkDir: dir, MaxWallTime: cfg.MaxWallTime,
+		WorkDir: dir, MaxWallTime: cfg.MaxWallTime, ExcludedPaths: omittedPaths,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
 		return ReviewOutcome{Err: fmt.Errorf("claude review invocation: %w", err)}
 	}
 
+	reviewedDiff := reconstructDiff(reviewFiles)
 	summary, findings := parseReviewFindings(result.Text)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
-	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
-	body := buildReviewBody(summary, demoted)
+	reviewComments, demoted := partitionFindings(findings, validRightAnchors(reviewedDiff))
+	body := buildReviewBody(summary, demoted, omittedPaths)
 
-	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
+	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, reviewComments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
 	}
 
@@ -129,6 +227,21 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
 	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD}
+}
+
+// reconstructDiff concatenates files' Body blocks back into a single unified
+// diff covering only the files actually reviewed — used for validRightAnchors
+// so a demoted/anchored finding can never reference a file ReviewPR excluded
+// or auto-dropped before Claude ever saw it. For an unfiltered PR this
+// reconstructs byte-identical to the original FetchPRDiff output (see
+// TestSplitDiffFiles_MultiFile), so existing anchor behavior is unchanged
+// when no exclusion or trimming occurred.
+func reconstructDiff(files []diffFile) string {
+	var b strings.Builder
+	for _, f := range files {
+		b.WriteString(f.Body)
+	}
+	return b.String()
 }
 
 // decideEvent computes the review event to submit, deterministically, from
