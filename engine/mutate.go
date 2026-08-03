@@ -48,6 +48,13 @@ func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
 // item.Repo in one place and a resolved owner/repo elsewhere. echo controls
 // whether a webhook echo is registered on success; it exists only so
 // pauseIssue can suppress it for callers that historically didn't echo.
+//
+// recordLabelAppliedAtNow is called unconditionally on success (#1314): every
+// caller of applyLabelAdd/addLabel already guards on the label's absence
+// before calling (verified per label at Plan time), so this is always a
+// genuine new application, never a defensive idempotent no-op. This is
+// harmless no-op storage for the ~15+ other labels applyLabelAdd handles that
+// nothing ever reads back via labelAppliedAt.
 func (e *Engine) applyLabelAdd(item gh.ProjectItem, label string, echo bool) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
@@ -55,6 +62,45 @@ func (e *Engine) applyLabelAdd(item gh.ProjectItem, label string, echo bool) {
 		return
 	}
 	e.syncLabelAdd(item, label, echo)
+	e.recordLabelAppliedAtNow(item, label)
+}
+
+// recordLabelAppliedAtNow records that the engine just applied label to item,
+// at the current time, into the in-memory record-at-write cache (#1314). Must
+// only be called at a write site already guarded to fire on a genuine new
+// application — never as a defensive idempotent re-add — so that the recorded
+// timestamp is always exact. Called unconditionally from applyLabelAdd's
+// success path, and explicitly at the handful of direct AddLabelToIssue call
+// sites (engine/stages.go) that bypass applyLabelAdd.
+func (e *Engine) recordLabelAppliedAtNow(item gh.ProjectItem, label string) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: owner + "/" + repo, Number: item.Number, Label: label, At: time.Now()})
+}
+
+// labelAppliedAt returns the time label was last applied to item, preferring
+// the in-memory record-at-write cache (ItemState.LabelAppliedAt, #1314) over a
+// live REST fetch. On a cache miss — cold start (engine restart), or the
+// label was most recently (re-)applied by a different engine instance — it
+// falls through to e.client.FetchLabelAppliedAt unchanged and self-heals the
+// cache with the result, so subsequent calls in this process become free.
+// Same (time.Time, error) signature and fail-open contract as
+// FetchLabelAppliedAt itself: a zero time or non-nil error must leave every
+// caller inert, exactly as before this cache existed.
+func (e *Engine) labelAppliedAt(item gh.ProjectItem, owner, repo, label string) (time.Time, error) {
+	repoStr := owner + "/" + repo
+	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
+		if at := snap.LabelAppliedAt(label); !at.IsZero() {
+			return at, nil
+		}
+	}
+	at, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, label)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !at.IsZero() {
+		e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: repoStr, Number: item.Number, Label: label, At: at})
+	}
+	return at, nil
 }
 
 // addLabel is the always-echoing public entry point for applyLabelAdd, used by
