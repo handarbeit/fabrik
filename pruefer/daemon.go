@@ -3,22 +3,29 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/pruefer/events"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
 // GitHubLister is the subset of *github.Client's methods Daemon needs
-// beyond GitHubReviewer: listing open PRs per watched repo.
+// beyond GitHubReviewer: listing open PRs per watched repo, and fetching a
+// single PR's authoritative current state (used by the event-triggered
+// review path — see eventsink.go — which must never trust webhook payload
+// contents as PR state).
 type GitHubLister interface {
 	GitHubReviewer
 	ListOpenPRs(owner, repo string) ([]gh.PRDetails, error)
+	FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error)
 }
 
 // RateLimitReporter is an optional interface implemented by *github.Client:
@@ -59,6 +66,61 @@ type Daemon struct {
 	// ReviewPR's decision logic: every emit call here wraps ReviewPR from
 	// the outside, never alters its inputs, return value, or control flow.
 	Emit func(ptui.Event)
+
+	// EventSource, when non-nil, switches Run into event-driven mode: it is
+	// started alongside a low-frequency reconciliation fallback loop,
+	// instead of poll() being the sole/primary driver. nil (the default,
+	// matching event_source: poll) leaves Run's poll-only behavior exactly
+	// as before this field existed. See runEventDriven.
+	EventSource events.EventSource
+
+	// sem is the concurrency-capped semaphore shared by every review
+	// dispatch path — poll()'s per-cycle fan-out and event-triggered
+	// ReviewFromEvent (eventsink.go) alike — so Pruefer's one claude
+	// invocation budget is never exceeded regardless of which path
+	// triggered a given review. Lazily built by semaphore() since Daemon
+	// values are constructed as struct literals (execute.go, tests), not
+	// via a constructor that could size it upfront.
+	semOnce sync.Once
+	sem     chan struct{}
+
+	// prLocks is a small fixed-size set of stripe mutexes serializing
+	// concurrent review dispatch for the same PR across poll- and
+	// event-triggered paths — see prLock and runReview. A zero Daemon
+	// (struct literal) has a usable zero-value [prLockStripes]sync.Mutex,
+	// so no lazy-init is needed here unlike sem.
+	prLocks [prLockStripes]sync.Mutex
+
+	// pollInFlight coalesces concurrent installation-event-triggered
+	// reconciliation polls — see triggerReconciliationPoll. A zero Daemon
+	// has a usable zero-value atomic.Bool, so no lazy-init is needed here
+	// either.
+	pollInFlight atomic.Bool
+}
+
+// prLockStripes bounds prLocks to a small fixed size instead of an
+// unbounded per-PR map that would grow for the daemon's entire lifetime.
+// Unrelated PRs occasionally hashing to the same stripe only costs
+// incidental contention (they still fully serialize against each other),
+// never a correctness gap — the property runReview needs is "no two
+// reviews of the *same* PR run concurrently," which holds regardless.
+const prLockStripes = 64
+
+// prLock returns the stripe mutex for owner/repo/prNumber, selected by
+// hashing the PR's identity. See prLocks and runReview.
+func (d *Daemon) prLock(owner, repo string, prNumber int) *sync.Mutex {
+	h := fnv.New32a()
+	fmt.Fprintf(h, "%s/%s#%d", owner, repo, prNumber)
+	return &d.prLocks[h.Sum32()%prLockStripes]
+}
+
+// semaphore returns the daemon's shared concurrency-capped semaphore,
+// building it on first use.
+func (d *Daemon) semaphore() chan struct{} {
+	d.semOnce.Do(func() {
+		d.sem = make(chan struct{}, d.effectiveConcurrency())
+	})
+	return d.sem
 }
 
 // emit is a nil-checked convenience wrapper around d.Emit.
@@ -78,7 +140,10 @@ func (d *Daemon) lockPath() string {
 
 // Run acquires an exclusive file lock (preventing two Pruefer instances from
 // double-polling the same watched repos, mirroring engine/poll.go's
-// Engine.Run) and polls on Config.PollInterval until ctx is cancelled.
+// Engine.Run), then dispatches to runPollOnly (Config.PollInterval-driven,
+// the default, byte-for-byte unchanged from before EventSource existed) or
+// runEventDriven (when EventSource is set — event_source: hookdeck),
+// running until ctx is cancelled either way.
 func (d *Daemon) Run(ctx context.Context) (err error) {
 	lockPath := d.lockPath()
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
@@ -106,6 +171,17 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
+	if d.EventSource != nil {
+		return d.runEventDriven(ctx)
+	}
+	return d.runPollOnly(ctx)
+}
+
+// runPollOnly is Run's original (pre-EventSource) poll loop, unchanged:
+// poll every Config.PollInterval until ctx is cancelled. This is
+// event_source: poll's entire behavior — the default, and what makes that
+// default "byte-for-byte unchanged" from before this issue.
+func (d *Daemon) runPollOnly(ctx context.Context) error {
 	interval := d.Config.PollInterval
 	if interval <= 0 {
 		interval = DefaultPollInterval
@@ -123,6 +199,89 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	}
 }
 
+func (d *Daemon) reconciliationFallbackInterval() time.Duration {
+	if d.Config.ReconciliationFallbackInterval > 0 {
+		return d.Config.ReconciliationFallbackInterval
+	}
+	return DefaultReconciliationFallbackInterval
+}
+
+// runEventDriven runs Pruefer in event_source: hookdeck mode: EventSource
+// delivers events to a daemonEventSink in the background, while poll() is
+// demoted to a low-frequency safety net — an optional pass at startup, then
+// one every reconciliationFallbackInterval() for the lifetime of the run.
+// EventSource.Run is trusted to retry transport failures internally and
+// never return except on ctx cancellation (see events.EventSource's
+// contract), but this loop tolerates a misbehaving implementation that
+// returns early anyway: the fallback ticker keeps polling regardless, so a
+// dead event source degrades to poll-only rather than crashing the daemon.
+func (d *Daemon) runEventDriven(ctx context.Context) error {
+	fallback := d.reconciliationFallbackInterval()
+	logf(0, "poll", "pruefer starting: watching %d repo(s) in event-driven mode, reconciliation fallback %s, concurrency %d\n",
+		len(d.Config.WatchedRepos), fallback, d.effectiveConcurrency())
+
+	if d.Config.ReconciliationStartup {
+		logf(0, "poll", "running startup reconciliation poll\n")
+		d.poll(ctx)
+	}
+
+	sourceDone := make(chan error, 1)
+	go func() { sourceDone <- d.EventSource.Run(ctx, &daemonEventSink{daemon: d}) }()
+
+	ticker := time.NewTicker(fallback)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			d.poll(ctx)
+		case err := <-sourceDone:
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				logf(0, "warn", "event source exited unexpectedly: %v — continuing on poll-fallback only\n", err)
+			} else {
+				logf(0, "warn", "event source returned before ctx cancellation — continuing on poll-fallback only\n")
+			}
+			// Disable this case: the goroutine has exited and sourceDone
+			// will never receive again, so avoid busy-looping on it.
+			sourceDone = nil
+		}
+	}
+}
+
+// HealthHandler returns a callback suitable for wiring into an
+// EventSource's transport-health hook (e.g. hookdeck.Config.OnHealth),
+// bound to ctx — execute.go constructs the EventSource (and this callback)
+// before Run/runEventDriven starts, so ctx is threaded through explicitly
+// rather than stored on Daemon. A transition into events.HealthConnected
+// that follows a prior connection (a reconnect) triggers a reconciliation
+// poll: events may have been missed while disconnected, so this catches up
+// via poll rather than trusting the transport's own replay alone. The very
+// first connect is not treated as a reconnect — ReconciliationStartup
+// already covers startup. The poll is coalesced via triggerReconciliationPoll
+// (shared with installation events) rather than a bare goroutine — a
+// flapping connection can achieve HealthConnected repeatedly in quick
+// succession, and without coalescing each reconnect would spawn its own
+// independent full ListOpenPRs sweep across every watched repo, exactly
+// when the network is already unreliable.
+func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
+	var connectedBefore atomic.Bool
+	return func(ev events.HealthEvent) {
+		if ev.State != events.HealthConnected {
+			return
+		}
+		if !connectedBefore.Swap(true) {
+			return
+		}
+		logf(0, "poll", "event source reconnected — running a reconciliation poll\n")
+		d.triggerReconciliationPoll(ctx)
+	}
+}
+
 func (d *Daemon) effectiveConcurrency() int {
 	if d.Config.ConcurrencyCap > 0 {
 		return d.Config.ConcurrencyCap
@@ -130,12 +289,32 @@ func (d *Daemon) effectiveConcurrency() int {
 	return DefaultConcurrencyCap
 }
 
+// triggerReconciliationPoll starts one poll cycle in its own goroutine,
+// coalescing concurrent requests: a burst of installation/repo-selection
+// events (e.g. an app install across many repos, each a distinct delivery
+// so dedupe doesn't collapse them), or a flapping Hookdeck connection
+// achieving HealthConnected repeatedly in quick succession (see
+// HealthHandler), would otherwise spawn one redundant full ListOpenPRs
+// sweep per trigger. Only one poll runs at a time; a trigger that arrives
+// while one is already in flight is dropped — the in-flight poll already
+// re-derives current GitHub state, and any further change is still covered
+// by the next fallback-interval tick or the poll-fallback safety net.
+func (d *Daemon) triggerReconciliationPoll(ctx context.Context) {
+	if !d.pollInFlight.CompareAndSwap(false, true) {
+		logf(0, "poll", "reconciliation poll already in flight — coalescing this trigger\n")
+		return
+	}
+	go func() {
+		defer d.pollInFlight.Store(false)
+		d.poll(ctx)
+	}()
+}
+
 // poll runs one polling cycle across every watched repo, dispatching
 // eligible PRs to ReviewPR through a concurrency-capped semaphore shared
 // across the whole cycle (not per-repo) — Pruefer's claude capacity is one
 // subscription shared across every watched repo, not one per repo.
 func (d *Daemon) poll(ctx context.Context) {
-	sem := make(chan struct{}, d.effectiveConcurrency())
 	var wg sync.WaitGroup
 
 	for _, repoSpec := range d.Config.WatchedRepos {
@@ -163,34 +342,7 @@ func (d *Daemon) poll(ctx context.Context) {
 		}
 		d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, PRCount: len(prs)})
 		for _, pr := range prs {
-			pr := pr
-			wg.Add(1)
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				wg.Done()
-				continue
-			}
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-				startedAt := time.Now()
-				d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
-				outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
-				if outcome.Err != nil {
-					logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
-				}
-				errText := ""
-				if outcome.Err != nil {
-					errText = outcome.Err.Error()
-				}
-				d.emit(ptui.ReviewCompletedEvent{
-					Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
-					Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
-					Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
-					Duration: time.Since(startedAt), CompletedAt: time.Now(),
-				})
-			}()
+			d.reviewOne(ctx, &wg, client, owner, repo, pr)
 		}
 	}
 	wg.Wait()
@@ -205,6 +357,104 @@ func (d *Daemon) poll(ctx context.Context) {
 			d.emit(ptui.RateLimitSnapshotEvent{Owner: owner, Stats: rest})
 		}
 	}
+}
+
+// reviewOne dispatches a single PR to ReviewPR through the daemon's shared
+// concurrency-capped semaphore. Calls wg.Add(1) itself and guarantees a
+// matching wg.Done, whether the PR is actually dispatched or ctx is
+// cancelled first — callers must not call wg.Add themselves.
+// Shared by poll() (fan-out per cycle) and ReviewFromEvent (event-triggered,
+// see eventsink.go) so both draw from one concurrency budget, satisfying
+// the issue's "hand off to the existing concurrency-capped review dispatch"
+// requirement for real rather than just in shape.
+func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+	sem := d.semaphore()
+	wg.Add(1)
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		wg.Done()
+		return
+	}
+	go func() {
+		defer wg.Done()
+		defer func() { <-sem }()
+		d.runReview(ctx, client, owner, repo, pr)
+	}()
+}
+
+// runReview acquires the PR's stripe lock (prLock), blocking until any
+// review already in flight for the same PR finishes, then executes
+// ReviewPR. Used by poll()'s reviewOne: poll cycles are infrequent (default
+// 2m), so a poll-triggered dispatch blocking briefly on an event-triggered
+// review already in progress for the same PR is not a resource-exhaustion
+// concern the way a burst of event-triggered dispatches would be — see
+// ReviewFromEvent's non-blocking claim instead, which drops rather than
+// blocks for exactly that reason.
+//
+// Without this lock at all, ReviewPR's "check existing reviews, then
+// submit" sequence (review.go's FetchPRReviews/alreadyReviewedAtHead check
+// against a snapshot taken at call start) is a TOCTOU race: before
+// event-triggered dispatch existed, only one poll loop ever ran, so a given
+// PR was reviewed by at most one caller at a time. Now poll()'s per-cycle
+// fan-out and ReviewFromEvent's per-event dispatch can both pick up the
+// same PR at the same head SHA concurrently, both see no existing bot
+// review, and both submit — a duplicate review beyond what ReviewPR's own
+// SHA-idempotency is supposed to prevent. The lock makes the second
+// caller's ReviewPR call observe the first caller's just-submitted review
+// and skip, restoring the single-flight-per-PR property the SHA-idempotency
+// guarantee assumes.
+func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+	mu := d.prLock(owner, repo, pr.Number)
+	mu.Lock()
+	defer mu.Unlock()
+	d.executeReview(ctx, client, owner, repo, pr)
+}
+
+// executeReview runs ReviewPR and emits the same TUI events poll()'s former
+// inline goroutine did. Caller must already hold both a concurrency-budget
+// semaphore slot and the PR's stripe lock (prLock) — executeReview touches
+// neither itself; see runReview (blocking claim, used by poll()) and
+// ReviewFromEvent (non-blocking claim, used by event-triggered dispatch)
+// for the two ways callers establish that precondition.
+func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+	repoName := owner + "/" + repo
+	startedAt := time.Now()
+	d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
+	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
+	if outcome.Err != nil {
+		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
+	}
+	errText := ""
+	if outcome.Err != nil {
+		errText = outcome.Err.Error()
+	}
+	d.emit(ptui.ReviewCompletedEvent{
+		Repo: repoName, PRNumber: pr.Number, Title: pr.Title,
+		Reviewed: outcome.Reviewed, Skipped: outcome.Skipped, Reason: string(outcome.Reason),
+		Err: errText, NumTurns: outcome.NumTurns, CostUSD: outcome.CostUSD,
+		Duration: time.Since(startedAt), CompletedAt: time.Now(),
+	})
+}
+
+// isWatchedRepo reports whether owner/repo is one of Config.WatchedRepos.
+// poll() never needs this check — it only ever iterates WatchedRepos in the
+// first place — but event-triggered dispatch (ReviewFromEvent) must check
+// explicitly: Daemon.Clients is owner-keyed, not repo-keyed, and an owner's
+// installation token can plausibly cover repos beyond what Pruefer is
+// configured to watch. In particular, the Hookdeck adapter creates its
+// session with webhook_ids: [] (see hookdeck/client.go's createSession) —
+// "every connection visible to this API key," not scoped to watched repos —
+// so a webhook event for an unwatched repo under a watched owner is a
+// plausible real delivery, not just a hypothetical one.
+func (d *Daemon) isWatchedRepo(owner, repo string) bool {
+	target := owner + "/" + repo
+	for _, spec := range d.Config.WatchedRepos {
+		if spec == target {
+			return true
+		}
+	}
+	return false
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts. Returns ok=false
