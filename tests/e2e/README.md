@@ -394,6 +394,15 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     generates only ~7–10, so the test would time out. A cap of 6 sits above
     Alpha's bisect-scenario max (~4 trials) with comfortable margin. Wall-clock:
     ~10–20 min; ~6 trials × 2 required checks ≈ 12 Actions runs.
+    `TestMergeTrainRunawayGuardPausesBatch` intentionally does not call
+    `t.Parallel()` — it deliberately induces a repo-wide fault on
+    `fabrik-test-beta`, and `TestCrossRepoSpawn` is the only other scenario
+    that drives real work on that same repo. Running them concurrently let the
+    induced fault pause `TestCrossRepoSpawn`'s in-flight child issue as
+    collateral damage in the 0.0.77 validation gate (issue #1395); dropping
+    `t.Parallel()` here guarantees the runaway scenario completes before
+    `TestCrossRepoSpawn` starts real work, mirroring the same idiom
+    `TestMergeTrainRestartSafety` already uses below.
 
 ### Additional prerequisites for `TestReviewAuthority*` scenarios
 
@@ -894,7 +903,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
-| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | Train-only (on) | 10–20 min | low (no Claude) |
+| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 
 Approximate single-mode suite total: ~685 min wall-clock, $10.30–30 in Claude
 tokens. A full two-mode gate run is roughly double this, minus the
