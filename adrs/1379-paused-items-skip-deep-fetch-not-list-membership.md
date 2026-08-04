@@ -150,6 +150,18 @@ special-cased as an exception.
   `settleRevalidateScan`'s FR-5 guarantee are unaffected.
 - Removing `fabrik:paused` re-admits the item within one poll cycle: no restart, no
   store reset, no operator action beyond the label removal itself.
+- **The `!cycleSet[iKey]` half of the gate is what preserves unpause-by-comment, and is
+  the change's highest-consequence line.** A human comment on a paused issue is the
+  documented in-band unpause trigger (#1083 — pause is an operator kill-switch a human
+  comment releases). That release runs `dispatchCandidates` → `itemNeedsWork` → the
+  `isPaused` branch, which reads `item.Comments` — populated only by `FetchItemDetails`.
+  Gating on pause alone would suppress the fetch for a paused item whose `updatedAt`
+  just moved, so the comment is never seen and the issue can never be unpaused by
+  commenting: the operator's only in-band resume path, lost silently. Pinned by
+  `TestSelectDeepFetchCandidates_PausedWithNewActivityStillFetched`, added because
+  removing the condition passed the entire engine suite otherwise — the AC1/AC2/AC3
+  tests all fix `cycleSet` empty or drop the pause label, so none of them exercise the
+  paused-and-changed case that this condition exists for.
 - **This fix's real-world GraphQL/REST savings are narrower than the issue's own
   motivating cost evidence.** The Research stage identified two cost sources that are
   both outside this issue's stated scope (`engine/poll.go`, `engine/janitor.go`,

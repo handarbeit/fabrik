@@ -280,3 +280,52 @@ func TestSelectDeepFetchCandidates_PausedNotInStoreGetsBaselineFetch(t *testing.
 		t.Fatalf("expected item to be a candidate, got %+v", candidates)
 	}
 }
+
+// R2/AC2, the load-bearing half: a paused item WITH new activity must still be
+// deep-fetched. This pins the `!cycleSet[iKey]` half of the gate, which the rest
+// of this file does not exercise — removing it suppresses the fetch for every
+// paused item unconditionally, and the entire engine suite still passes.
+//
+// The consequence is not a missed optimisation but a stranded issue. A human
+// comment on a paused issue is the documented unpause trigger (#1083 — pause is
+// an operator kill-switch that a human comment releases). That release runs
+// through dispatchCandidates → itemNeedsWork → the isPaused branch, which reads
+// item.Comments. Those comments only exist if FetchItemDetails ran. Suppress the
+// fetch for a paused item whose updatedAt just moved and the comment is never
+// seen, so the issue can never be unpaused by commenting — the operator's only
+// in-band resume path, gone silently.
+func TestSelectDeepFetchCandidates_PausedWithNewActivityStillFetched(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	// Store baseline, so the gate's notInStore first-sighting fallback is not
+	// what admits this item — the cycleSet exemption must be doing the work.
+	eng.store.Apply(itemstate.CooldownRecorded{
+		Repo: "owner/repo", Number: 52, Reason: "prior-poll", Until: time.Now().Add(-time.Hour),
+	})
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 52, Title: "Parked item a human just commented on", Status: "Research", Labels: []string{"fabrik:paused"}},
+		},
+	}
+	// A new comment bumps the issue's updatedAt, which is what places the item in
+	// cycleSet — the same mechanism the gate's own comment cites.
+	cycleSet := map[string]bool{issueKey(board.Items[0], eng.defaultRepo()): true}
+
+	candidates, deepFetched := eng.selectDeepFetchCandidates(board, "", cycleSet, map[string]bool{})
+
+	client.mu.Lock()
+	fetchCalls := len(client.fetchItemDetailsCalls)
+	client.mu.Unlock()
+	if fetchCalls != 1 {
+		t.Errorf("a paused item with new activity must still be deep-fetched so itemNeedsWork can see the human comment that unpauses it, got %d FetchItemDetails call(s), want 1", fetchCalls)
+	}
+	if deepFetched != 1 {
+		t.Errorf("deepFetched = %d, want 1", deepFetched)
+	}
+	if len(candidates) != 1 || candidates[0].Number != 52 {
+		t.Fatalf("expected the item to be a fetched candidate, got %+v", candidates)
+	}
+}
