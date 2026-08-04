@@ -59,6 +59,7 @@ func TestSmokeSingleRepoFullPipeline(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	marker := fmt.Sprintf("smoke-full-pipeline-%s", stamp)
+	path := markerPath("TestSmokeSingleRepoFullPipeline")
 	num := FileIssue(t, env, env.RepoAlpha,
 		fmt.Sprintf("e2e smoke full-pipeline (%s)", stamp),
 		`## Goal
@@ -67,7 +68,7 @@ End-to-end single-repo pipeline smoke. Verify Fabrik can take an issue from Spec
 
 ## Trivial change
 
-Append a single comment line to `+"`README.md`"+` at the very end of the file:
+Append a single comment line to `+"`"+path+"`"+` at the very end of the file (create the file first if it doesn't already exist):
 
 `+"```"+`
 <!-- `+marker+` -->
