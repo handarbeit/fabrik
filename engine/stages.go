@@ -44,7 +44,6 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 	return false
 }
 
-
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 

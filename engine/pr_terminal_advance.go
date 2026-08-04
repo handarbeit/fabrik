@@ -40,23 +40,34 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 		return
 	}
 	// Items with fabrik:auto-merge-enabled are exclusively managed by
-	// checkAutoMergeConvergence (Phase 1). Single owner does not touch them.
+	// checkAutoMergeConvergence (Phase 1) — but only once stage:Validate:complete
+	// is also present, which is the only state attemptMergeOnValidate's
+	// auto-merge/enqueue/direct-merge branches are ever supposed to produce (they
+	// only ever apply the label once the gate has cleared). Deferring
+	// unconditionally on the label alone assumed that invariant always holds.
+	//
+	// If it is ever violated (a labeling race, or a future caller of the label),
+	// deferring here is not the safe skip it looks like — checkAutoMergeConvergence
+	// is gated on hasComplete in the Phase 1 catch-up loop (poll.go), so it never
+	// even sees an item missing stage:Validate:complete, closed or open. Under the
+	// prior skip-and-warn version of this check, healing was not permanently lost:
+	// fabrik:auto-merge-enabled is not in gateSettleOwnedTransientLabels
+	// (poll.go), so cleanupClosedIssueTransientLabels — which runs later in the
+	// same poll — sweeps it off any closed item unconditionally, and the next
+	// poll's call into this function then falls through normally. So the actual
+	// prior cost was a one-poll-cycle delay for a closed item, not a permanent
+	// strand — Pruefer correctly caught the original comment here overstating
+	// that. Healing inline below is still strictly better (no dependency on sweep
+	// ordering, no wasted poll cycle, and open items reach the same fix — for an
+	// open item in this state there is no sweep to fall back on at all, since
+	// cleanupClosedIssueTransientLabels only ever runs on closed issues), so the
+	// fix is unchanged; only the rationale for why it was worth making is
+	// corrected (Pruefer, PR #1388).
 	if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
-		// This skip assumes fabrik:auto-merge-enabled never appears without
-		// stage:Validate:complete (attemptMergeOnValidate only ever applies it
-		// once the gate has cleared) — true for both callers of this function
-		// today. That assumption is now load-bearing for a second, closed-item
-		// caller with no dispatch-admission precondition of its own: if it is
-		// ever violated (a labeling race, or a future caller of the label),
-		// this early return silently strands the item forever — dispatch
-		// admission blocks it (no stage:Validate:complete), no settle-owner
-		// processes it (this return), and settleClosedItemsToDone excludes
-		// gate-checked stages. Log defensively so a violation is visible
-		// rather than silent (Pruefer, PR #1388).
-		if !hasLabel(item.Labels, "stage:Validate:complete") {
-			e.logf(item.Number, "warn", "fabrik:auto-merge-enabled present without stage:Validate:complete — skipping per single-owner exclusion, but this violates the assumed invariant and may permanently strand the item (ADR-1387)\n")
+		if hasLabel(item.Labels, "stage:Validate:complete") {
+			return
 		}
-		return
+		e.logf(item.Number, "warn", "fabrik:auto-merge-enabled present without stage:Validate:complete — this violates the assumed invariant; healing via the normal terminal-advance flow instead of deferring to checkAutoMergeConvergence, which is unreachable for this item in this state (ADR-1387)\n")
 	}
 	iKey := issueKey(item, e.defaultRepo())
 	if advancedItems[iKey] {
@@ -251,13 +262,19 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 // strictly cheaper, not a new failure mode. A stuck-PR escalation path is
 // unrelated to ADR-1387's scope.
 //
-// Ownership: exclusive owner of closed items at Validate (or any other
-// gate-checked stage, though Validate is the only one today), together with
-// its open-item sibling runValidatePRTerminalAdvance — the two are
-// IsClosed-partitioned and never process the same item, so there is no race
-// or double-advance between them. settleClosedItemsToDone (ADR-064)
-// deliberately excludes gate-checked stages for exactly this reason, deferring
-// to this scan instead.
+// Ownership: exclusive owner of closed items at Validate specifically — not
+// "any gate-checked stage" (advanceValidateTerminalItem hardcodes
+// stage.Name == "Validate", not stageIsGateChecked; see its doc comment) —
+// together with its open-item sibling runValidatePRTerminalAdvance. The two
+// are IsClosed-partitioned and never process the same item, so there is no
+// race or double-advance between them. settleClosedItemsToDone (ADR-064)
+// excludes stage.Name == "Validate" specifically, for exactly this reason,
+// deferring to this scan instead — but it does NOT exclude other gate-checked
+// stages (e.g. a Review stage configured with wait_for_reviews: true, the
+// shipped default): a closed item stranded there has no PR-merge nuance for
+// this pair to add, so settleClosedItemsToDone's plain "move to Done" handles
+// it directly (caught in review on PR #1388 — see ADR-1387's "R1 Follow-up:
+// Closed Item Stranded at a Non-Validate Gate-Checked Stage").
 func (e *Engine) settleClosedValidateAdvance(board *gh.ProjectBoard, advancedItems map[string]bool) {
 	for _, item := range board.Items {
 		if !item.IsClosed {

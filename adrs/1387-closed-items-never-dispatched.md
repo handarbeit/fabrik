@@ -138,7 +138,7 @@ unconditionally (each removal is itself a no-op when the label is absent).
 implementation used `stageIsGateChecked(stage)` here, matching the general convention used elsewhere
 in this codebase (`itemMayNeedWork`'s pre-fix guard, `settleClosedItemsToDone`'s exclusion). It was
 caught and corrected during implementation: `advanceValidateTerminalItem` — and therefore both
-settle-owners — only ever processes `stage.Name == "Validate"` (see "Known limitation" below). The
+settle-owners — only ever processes `stage.Name == "Validate"` (see "R1 Follow-up: Closed Item Stranded at a Non-Validate Gate-Checked Stage" below). The
 shipped default `Review` stage (`stages/examples/review.yaml`) is independently configured with
 `wait_for_reviews: true`, making it gate-checked too. Had the exclusion used `stageIsGateChecked`
 generally, a closed item stranded at Review with no `stage:Review:complete` would have had
@@ -313,3 +313,36 @@ independently and safely regardless of ordering, since `advanceClosedItemToDone`
 label state (ADR-064's "deliberately not conditioned on any label" property, confirmed still holding here).
 
 **References:** [ADR-064: Closed-Item-At-Any-Stage Advance To Done](064-closed-item-any-stage-advance-to-done.md) (the scan whose exclusion this narrows), [ADR-056: Consolidate Convergence Gate Recovery](056-consolidate-convergence-gate-recovery.md) (D2, why Validate's PR-merge nuance doesn't generalize), `handarbeit/fabrik-test-alpha#4246` (the field evidence showing this is ordinary operator behavior, not a rare edge case)
+
+## R1 Follow-up: `fabrik:auto-merge-enabled` Without `stage:Validate:complete` Delayed Healing by a Poll Cycle
+
+Caught by Pruefer review on PR #1388, after the fixes above landed. `advanceValidateTerminalItem`
+defers entirely to `checkAutoMergeConvergence` (Phase 1) whenever `fabrik:auto-merge-enabled` is
+present, on the assumption that `attemptMergeOnValidate`'s auto-merge/enqueue/direct-merge branches
+never apply the label before `stage:Validate:complete` already exists — true for both callers today.
+An initial implementation deferred unconditionally on the label alone and, when that assumption was
+observed violated, logged a warning and returned. The warning's own wording claimed this "may
+permanently strand the item" — the same "zero remaining owners" framing correctly used for the
+Review-stage strand above. On closer review that framing was itself wrong here (a second Pruefer
+finding, on the first fix): `fabrik:auto-merge-enabled` is not among the labels
+`cleanupClosedIssueTransientLabels` withholds from its closed-item sweep
+(`gateSettleOwnedTransientLabels`, R6 above) — so for a *closed* item, the very same poll's later sweep
+step removes the label unconditionally, and the next poll's call into this function then falls through
+normally and heals it. The actual prior cost was a one-poll-cycle delay for a closed item, not a
+permanent strand. (An *open* item in this state has no such fallback — the sweep only ever runs on
+closed issues — but this state is believed genuinely rare for either: a labeling race, or a future
+caller of the label, not ordinary operator behavior like the Review-stage case above.)
+
+**Fix (unchanged by the corrected rationale):** narrow the defer-to-Phase-1 skip to the
+invariant-respecting case only — `fabrik:auto-merge-enabled` **and** `stage:Validate:complete` both
+present. When the label is present without the completion label, log the same warning but fall through
+into the ordinary merge-vs-pause flow immediately below instead of returning, healing the item via the
+identical logic already used for every other Validate terminal advance in this function. This remains
+worth doing even though the closed-item case would have self-healed on its own: it heals inline instead
+of depending on sweep ordering and a wasted poll cycle, and it is the only fix available for the
+open-item case, which has no sweep to fall back on at all. It does not risk racing
+`checkAutoMergeConvergence`: that handler cannot reach the item in this state either (same `hasComplete`
+gate), so the two code paths remain mutually exclusive by construction, exactly as they are in the
+invariant-respecting case.
+
+**References:** [ADR-056: Consolidate Convergence Gate Recovery](056-consolidate-convergence-gate-recovery.md) (D2), [ADR-057: Single-Owner Validate PR Terminal Advance](057-validate-pr-terminal-advance.md)
