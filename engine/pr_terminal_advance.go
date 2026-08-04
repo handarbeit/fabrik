@@ -222,6 +222,21 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 // fetch), and only for items already known-closed from the shallow board
 // snapshot.
 //
+// Unresolved-PR polling cost (pre-existing, unchanged by ADR-1387): if a
+// candidate's linked PR is neither merged nor closed (e.g. a human closed the
+// issue without touching the PR — an unusual, out-of-band action, the same
+// trigger class as the loop this scan exists to fix), advanceValidateTerminalItem
+// returns immediately with no state change, and this scan re-evaluates the item
+// every poll — one FetchLinkedPR call, indefinitely, until the PR resolves.
+// There is no timeout/escalation here comparable to settleAwaitingCIScan's
+// CIWaitTimeout backstop (ADR-1270). This exact no-escalation behavior already
+// existed in the pre-ADR-1387 runValidatePRTerminalAdvance; ADR-1387 does not
+// introduce it, and only lowers its cost — pre-ADR-1387 the same item was also
+// being fully re-dispatched to Claude every poll (the bug this scan fixes), so
+// the steady-state cost here (one lightweight, read-only API call per poll) is
+// strictly cheaper, not a new failure mode. A stuck-PR escalation path is
+// unrelated to ADR-1387's scope.
+//
 // Ownership: exclusive owner of closed items at Validate (or any other
 // gate-checked stage, though Validate is the only one today), together with
 // its open-item sibling runValidatePRTerminalAdvance — the two are

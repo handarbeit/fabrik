@@ -207,20 +207,33 @@ unconsidered.
   for non-gate-checked columns — all explicitly out of scope and confirmed untouched.
 
 **Negative / Trade-offs:**
-- **Known limitation, deliberately out of scope:** if a deployment's Review stage is independently
-  gate-checked (`wait_for_reviews: true`, the shipped default), a closed item stranded there with no
-  `stage:Review:complete` is, after this fix, never dispatched (R1 holds unconditionally) but also
-  never healed by any settle-owner — `settleClosedItemsToDone` already excludes `stageIsGateChecked`
-  stages generally (pre-existing, unchanged), deferring to "whichever settle-owner owns gate-checked
-  closed items," but that owner only ever answers for Validate. This is not a regression: before this
-  fix, such an item was *admitted to dispatch* and exhibited the identical unbounded-loop symptom this
-  issue fixes for Validate, just unreported. After this fix it trades a loud, token-burning symptom
-  for a silent, stranding one. Believed unreachable in the standard pipeline shape (PR-merge authority
-  sits at Validate, not Review) except via a human manually closing an issue mid-Review — see
-  `docs/state-machine.md` §6.15 for the full analysis.
+- **Known limitation, deliberately out of scope, confirmed real (not hypothetical):** both shipped
+  default stage templates — `stages/examples/review.yaml` and `stages/examples/validate.yaml` — set
+  `wait_for_reviews: true`, so a deployment using the defaults has a **second** gate-checked stage
+  (Review) beyond Validate. A closed item stranded at Review with no `stage:Review:complete` is, after
+  this fix, never dispatched (R1 holds unconditionally) but also never healed by any settle-owner —
+  `settleClosedItemsToDone` already excludes `stageIsGateChecked` stages generally (pre-existing,
+  unchanged), deferring to "whichever settle-owner owns gate-checked closed items," but that owner
+  only ever answers for Validate. This is not a regression: before this fix, such an item was *admitted
+  to dispatch* and exhibited the identical unbounded-loop symptom this issue fixes for Validate, just
+  unreported. After this fix it trades a loud, token-burning symptom for a silent, stranding one.
+  Believed unreachable in the standard pipeline shape (PR-merge authority sits at Validate, not Review)
+  except via a human manually closing an issue mid-Review — see `docs/state-machine.md` §6.15 for the
+  full analysis.
 - `advanceValidateTerminalItem`'s pre-existing `stage.Name == "Validate"` hardcoding (rather than
   `stageIsGateChecked`) is now load-bearing for two call sites instead of one — any future
   generalization work touches both.
+- **Unresolved-PR polling cost, pre-existing and unchanged by this fix:** for a closed item at
+  Validate whose linked PR is neither merged nor closed (a human closed the issue without touching the
+  PR — an unusual, out-of-band action, same trigger class as the loop this issue fixes),
+  `advanceValidateTerminalItem` returns immediately with no state change. `settleClosedValidateAdvance`
+  re-evaluates that item every poll — one `FetchLinkedPR` call, indefinitely, until the PR resolves —
+  with no timeout/escalation comparable to `settleAwaitingCIScan`'s `CIWaitTimeout` backstop (ADR-1270).
+  This exact no-escalation behavior already existed in `runValidatePRTerminalAdvance` before this issue
+  (verified against the pre-fix code); this fix does not introduce it, and only lowers its cost — the
+  same item pre-fix was *also* being fully re-dispatched to Claude every poll (the R1 bug), so the
+  post-fix steady-state cost (one lightweight, read-only API call per poll) is strictly cheaper, not a
+  new failure mode. Adding a stuck-PR escalation path is unrelated to R1–R7 and left out of scope.
 
 ## Sibling Audit
 
