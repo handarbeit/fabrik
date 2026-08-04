@@ -43,8 +43,10 @@ func TestCIFixReinvoke(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e ci-fix-reinvoke (%s)", stamp)
+	path := markerPath("TestCIFixReinvoke")
+	body := fmt.Sprintf(ciFixReinvokeBody, path, path)
 
-	num := FileIssue(t, env, env.RepoAlpha, title, ciFixReinvokeBody, "fabrik:yolo")
+	num := FileIssue(t, env, env.RepoAlpha, title, body, "fabrik:yolo")
 	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
 	SetIssueStatus(t, env, itemID, "Specify")
 	t.Logf("filed %s#%d", env.RepoAlpha, num)
@@ -277,8 +279,10 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e ci-fix-cycle-limit (%s)", stamp)
+	path := markerPath("TestCIFixReinvokeCycleLimit")
+	body := fmt.Sprintf(ciFixCycleLimitBody, path, path)
 
-	num := FileIssue(t, env, env.RepoAlpha, title, ciFixCycleLimitBody, "fabrik:yolo")
+	num := FileIssue(t, env, env.RepoAlpha, title, body, "fabrik:yolo")
 	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
 	SetIssueStatus(t, env, itemID, "Specify")
 	t.Logf("filed %s#%d", env.RepoAlpha, num)
@@ -368,12 +372,16 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
 }
 
-// ciFixReinvokeBody is the issue body for TestCIFixReinvoke. The PR body must
-// contain "ci-fix-sentinel-required" so the test-alpha CI workflow triggers the
-// ci-fix-sentinel check. That check FAILS until a file named SENTINEL_FIX
-// (at the repo root) contains the line "ci-fix-satisfied" — the only sanctioned
-// way to satisfy it. Claude must create that file ONLY on the CI-fix reinvoke,
-// producing the failure → reinvoke → recovery sequence the test exercises.
+// ciFixReinvokeBody is the issue body template for TestCIFixReinvoke. Both %s
+// placeholders are the scenario's unique marker file path (see markerPath in
+// harness.go, #1394), repeated verbatim.
+//
+// The PR body must contain "ci-fix-sentinel-required" so the test-alpha CI
+// workflow triggers the ci-fix-sentinel check. That check
+// FAILS until a file named SENTINEL_FIX (at the repo root) contains the line
+// "ci-fix-satisfied" — the only sanctioned way to satisfy it. Claude must
+// create that file ONLY on the CI-fix reinvoke, producing the failure →
+// reinvoke → recovery sequence the test exercises.
 //
 // The SENTINEL_FIX mechanism is deliberately the sole satisfaction path and the
 // workflow is off-limits (see hard constraints) so the agent cannot satisfy or
@@ -385,9 +393,9 @@ End-to-end regression test for the Fabrik CI-fix reinvoke loop (handarbeit/fabri
 
 ## The change
 
-On the **initial Implement commit**, add exactly one new HTML comment to
-README.md, on its own line, immediately after the line containing
-"# fabrik-test-alpha":
+On the **initial Implement commit**, add exactly one new HTML comment as a new
+line at the end of ` + "`%s`" + ` (create the file first if it doesn't already
+exist):
 
     <!-- ci-fix-reinvoke-initial -->
 
@@ -424,14 +432,16 @@ ci-fix-sentinel-required
 
 ## Scope
 
-README.md on the initial commit; a new SENTINEL_FIX file on the CI-fix reinvoke.
+` + "`%s`" + ` on the initial commit; a new SENTINEL_FIX file on the CI-fix reinvoke.
 No other files. No decomposition. One commit on the initial push, one CI-fix
 commit.
 `
 
-// ciFixCycleLimitBody is the issue body for TestCIFixReinvokeCycleLimit. The
-// PR body must contain "ci-fix-sentinel-unfixable" so the test-alpha CI
-// workflow runs a permanently-failing sentinel check regardless of content.
+// ciFixCycleLimitBody is the issue body template for TestCIFixReinvokeCycleLimit.
+// Both %s placeholders are the scenario's unique marker file path (see
+// markerPath in harness.go, #1394), repeated verbatim. The PR body must
+// contain "ci-fix-sentinel-unfixable" so the test-alpha CI workflow runs a
+// permanently-failing sentinel check regardless of content.
 //
 // The sentinel cannot be satisfied by any commit content, so this fixture's
 // job is not to fix CI — it is to guarantee a NEW commit on every single
@@ -454,8 +464,8 @@ commit on every single CI-fix reinvoke.
 
 ## The change
 
-On the initial commit, add exactly one new HTML comment to README.md, on its
-own line, immediately after the line containing "# fabrik-test-alpha":
+On the initial commit, add exactly one new HTML comment as a new line at the
+end of ` + "`%s`" + ` (create the file first if it doesn't already exist):
 
     <!-- ci-fix-cycle-limit-test -->
 
@@ -502,6 +512,6 @@ ci-fix-sentinel-unfixable
 
 ## Scope
 
-README.md and ` + "`.ci-fix-attempts.log`" + ` only. Minimal change per commit. No
+` + "`%s`" + ` and ` + "`.ci-fix-attempts.log`" + ` only. Minimal change per commit. No
 decomposition.
 `

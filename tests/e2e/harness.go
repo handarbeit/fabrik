@@ -30,6 +30,51 @@ const (
 	defaultProjectOwner  = "handarbeit"
 )
 
+// markerPaths is the single source of truth for every non-train scenario's
+// marker file target: one fixed, distinct e2e/markers/<scenario>.md path per
+// writer test function, so parallel scenarios can never conflict on a shared
+// file (#1394). Unlike the merge-train members' uniqueMemberPath (which needs
+// per-run uniqueness because a landed batch merges files into main and a
+// fixed path would collide with the existing blob's SHA on the Contents API),
+// these files are edited through a normal agent git commit in a worktree — a
+// real diff, not a raw Contents-API PUT — so a fixed path across runs is
+// fine, and it's what lets TestMarkerPathsAreUnique enumerate the set
+// statically (AC1) rather than needing to execute the tests to know the
+// paths.
+//
+// TestPausedMergedPRRecovery's 3 sub-variants deliberately share one path:
+// they run strictly sequentially (t.Run, no t.Parallel between them) and each
+// variant's PR merges before the next is filed, so there is no concurrent
+// write to race.
+//
+// TestConvergenceRace is deliberately absent from this map. Its entire
+// premise (documented in convergence_race_test.go's own top-of-file comment)
+// is that its two issues collide on the same anchor line of the shared
+// README.md, forcing a genuine merge conflict that Fabrik must resolve via a
+// rebase reinvoke — giving it a unique path would eliminate the exact
+// condition it exists to provoke (R4).
+var markerPaths = map[string]string{
+	"TestSmokeSingleRepoFullPipeline": "e2e/markers/smoke-full-pipeline.md",
+	"TestYoloAutoMergeLabel":          "e2e/markers/auto-merge-yolo.md",
+	"TestPausedMergedPRRecovery":      "e2e/markers/paused-merged-pr-recovery.md",
+	"TestBaseBranchPipeline":          "e2e/markers/base-branch-pipeline.md",
+	"TestCruiseFullPipeline":          "e2e/markers/cruise-full-pipeline.md",
+	"TestCIFixReinvoke":               "e2e/markers/ci-fix-reinvoke.md",
+	"TestCIFixReinvokeCycleLimit":     "e2e/markers/ci-fix-reinvoke-cycle-limit.md",
+	"TestConjunctiveCIReviewGate":     "e2e/markers/conjunctive-ci-review-gate.md",
+}
+
+// markerPath returns the unique marker file path for the named scenario.
+// Panics on an unknown name so a typo'd lookup fails loudly at test setup
+// rather than silently producing an empty path in an issue body.
+func markerPath(name string) string {
+	path, ok := markerPaths[name]
+	if !ok {
+		panic(fmt.Sprintf("markerPath: no entry for %q — add it to markerPaths in harness.go", name))
+	}
+	return path
+}
+
 // Env carries the resolved test-bed paths and identifiers. Constructed by
 // LoadEnv from environment variables (with sensible defaults).
 type Env struct {
