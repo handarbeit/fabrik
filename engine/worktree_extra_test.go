@@ -20,6 +20,14 @@ func TestRepoNameFromURL_HTTPSWithGit(t *testing.T) {
 		{"git@github.com:owner/repo", "repo"},
 		{"", ""},
 		{"no-slash-or-colon", ""},
+		// FR-5: these helpers contain no "github.com" literal — they parse
+		// generically by splitting on the last "/"/":", so a GHES-host remote
+		// (built by buildCloneURL when GHESHost is configured) already
+		// round-trips correctly with zero production code change.
+		{"https://github.example.com/owner/repo.git", "repo"},
+		{"https://github.example.com/owner/repo", "repo"},
+		{"git@github.example.com:owner/repo.git", "repo"},
+		{"git@github.example.com:owner/repo", "repo"},
 	}
 	for _, tc := range cases {
 		got := repoNameFromURL(tc.url)
@@ -40,6 +48,11 @@ func TestOwnerRepoDirFromURL(t *testing.T) {
 		{"git@github.com:owner/repo", "owner-repo"},
 		{"", ""},
 		{"noslash", ""},
+		// FR-5: confirms the same GHES round-trip for the owner-repo dir form.
+		{"https://github.example.com/owner/repo.git", "owner-repo"},
+		{"https://github.example.com/owner/repo", "owner-repo"},
+		{"git@github.example.com:owner/repo.git", "owner-repo"},
+		{"git@github.example.com:owner/repo", "owner-repo"},
 	}
 	for _, tc := range cases {
 		got := ownerRepoDirFromURL(tc.url)
@@ -148,7 +161,7 @@ func TestEnsureBareClone_ExistingDir_FetchesOnly(t *testing.T) {
 
 	// ensureBareClone should see the existing directory and attempt a git fetch (best-effort).
 	// Since this is not a real git repo, fetch will fail silently.
-	_, err := ensureBareClone(tmpDir, "owner", "repo", "", false)
+	_, err := ensureBareClone(tmpDir, "owner", "repo", "", false, "")
 	if err != nil {
 		t.Errorf("ensureBareClone with existing dir returned error: %v", err)
 	}
@@ -167,13 +180,35 @@ func TestSetCommitterIdentity_SetsWhenUnset(t *testing.T) {
 		cmd.CombinedOutput()
 	}
 
-	setCommitterIdentity(repoDir, "arbeithand", env)
+	setCommitterIdentity(repoDir, "arbeithand", env, "")
 
 	if got := readGitConfig(t, repoDir, "user.name"); got != "arbeithand" {
 		t.Errorf("user.name = %q, want %q", got, "arbeithand")
 	}
 	if got := readGitConfig(t, repoDir, "user.email"); got != "arbeithand@users.noreply.github.com" {
 		t.Errorf("user.email = %q, want %q", got, "arbeithand@users.noreply.github.com")
+	}
+}
+
+func TestSetCommitterIdentity_GHESHost(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	env := nonInteractiveGitEnv()
+
+	for _, key := range []string{"user.name", "user.email"} {
+		cmd := exec.Command("git", "config", "--unset", key)
+		cmd.Dir = repoDir
+		cmd.Env = env
+		cmd.CombinedOutput()
+	}
+
+	setCommitterIdentity(repoDir, "arbeithand", env, "github.example.com")
+
+	if got := readGitConfig(t, repoDir, "user.name"); got != "arbeithand" {
+		t.Errorf("user.name = %q, want %q", got, "arbeithand")
+	}
+	if got := readGitConfig(t, repoDir, "user.email"); got != "arbeithand@users.noreply.github.example.com" {
+		t.Errorf("user.email = %q, want %q", got, "arbeithand@users.noreply.github.example.com")
 	}
 }
 
@@ -192,7 +227,7 @@ func TestSetCommitterIdentity_PreservesExisting(t *testing.T) {
 		}
 	}
 
-	setCommitterIdentity(repoDir, "arbeithand", env)
+	setCommitterIdentity(repoDir, "arbeithand", env, "")
 
 	if got := readGitConfig(t, repoDir, "user.name"); got != "preset-name" {
 		t.Errorf("user.name = %q, want preserved %q", got, "preset-name")
@@ -211,7 +246,7 @@ func TestSetCommitterIdentity_EmptyUserIsNoOp(t *testing.T) {
 	before := readGitConfig(t, repoDir, "user.name")
 	beforeEmail := readGitConfig(t, repoDir, "user.email")
 
-	setCommitterIdentity(repoDir, "", env)
+	setCommitterIdentity(repoDir, "", env, "")
 
 	if got := readGitConfig(t, repoDir, "user.name"); got != before {
 		t.Errorf("user.name = %q, want unchanged %q", got, before)
@@ -242,18 +277,21 @@ func TestBuildCloneURL(t *testing.T) {
 	cases := []struct {
 		owner, repo string
 		useSSH      bool
+		host        string
 		want        string
 	}{
-		{"owner", "repo", true, "git@github.com:owner/repo.git"},
-		{"owner", "repo", false, "https://github.com/owner/repo.git"},
-		{"acme", "widgets", true, "git@github.com:acme/widgets.git"},
-		{"acme", "widgets", false, "https://github.com/acme/widgets.git"},
+		{"owner", "repo", true, "", "git@github.com:owner/repo.git"},
+		{"owner", "repo", false, "", "https://github.com/owner/repo.git"},
+		{"acme", "widgets", true, "", "git@github.com:acme/widgets.git"},
+		{"acme", "widgets", false, "", "https://github.com/acme/widgets.git"},
+		{"owner", "repo", true, "github.example.com", "git@github.example.com:owner/repo.git"},
+		{"owner", "repo", false, "github.example.com", "https://github.example.com/owner/repo.git"},
 	}
 	for _, tc := range cases {
-		t.Run(fmt.Sprintf("%s/%s ssh=%v", tc.owner, tc.repo, tc.useSSH), func(t *testing.T) {
-			if got := buildCloneURL(tc.owner, tc.repo, tc.useSSH); got != tc.want {
-				t.Errorf("buildCloneURL(%q, %q, %v) = %q, want %q",
-					tc.owner, tc.repo, tc.useSSH, got, tc.want)
+		t.Run(fmt.Sprintf("%s/%s ssh=%v host=%q", tc.owner, tc.repo, tc.useSSH, tc.host), func(t *testing.T) {
+			if got := buildCloneURL(tc.owner, tc.repo, tc.useSSH, tc.host); got != tc.want {
+				t.Errorf("buildCloneURL(%q, %q, %v, %q) = %q, want %q",
+					tc.owner, tc.repo, tc.useSSH, tc.host, got, tc.want)
 			}
 		})
 	}
