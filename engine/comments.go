@@ -650,14 +650,21 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 }
 
 // isReviewReinvoke reports whether this processComments invocation originated
-// from a review-reinvoke dispatch (i.e., all comments are PR inline review
-// thread comments). Returns false for an empty slice.
+// from a review-reinvoke dispatch (i.e., every comment is either a PR inline
+// review thread comment or a synthetic review-body comment, Finding 4 —
+// buildReviewBodyComments). A comment counts as review-reinvoke-eligible when
+// c.ReviewThreadID != "" (a real thread comment) OR c.ID has the
+// reviewBodyIDPrefix ("review-body:") — a body-derived comment has no thread
+// to carry the marker, so it needs its own discriminator. This keeps a
+// mixed batch (some thread comments plus a review body) classified as a
+// review reinvoke, so publishCommentOutput still posts the PR feedback
+// summary for it. Returns false for an empty slice.
 func isReviewReinvoke(comments []gh.Comment) bool {
 	if len(comments) == 0 {
 		return false
 	}
 	for _, c := range comments {
-		if c.ReviewThreadID == "" {
+		if c.ReviewThreadID == "" && !strings.HasPrefix(c.ID, reviewBodyIDPrefix) {
 			return false
 		}
 	}

@@ -397,13 +397,14 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
 
 ### Additional prerequisites for `TestReviewAuthority*` scenarios
 
-`TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
+`TestReviewAuthorityReinvokesOnChangesRequested`, `TestReviewAuthorityCycleLimitPauses`,
 `TestReviewAuthorityClearsOnApproval`, and `TestReviewAuthorityYoloDoesNotBypassBlock`
-cover ADR-1250's `review_authority: authoritative` mode. All four `TestReviewAuthority*`
-scenarios, including `TestReviewAuthorityAdvisoryRegressionGuard`, run against the bed's
-existing `Review` column/stage (default, untouched config) — **no bed column or stage-YAML
-setup is required**, beyond `FABRIK_REVIEWER_TOKEN` and the `review-authority:authoritative`
-label (both below).
+cover ADR-1250's `review_authority: authoritative` mode (as amended by ADR-1375's
+reinvoke-governs-working / authoritative-governs-merging model). All five
+`TestReviewAuthority*` scenarios, including `TestReviewAuthorityAdvisoryRegressionGuard`,
+run against the bed's existing `Review` column/stage (default, untouched config) — **no
+bed column or stage-YAML setup is required**, beyond `FABRIK_REVIEWER_TOKEN` and the
+`review-authority:authoritative` label (both below).
 
 **Mechanism: a per-issue label, not a bed column.** Authoritative mode is applied per item
 via the `review-authority:authoritative` label, passed as an extra label at seed time
@@ -432,7 +433,7 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
 `fabrik:paused` never applied), not that the item merges.
 
 21. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
-    in prerequisite #13 above. All four `TestReviewAuthority*` scenarios skip with an
+    in prerequisite #13 above. All five `TestReviewAuthority*` scenarios skip with an
     instructional message if it is unset; there is no timeout-fallback path here (unlike
     `TestConjunctiveCIReviewGate`) because these scenarios exist specifically to assert
     on a deterministic verdict, not on gate-timeout behavior alone.
@@ -457,20 +458,25 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     coupling (Fabrik's release gate depending on pruefer's health). All verdict assertions
     in `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
     deterministic, harness-posted formal reviews from a non-author identity.
-24. The default `E2E_TIMEOUT=4h` already covers
-    `TestReviewAuthorityBlocksAndPausesOnChangesRequested` in isolation — its
-    worst-case wall-clock is `FABRIK_REVIEW_WAIT_TIMEOUT + ~30 min`
-    (10 min initial block-confirmation wait + `FABRIK_REVIEW_WAIT_TIMEOUT`+10 min for the
-    pause wait itself + two trailing 5 min waits for `fabrik:awaiting-input` and the pause
-    comment), though it typically completes much faster in practice. With the 15-minute
-    default this worst case is ~45 min, still within `E2E_TIMEOUT=1h`. **Do not use a very
-    short value like `FABRIK_REVIEW_WAIT_TIMEOUT=2` here**: `TestReviewAuthorityYoloDoesNotBypassBlock`
-    runs concurrently against the same bed setting and needs the timeout comfortably above
-    ~2 minutes, since its 90s "block persists under yolo" window starts shortly after
-    `fabrik:awaiting-review` first appears — a too-short timeout risks a legitimate
-    review-wait-timeout pause landing inside that window, which the test detects and fails
-    on explicitly (distinct message, not misreported as a yolo bypass) rather than passing.
-    A moderate value (e.g. `FABRIK_REVIEW_WAIT_TIMEOUT=5`) balances both tests' needs.
+24. **`TestReviewAuthorityReinvokesOnChangesRequested`'s wall-clock is dominated by one
+    real Claude invocation** (the review-reinvoke itself addressing the harness's
+    synthetic feedback), typically several minutes, plus a bounded 90s settle window for
+    its AC7 "not re-processed" check — well within the default `E2E_TIMEOUT=4h`. **Do not
+    use a very short value like `FABRIK_REVIEW_WAIT_TIMEOUT=2` here**:
+    `TestReviewAuthorityYoloDoesNotBypassBlock` runs concurrently against the same bed
+    setting and needs the timeout comfortably above ~2 minutes, since its 90s "block
+    persists under yolo" window starts shortly after `fabrik:awaiting-review` first
+    appears — a too-short timeout risks a legitimate review-wait-timeout pause landing
+    inside that window, which the test detects and fails on explicitly (distinct message,
+    not misreported as a yolo bypass) rather than passing. A moderate value (e.g.
+    `FABRIK_REVIEW_WAIT_TIMEOUT=5`) balances both tests' needs.
+24a. **`TestReviewAuthorityCycleLimitPauses` needs a small `FABRIK_MAX_REVIEW_CYCLES`**
+    (e.g. `2`) for a bounded wall-clock — each cycle requires a full reinvoke (a real
+    Claude invocation) before the next distinct `REQUEST_CHANGES` review can be
+    submitted. The test skips itself with an instructional message if the bed's
+    configured value is above 5 (too large for a reasonable e2e run). Defaults to the
+    engine's own default (5) if `FABRIK_MAX_REVIEW_CYCLES` is unset in the bed `.env`,
+    which will cause the skip.
 25. **Note on scope**: neither test bed repo has a branch-protection review requirement
     configured (only required *status checks* are documented as enrolled), so
     `FetchPRReviewDecision` returns `""` for every scenario here and `reviewGateAuthorityVerdict`
@@ -490,6 +496,15 @@ dependency described below. All four run against the bed's existing `Review`
 column/stage (default, untouched config) — **no bed column or stage-YAML setup is
 required**, beyond `FABRIK_REVIEW_WAIT_TIMEOUT` (already documented above) and the
 two labels below.
+
+A fifth scenario in this file, `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation`,
+covers AC2 of #1375 (Finding 2's fix): a declared `expected_reviewers` bot must not defer
+an outstanding human reviewer's `review_authority: authoritative` escalation. It combines
+both mechanisms — `expected-reviewers:declared` (this section) and
+`review-authority:authoritative` (previous section) — on the same issue, with a real
+requested human reviewer (via `RequestPRReviewer` + `FABRIK_REVIEWER_TOKEN`, not a draft
+PR), so it has both sections' prerequisites and needs `FABRIK_REVIEWER_TOKEN` in addition
+to the two labels below.
 
 **Mechanism: two per-issue labels, not a bed column.** A declared `expected_reviewers`
 value is applied per item via one of two labels, passed as an extra label at seed
@@ -543,8 +558,7 @@ is a documented, accepted e2e gap.
     object itself — the objects must exist before any of these scenarios can even
     file their seed issue.
 27. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
-    (~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer, similar to
-    `TestReviewAuthorityBlocksAndPausesOnChangesRequested`) — Phase 1 and Phase 2
+    (~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer) — Phase 1 and Phase 2
     of the bot re-prompt ladder are folded into one continuation. The same
     moderate `FABRIK_REVIEW_WAIT_TIMEOUT` value recommended in prerequisite #24
     (e.g. `5`) applies here too; a very short value risks a legitimate Phase 1/2
@@ -702,8 +716,10 @@ necessarily by 4 being too high a concurrency cap. The one scenario failure
 plausibly linked to bed starvation in the observed run
 (`TestReviewAuthorityClearsOnApproval` timing out waiting for
 `fabrik:awaiting-review` alongside a 5½-minute processing gap in the bed log)
-is explicitly unconfirmed — its sibling `TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
-same helper, same assertion, passed in the same leg. Lowering `E2E_PARALLEL`
+is explicitly unconfirmed — its sibling (at the time of this run,
+`TestReviewAuthorityBlocksAndPausesOnChangesRequested`; renamed to
+`TestReviewAuthorityReinvokesOnChangesRequested` by #1375), same helper, same
+assertion, passed in the same leg. Lowering `E2E_PARALLEL`
 without stronger evidence would itself be an unmeasured, guessed change, and
 risks masking real `t.Parallel()` interleaving defects for no demonstrated
 benefit. Instead, the risk this requirement is aimed at — a scenario failing
@@ -865,7 +881,8 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); covered by the default `E2E_TIMEOUT=4h` | $1.50–4.50 |
 | `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
-| `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): CHANGES_REQUESTED verdict blocks the gate (fabrik:awaiting-review); verdict never clears → pauses at ReviewWaitTimeout with the authoritative reason in the comment, not the generic "no reviews submitted yet" | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + 30 min (worst case) | ~$0.05 (no Claude) |
+| `TestReviewAuthorityReinvokesOnChangesRequested` | ADR-1250/ADR-1375 authoritative mode (via `review-authority:authoritative` label): CHANGES_REQUESTED verdict blocks checkReviewGate, but a bounded reinvoke fires immediately (AC1/AC6, engine log assertion, not a label transition) — the body-only review shape SubmitPRReview produces is enough with zero inline comments; the same review is not re-dispatched on a later poll (AC7) | Both | several min (one real Claude invocation) + 90s settle window | $0.10–0.50 (one Claude invocation) |
+| `TestReviewAuthorityCycleLimitPauses` | ADR-1375 R5 terminal fallback (via `review-authority:authoritative` label): repeated distinct CHANGES_REQUESTED reviews up to `FABRIK_MAX_REVIEW_CYCLES` (bed-configured small) terminate in `pauseForReviewCycleLimit`, not an unbounded reinvoke loop (AC4) | Both | ~`FABRIK_MAX_REVIEW_CYCLES` × several min (one Claude invocation per cycle) | $0.20–1.00 (`FABRIK_MAX_REVIEW_CYCLES` Claude invocations) |
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250 composition guarantee (via `review-authority:authoritative` label, requires #1261): fabrik:yolo does not bypass an authoritative gate — blocked while CHANGES_REQUESTED stands, clears once approved | Both | 5–10 min | ~$0.03 (no Claude) |
 | `TestReviewAuthorityAdvisoryRegressionGuard` | Regression guard: advisory (default) mode still clears on any submitted review regardless of verdict — proves the additive authoritative check didn't narrow the default path | Both | 2–5 min | ~$0.02 (no Claude) |
@@ -873,6 +890,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283 `expected_reviewers: [<name>]` (via `expected-reviewers:declared` label, requires follow-up engine issue): declared-but-unrequested reviewer holds the gate open, Phase 1 re-prompt ladder fires with an @mention comment, Phase 2 pauses for human when no response arrives | Both | ~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer | ~$0.05 (no Claude) |
 | `TestExpectedReviewersUndeclaredRegressionGuard` | Regression guard: undeclared (`nil`) `expected_reviewers` still never fast-advances — pins the `expected != nil` check and proves the shipped default (FR-5) is unchanged | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
+| `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2/AC2 (via `expected-reviewers:declared` + `review-authority:authoritative` labels, human requested via `RequestPRReviewer`): a declared bot's re-prompt ladder must never defer an outstanding human's authoritative CHANGES_REQUESTED escalation — the reinvoke fires and `fabrik:bot-reprompted` never applies | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + ~15 min | $0.10–0.50 (one Claude invocation) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
@@ -902,7 +920,8 @@ shape, not just the single-mode total.
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 | `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
 | `TestConjunctiveCIReviewGate` | ADR-056 D2 (conjunctive gate joint-clear), #887 (settle-owner), #895 (this scenario), #925 (identity/dual-gate/bot-reviewer redesign) |
-| `TestReviewAuthorityBlocksAndPausesOnChangesRequested` | ADR-1250 (`review_authority: authoritative`), #1258 (this scenario), `checkAwaitingReviewTimeout`'s `authorityReason` pause-message path |
+| `TestReviewAuthorityReinvokesOnChangesRequested` | ADR-1250/ADR-1375 (`review_authority: authoritative`), #1258 (original scenario), #1375 (reinvoke-not-pause model), `handleReviewGate`'s reinvoke-before-block ordering, `buildReviewBodyComments`'s review-body actionability |
+| `TestReviewAuthorityCycleLimitPauses` | ADR-1375 R5 (`pauseForReviewCycleLimit` as the terminal fallback), #1375 |
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250, #1258 |
 | `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250's yolo/cruise composition guarantee, #1258 |
 | `TestReviewAuthorityAdvisoryRegressionGuard` | ADR-1250 additive-check regression guard, #1258 |
@@ -910,6 +929,7 @@ shape, not just the single-mode total.
 | `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283, #1298 — first e2e coverage of the bot re-prompt ladder (`fabrik:bot-reprompted`, Phase 1/2 of `checkAwaitingReviewTimeout`) |
 | `TestExpectedReviewersUndeclaredRegressionGuard` | ADR-1283 FR-5 regression guard, #1298 — pins `reviewGateFastAdvance`'s `expected != nil` check |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283, #1298 — fast-advance independence from `review_authority` (ADR-1250) |
+| `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2 (`reviewGateAllBots` gated on `authorityReason == ""`), AC2, #1375 |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |

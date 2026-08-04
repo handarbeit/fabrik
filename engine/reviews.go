@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,27 @@ import (
 // because the guard is bot-agnostic: Phase 1 fires once per gate cycle for all
 // outstanding bots in one round. Must stay ≤50 chars (GitHub REST API limit).
 const botRepromptedLabel = "fabrik:bot-reprompted"
+
+// reviewBodyIDPrefix marks a synthetic gh.Comment derived from a PR review's
+// top-level body (Finding 4, #1375) rather than a real inline thread comment.
+// GitHub's REST reactions API has no endpoint for a pulls/.../reviews/{id}
+// object itself, so a review body has no ROCKET-reaction dedup backstop the
+// way a real thread comment does (acknowledgeComments/finalizeComments skip
+// reaction calls for DatabaseID==0 synthetics) — snap.CommentProcessed keyed
+// on this ID is the *only* idempotency guard (R7). The prefix is structurally
+// distinct from GraphQL node IDs (thread comments use those verbatim as ID),
+// so a synthetic body ID can never collide with a real comment ID. Also
+// doubles as the isReviewReinvoke/buildThreadEntries discriminator for a
+// review-reinvoke batch that mixes thread comments and review bodies.
+const reviewBodyIDPrefix = "review-body:"
+
+// reviewBodyCommentID derives the stable synthetic ID for review's top-level
+// body, keyed on PRReview.DatabaseID (the numeric PR review ID, already
+// fetched — see github/types.go). Stable across polls so snap.CommentProcessed
+// dedup (R7) actually works: the same review always produces the same ID.
+func reviewBodyCommentID(review gh.PRReview) string {
+	return reviewBodyIDPrefix + strconv.Itoa(review.DatabaseID)
+}
 
 // checkReviewGate inspects item.LinkedPRReviewRequests and item.LinkedPRReviews
 // to determine whether the review gate is blocking review reinvoke or stage
@@ -73,10 +95,23 @@ const botRepromptedLabel = "fabrik:bot-reprompted"
 // Side effects when unblocking (naturally or by timeout):
 //   - Removes fabrik:awaiting-review label if present (idempotent).
 //   - Removes fabrik:bot-reprompted label if present (idempotent).
-func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut, terminated bool) {
+//
+// resolvedReviews is the same reviews slice this call used internally to
+// compute the gate (item.LinkedPRReviews, or — on a base:<branch> item — the
+// live REST-fetched replacement, see the base-label branch below). Threaded
+// back to the caller (Pruefer review finding, #1375) so handleReviewGate can
+// pass it straight to buildReviewBodyCommentsFromReviews instead of calling
+// resolveReviewsForFeedback, which would otherwise re-run the identical
+// FetchPRReviews REST call a second time in the same synchronous chain for a
+// base:<branch> item. Only meaningful when the function reaches the
+// reviews-resolution step below; the two early returns (gate not opt-in,
+// broken-linkage pause) return it as nil, which the caller never consumes
+// since terminated==true or the stage doesn't use the gate at all in those
+// cases.
+func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut, terminated bool, resolvedReviews []gh.PRReview) {
 	// Gate is opt-in — only active when wait_for_reviews: true.
 	if stage.WaitForReviews == nil || !*stage.WaitForReviews {
-		return false, false, false
+		return false, false, false, nil
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -86,7 +121,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		// handleBrokenReviewLinkage already paused the item directly — report
 		// terminated=true so the caller claims it instead of reading this as
 		// "gate cleared naturally".
-		return false, false, true
+		return false, false, true, nil
 	}
 
 	reviewRequests, reviews := item.LinkedPRReviewRequests, item.LinkedPRReviews
@@ -145,7 +180,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if !fetchFailed && prNumber > 0 && reviewGateFastAdvance(outstanding, hasReviews, expectedReviewers) {
 		e.logf(item.Number, "awaiting-review", "expected_reviewers declared none expected and nothing was requested — advancing immediately\n")
 		e.removeAwaitingReviewLabel(owner, repo, item)
-		return false, false, false
+		return false, false, false, reviews
 	}
 
 	var declaredReviewers []string
@@ -179,7 +214,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if len(outstanding) == 0 && hasReviews {
 		if e.effectiveReviewAuthority(item, stage) != "authoritative" {
 			e.removeAwaitingReviewLabel(owner, repo, item)
-			return false, false, false
+			return false, false, false, reviews
 		}
 		if prNumber <= 0 {
 			// No PR number resolved — can't fetch a verdict. Block
@@ -191,7 +226,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			authorityReason = "review verdict unreadable (fetch failed), blocking conservatively"
 		} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); satisfied {
 			e.removeAwaitingReviewLabel(owner, repo, item)
-			return false, false, false
+			return false, false, false, reviews
 		} else {
 			authorityReason = reason
 		}
@@ -200,7 +235,18 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Determine if all outstanding reviewers are bots (or, when nothing was
 	// formally requested, whether a declared reviewer is still outstanding).
 	// Used by Phase 1/2 logic.
-	allBots := reviewGateAllBots(reviewRequests, outstanding, declaredOutstanding)
+	//
+	// Finding 2 (#1375): additionally require authorityReason == "". A
+	// declared expected_reviewers bot must never preempt a human escalation —
+	// authorityReason is only ever non-empty once outstanding is already empty
+	// (a requested human has responded but with a verdict authoritative mode
+	// does not accept), so this can never change behavior for the "human
+	// hasn't responded yet" case (outstanding non-empty already forces
+	// allBots=false via the loop below); it only closes the gap where a human
+	// *has* responded with a blocking verdict but a declared bot is still
+	// outstanding — without this, that declared bot's re-prompt ladder would
+	// defer the human escalation by a full ReviewWaitTimeout window.
+	allBots := reviewGateAllBots(reviewRequests, outstanding, declaredOutstanding) && authorityReason == ""
 
 	// Find the fabrik:bot-reprompted label (idempotency guard for Phase 1 and
 	// timing anchor for Phase 2).
@@ -216,7 +262,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// window has elapsed without response, pause for human.
 	if reprompted && allBots {
 		if blocked, timedOut, done := e.checkBotPhase2Timeout(owner, repo, item); done {
-			return blocked, timedOut, false
+			return blocked, timedOut, false, reviews
 		}
 	}
 
@@ -224,7 +270,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
 	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, declaredOutstanding, allBots, reprompted, authorityReason); done {
-		return blocked, timedOut, false
+		return blocked, timedOut, false, reviews
 	}
 
 	if authorityReason != "" {
@@ -249,7 +295,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		e.applyLabelAdd(item, "fabrik:awaiting-review", false)
 	}
 
-	return true, false, false
+	return true, false, false, reviews
 }
 
 // handleBrokenReviewLinkage detects FR-013's broken-linkage case: the item
@@ -1114,6 +1160,204 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 	return out
 }
 
+// buildReviewBodyComments returns synthetic gh.Comments derived from the
+// top-level body of each unaddressed CHANGES_REQUESTED PR review (Finding 4,
+// #1375) — buildReviewThreadComments only ever looks at inline thread
+// comments, which GitHub does not require, and misses the guaranteed part of
+// a CHANGES_REQUESTED review: its body (see reviewGateAuthorityVerdict's doc
+// comment and GitHub's REST "Create a review for a pull request" contract,
+// which requires a body for REQUEST_CHANGES/COMMENT alike).
+//
+// A review is skipped when:
+//   - DatabaseID == 0 (not yet fetched/unavailable — no stable ID to key
+//     dedup on)
+//   - State != "CHANGES_REQUESTED" (Pruefer review finding, #1375: COMMENTED
+//     is deliberately excluded — despite GitHub also requiring a body for it —
+//     because automated reviewers (Copilot, Gemini) routinely submit a
+//     COMMENTED review whose body is a generic "Pull request overview"
+//     summary, not something to act on; treating it as actionable would
+//     trigger a reinvoke on every wait_for_reviews stage, advisory included,
+//     far beyond this issue's stated scope. APPROVED is likewise excluded — a
+//     body there is typically "LGTM". DISMISSED is excluded because it is no
+//     longer an active verdict, mirroring reviewGateOutstanding's hasReviews
+//     computation. reviewGateAuthorityVerdict draws the identical line: only
+//     CHANGES_REQUESTED blocks authoritative mode's own fallback verdict.
+//   - Body == "" (nothing to act on)
+//   - already recorded via snap.CommentProcessed(reviewBodyCommentID(r)) — the
+//     only dedup mechanism available, since no GitHub reaction endpoint exists
+//     for a top-level review body (see reviewBodyIDPrefix's doc comment, R7)
+//
+// The returned gh.Comment carries DatabaseID: 0 and no ReviewThreadID — the
+// pre-existing "synthetic comment" escape hatch in acknowledgeComments/
+// finalizeComments (both already gate on DatabaseID == 0) skips reaction calls
+// for it automatically.
+//
+// base:<branch> repos (Pruefer review finding, #1375): closedByPullRequestsReferences
+// — and everything nested inside it, including latestReviews — is structurally
+// empty there (GitHub only populates it for PRs targeting the repository
+// default branch), so item.LinkedPRReviews is always empty regardless of the
+// PR's actual review state. Mirrors checkReviewGate's own REST-fallback branch
+// (#1046/#1047/#1050): resolves the PR number from item.LinkedPRNumber (always
+// populated on a default-branch item) or, when zero, a plain FetchLinkedPR call
+// — no pause side effects here, since handleReviewGate only ever reaches this
+// call after checkReviewGate has already run handleBrokenReviewLinkage this
+// same poll without returning terminated=true, so linkage is already known
+// good (or genuinely absent). buildReviewThreadComments has the identical
+// base:<branch> gap and remains unfixed — an existing, explicitly documented
+// out-of-scope limitation (docs/state-machine.md's Review Gate section,
+// "Out of scope: LinkedPRReviewThreadComments") that predates this issue and
+// is not addressed here; only the review-body half (this function) gets the
+// REST fallback, which is sufficient to make Finding 1/AC6's target
+// scenario — a CHANGES_REQUESTED review with a body and zero inline
+// comments — reachable on a base:<branch> repo too.
+func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
+	return e.buildReviewBodyCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
+}
+
+// resolveReviewsForFeedback returns item.LinkedPRReviews when already
+// populated by GraphQL (default-branch items), falling back to a live
+// FetchPRReviews REST call for base:<branch> items — see
+// buildReviewBodyComments' base:<branch> doc comment above for why the
+// fallback is needed. Split out from buildReviewBodyComments (Pruefer review
+// finding, #1375) so a single synchronous call chain — handleReviewGate's own
+// two uses plus dispatchReviewReinvoke's precheck — can resolve reviews once
+// and reuse the result, instead of each issuing its own live REST call for
+// the same PR on the same poll. build() (dispatchReviewReinvoke, run inside
+// the reinvoke goroutine after an unbounded semaphore wait) deliberately does
+// not reuse a memoized result — it calls buildReviewBodyComments fresh, since
+// real time may have passed and review state may have changed since the
+// synchronous chain resolved it.
+func (e *Engine) resolveReviewsForFeedback(item gh.ProjectItem) []gh.PRReview {
+	reviews := item.LinkedPRReviews
+	if itemHasBaseLabel(item) {
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		prNumber := item.LinkedPRNumber
+		if prNumber == 0 {
+			pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+			if err != nil || pr == nil || pr.Number == 0 {
+				return nil
+			}
+			prNumber = pr.Number
+		}
+		restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber)
+		if err != nil {
+			e.logf(item.Number, "warn", "resolveReviewsForFeedback: FetchPRReviews failed: %v\n", err)
+			return nil
+		}
+		reviews = restReviews
+	}
+	return reviews
+}
+
+// buildReviewBodyCommentsFromReviews turns already-resolved reviews into
+// synthetic gh.Comments — the skip conditions and dedup logic are documented
+// on buildReviewBodyComments above.
+func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
+
+	out := make([]gh.Comment, 0, len(reviews))
+	for _, r := range reviews {
+		if r.DatabaseID == 0 {
+			continue
+		}
+		// Only CHANGES_REQUESTED is treated as actionable (Pruefer review
+		// finding, #1375). COMMENTED is deliberately excluded even though
+		// GitHub also requires a body for it: automated reviewers (Copilot,
+		// Gemini) routinely submit a COMMENTED review whose body is a generic
+		// "Pull request overview" summary with zero inline comments — treating
+		// that as actionable feedback would fire a full reinvoke/Claude
+		// invocation on every wait_for_reviews stage (advisory included, not
+		// just authoritative), a much larger cost/behavior change than this
+		// issue's stated problem. reviewGateAuthorityVerdict draws the same
+		// line — only CHANGES_REQUESTED blocks authoritative mode's own
+		// fallback verdict.
+		if r.State != "CHANGES_REQUESTED" {
+			continue
+		}
+		if r.Body == "" {
+			continue
+		}
+		id := reviewBodyCommentID(r)
+		if !snap.CommentProcessed(id).IsZero() {
+			continue
+		}
+		// Prefer the review's actual submission time (r.SubmittedAt, now
+		// fetched via both the GraphQL and REST paths) so a mixed batch of
+		// thread comments and a review body sorts/reads correctly by
+		// chronology in the reinvoke prompt (engine/claude.go renders
+		// c.CreatedAt verbatim). Fall back to time.Now() only when it's
+		// genuinely unavailable (unparseable or a data source that doesn't
+		// carry it) — never leave the comment with a zero timestamp.
+		createdAt := r.SubmittedAt
+		if createdAt.IsZero() {
+			createdAt = time.Now()
+		}
+		out = append(out, gh.Comment{
+			ID:        id,
+			Author:    r.Author,
+			Body:      r.Body,
+			CreatedAt: createdAt,
+		})
+	}
+	return out
+}
+
+// buildReviewFeedbackCommentsFromReviews is buildReviewFeedbackComments with
+// an already-resolved reviews slice, so a caller that has already paid for
+// resolveReviewsForFeedback's REST fallback (e.g. handleReviewGate, which
+// gets it from checkReviewGate) can reuse it instead of resolving twice.
+// This is the single definition of "actionable review feedback" — both
+// buildReviewFeedbackComments and handleReviewGate delegate here (Pruefer
+// review finding, #1375) so the two could never silently diverge as this
+// function's composition evolves.
+func (e *Engine) buildReviewFeedbackCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
+	out := e.buildReviewThreadComments(item)
+	out = append(out, e.buildReviewBodyCommentsFromReviews(item, reviews)...)
+	return out
+}
+
+// buildReviewFeedbackComments returns the full set of actionable review
+// feedback for a review-reinvoke dispatch: unresolved inline thread comments
+// (buildReviewThreadComments) plus unaddressed review bodies
+// (buildReviewBodyComments, Finding 4). This is the set dispatchReviewReinvoke
+// dispatches on — buildReviewThreadComments alone is retained standalone
+// because its dedup/shape is also exercised independently by existing tests
+// and the #1207 auto-merge-disable guard's isOutdated-aware narrowing
+// (currentHeadReviewThreadComments).
+func (e *Engine) buildReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
+	return e.buildReviewFeedbackCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
+}
+
+// currentHeadReviewFeedbackCommentsFromReviews is currentHeadReviewFeedbackComments
+// with an already-resolved reviews slice — see buildReviewFeedbackCommentsFromReviews's
+// doc comment for why this split exists.
+//
+// R8 decision: a review body has no thread and therefore no GitHub-computed
+// isOutdated signal — CommitID (the SHA a review was submitted against) is
+// only ever populated via the REST path (FetchPRReviews), not the GraphQL
+// latestReviews selection the default-branch path uses, so comparing it
+// against the PR's current head SHA would require a schema change. Every
+// review-body comment is therefore treated as always-current-head — an
+// explicit, documented simplification (see adrs/1375-review-authority-reinvoke-not-pause.md),
+// not an oversight. This is over-conservative, not unsafe: at worst it holds
+// auto-merge for a review body that actually targets a stale commit, which is
+// consistent with this file's established "block on unknown state" pattern.
+func (e *Engine) currentHeadReviewFeedbackCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
+	out := e.currentHeadReviewThreadComments(item)
+	out = append(out, e.buildReviewBodyCommentsFromReviews(item, reviews)...)
+	return out
+}
+
+// currentHeadReviewFeedbackComments narrows buildReviewFeedbackComments to
+// comments safe to trigger the #1207 auto-merge-disable guard: current-head
+// thread comments (currentHeadReviewThreadComments) plus all review-body
+// comments. See currentHeadReviewFeedbackCommentsFromReviews for the R8
+// isOutdated decision this makes.
+func (e *Engine) currentHeadReviewFeedbackComments(item gh.ProjectItem) []gh.Comment {
+	return e.currentHeadReviewFeedbackCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
+}
+
 // pauseForReviewTimeout pauses the issue when the review wait timeout elapses.
 // It applies fabrik:paused + fabrik:awaiting-input and posts an explanatory comment.
 // If item.Labels contains the fabrik:bot-reprompted label (the pre-cleanup snapshot
@@ -1395,21 +1639,29 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 }
 
 // dispatchReviewReinvoke re-invokes the stage agent via processComments with
-// synthetic review comments. A thin wrapper over dispatchReinvoke, supplying
-// only review's pre-dispatch emptiness precheck and its comment builder —
-// the shared goroutine scaffold (WorkerEntered/semaphore/processComments)
-// lives in reinvoke.go.
-func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+// synthetic review comments (unresolved inline thread comments plus
+// unaddressed review bodies, Finding 4 — see buildReviewFeedbackComments). A
+// thin wrapper over dispatchReinvoke, supplying only review's pre-dispatch
+// emptiness precheck and its comment builder — the shared goroutine scaffold
+// (WorkerEntered/semaphore/processComments) lives in reinvoke.go.
+//
+// precomputed is handleReviewGate's already-computed syntheticComments
+// (Pruefer review finding, #1375): the caller established len(precomputed) >
+// 0 immediately before invoking this dispatch, in the same synchronous call
+// chain, so precheck reuses that result instead of re-deriving it — which,
+// for a base:<branch> item, would otherwise mean a second live FetchPRReviews
+// REST call for a value nothing async could have changed since the first.
+func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, precomputed []gh.Comment) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
-		// precheck runs synchronously before WorkerEntered/goroutine dispatch —
-		// buildReviewThreadComments needs no workDir, so there's no reason to
-		// incur ensureRepoReady/WorkerEntered churn for a same-poll no-op.
+		// precheck runs synchronously before WorkerEntered/goroutine dispatch,
+		// immediately after handleReviewGate computed precomputed — reusing it
+		// here avoids a redundant re-fetch for a same-poll no-op.
 		precheck: func() bool {
-			return len(e.buildReviewThreadComments(item)) > 0
+			return len(precomputed) > 0
 		},
 		build: func(workDir string) []gh.Comment {
-			return e.buildReviewThreadComments(item)
+			return e.buildReviewFeedbackComments(item)
 		},
 	})
 }

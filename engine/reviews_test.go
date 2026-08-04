@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -322,7 +323,7 @@ func TestCheckReviewGate_LabelOverride_AuthoritativeOnAdvisoryStage_Blocks(t *te
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset (advisory)
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected review-authority:authoritative label to make an advisory stage block on CHANGES_REQUESTED")
@@ -355,7 +356,7 @@ func TestCheckReviewGate_LabelOverride_AdvisoryOnAuthoritativeStage_Clears(t *te
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected review-authority:advisory label to clear the gate despite an authoritative stage and CHANGES_REQUESTED review")
@@ -389,7 +390,7 @@ func TestCheckReviewGate_Advisory_ChangesRequestedReview_StillClears(t *testing.
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("advisory mode must clear regardless of CHANGES_REQUESTED verdict (unchanged pre-existing behavior)")
@@ -420,7 +421,7 @@ func TestCheckReviewGate_Authoritative_ReviewDecisionApproved_Clears(t *testing.
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear when reviewDecision=APPROVED")
@@ -448,7 +449,7 @@ func TestCheckReviewGate_Authoritative_ReviewDecisionChangesRequested_Blocks(t *
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked when reviewDecision=CHANGES_REQUESTED")
@@ -482,7 +483,7 @@ func TestCheckReviewGate_Authoritative_NoBranchProtection_NoChangesRequested_Cle
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear via fallback computation when no CHANGES_REQUESTED review exists")
@@ -513,7 +514,7 @@ func TestCheckReviewGate_Authoritative_NoBranchProtection_ChangesRequested_Block
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked via fallback computation on a repo with no branch protection")
@@ -543,13 +544,86 @@ func TestCheckReviewGate_Authoritative_FetchReviewDecisionError_BlocksConservati
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to block conservatively when FetchPRReviewDecision errors")
 	}
 	if timedOut {
 		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// Finding 2 (#1375): a declared expected_reviewers bot must never defer a
+// human's authoritative escalation. Here, the requested human (alice) has
+// already responded with CHANGES_REQUESTED (so she's no longer in
+// LinkedPRReviewRequests — GitHub drops a reviewer from the requested list
+// once they submit), review_authority is authoritative (so authorityReason
+// is non-empty), and the stage separately declares a bot via
+// expected_reviewers that has not yet reviewed. Before the fix,
+// reviewGateAllBots's declared-reviewer branch (len(outstanding)==0) would
+// see only the declared bot outstanding and return allBots=true, routing
+// through the Phase 1 bot re-prompt ladder instead of the human-escalation
+// timeout path — deferring the human's CHANGES_REQUESTED verdict by a full
+// ReviewWaitTimeout window. With the fix, authorityReason != "" forces
+// allBots=false, so Phase 1 must not fire (no re-prompt comment, no
+// DeleteReviewRequest/AddReviewRequest mutation, no fabrik:bot-reprompted
+// label) — the item instead falls straight to the standard timeout branch,
+// which is what ultimately carries the authoritative reason to a human via
+// pauseForReviewTimeout. AC2 in the issue requires this scenario to fail
+// against unpatched main.
+func TestCheckReviewGate_DeclaredBotDoesNotDeferAuthoritativeHumanEscalation(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         42,
+		Labels:                 []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: nil, // alice already responded — GitHub dropped her from the requested list
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED"},
+		},
+	}
+	declared := []string{"some-declared-bot"}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative", ExpectedReviewers: &declared}
+
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected NOT blocked — timeout branch fires instead (authoritative escalation, not a bot re-prompt)")
+	}
+	if !timedOut {
+		t.Error("expected timedOut — the human escalation must reach the standard pause path, not the bot ladder")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected NO bot re-prompt comment (declared bot must not preempt human escalation), got %d: %v", len(client.addCommentCalls), client.addCommentCalls)
+	}
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected NO DeleteReviewRequest calls, got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 0 {
+		t.Errorf("expected NO AddReviewRequest calls, got %d", len(client.addReviewRequestCalls))
+	}
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:bot-reprompted" {
+			t.Error("expected fabrik:bot-reprompted NOT to be applied — Phase 1 must not fire for an authoritative-blocked human escalation")
+		}
 	}
 }
 
@@ -587,7 +661,7 @@ func TestCheckReviewGate_NonDefaultBase_Authoritative_ChangesRequested_Blocks(t 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked on a base:<branch> repo with an outstanding CHANGES_REQUESTED review")
@@ -614,7 +688,7 @@ func TestCheckReviewGate_NoReviewersNoReviews_Blocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected blocked when no reviews submitted yet (bots may still be processing)")
@@ -646,7 +720,7 @@ func TestCheckReviewGate_NoReviewersNoDeclaration_LogsExpectedReviewersRemedy(t 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // no ExpectedReviewers declared
 
-	blocked, _, _ := eng.checkReviewGate(board, item, stage)
+	blocked, _, _, _ := eng.checkReviewGate(board, item, stage)
 	if !blocked {
 		t.Fatal("expected blocked when no reviews submitted yet")
 	}
@@ -692,7 +766,7 @@ func TestCheckReviewGate_NoReviewersWithReview_Clears(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked once a review has been submitted")
@@ -720,7 +794,7 @@ func TestCheckReviewGate_GateDisabled_ReturnsFalse(t *testing.T) {
 	// WaitForReviews is nil (not set)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: nil}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when WaitForReviews is nil")
@@ -747,7 +821,7 @@ func TestCheckReviewGate_ReviewerRequested_NoReview_Blocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected blocked when reviewer has not submitted")
@@ -784,7 +858,7 @@ func TestCheckReviewGate_AlreadyWaiting_NoLabelAdd(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked")
@@ -816,7 +890,7 @@ func TestCheckReviewGate_AllReviewersSubmitted_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when all reviewers submitted")
@@ -855,7 +929,7 @@ func TestCheckReviewGate_TimeoutElapsed_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when timeout elapsed")
@@ -903,7 +977,7 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected re-blocked after reviewer dismissal and re-request")
@@ -936,7 +1010,7 @@ func TestCheckReviewGate_DismissedReviewDoesNotClear(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked when only review is DISMISSED")
@@ -1041,6 +1115,380 @@ func TestCurrentHeadReviewThreadComments_AllOutdatedReturnsEmpty(t *testing.T) {
 
 	if len(comments) != 0 {
 		t.Fatalf("expected 0 current-head comments, got %d", len(comments))
+	}
+}
+
+// Finding 4 (#1375): buildReviewBodyComments must pick up a CHANGES_REQUESTED
+// review's body even when it has zero inline thread comments — the exact
+// shape GitHub's REST API guarantees (body required for REQUEST_CHANGES) and
+// the exact shape the e2e harness's SubmitPRReview produces.
+func TestBuildReviewBodyComments_ChangesRequestedWithBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 555},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:555" {
+		t.Errorf("expected synthetic ID review-body:555, got %q", comments[0].ID)
+	}
+	if comments[0].DatabaseID != 0 {
+		t.Errorf("expected synthetic comment to carry DatabaseID 0, got %d", comments[0].DatabaseID)
+	}
+	if comments[0].Body != "please fix the error handling" {
+		t.Errorf("expected body to be carried through, got %q", comments[0].Body)
+	}
+}
+
+// Pruefer review finding (#1375): buildReviewBodyComments must prefer the
+// review's actual SubmittedAt over time.Now(), so a mixed batch of thread
+// comments (real timestamps) and a review body sorts/reads correctly by
+// chronology in the reinvoke prompt (engine/claude.go renders CreatedAt
+// verbatim) instead of always appearing to be the newest item regardless of
+// actual submission time.
+func TestBuildReviewBodyComments_UsesSubmittedAt(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	submittedAt := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555, SubmittedAt: submittedAt},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if !comments[0].CreatedAt.Equal(submittedAt) {
+		t.Errorf("CreatedAt = %v, want the review's actual SubmittedAt %v", comments[0].CreatedAt, submittedAt)
+	}
+}
+
+// When SubmittedAt is unavailable (zero value — e.g. a data source that
+// doesn't carry it), buildReviewBodyComments must fall back to time.Now()
+// rather than leaving the synthetic comment with a zero timestamp.
+func TestBuildReviewBodyComments_FallsBackToNowWhenSubmittedAtZero(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555},
+		},
+	}
+
+	before := time.Now()
+	comments := eng.buildReviewBodyComments(item)
+	after := time.Now()
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if comments[0].CreatedAt.Before(before) || comments[0].CreatedAt.After(after) {
+		t.Errorf("expected CreatedAt to fall back to time.Now() (between %v and %v), got %v", before, after, comments[0].CreatedAt)
+	}
+}
+
+// buildReviewBodyComments must skip a review with DatabaseID == 0 (not yet
+// fetched/unavailable — no stable ID to key dedup on).
+func TestBuildReviewBodyComments_SkipsZeroDatabaseID(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 0},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments for DatabaseID==0 review, got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip APPROVED reviews (a body there is
+// typically "LGTM", not something to act on) and DISMISSED reviews (no
+// longer an active verdict).
+func TestBuildReviewBodyComments_SkipsApprovedAndDismissed(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "APPROVED", Body: "LGTM!", DatabaseID: 601},
+			{Author: "bob", State: "DISMISSED", Body: "please fix this", DatabaseID: 602},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (APPROVED/DISMISSED skipped), got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip COMMENTED reviews even though they carry
+// a non-empty body (Pruefer review finding, #1375). Automated reviewers like
+// Copilot routinely submit a COMMENTED review whose body is a generic
+// "Pull request overview" summary with zero inline comments — treating that
+// as actionable feedback would trigger a reinvoke/Claude invocation on every
+// wait_for_reviews stage (advisory included, not just authoritative), far
+// beyond a CHANGES_REQUESTED verdict's scope. reviewGateAuthorityVerdict draws
+// the identical line — only CHANGES_REQUESTED blocks its fallback verdict.
+func TestBuildReviewBodyComments_SkipsCommented(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "copilot-pull-request-reviewer", State: "COMMENTED", Body: "## Pull request overview\n\nLGTM.", DatabaseID: 603},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (COMMENTED skipped), got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip a PENDING review — a draft review not yet
+// submitted (Pruefer review finding, #1375). The actionable-state check is an
+// allow-list (State == "CHANGES_REQUESTED" only, not a APPROVED/DISMISSED
+// deny-list), so PENDING — and any other state neither data source is
+// documented to return here — is excluded structurally, not by relying on it
+// never occurring in practice.
+func TestBuildReviewBodyComments_SkipsPending(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "PENDING", Body: "draft, not submitted yet", DatabaseID: 604},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (PENDING skipped), got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must skip a review with an empty body — nothing to
+// act on.
+func TestBuildReviewBodyComments_SkipsEmptyBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "", DatabaseID: 701},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments for empty-body review, got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must dedup via snap.CommentProcessed keyed on the
+// synthetic review-body: ID (R7) — no GitHub reaction endpoint exists for a
+// top-level review body, so this is the only idempotency guard.
+func TestBuildReviewBodyComments_DedupViaCommentProcessed(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 801},
+		},
+	}
+
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 10, CommentID: "review-body:801", At: time.Now()})
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (already processed), got %d", len(comments))
+	}
+}
+
+// Pruefer review finding (#1375): on a base:<branch> item, item.LinkedPRReviews
+// is always structurally empty (closedByPullRequestsReferences is empty for
+// non-default-base PRs), so buildReviewBodyComments must REST-fallback —
+// mirroring checkReviewGate's own base:<branch> branch — rather than silently
+// returning nothing forever. item.LinkedPRNumber == 0 here (as it always is on
+// a base:<branch> repo), so this also exercises the FetchLinkedPR resolution
+// path.
+func TestBuildReviewBodyComments_NonDefaultBase_RESTFallback(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviews called with resolved PR #77, got #%d", prNumber)
+			}
+			return []gh.PRReview{
+				{Author: "bob", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 900},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+		// LinkedPRReviews deliberately empty — this is the true GraphQL state
+		// for a base:<branch> item; the REST fallback below is what must
+		// populate the result instead.
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment via REST fallback, got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:900" {
+		t.Errorf("expected synthetic ID review-body:900, got %q", comments[0].ID)
+	}
+}
+
+// When item.LinkedPRNumber is already resolved (nonzero), the REST fallback
+// must reuse it rather than calling FetchLinkedPR again.
+func TestBuildReviewBodyComments_NonDefaultBase_ReusesResolvedPRNumber(t *testing.T) {
+	fetchLinkedPRCalls := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchLinkedPRCalls++
+			return &gh.PRDetails{Number: 99, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			if prNumber != 55 {
+				t.Errorf("expected FetchPRReviews called with item.LinkedPRNumber #55, got #%d", prNumber)
+			}
+			return []gh.PRReview{
+				{Author: "bob", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 901},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 55,
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 synthetic body comment, got %d", len(comments))
+	}
+	if fetchLinkedPRCalls != 0 {
+		t.Errorf("expected FetchLinkedPR NOT called when LinkedPRNumber is already resolved, got %d calls", fetchLinkedPRCalls)
+	}
+}
+
+// A FetchPRReviews error on the base:<branch> REST fallback must return nil,
+// not panic or silently fall back to the (empty) GraphQL-sourced slice.
+func TestBuildReviewBodyComments_NonDefaultBase_RESTFetchError_ReturnsNil(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, errors.New("transient API error")
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Errorf("expected no comments on FetchPRReviews error, got %v", comments)
+	}
+}
+
+// buildReviewFeedbackComments combines inline thread comments and review-body
+// comments into a single actionable set.
+func TestBuildReviewFeedbackComments_CombinesThreadAndBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "inline finding", ReviewThreadID: "RT_1"},
+		},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555},
+		},
+	}
+
+	comments := eng.buildReviewFeedbackComments(item)
+
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments (1 thread + 1 body), got %d", len(comments))
+	}
+}
+
+// currentHeadReviewFeedbackComments includes review-body comments
+// unconditionally (R8: no isOutdated signal exists for a body-only review)
+// alongside current-head thread comments, excluding outdated ones.
+func TestCurrentHeadReviewFeedbackComments_IncludesBodyRegardlessOfOutdated(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_stale", DatabaseID: 102, Author: "pruefer", Body: "stale finding", ReviewThreadID: "RT_stale", IsOutdated: true},
+		},
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix this", DatabaseID: 555},
+		},
+	}
+
+	comments := eng.currentHeadReviewFeedbackComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (body only — outdated thread excluded), got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:555" {
+		t.Errorf("expected the remaining comment to be the review body, got %q", comments[0].ID)
 	}
 }
 
@@ -1282,7 +1730,7 @@ func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -1358,7 +1806,7 @@ func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked between Phase 1 and Phase 2")
@@ -1407,7 +1855,7 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked on Phase 2 (should return false, true)")
@@ -1463,7 +1911,7 @@ func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when bot submitted a review")
@@ -1505,7 +1953,7 @@ func TestCheckReviewGate_MixedBotHuman_PausesWithoutReprompt(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked (timeout elapsed → timedOut)")
@@ -1555,7 +2003,7 @@ func TestCheckReviewGate_PureHuman_PausesWithoutReprompt(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked (timeout elapsed → timedOut)")
@@ -2312,7 +2760,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_AdvancesImmediately(t *testing.T)
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked || timedOut || terminated {
 		t.Errorf("expected (false, false, false) fast-advance, got (%v, %v, %v)", blocked, timedOut, terminated)
@@ -2340,7 +2788,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_ReviewerRequested_StillWaits(t *t
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked — a requested reviewer takes precedence over expected_reviewers: []")
@@ -2377,7 +2825,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_AuthoritativeMode_StillAdvancesIm
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none, ReviewAuthority: "authoritative"}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked || timedOut || terminated {
 		t.Errorf("expected (false, false, false) fast-advance under authoritative mode, got (%v, %v, %v)", blocked, timedOut, terminated)
@@ -2414,7 +2862,7 @@ func TestCheckReviewGate_ExpectedReviewersNone_NoPRResolved_DoesNotFastAdvance(t
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, _, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, _, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if terminated {
 		t.Error("expected not terminated — no PR found should fall through to normal logic, not pause")
@@ -2453,7 +2901,7 @@ func TestCheckReviewGate_DeclaredReviewer_EmptyReviewRequests_Phase1PostsMention
 	declared := []string{"handarbeit-pruefer"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -2526,7 +2974,7 @@ func TestCheckReviewGate_DeclaredReviewer_MentionUsesCanonicalHandle(t *testing.
 	declared := []string{"copilot-pull-request-reviewer"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -2580,7 +3028,7 @@ func TestCheckReviewGate_DeclaredReviewer_AlsoFormallyRequested_NotDoubleRepromp
 	declared := []string{"copilot"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -2616,7 +3064,7 @@ func TestCheckReviewGate_MultipleDeclaredReviewers_AnyOneResponds_Clears(t *test
 	declared := []string{"handarbeit-pruefer", "gemini-code-assist"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear once any one declared reviewer has responded")
@@ -2657,7 +3105,7 @@ func TestCheckReviewGate_DeclaredReviewer_NeverResponds_Phase2PausesNamingBot(t 
 	declared := []string{"nonexistent-reviewer"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked on Phase 2 (should return false, true)")
@@ -2691,7 +3139,7 @@ func TestCheckReviewGate_BrokenLinkage_PRFound_Pauses(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	// Gate returns (false, false, true) — not blocked-for-reviews, not timed
 	// out, but processing was terminated via a direct pause — the caller must
@@ -2753,7 +3201,7 @@ func TestCheckReviewGate_BrokenLinkage_NoPRFound_FallsThrough(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, _, _ := eng.checkReviewGate(board, item, stage)
+	blocked, _, _, _ := eng.checkReviewGate(board, item, stage)
 
 	// No PR found → falls through to normal reviewer logic. With no reviews, gate blocks.
 	if !blocked {
@@ -2795,7 +3243,7 @@ func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_ConfirmedViaBody_ClearsNor
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	// Falls through to normal reviewer logic: no reviewers requested, no reviews yet → blocks.
 	if !blocked {
@@ -2837,7 +3285,7 @@ func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_BodyMissing_StillPauses(t 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, terminated := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("gate should not report blocked when broken linkage detected")
@@ -2911,7 +3359,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTReviewSubmitted_ClearsNaturally(t *t
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear naturally once a REST-sourced review is submitted with no outstanding requests")
@@ -2960,7 +3408,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTOutstandingReviewer_Blocks(t *testin
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked while a REST-sourced outstanding reviewer hasn't submitted")
@@ -3014,7 +3462,7 @@ func TestCheckReviewGate_NonDefaultBase_BotPhase1_Reprompts(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked after Phase 1 re-prompt")
@@ -3080,7 +3528,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTFetchError_StaysBlocked(t *testing.T
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked on a partial REST fetch failure (conservative no-data fallback)")
@@ -3122,7 +3570,7 @@ func TestCheckReviewGate_NonDefaultBase_RESTFetchError_ExpectedReviewersNone_Doe
 	none := []string{}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &none}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected gate to stay blocked on a REST fetch failure even though expected_reviewers: [] is declared — a fetch failure must never look like 'nothing requested, nothing expected'")
@@ -3222,7 +3670,7 @@ func TestCheckReviewGate_DefaultBranch_DoesNotCallRESTReviewFetch(t *testing.T) 
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked, timedOut, _ := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected gate to clear using the existing GraphQL-sourced data")

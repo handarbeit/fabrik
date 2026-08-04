@@ -3,8 +3,8 @@
 package e2e
 
 import (
+	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -14,7 +14,7 @@ import (
 // (SubmitPRReview + FABRIK_REVIEWER_TOKEN) — never the bed's COMMENT-only
 // claude-review.yml bot — for every verdict assertion.
 //
-// Mechanism: all four scenarios seed a member PR directly via the GitHub API
+// Mechanism: all scenarios seed a member PR directly via the GitHub API
 // (CreateMemberPR, zero Claude cost) against the bed's existing Review
 // column/stage (default, advisory config — untouched). Authoritative mode is
 // applied per issue via the "review-authority:authoritative" label passed as
@@ -25,8 +25,8 @@ import (
 // without introducing any bed-local board column or stage-YAML variant — an
 // earlier design that did so was rejected because review_authority is a
 // property of a stage's config, not a distinct kind of stage, and because a
-// bed prerequisite the operator hadn't yet set up would silently skip 3 of
-// the 4 scenarios, letting the suite go green having validated zero
+// bed prerequisite the operator hadn't yet set up would silently skip most of
+// the scenarios, letting the suite go green having validated zero
 // authoritative behavior. See adrs/1258-e2e-review-authority-coverage.md.
 //
 // Bed setup required: FABRIK_REVIEWER_TOKEN, and the
@@ -48,13 +48,14 @@ import (
 // reviewGateBlocksLanding's wiring around the same shared predicate is a
 // documented, accepted e2e gap, not a silently missing one.
 //
-// All four scenarios only touch checkReviewGate, which has no
-// FABRIK_MERGE_TRAIN branching — they pass identically under both legs of
-// the suite's two-mode gate.
+// All scenarios only touch checkReviewGate (plus, as of #1375, the
+// buildReviewFeedbackComments/dispatchReviewReinvoke reinvoke path it now
+// unlocks), none of which have FABRIK_MERGE_TRAIN branching — they pass
+// identically under both legs of the suite's two-mode gate.
 //
-// Determinism (#1312): the three scenarios below that assert
-// fabrik:awaiting-review as a *precondition* before their own deliberate
-// verdict lands (BlocksAndPausesOnChangesRequested, ClearsOnApproval,
+// Determinism (#1312): the scenarios below that assert fabrik:awaiting-review
+// as a *precondition* before their own deliberate verdict lands
+// (ReinvokesOnChangesRequested, CycleLimitPauses, ClearsOnApproval,
 // AdvisoryRegressionGuard) each call RequestPRReviewer right after seeding,
 // making outstanding genuinely non-empty by construction. This corrects
 // ADR-1258's original "no RequestPRReviewer call is needed" rationale — that
@@ -69,24 +70,44 @@ import (
 // COMMENT landing before or after it can never satisfy the outer clearing
 // condition on its own — the wait is already deterministic. See
 // adrs/1258-e2e-review-authority-coverage.md's Revision section.
+//
+// R3 (#1375): TestReviewAuthorityBlocksAndPausesOnChangesRequested — which
+// asserted an authoritative CHANGES_REQUESTED escalates directly to
+// fabrik:paused — has been retired and replaced by
+// TestReviewAuthorityReinvokesOnChangesRequested (the primary reinvoke
+// response, AC1/AC6/AC7) and TestReviewAuthorityCycleLimitPauses (the
+// MaxReviewCycles terminal fallback, AC4). The old test encoded the
+// pre-#1375 behavior; see adrs/1375-review-authority-reinvoke-not-pause.md
+// for why that behavior was wrong and what replaces it.
 
-// TestReviewAuthorityBlocksAndPausesOnChangesRequested covers scenarios 1 and
-// 5 from issue #1258: authoritative + CHANGES_REQUESTED blocks advancement,
-// and — folded in as a continuation, since authoritative mode cannot reach
-// the separate MaxReviewCycles path (dispatchReviewReinvoke only fires after
-// the gate has already cleared) — a verdict that never clears eventually
-// pauses via checkAwaitingReviewTimeout, with the authoritative pause reason
-// naming the verdict rather than the misleading "no reviews submitted yet".
+// TestReviewAuthorityReinvokesOnChangesRequested covers AC1 and AC6 (R1/R3,
+// #1375, ADR-1375). This supersedes the retired
+// TestReviewAuthorityBlocksAndPausesOnChangesRequested and its expectation
+// that an authoritative CHANGES_REQUESTED escalates directly to
+// fabrik:paused: R1 decided authoritative mode governs merging, never
+// working, so the primary response to a change request is a bounded
+// reinvoke, not an immediate pause. Pausing is now reached only at
+// FABRIK_MAX_REVIEW_CYCLES (R5), covered separately by
+// TestReviewAuthorityCycleLimitPauses below.
+//
+// AC1 requires asserting an observable unique to a reinvoke — a stage
+// invocation in the engine log — rather than a label transition (other paths,
+// e.g. a plain "reviewer hasn't responded" timeout, also produce label
+// churn). AC6 requires the review body to be non-empty with zero inline
+// comments — exactly the shape SubmitPRReview produces (body-only
+// REQUEST_CHANGES, no inline thread comments) — and confirms it alone
+// triggers the reinvoke. AC7 requires the same review is not re-processed on
+// a later poll: after the reinvoke completes, this test waits through a
+// further poll window and asserts no second review-reinvoke dispatch occurs
+// for the same review.
 //
 // Requires #1261 (engine support for the review-authority:authoritative
-// label) to be merged.
+// label) and #1375 (this issue) to be merged.
 //
-// Wall-clock (worst case): ~FABRIK_REVIEW_WAIT_TIMEOUT + 30 min — 10 min for
-// the initial block-confirmation wait, FABRIK_REVIEW_WAIT_TIMEOUT+10 min for
-// the pause wait itself, plus two trailing 5 min waits (fabrik:awaiting-input,
-// the pause comment). Typically much faster in practice. Use a short bed
-// value (e.g. 2) for a fast iteration run — see README.
-func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
+// Wall-clock: dominated by one real Claude invocation to address the review
+// feedback (the reinvoke itself), typically several minutes, plus a bounded
+// AC7 settle window.
+func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
@@ -95,9 +116,8 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	if reviewerToken == "" {
 		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
 	}
-	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
 
-	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "blocks-pauses", "review-authority:authoritative")
+	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "reinvoke-changes", "review-authority:authoritative")
 
 	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	reviewerLogin := TokenLogin(t, reviewerToken)
@@ -118,75 +138,113 @@ func TestReviewAuthorityBlocksAndPausesOnChangesRequested(t *testing.T) {
 	t.Logf("requested reviewer %q on %s PR #%d — outstanding is non-empty by construction, gate engagement is deterministic", reviewerLogin, env.RepoAlpha, prNum)
 
 	// Confirm the gate's trivial, pre-verdict block (hasReviews==false blocks
-	// unconditionally) before the review lands. This alone doesn't prove the
-	// gate evaluates the verdict rather than always blocking — a REQUEST_CHANGES
-	// scenario can't distinguish that by itself; TestReviewAuthorityClearsOnApproval
-	// (block-before/clear-after APPROVE) supplies that half. The distinguishing
-	// assertion for *this* scenario is downstream: the pause-comment content
-	// check below, which fails if authorityReason wasn't derived from the actual
-	// CHANGES_REQUESTED verdict and fell back to the generic "no reviews
-	// submitted yet" message.
+	// unconditionally) before the review lands — proves the gate is genuinely
+	// engaged rather than a poll racing ahead of the review.
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-review")
 	t.Logf("fabrik:awaiting-review confirmed on %s#%d before any review submitted — gate is genuinely engaged", env.RepoAlpha, num)
 
+	logOffset := LogOffset(t, env)
 	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
-	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d", env.RepoAlpha, prNum)
+	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d (body-only, zero inline comments — AC6's target shape)", env.RepoAlpha, prNum)
 
-	// Scenario 1: the gate must still be blocking — fabrik:awaiting-review
-	// remains, and the item must not advance past Review (the durable,
-	// directly-observable signal is that the gate label is applied and
-	// fabrik:paused is not yet present).
+	// AC1/AC6: the reinvoke must fire — assert the engine log line unique to
+	// dispatchReinvoke's goroutine ("re-invoking stage ... via comment
+	// processing", tagged "review-reinvoke"), not merely a label transition.
+	// checkReviewGate still reports blocked=true here (the CHANGES_REQUESTED
+	// verdict has not cleared) — before Finding 1's fix this reinvoke was
+	// unreachable, and the gate would instead sit on fabrik:awaiting-review
+	// until FABRIK_REVIEW_WAIT_TIMEOUT elapsed.
+	WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), logOffset, 10*time.Minute)
+	t.Logf("review-reinvoke dispatched for %s#%d — authoritative CHANGES_REQUESTED body alone triggered a reinvoke", env.RepoAlpha, num)
+
+	// The reinvoke, not a pause, is the primary response — fabrik:paused must
+	// not have fired from this alone.
+	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:paused")
+	t.Logf("AC1/AC6 verified: %s#%d reinvoked on an authoritative CHANGES_REQUESTED body with zero inline comments, never paused", env.RepoAlpha, num)
+
+	// Wait for the reinvoke's Claude invocation to actually complete
+	// (comments.go's finalizeComments logs "comment processing complete[d]")
+	// before checking AC7 — CommentProcessed is only recorded once this
+	// completes, and checking too early would let AC7 pass trivially without
+	// having exercised the dedup this scenario targets.
+	WaitForLogLine(t, env, fmt.Sprintf("[#%d done] comment processing complete", num), logOffset, 20*time.Minute)
+	t.Logf("review-reinvoke completed for %s#%d", env.RepoAlpha, num)
+
+	// AC7: the same review must not be re-processed on a later poll. No new
+	// review has been submitted and no new thread comments exist, so
+	// buildReviewFeedbackComments must now return empty — confirm no second
+	// review-reinvoke dispatch occurs within a bounded settle window.
+	settleOffset := LogOffset(t, env)
+	settleDeadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(settleDeadline) {
+		pollSleep(pollBase())
+	}
+	if line, err := tryLogLineContaining(env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), settleOffset); err == nil && line != "" {
+		t.Fatalf("AC7 violated: a second review-reinvoke dispatched for %s#%d after the same review was already processed: %q",
+			env.RepoAlpha, num, line)
+	}
+	t.Logf("AC7 verified: %s#%d did not re-dispatch a reinvoke for the same, already-processed review", env.RepoAlpha, num)
+}
+
+// TestReviewAuthorityCycleLimitPauses covers AC4: a reviewer requesting
+// changes FABRIK_MAX_REVIEW_CYCLES times terminates in
+// pauseForReviewCycleLimit, not an unbounded reinvoke loop. This is the
+// terminal-fallback half of R1's reinvoke model (R5) — the primary,
+// non-terminal reinvoke response is covered by
+// TestReviewAuthorityReinvokesOnChangesRequested above.
+//
+// Requires a small bed-configured FABRIK_MAX_REVIEW_CYCLES for a bounded
+// wall-clock: each cycle requires a full reinvoke (a real Claude invocation)
+// before the next distinct REQUEST_CHANGES review can be submitted. Skips if
+// the bed's configured value is too large to run in a reasonable e2e window.
+func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
+	t.Parallel()
+	env := LoadEnv(t)
+	AssertFabrikRunning(t, env)
+
+	reviewerToken := readEnvFileReviewerToken(t, env)
+	if reviewerToken == "" {
+		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
+	}
+	maxCycles := readEnvFileMaxReviewCycles(t, env)
+	if maxCycles > 5 {
+		t.Skipf("FABRIK_MAX_REVIEW_CYCLES=%d is too large for a bounded e2e run (each cycle requires a full reinvoke) — "+
+			"set a small bed value (e.g. 2) for this test, see README", maxCycles)
+	}
+
+	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "cycle-limit", "review-authority:authoritative")
+
+	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
+	reviewerLogin := TokenLogin(t, reviewerToken)
+	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
+		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
+			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
+	}
+
+	RequestPRReviewer(t, env, env.RepoAlpha, prNum, reviewerLogin)
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
-	t.Logf("fabrik:awaiting-review confirmed on %s#%d — authoritative gate is blocking on CHANGES_REQUESTED", env.RepoAlpha, num)
+	t.Logf("fabrik:awaiting-review confirmed on %s#%d — gate is genuinely engaged", env.RepoAlpha, num)
 
-	// Scenario 5: wait out the review timeout and confirm the pause fires
-	// with the authoritative reason, not the generic "no reviews submitted
-	// yet" message — this is the distinguishing assertion for AC1 and AC5.
-	timeoutWait := time.Duration(reviewWaitTimeout+10) * time.Minute
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", timeoutWait)
-	t.Logf("fabrik:paused appeared on %s#%d (authoritative review gate timed out)", env.RepoAlpha, num)
+	for i := 0; i < maxCycles; i++ {
+		offset := LogOffset(t, env)
+		SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
+		t.Logf("cycle %d/%d: submitted a fresh REQUEST_CHANGES review on %s PR #%d", i+1, maxCycles, env.RepoAlpha, prNum)
+		WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset, 15*time.Minute)
+		WaitForLogLine(t, env, fmt.Sprintf("[#%d done] comment processing complete", num), offset, 20*time.Minute)
+		t.Logf("cycle %d/%d: reinvoke completed for %s#%d", i+1, maxCycles, env.RepoAlpha, num)
+	}
+
+	// One more distinct CHANGES_REQUESTED review at the cycle limit must
+	// route to pauseForReviewCycleLimit, not another reinvoke.
+	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
+	t.Logf("submitted the (maxCycles+1)th REQUEST_CHANGES review on %s PR #%d — expecting the cycle-limit pause", env.RepoAlpha, prNum)
+
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", 15*time.Minute)
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-input", 5*time.Minute)
-
-	if state := IssueState(t, env, env.RepoAlpha, num); state != "OPEN" {
-		t.Fatalf("expected issue OPEN after authoritative review timeout, got %s on %s#%d", state, env.RepoAlpha, num)
-	}
-
-	// WaitForPRCommentContainingAny queries the /issues/<n>/comments REST
-	// endpoint, which is identical for issue and PR numbers on GitHub — the
-	// pause comment is posted on the issue (postComment uses item.Number),
-	// not the PR, so passing the issue number here is correct.
-	//
-	// The authoritative reason has two equally correct forms, because
-	// reviewGateAuthorityVerdict prefers GitHub's reviewDecision where branch
-	// protection defines a review requirement and falls back to Fabrik's own
-	// computation otherwise (ADR-1250, engine/reviews.go):
-	//
-	//   reviewDecision path (branch protection configured): "reviewDecision=CHANGES_REQUESTED"
-	//   fallback path (no branch-protection review requirement): "<author> requested changes"
-	//
-	// The bed's repos currently DO have a branch-protection review requirement,
-	// so the reviewDecision form is what appears today — asserting only the
-	// fallback wording made this test fail against correct engine behavior.
-	// Accept either: what AC1/AC5 actually require is that the reason names the
-	// CHANGES_REQUESTED verdict at all, rather than falling back to the generic
-	// "no reviews submitted yet" message (asserted negatively just below).
 	WaitForPRCommentContainingAny(t, env, env.RepoAlpha, num,
-		[]string{"reviewDecision=CHANGES_REQUESTED", "requested changes"}, 5*time.Minute)
-	t.Logf("pause comment names the authoritative CHANGES_REQUESTED verdict on %s#%d", env.RepoAlpha, num)
-
-	bodies, err := tryPRComments(env, env.RepoAlpha, num)
-	if err != nil {
-		t.Fatalf("read comments on %s#%d: %v", env.RepoAlpha, num, err)
-	}
-	for _, b := range bodies {
-		if strings.Contains(strings.ToLower(b), "no reviews submitted yet") {
-			t.Fatalf("pause comment on %s#%d used the generic \"no reviews submitted yet\" message "+
-				"instead of the authoritative verdict reason — authorityReason did not propagate: %q",
-				env.RepoAlpha, num, b)
-		}
-	}
-	t.Logf("R5 verified: pause reason reflects the CHANGES_REQUESTED verdict, not the generic message")
+		[]string{"review cycle limit", "maximum configured limit"}, 5*time.Minute)
+	t.Logf("AC4 verified: %s#%d paused via the review cycle limit after %d reinvoke cycle(s), not an unbounded loop", env.RepoAlpha, num, maxCycles)
 }
 
 // TestReviewAuthorityClearsOnApproval covers scenario 2: authoritative +

@@ -1,6 +1,9 @@
 package github
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // These tests exercise the apply* helpers extracted from FetchItemDetails
 // directly, in isolation from the GraphQL request/response plumbing that the
@@ -144,8 +147,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 					Author     *struct {
 						Login string `json:"login"`
 					} `json:"author"`
-					State string `json:"state"`
-					Body  string `json:"body"`
+					State       string `json:"state"`
+					Body        string `json:"body"`
+					SubmittedAt string `json:"submittedAt"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {
@@ -192,8 +196,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 				Author     *struct {
 					Login string `json:"login"`
 				} `json:"author"`
-				State string `json:"state"`
-				Body  string `json:"body"`
+				State       string `json:"state"`
+				Body        string `json:"body"`
+				SubmittedAt string `json:"submittedAt"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -231,12 +236,13 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		Author     *struct {
 			Login string `json:"login"`
 		} `json:"author"`
-		State string `json:"state"`
-		Body  string `json:"body"`
+		State       string `json:"state"`
+		Body        string `json:"body"`
+		SubmittedAt string `json:"submittedAt"`
 	}{
 		{DatabaseID: 1, Author: &struct {
 			Login string `json:"login"`
-		}{Login: "carol"}, State: "APPROVED", Body: "lgtm"},
+		}{Login: "carol"}, State: "APPROVED", Body: "lgtm", SubmittedAt: "2026-01-15T10:30:00Z"},
 	}
 	node.LinkedPRs.Nodes = []struct {
 		ID                  string               `json:"id"`
@@ -266,8 +272,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 				Author     *struct {
 					Login string `json:"login"`
 				} `json:"author"`
-				State string `json:"state"`
-				Body  string `json:"body"`
+				State       string `json:"state"`
+				Body        string `json:"body"`
+				SubmittedAt string `json:"submittedAt"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -297,5 +304,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 	}
 	if len(item.LinkedPRReviews) != 1 || item.LinkedPRReviews[0].Author != "carol" {
 		t.Errorf("LinkedPRReviews = %+v", item.LinkedPRReviews)
+	}
+	wantSubmittedAt := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	if !item.LinkedPRReviews[0].SubmittedAt.Equal(wantSubmittedAt) {
+		t.Errorf("LinkedPRReviews[0].SubmittedAt = %v, want %v", item.LinkedPRReviews[0].SubmittedAt, wantSubmittedAt)
 	}
 }

@@ -700,6 +700,7 @@ query($id: ID!) {
               author { login }
               state
               body
+              submittedAt
             }
           }
           reviewThreads(first: 50) {
@@ -829,8 +830,9 @@ type fetchItemDetailsNode struct {
 					Author     *struct {
 						Login string `json:"login"`
 					} `json:"author"`
-					State string `json:"state"`
-					Body  string `json:"body"`
+					State       string `json:"state"`
+					Body        string `json:"body"`
+					SubmittedAt string `json:"submittedAt"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {
@@ -1025,12 +1027,16 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 		}
 		for _, rev := range pr.LatestReviews.Nodes {
 			if rev.Author != nil && rev.Author.Login != "" {
-				item.LinkedPRReviews = append(item.LinkedPRReviews, PRReview{
+				review := PRReview{
 					Author:     rev.Author.Login,
 					State:      rev.State,
 					Body:       rev.Body,
 					DatabaseID: rev.DatabaseID,
-				})
+				}
+				if t, err := parseTime(rev.SubmittedAt); err == nil {
+					review.SubmittedAt = t
+				}
+				item.LinkedPRReviews = append(item.LinkedPRReviews, review)
 			}
 		}
 		for _, thread := range pr.ReviewThreads.Nodes {

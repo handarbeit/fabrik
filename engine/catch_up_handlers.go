@@ -69,11 +69,29 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 // active when the stage has genuinely completed (hasComplete == true); during
 // the CI-await window (fabrik:awaiting-ci && !hasComplete) the gate is skipped
 // to prevent spurious fabrik:awaiting-review re-application (#617).
+//
+// Reinvoke-governs-working, authoritative-governs-merging (R1, #1375,
+// amending ADR-1250): actionable review feedback (buildReviewFeedbackComments —
+// unresolved inline thread comments plus unaddressed review bodies, Finding 4)
+// is checked and dispatched *before* consuming checkReviewGate's blocked/timedOut
+// return values, not after. This is what makes the reinvoke reachable at all
+// under review_authority: authoritative — an unresolved CHANGES_REQUESTED verdict
+// keeps checkReviewGate returning blocked=true (or, once its own timeout has
+// separately elapsed, timedOut=true) indefinitely, which used to short-circuit
+// this function before the reinvoke path was ever reached (Finding 1). A
+// CHANGES_REQUESTED review always has a body per GitHub's REST contract, so
+// there is always something actionable to reinvoke on; only a bare "nobody has
+// reviewed yet" block (nothing actionable) still falls through to the original
+// cooldown-record/pause tail below, unchanged. The reinvoke loop is bounded by
+// MaxReviewCycles/dispatchWithCycleLimit exactly as it was for the
+// naturally-cleared case — R7's dedup (buildReviewFeedbackComments only
+// returns unprocessed feedback) is what stops this from firing every poll for
+// the same review.
 func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	if !pctx.hasComplete {
 		return false
 	}
-	blocked, timedOut, terminated := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+	blocked, timedOut, terminated, resolvedReviews := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
 	if terminated {
 		// checkReviewGate already paused the item directly via
 		// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
@@ -82,41 +100,51 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// ciTerminated check. See ADR-1223.
 		return true
 	}
-	if blocked {
-		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
-		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
-		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
-		// non-responsive bot reviewer (issue #495).
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		e.store.Apply(itemstate.CooldownRecorded{
-			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
-			Number: pctx.item.Number,
-			Reason: "review-blocked",
-			Until:  time.Now().Add(cooldown),
-		})
-		return true
-	}
-	if timedOut {
-		e.pauseForReviewTimeout(pctx.board, pctx.item, pctx.stage)
-		return true
-	}
-	// Gate cleared naturally — if reviews with actionable body text were
-	// submitted, re-invoke the stage agent to address the feedback before
-	// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
-	// have nothing to address; fall through to Phase 2.
-	if syntheticComments := e.buildReviewThreadComments(pctx.item); len(syntheticComments) > 0 {
+	// Actionable review feedback (thread comments and/or review bodies) is
+	// dispatched regardless of blocked/timedOut — see the doc comment above.
+	//
+	// Delegates to buildReviewFeedbackCommentsFromReviews/
+	// currentHeadReviewFeedbackCommentsFromReviews (reviews.go) rather than
+	// hand-rolling the thread+body composition here (Pruefer review finding,
+	// #1375) — one definition of "actionable feedback" shared with
+	// dispatchReviewReinvoke's build(), instead of two that could silently
+	// drift. resolvedReviews is checkReviewGate's own already-resolved
+	// reviews slice (a second Pruefer finding, #1375): for a base:<branch>
+	// item, checkReviewGate — called two lines above — already issued the
+	// live FetchPRReviews REST call needed to compute blocked/timedOut, so
+	// resolving again here would silently repeat that exact same call for an
+	// answer that cannot have changed since (nothing async runs between the
+	// two calls). dispatchReviewReinvoke's build() deliberately does not
+	// reuse this value — it runs inside the reinvoke goroutine after an
+	// unbounded semaphore wait, where review state may genuinely have moved
+	// on, so it resolves fresh via the no-arg buildReviewFeedbackComments.
+	syntheticComments := e.buildReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews)
+	if len(syntheticComments) > 0 {
+		// Observability (Pruefer review finding, #1375): when timedOut is also
+		// true here, checkAwaitingReviewTimeout has already removed
+		// fabrik:awaiting-review as its own side effect, but the reinvoke below
+		// — not pauseForReviewTimeout — is what actually happens. Without this
+		// line, a real ReviewWaitTimeout elapsing produces no visible signal in
+		// the logs; only the eventual MaxReviewCycles pause would. blocked is
+		// not logged the same way — it is the common, expected steady state
+		// while a reinvoke is outstanding, not a noteworthy transition.
+		if timedOut {
+			e.logf(pctx.item.Number, "review-gate", "review wait timeout reached, but actionable feedback exists — dispatching reinvoke instead of pausing\n")
+		}
 		// #1207 guard 2: an item already in the GitHub auto-merge convergence
-		// flow (fabrik:auto-merge-enabled present) that has grown a fresh
-		// unresolved thread on its current head must have auto-merge disabled
+		// flow (fabrik:auto-merge-enabled present) that has grown fresh
+		// unresolved feedback on its current head must have auto-merge disabled
 		// now — on this same poll, before the dispatch below — so GitHub
 		// cannot merge underneath the reinvoke this handler is about to fire.
-		// Scoped to current-head threads (excludes GitHub-marked isOutdated)
-		// so a thread against a superseded commit never triggers a needless
-		// disable. handleAutoMergeConvergence (Handler 3) never runs this poll
-		// for this item regardless — Handler 2 always claims and stops the
-		// chain below — so the disable must happen here, not there.
+		// Scoped to current-head feedback (excludes GitHub-marked isOutdated
+		// thread comments; review-body comments are always treated as
+		// current-head per R8) so a thread against a superseded commit never
+		// triggers a needless disable. handleAutoMergeConvergence (Handler 3)
+		// never runs this poll for this item regardless — Handler 2 always
+		// claims and stops the chain below — so the disable must happen here,
+		// not there.
 		if hasLabel(pctx.item.Labels, "fabrik:auto-merge-enabled") {
-			if blocking := e.currentHeadReviewThreadComments(pctx.item); len(blocking) > 0 {
+			if blocking := e.currentHeadReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews); len(blocking) > 0 {
 				e.disableAutoMergeForReviewThreads(pctx.item, len(blocking))
 			}
 		}
@@ -135,11 +163,33 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			func(repoStr string) {
 				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
 			},
-			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
+			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
 			func(cycleCount int) {
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
 		)
+	}
+	// Nothing actionable to reinvoke on — fall back to the pre-existing
+	// blocked/timedOut handling (R5's terminal fallback for a gate that never
+	// converges, and the plain "waiting for a response" cases where there is
+	// genuinely nothing to reinvoke on).
+	if blocked {
+		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
+		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
+		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
+		// non-responsive bot reviewer (issue #495).
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
+			Number: pctx.item.Number,
+			Reason: "review-blocked",
+			Until:  time.Now().Add(cooldown),
+		})
+		return true
+	}
+	if timedOut {
+		e.pauseForReviewTimeout(pctx.board, pctx.item, pctx.stage)
+		return true
 	}
 	return false
 }

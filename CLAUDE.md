@@ -151,9 +151,18 @@ review_authority: authoritative # Optional: advisory (default) | authoritative. 
                                 # requires no outstanding CHANGES_REQUESTED and required approvals satisfied
                                 # — preferring GitHub's reviewDecision where branch protection defines a
                                 # review requirement, falling back to Fabrik's own no-CHANGES_REQUESTED
-                                # computation otherwise. yolo/cruise never bypass an authoritative gate —
-                                # they still control auto-advance/auto-merge timing, only once the gate
-                                # itself is satisfied. See ADR-1250.
+                                # computation otherwise. Governs MERGING, never WORKING: an unresolved
+                                # CHANGES_REQUESTED does not make Fabrik sit idle — it reinvokes the stage
+                                # to address the reviewer's feedback (both inline thread comments and the
+                                # body of any CHANGES_REQUESTED review, which GitHub requires non-empty;
+                                # COMMENTED review bodies are deliberately excluded, since automated
+                                # reviewers routinely submit a generic summary as one), bounded by
+                                # MaxReviewCycles, with pauseForReviewCycleLimit as the terminal fallback
+                                # only if the loop never converges — never as the first response to a
+                                # change request. yolo/cruise
+                                # never bypass an authoritative gate's MERGE decision — they still control
+                                # auto-advance/auto-merge timing, only once the gate itself is satisfied.
+                                # See ADR-1250, ADR-1375.
 expected_reviewers:             # Optional: declares unrequested reviewers (self-submitting review bots
   - handarbeit-pruefer          # like Pruefer, Gemini, CodeRabbit) expected on PRs from this stage
                                 # without ever appearing in GitHub's requested-reviewer list. Only
