@@ -55,7 +55,14 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stamp := time.Now().UTC().Format("20060102-150405")
 			marker := fmt.Sprintf("paused-merged-pr-%s-%s", tc.name, stamp)
-			body := fmt.Sprintf(pausedMergedPRBodyTemplate, "`", "`", "```", marker, "```")
+			// All 3 sub-variants share one marker file (markerPath is keyed by
+			// the parent test function, not the sub-test name): they run
+			// strictly sequentially (no t.Parallel inside t.Run, per R6/the
+			// comment above), and each variant's PR merges (step 7 below)
+			// before the next variant is filed, so there is no concurrent
+			// write to race.
+			path := markerPath("TestPausedMergedPRRecovery")
+			body := fmt.Sprintf(pausedMergedPRBodyTemplate, "`", path, "`", "```", marker, "```")
 
 			// File WITHOUT an auto-advance label. With global yolo off and
 			// auto_advance unset (nil, not true) on Research..Validate, the engine
@@ -155,8 +162,8 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 }
 
 // pausedMergedPRBodyTemplate is the issue body for TestPausedMergedPRRecovery.
-// The five %s placeholders are: backtick, backtick, codefence, marker, codefence
-// (Go raw strings can't contain backticks).
+// The six %s placeholders are: backtick, marker path, backtick, codefence,
+// marker, codefence (Go raw strings can't contain backticks).
 const pausedMergedPRBodyTemplate = `## Goal
 
 End-to-end regression guard for the #874 bug class (paused item + merged PR
@@ -164,7 +171,7 @@ recovery via the settle-owner, ADR-056 D2).
 
 ## Trivial change
 
-Append a single HTML comment line to %sREADME.md%s at the very end of the file:
+Append a single HTML comment line to %s%s%s at the very end of the file (create the file first if it doesn't already exist):
 
 %s
 <!-- %s -->
