@@ -30,10 +30,21 @@ import (
 // FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=6 in the bed .env).
 // Skips cleanly if either prerequisite is absent.
 //
+// NOT t.Parallel(): it deliberately induces a repo-wide fault on RepoBeta
+// (fabrik-test-beta), and TestCrossRepoSpawn is the only other scenario that
+// drives real work on that same repo — running concurrently would let this
+// test's induced fault pause TestCrossRepoSpawn's in-flight child issue as
+// collateral damage (exactly what happened in the 0.0.77 validation gate,
+// issue #1395). Mirrors the same serialization idiom TestMergeTrainRestartSafety
+// already uses (see its doc comment): Go runs non-parallel tests to completion
+// before resuming parallel ones, so this test always finishes — guard tripped,
+// all 4 members paused — before TestCrossRepoSpawn starts real work. The test
+// body and assertions below are unchanged; only the scheduling annotation was
+// removed.
+//
 // Wall-clock: ~10–20 min (~6 trials × 2 required checks ≈ 12 Actions runs).
 // Cost: low (no Claude invocations).
 func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
-	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	requireTrainBed(t, env)
