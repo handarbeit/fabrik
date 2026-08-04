@@ -226,7 +226,11 @@ func New(cfg Config) (*Engine, error) {
 	// Fabrik's own release always lives on github.com/handarbeit/fabrik, never
 	// on a customer's GHES instance, so self-upgrade needs a dedicated client
 	// pinned to github.com regardless of cfg.GHESHost (see checkReleaseUpgrade).
-	releaseClient := gh.NewClient(cfg.Token)
+	// cfg.Token is dropped (releaseUpgradeToken returns "") when a GHES host
+	// is configured — it authenticates the GHES instance, not github.com, and
+	// would be rejected outright rather than falling back to unauthenticated
+	// (see releaseUpgradeToken's doc comment).
+	releaseClient := gh.NewClient(releaseUpgradeToken(cfg))
 	eng := &Engine{
 		cfg:                      cfg,
 		client:                   ghClient,
