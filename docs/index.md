@@ -531,7 +531,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">🔒</span>
         <div class="feature-title">Anthropic Auth Namespace Scrub</div>
         <div class="feature-desc">
-          Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default, so an ambient API key can never silently flip a stage from subscription to metered billing — with an explicit opt-in and an outright refusal of `apiKeyHelper`.
+          Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default, so an ambient API key can never silently flip a stage from subscription to metered billing — with an explicit opt-in and an outright refusal of <code>apiKeyHelper</code>.
         </div>
       </a>
     </div>
