@@ -62,7 +62,8 @@ func TestBaseBranchPipeline(t *testing.T) {
 	ensureLabelExists(t, env, env.RepoAlpha, baseLabel)
 
 	marker := fmt.Sprintf("base-branch-pipeline-%s", stamp)
-	body := fmt.Sprintf(baseBranchPipelineBodyTemplate, "`", "`", "```", marker, "```", branchName)
+	path := markerPath("TestBaseBranchPipeline")
+	body := fmt.Sprintf(baseBranchPipelineBodyTemplate, "`", path, "`", "```", marker, "```", branchName)
 
 	num := FileIssue(t, env, env.RepoAlpha,
 		fmt.Sprintf("e2e base-branch pipeline (%s)", stamp),
@@ -140,8 +141,8 @@ func ensureLabelExists(t *testing.T, env *Env, repo, label string) {
 }
 
 // baseBranchPipelineBodyTemplate is the issue body for TestBaseBranchPipeline.
-// The six %s placeholders are: backtick, backtick, codefence, marker,
-// codefence, branch name (Go raw strings can't contain backticks).
+// The seven %s placeholders are: backtick, marker path, backtick, codefence,
+// marker, codefence, branch name (Go raw strings can't contain backticks).
 const baseBranchPipelineBodyTemplate = `## Goal
 
 End-to-end verification of the base:<branch> (non-default base branch)
@@ -151,7 +152,7 @@ fixes.
 
 ## Trivial change
 
-Append a single HTML comment line to %sREADME.md%s at the very end of the file:
+Append a single HTML comment line to %s%s%s at the very end of the file (create the file first if it doesn't already exist):
 
 %s
 <!-- %s -->

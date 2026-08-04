@@ -68,7 +68,8 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	marker := fmt.Sprintf("auto-merge-yolo-%s", stamp)
-	body := fmt.Sprintf(autoMergeBodyTemplate, "`", "`", "```", marker, "```")
+	path := markerPath("TestYoloAutoMergeLabel")
+	body := fmt.Sprintf(autoMergeBodyTemplate, "`", path, "`", "```", marker, "```")
 
 	logStart := LogOffset(t, env)
 	num := FileIssue(t, env, env.RepoAlpha,
@@ -143,16 +144,16 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 	})
 }
 
-// autoMergeBodyTemplate is the issue body for TestYoloAutoMergeLabel. The five
-// %s placeholders are: backtick, backtick, codefence, marker, codefence
-// (Go raw strings can't contain backticks).
+// autoMergeBodyTemplate is the issue body for TestYoloAutoMergeLabel. The six
+// %s placeholders are: backtick, marker path, backtick, codefence, marker,
+// codefence (Go raw strings can't contain backticks).
 const autoMergeBodyTemplate = `## Goal
 
 End-to-end verification of the GitHub native auto-merge path for yolo issues (#829).
 
 ## Trivial change
 
-Append a single HTML comment line to %sREADME.md%s at the very end of the file:
+Append a single HTML comment line to %s%s%s at the very end of the file (create the file first if it doesn't already exist):
 
 %s
 <!-- %s -->

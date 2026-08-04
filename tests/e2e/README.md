@@ -213,6 +213,58 @@ A repo-wide search (`grep -rn "🏭" tests/e2e/*.go`) found every call site in
 No other `tests/e2e/*.go` file references the `🏭` emoji or a
 `"🏭 **Fabrik —"` literal.
 
+### Marker-path convention (#1394)
+
+Multiple scenarios run in parallel against the same repo. Early on, several of
+them instructed the agent to append its marker to the *same* file —
+`README.md` on `fabrik-test-alpha`. When two such PRs landed close together,
+the second could pick up a merge conflict on the shared trailing lines and
+fail in its own harness code (e.g. `MergePR`), before any engine assertion
+ever ran — a flake, not a regression.
+
+Every scenario that writes a marker file (other than the deliberate exception
+below) must instead target its own dedicated, fixed path under
+`e2e/markers/`, so parallel scenarios can never collide on the same file:
+
+- **`markerPaths`** (`harness.go`) is the single source of truth: a map from
+  test-function name to its unique `e2e/markers/<scenario>.md` path.
+  `markerPath(name string) string` is the accessor — it panics on an unknown
+  name so a typo'd lookup fails loudly at test setup rather than silently
+  producing an empty path in an issue body.
+- **`TestMarkerPathsAreUnique`** (`marker_paths_test.go`) statically enumerates
+  `markerPaths` and fails on any duplicate or empty value. It requires no live
+  bed:
+
+  ```
+  go test -tags e2e -run TestMarkerPathsAreUnique -v ./tests/e2e/
+  ```
+
+- Paths are **fixed per scenario**, not derived from a per-run timestamp. This
+  differs from the merge-train members' `uniqueMemberPath` (`e2e/train/<name>-<issue>.txt`),
+  which needs a fresh path every run because a landed batch merges member
+  files into `main` and a fixed path would collide with the existing blob's
+  SHA on the next run's Contents-API PUT. These marker files are instead
+  edited through a normal agent git commit in a worktree — a real diff, not a
+  raw Contents-API PUT — so a fixed path across runs is fine, and it's what
+  lets `TestMarkerPathsAreUnique` enumerate the set statically instead of
+  needing to execute the tests to discover the paths.
+- `TestPausedMergedPRRecovery`'s 3 sequential sub-variants deliberately share
+  one path: they run strictly sequentially (`t.Run`, no `t.Parallel` between
+  them) and each variant's PR merges before the next is filed, so there is no
+  concurrent write to race.
+
+**Deliberate exception — `TestConvergenceRace`:** this scenario is absent from
+`markerPaths` on purpose. Its entire premise (see its own top-of-file comment)
+is that two yolo issues insert at the *same* anchor line of the *same*
+`README.md`, so that whichever PR merges first forces the other into a
+genuine `mergeable=CONFLICTING` state that Fabrik must resolve via a single
+rebase reinvoke. Giving it a unique path would eliminate the exact condition
+it exists to provoke. Any new scenario whose behavior genuinely depends on a
+shared file should be documented as such here, rather than left to race.
+
+When adding a new marker-writing scenario, add an entry to `markerPaths`
+before wiring up the issue body template — see "Adding a scenario" below.
+
 ### `TestNoWorkNeeded` discriminator verification (#1355)
 
 `TestNoWorkNeeded` used to assert only `WaitForIssueClosed` (plus a
@@ -956,7 +1008,12 @@ Every escape-from-release regression earns a new scenario in this table.
    the test bed (`t.Cleanup` is your friend).
 4. Document what regression the scenario protects against. Reference the
    originating issue or PR.
-5. **Assert on something that can only be produced by the engine, on the
+5. **If the scenario writes a marker file, give it its own path — do not
+   append to `README.md`.** Add an entry to `markerPaths` (`harness.go`) and
+   read it via `markerPath("Test...")` when building the issue body. See the
+   "Marker-path convention (#1394)" section above; `TestMarkerPathsAreUnique`
+   will fail the build if the new path collides with an existing one.
+6. **Assert on something that can only be produced by the engine, on the
    specific path under test** (handarbeit/fabrik#1355). A scenario that
    passes just as easily against a broken engine as a working one is worse
    than no scenario at all — it looks like coverage but proves nothing, and
