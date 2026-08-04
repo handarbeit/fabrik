@@ -124,6 +124,16 @@ independently by the generic sweep. Every other transient label, including
 `stage:Validate:complete` and so was never part of the stranding mechanism), continues to sweep
 unconditionally. Closed items at any other column — gate-checked or not — are entirely unaffected.
 
+The "cleared atomically by the settle-owner pair as part of a real merge/pause transition" claim
+requires the pause branch to clear all three gate labels, not just the one (`fabrik:awaiting-ci`) it
+originally cleared — otherwise an item carrying `fabrik:awaiting-review` or `fabrik:rebase-needed`
+that hits the closed-and-not-merged path is paused with that label intact, and every subsequent poll
+short-circuits on `fabrik:paused` before ever reaching the clearing code again, stranding it
+permanently now that the sweep no longer catches it either. Caught by Pruefer review on PR #1388;
+`pauseForPRClosedNotMerged` (`engine/ci.go`, shared by this settle-owner and the open-item `checkCIGate`
+catch-up path) now clears `fabrik:awaiting-ci`, `fabrik:awaiting-review`, and `fabrik:rebase-needed`
+unconditionally (each removal is itself a no-op when the label is absent).
+
 **Why `stage.Name == "Validate"`, not `stageIsGateChecked(stage)`, for this exclusion.** A first
 implementation used `stageIsGateChecked(stage)` here, matching the general convention used elsewhere
 in this codebase (`itemMayNeedWork`'s pre-fix guard, `settleClosedItemsToDone`'s exclusion). It was
