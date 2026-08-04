@@ -152,6 +152,17 @@ func TestValidatePRTerminalAdvance_TableDriven(t *testing.T) {
 				if !containsLabel(added, "fabrik:paused") {
 					t.Errorf("expected fabrik:paused to be added; got %v", added)
 				}
+				// pauseForPRClosedNotMerged must clear whichever gate label was
+				// present, not just fabrik:awaiting-ci — otherwise fabrik:awaiting-review
+				// or fabrik:rebase-needed is permanently stranded on a closed, paused
+				// item once cleanupClosedIssueTransientLabels stops sweeping them at
+				// Validate (R6, ADR-1387; caught by Pruefer on PR #1388).
+				if tc.gateLabel != "" {
+					removed := removedLabelNames(client.removeLabelCalls)
+					if !containsLabel(removed, tc.gateLabel) {
+						t.Errorf("expected gate label %q to be removed on pause; got %v", tc.gateLabel, removed)
+					}
+				}
 
 			case tc.wantSkipped:
 				if advancedItems[iKey] {
@@ -653,10 +664,17 @@ func TestSettleClosedValidateAdvance_TableDriven(t *testing.T) {
 
 		{name: "awaiting-review/merged", gateLabel: "fabrik:awaiting-review", prMerged: true, prState: "closed", wantAdvanced: true},
 		{name: "awaiting-review/paused/merged", gateLabel: "fabrik:awaiting-review", prMerged: true, prState: "closed", alreadyPaused: true, wantAdvanced: true},
+		// Regression case for the label-hygiene gap Pruefer caught on PR #1388:
+		// pauseForPRClosedNotMerged must clear fabrik:awaiting-review, not just
+		// fabrik:awaiting-ci — cleanupClosedIssueTransientLabels no longer sweeps
+		// it at Validate (R6), so this is the only place left to clear it.
+		{name: "awaiting-review/closed-unmerged", gateLabel: "fabrik:awaiting-review", prMerged: false, prState: "closed", wantPaused: true},
 
 		{name: "paused-only/merged", gateLabel: "", prMerged: true, prState: "closed", alreadyPaused: true, wantAdvanced: true},
 
 		{name: "rebase-needed/merged", gateLabel: "fabrik:rebase-needed", prMerged: true, prState: "closed", wantAdvanced: true},
+		// Same regression case as above, for fabrik:rebase-needed.
+		{name: "rebase-needed/closed-unmerged", gateLabel: "fabrik:rebase-needed", prMerged: false, prState: "closed", wantPaused: true},
 
 		// Already paused + closed-unmerged — must skip to avoid a duplicate comment.
 		{name: "awaiting-ci+paused/closed-unmerged", gateLabel: "fabrik:awaiting-ci", prMerged: false, prState: "closed", alreadyPaused: true, wantSkipped: true},
@@ -727,6 +745,15 @@ func TestSettleClosedValidateAdvance_TableDriven(t *testing.T) {
 				added := addedLabelNames(client.addLabelCalls)
 				if !containsLabel(added, "fabrik:paused") {
 					t.Errorf("expected fabrik:paused to be added; got %v", added)
+				}
+				// pauseForPRClosedNotMerged must clear whichever gate label was
+				// present — cleanupClosedIssueTransientLabels no longer sweeps it
+				// independently for a closed item at Validate (R6, ADR-1387).
+				if tc.gateLabel != "" {
+					removed := removedLabelNames(client.removeLabelCalls)
+					if !containsLabel(removed, tc.gateLabel) {
+						t.Errorf("expected gate label %q to be removed on pause; got %v", tc.gateLabel, removed)
+					}
 				}
 
 			case tc.wantSkipped:
