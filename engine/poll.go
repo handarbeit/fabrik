@@ -790,6 +790,20 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		atValidateStage := stage != nil && stage.Name == "Validate"
+		// R6 follow-up (Pruefer, PR #1388): a closed item at a gate-checked
+		// stage other than Validate (e.g. the shipped default Review stage,
+		// wait_for_reviews: true — see stages/examples/review.yaml) has its
+		// gate label swept unconditionally below, same as any non-Validate
+		// stage. Per ADR-1387's "Known limitation," no settle-owner exists for
+		// any gate-checked stage but Validate, and dispatch admission no
+		// longer readmits a closed item lacking stage:<X>:complete — so this
+		// combination permanently strands the item with zero remaining owners
+		// and no other operator-visible signal. Log every poll the condition
+		// holds so the strand is not silent, even though reaching it is
+		// believed rare (requires manually closing an issue mid-stage).
+		if stage != nil && !atValidateStage && stageIsGateChecked(stage) && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+			e.logf(item.Number, "warn", "closed item at gate-checked stage %q (not Validate) has no settle-owner — its gate label(s) will be swept below, permanently stranding it (ADR-1387 known limitation)\n", stage.Name)
+		}
 		labelSet := make(map[string]struct{}, len(item.Labels))
 		for _, l := range item.Labels {
 			labelSet[l] = struct{}{}

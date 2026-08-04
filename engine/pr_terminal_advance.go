@@ -42,6 +42,20 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 	// Items with fabrik:auto-merge-enabled are exclusively managed by
 	// checkAutoMergeConvergence (Phase 1). Single owner does not touch them.
 	if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
+		// This skip assumes fabrik:auto-merge-enabled never appears without
+		// stage:Validate:complete (attemptMergeOnValidate only ever applies it
+		// once the gate has cleared) — true for both callers of this function
+		// today. That assumption is now load-bearing for a second, closed-item
+		// caller with no dispatch-admission precondition of its own: if it is
+		// ever violated (a labeling race, or a future caller of the label),
+		// this early return silently strands the item forever — dispatch
+		// admission blocks it (no stage:Validate:complete), no settle-owner
+		// processes it (this return), and settleClosedItemsToDone excludes
+		// gate-checked stages. Log defensively so a violation is visible
+		// rather than silent (Pruefer, PR #1388).
+		if !hasLabel(item.Labels, "stage:Validate:complete") {
+			e.logf(item.Number, "warn", "fabrik:auto-merge-enabled present without stage:Validate:complete — skipping per single-owner exclusion, but this violates the assumed invariant and may permanently strand the item (ADR-1387)\n")
+		}
 		return
 	}
 	iKey := issueKey(item, e.defaultRepo())
