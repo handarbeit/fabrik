@@ -248,4 +248,30 @@ matching `settleClosedItemsToDone`'s own "deliberately not conditioned on any la
 — a closed issue at a non-terminal, non-cleanup, gate-checked column is itself the complete,
 sufficient, durable signal.
 
+## R1 Follow-up: Comment-Driven Dispatch on a Closed, Stage-Complete Item
+
+Caught by Pruefer review on PR #1388, after the fixes above landed. R1's admission-guard simplification
+retains one exception beyond cleanup stages: a closed item carrying `stage:<X>:complete` is still
+admitted by `itemMayNeedWork`/`itemNeedsWork` (see
+`TestItemMayNeedWork_ClosedAtValidate_StageComplete_StillAdmitted`), so the catch-up loop can still act
+on it. But `itemNeedsWork`'s "new comments are always worth processing (even on completed stages)"
+fast path, and its mirror in `processItem`, had no `item.IsClosed` check — so a closed, stage-complete
+item that received a fresh comment was still routed to `processComments`, a real Claude invocation.
+This is a narrower, **pre-existing** instance of the same class of bug this ADR fixes (a closed item
+reaching real dispatch), reachable independently of the CI-gate/`fabrik:awaiting-ci` mechanism that
+was this issue's original trigger — it predates commit `7311a14e` and is not a regression this PR
+introduced.
+
+R1 as stated is unconditional ("a closed item is never dispatched … the sole exception is a
+`cleanup_worktree` stage"), so this is closed on the same terms as the rest of the invariant: both
+fast paths now skip when `item.IsClosed`. In `itemNeedsWork`, simply not short-circuiting on the new
+comment is sufficient — the pre-existing "already completed this stage" check just below it already
+rejects a closed+`stage:complete` item once the fast path stops pre-empting it. In `processItem`, the
+added `!item.IsClosed` guard is redundant-but-explicit (itemNeedsWork's gate already prevents
+`processItem` from being invoked at all for a closed item outside a cleanup stage) — the same
+ownership-boundary idiom used for `runValidatePRTerminalAdvance`'s own `IsClosed` skip earlier in this
+ADR. A human comment on a closed, completed issue is no longer actionable by Fabrik at all — consistent
+with "a closed issue has no computable work left" (this ADR's own framing) applying to comment
+processing exactly as it applies to stage re-invocation.
+
 **References:** [ADR-056: Consolidate Convergence Gate Recovery](056-consolidate-convergence-gate-recovery.md) (D2), [ADR-057: Single-Owner Validate PR Terminal Advance](057-validate-pr-terminal-advance.md), [ADR-064: Closed-Item-At-Any-Stage Advance To Done](064-closed-item-any-stage-advance-to-done.md), [ADR-1270: Awaiting-CI Settle Scan](1270-awaiting-ci-settle-scan.md), commit `7311a14e` (the regression point whose intent this ADR preserves, only changing its mechanism), issue #617 (the transient-label sweep whose interaction with the conjunctive gate is closed by this issue's R6)

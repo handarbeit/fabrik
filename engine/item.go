@@ -347,10 +347,20 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
-	// New comments are always worth processing (even on completed stages)
-	newComments := e.findNewComments(item)
-	if len(newComments) > 0 {
-		return true
+	// New comments are always worth processing (even on completed stages) —
+	// except on a closed item (R1, ADR-1387): a closed item must never reach a
+	// real Claude invocation, regardless of new comments. The closed-issue
+	// gate above only lets a closed item reach this point via stage:complete
+	// (or a cleanup stage, already returned earlier) — pre-existing,
+	// independent of this issue's original CI-gate-loop regression, but a
+	// second instance of the same class of bug (Pruefer, PR #1388). Not
+	// short-circuiting here for a closed item is sufficient on its own: the
+	// "already completed this stage" check below already rejects it.
+	if !item.IsClosed {
+		newComments := e.findNewComments(item)
+		if len(newComments) > 0 {
+			return true
+		}
 	}
 
 	// Dependency gate: on the first dispatch (fabrik:blocked not yet set),
@@ -537,8 +547,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Check for new comments from our user
 	newComments := e.findNewComments(item)
 
-	// If there are new comments, process them (even if stage is complete)
-	if len(newComments) > 0 {
+	// If there are new comments, process them (even if stage is complete) —
+	// except on a closed item (R1, ADR-1387): itemNeedsWork's mirrored gate
+	// already prevents processItem from being invoked at all for this case,
+	// so this is a redundant-but-explicit ownership boundary, not a
+	// load-bearing filter — matching the same idiom used elsewhere in
+	// ADR-1387 (e.g. runValidatePRTerminalAdvance's own IsClosed skip).
+	if len(newComments) > 0 && !item.IsClosed {
 		return e.processComments(ctx, board, item, stage, newComments)
 	}
 

@@ -192,6 +192,32 @@ func TestItemNeedsWork_ClosedAtNonGateStage_NotAdmitted(t *testing.T) {
 	}
 }
 
+// R1/ADR-1387, a second instance of the same class of bug (Pruefer, PR
+// #1388): before this fix, itemNeedsWork's "new comments are always worth
+// processing" fast path had no IsClosed check, so a closed item admitted via
+// the retained stage:complete exception (see
+// TestItemMayNeedWork_ClosedAtValidate_StageComplete_StillAdmitted above)
+// could still reach a real Claude invocation via comment processing — a
+// narrower, pre-existing variant of the same "closed item reaches dispatch"
+// bug this issue fixes, just through the comment path rather than the
+// CI-gate/awaiting-ci loop. A closed item must never be dispatched (R1),
+// regardless of new comments, except at a cleanup stage.
+func TestItemNeedsWork_ClosedAtValidate_StageComplete_WithNewComment_NotAdmitted(t *testing.T) {
+	eng := gateCheckedEngine(t)
+	item := gh.ProjectItem{
+		Number:   12,
+		Status:   "Validate",
+		IsClosed: true,
+		Labels:   []string{"stage:Validate:complete"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "someone", Body: "any follow-up comment"},
+		},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("closed item with stage:Validate:complete must NOT pass itemNeedsWork even with a new comment (R1, ADR-1387) — comment processing is still a real Claude invocation")
+	}
+}
+
 // R1's stated exception: a closed item at a cleanup_worktree stage still
 // reaches the dispatch path, so worktree reaping can run.
 func TestItemMayNeedWork_ClosedAtCleanupStage_Admitted(t *testing.T) {
