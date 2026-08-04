@@ -115,6 +115,9 @@ type mockGitHubClient struct {
 	fetchCommitsBehindCalls          []fetchCommitsBehindCall
 	createPRCalls                    []createPRCall
 	listPRsCalls                     int
+
+	// Track calls for FetchItemDetails, by issue number.
+	fetchItemDetailsCalls []int
 }
 
 type createPRCall struct {
@@ -243,8 +246,12 @@ func (m *mockGitHubClient) ProbeProjectBoard(owner, repo string, projectNum int,
 }
 
 func (m *mockGitHubClient) FetchItemDetails(item *gh.ProjectItem) error {
-	if m.fetchItemDetailsFn != nil {
-		return m.fetchItemDetailsFn(item)
+	m.mu.Lock()
+	m.fetchItemDetailsCalls = append(m.fetchItemDetailsCalls, item.Number)
+	fn := m.fetchItemDetailsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(item)
 	}
 	return nil
 }
