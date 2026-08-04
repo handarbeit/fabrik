@@ -189,6 +189,16 @@ var claudeKillGraceSigTerm = 10 * time.Second
 // of the launching shell's ambient environment. Empty skips injection.
 var claudeGHToken string
 
+// claudeGHHost is the engine's resolved GHES host (Config.GHESHost). Set by
+// the Engine during construction, mirroring claudeGHToken's package-var
+// pattern. Injected into every Claude worker's environment as GH_HOST so the
+// worker's gh invocations target the same GitHub instance as the engine
+// itself (FR-6, ADR-1391) — without this, a stage worker's `gh` calls (e.g.
+// fabrik-validate's Pre-Completion Gate) would silently hit github.com even
+// when the engine is talking to a GHES instance. Empty (the default) skips
+// injection entirely, preserving today's behavior byte-for-byte.
+var claudeGHHost string
+
 // claudeAnthropicAPIKey is the engine's resolved FABRIK_ANTHROPIC_API_KEY
 // (read from os.Getenv, which reflects .env by the time Engine.New runs —
 // see config.LoadDotenv). Set once by the Engine during construction,
@@ -665,6 +675,9 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
 	if claudeGHToken != "" {
 		env = append(env, "GH_TOKEN="+claudeGHToken, "GITHUB_TOKEN="+claudeGHToken)
+	}
+	if claudeGHHost != "" {
+		env = append(env, "GH_HOST="+claudeGHHost)
 	}
 
 	env = append(env, "FABRIK_ISSUE="+strconv.Itoa(issue.Number))

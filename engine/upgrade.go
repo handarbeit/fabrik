@@ -72,7 +72,7 @@ func (e *Engine) checkReleaseUpgrade() {
 	// contract is non-fatal — the poll loop continues regardless (unlike the
 	// foreground `fabrik upgrade` command).
 	_ = selfupgrade.PerformReleaseUpgrade(selfupgrade.ReleaseConfig{
-		Client:     e.client,
+		Client:     e.releaseClient,
 		Owner:      fabrikOwner,
 		Repo:       fabrikRepo,
 		BinaryName: "fabrik",
