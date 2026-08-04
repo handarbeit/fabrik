@@ -289,6 +289,56 @@ git -C .fabrik/repos/owner-repo.git remote set-url origin git@github.com:owner/r
 
 If you have `url.<base>.insteadOf` configured in your global `~/.gitconfig` (a common way to redirect HTTPS to SSH globally), Fabrik will notice at startup and print an informational message. Git applies URL rewriting transparently, so Fabrik's HTTPS clone URLs will automatically use your SSH configuration — no additional Fabrik setting is needed.
 
+> **GitHub Enterprise Server:** clone URLs (both HTTPS and SSH) are built against the configured `ghes_host` when set, instead of `github.com`. See [GitHub Enterprise Server Support](#github-enterprise-server-support) below.
+
+### GitHub Enterprise Server Support
+
+Fabrik can run against a GitHub Enterprise Server (GHES) instance instead of github.com. This was verified against a live GHES 3.19.8 instance with full API parity for everything Fabrik uses — no adapter layer, schema introspection, or capability negotiation is involved. It's pure endpoint/host configuration.
+
+#### Configuring a GHES host
+
+Set the hostname of your GHES instance (no scheme, no trailing slash) via any of the usual precedence layers:
+
+```bash
+# Flag
+fabrik --ghes-host github.example.com --owner myorg --project 5 --user me
+
+# Environment variable
+export FABRIK_GHES_HOST=github.example.com
+
+# .fabrik/config.yaml
+ghes_host: github.example.com
+```
+
+Precedence is flag > `FABRIK_GHES_HOST` > `config.yaml`'s `ghes_host`, matching every other setting. A value with a `https://`/`http://` scheme or a trailing `/` is normalized automatically, so `https://github.example.com/` and `github.example.com` are equivalent.
+
+**Absent any GHES configuration, behavior is exactly today's github.com behavior** — this is the default path and does not regress.
+
+Once configured, the GHES host governs:
+- **REST and GraphQL API endpoints** — REST resolves to `https://<host>/api/v3/...`, GraphQL to `https://<host>/api/graphql`. These are independently derived, not one path-suffixed from the other — GHES puts them at different paths (`/api/v3/graphql` is a 404 on GHES; `/api/graphql` is the correct endpoint).
+- **Bare-clone URLs** — both the HTTPS and SSH forms (`--ssh` / `git_ssh: true` still selects which protocol is used; see [Git Clone Protocol](#git-clone-protocol-https-vs-ssh) above).
+- **Commit author noreply email** — Fabrik-authored commits use `<user>@users.noreply.<host>` instead of `<user>@users.noreply.github.com`. **Note:** this mirrors github.com's own noreply-email convention with the configured host substituted, but has not been verified against a live GHES instance's actual private-commit-email behavior — GitHub's published GHES admin documentation does not explicitly confirm this format. If your GHES instance uses a different convention, please file an issue.
+- **`GH_HOST` in stage-worker subprocess environments** — every Claude-invoked stage worker's `gh` CLI calls (e.g. `fabrik-validate`'s Pre-Completion Gate, which runs `gh pr view` on every invocation) are pointed at the same GHES instance as the engine, via the `gh` CLI's own `GH_HOST` convention. See [Subprocess Environment](#subprocess-environment).
+
+#### Minimum supported version
+
+Fabrik requires **GHES 3.19 or later**. At startup, when a GHES host is configured, Fabrik queries the instance's unauthenticated `/meta` endpoint for `installed_version` and refuses to start if it's below the floor:
+
+```
+GHES instance github.example.com reports version 3.18.5, below Fabrik's minimum supported version 3.19 —
+upgrade the GHES instance or remove the ghes_host configuration. See docs/USER_GUIDE.md
+```
+
+If the `/meta` fetch itself fails (network error, auth problem), Fabrik logs a non-fatal warning and continues — connectivity issues surface more clearly moments later when the project board fetch runs. This preflight only applies when a GHES host is configured; github.com deployments never see it.
+
+#### Known limitations
+
+A few advisory-only, non-gating features still hardcode `github.com` and have not been updated for GHES:
+- The startup board-validation check's human-facing project board URL link.
+- The URL-rewrite and HTTPS-credential-helper startup checks' SSH-rewrite detection heuristics.
+
+None of these affect correctness — they may just show a `github.com`-shaped link or an inapplicable advisory message on a GHES deployment. Webhook support and `projects_v2_item` availability on GHES are also unverified; Fabrik always falls back to polling when webhooks aren't available, so this is not a blocker.
+
 ### Auto-upgrade
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself automatically. It checks for a newer version in two places:
@@ -529,6 +579,12 @@ user: your-github-username
 
 # Optional settings (defaults shown):
 
+# GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent
+# (the default) means github.com — byte-identical to today's behavior. See
+# "GitHub Enterprise Server Support" above for the full effect and the
+# minimum supported version (3.19).
+# ghes_host: ""
+
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
 
@@ -719,6 +775,7 @@ FABRIK_USER=my-personal-username
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off`; also `FABRIK_ARCHIVE_DONE` | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
+| `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
 ### Environment Variables
 
@@ -770,6 +827,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
 | `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -2568,9 +2626,13 @@ but it is not inherited unfiltered: Fabrik scrubs the Anthropic/Claude-Code auth
 namespace by default (see below) so no ambient credential can silently redirect
 billing, then shadows a small, explicit set of keys it cares about
 (`CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, the
-`FABRIK_*` invocation facts, `GH_TOKEN`/`GITHUB_TOKEN`) so that Fabrik's own value
-for those specific keys always wins over an ambient one, no matter which happened
-to be set first. Everything else — anything outside the scrubbed namespace and
+`FABRIK_*` invocation facts, `GH_TOKEN`/`GITHUB_TOKEN`, `GH_HOST`) so that Fabrik's
+own value for those specific keys always wins over an ambient one, no matter which
+happened to be set first. `GH_HOST` is only emitted when a GHES host is configured
+(`ghes_host` / `FABRIK_GHES_HOST`) — see [GitHub Enterprise Server
+Support](#github-enterprise-server-support); it is a Fabrik-computed override, not
+part of the Anthropic auth namespace, so it is never subject to the scrub described
+below. Everything else — anything outside the scrubbed namespace and
 not on the shadowed-keys list — passes through untouched. If you want a
 stage-specific variable to reach Claude reliably regardless of what's ambient,
 pass it explicitly via your stage YAML or a shell wrapper script rather than
