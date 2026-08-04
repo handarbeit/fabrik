@@ -152,6 +152,17 @@ func TestValidatePRTerminalAdvance_TableDriven(t *testing.T) {
 				if !containsLabel(added, "fabrik:paused") {
 					t.Errorf("expected fabrik:paused to be added; got %v", added)
 				}
+				// pauseForPRClosedNotMerged must clear whichever gate label was
+				// present, not just fabrik:awaiting-ci — otherwise fabrik:awaiting-review
+				// or fabrik:rebase-needed is permanently stranded on a closed, paused
+				// item once cleanupClosedIssueTransientLabels stops sweeping them at
+				// Validate (R6, ADR-1387; caught by Pruefer on PR #1388).
+				if tc.gateLabel != "" {
+					removed := removedLabelNames(client.removeLabelCalls)
+					if !containsLabel(removed, tc.gateLabel) {
+						t.Errorf("expected gate label %q to be removed on pause; got %v", tc.gateLabel, removed)
+					}
+				}
 
 			case tc.wantSkipped:
 				if advancedItems[iKey] {
@@ -291,8 +302,11 @@ func TestValidatePRTerminalAdvance_NoDoubleAdvance(t *testing.T) {
 }
 
 // TestValidatePRTerminalAdvance_AutoMergeExcluded verifies that items with
-// fabrik:auto-merge-enabled are excluded from the single owner.
-// These items are handled exclusively by checkAutoMergeConvergence (Phase 1).
+// fabrik:auto-merge-enabled AND stage:Validate:complete are excluded from the
+// single owner. These items are handled exclusively by checkAutoMergeConvergence
+// (Phase 1) — the expected, invariant-respecting state, since
+// attemptMergeOnValidate's auto-merge/enqueue/direct-merge branches only ever
+// apply fabrik:auto-merge-enabled once the gate has already cleared.
 func TestValidatePRTerminalAdvance_AutoMergeExcluded(t *testing.T) {
 	stgs := terminalAdvanceStages()
 	client := &mockGitHubClient{
@@ -306,13 +320,48 @@ func TestValidatePRTerminalAdvance_AutoMergeExcluded(t *testing.T) {
 		Number: 30,
 		ItemID: "PVTI_30",
 		Status: "Validate",
-		Labels: []string{"stage:Implement:complete", "fabrik:auto-merge-enabled"},
+		Labels: []string{"stage:Implement:complete", "stage:Validate:complete", "fabrik:auto-merge-enabled"},
 	}
 	advancedItems := make(map[string]bool)
 	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
 
 	if len(client.updateStatusCalls) > 0 {
-		t.Error("expected no status update for auto-merge-enabled item")
+		t.Error("expected no status update for auto-merge-enabled item with stage:Validate:complete already present")
+	}
+}
+
+// TestValidatePRTerminalAdvance_AutoMergeWithoutComplete_Heals is the
+// regression test for Pruefer's PR #1388 follow-up finding: fabrik:auto-merge-enabled
+// present WITHOUT stage:Validate:complete violates the invariant
+// attemptMergeOnValidate is assumed to maintain (the label always coexists
+// with the completion label). Before this fix, advanceValidateTerminalItem
+// unconditionally deferred to checkAutoMergeConvergence (Phase 1) in this
+// case too — but Phase 1 is gated on hasComplete, so it never actually sees
+// an item missing stage:Validate:complete, and for a closed item dispatch
+// admission also requires that label. The item had no owner left and was
+// silently and permanently stranded (only a warning log, per the prior
+// review round). The fix falls through to heal it via the normal
+// merge-vs-pause flow instead of skipping.
+func TestValidatePRTerminalAdvance_AutoMergeWithoutComplete_Heals(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 3, Merged: true}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 31,
+		ItemID: "PVTI_31",
+		Status: "Validate",
+		Labels: []string{"stage:Implement:complete", "fabrik:auto-merge-enabled"},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected the invariant-violating item to be healed (advanced to Done), got %d status updates", len(client.updateStatusCalls))
 	}
 }
 
@@ -583,5 +632,286 @@ func TestValidatePRTerminalAdvance_DefaultBase_DoesNotCloseIssue(t *testing.T) {
 
 	if len(client.closeIssueCalls) != 0 {
 		t.Errorf("expected no CloseIssue call when base == default, got %v", client.closeIssueCalls)
+	}
+}
+
+// TestValidatePRTerminalAdvance_ClosedItemSkipped_NoFetch (ADR-1387) verifies
+// that runValidatePRTerminalAdvance — now the open-item-only owner — never
+// touches a closed item: no FetchLinkedPR call, no label mutation, no advance.
+// Closed items at Validate are the exclusive responsibility of the
+// board-sourced sibling, settleClosedValidateAdvance.
+func TestValidatePRTerminalAdvance_ClosedItemSkipped_NoFetch(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	fetchCalls := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchCalls++
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:   42,
+		ItemID:   "PVTI_42",
+		Status:   "Validate",
+		IsClosed: true,
+		Labels:   []string{"stage:Implement:complete", "fabrik:awaiting-ci"},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	if fetchCalls != 0 {
+		t.Errorf("expected FetchLinkedPR to never be called for a closed item, got %d call(s)", fetchCalls)
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Error("expected no status update for a closed item")
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Error("expected no label mutation for a closed item")
+	}
+	if advancedItems[issueKey(item, eng.defaultRepo())] {
+		t.Error("expected closed item to not be marked as advanced by the open-item owner")
+	}
+}
+
+// TestSettleClosedValidateAdvance_TableDriven mirrors
+// TestValidatePRTerminalAdvance_TableDriven's gate-label × PR-state matrix, but
+// for closed items sourced from board.Items via settleClosedValidateAdvance
+// (ADR-1387, R2/R4). Confirms #874-class healing continues to work now that
+// dispatch admission no longer feeds the settle-owner.
+func TestSettleClosedValidateAdvance_TableDriven(t *testing.T) {
+	stgs := terminalAdvanceStages()
+
+	cases := []struct {
+		name          string
+		gateLabel     string
+		prMerged      bool
+		prState       string
+		alreadyPaused bool
+		wantAdvanced  bool
+		wantPaused    bool
+		wantSkipped   bool
+	}{
+		{name: "none/merged", gateLabel: "", prMerged: true, prState: "closed", wantAdvanced: true},
+		{name: "none/closed-unmerged", gateLabel: "", prMerged: false, prState: "closed", wantPaused: true},
+		{name: "none/open", gateLabel: "", prMerged: false, prState: "open", wantSkipped: true},
+
+		{name: "awaiting-ci/merged", gateLabel: "fabrik:awaiting-ci", prMerged: true, prState: "closed", wantAdvanced: true},
+		{name: "awaiting-ci/closed-unmerged", gateLabel: "fabrik:awaiting-ci", prMerged: false, prState: "closed", wantPaused: true},
+
+		{name: "awaiting-review/merged", gateLabel: "fabrik:awaiting-review", prMerged: true, prState: "closed", wantAdvanced: true},
+		{name: "awaiting-review/paused/merged", gateLabel: "fabrik:awaiting-review", prMerged: true, prState: "closed", alreadyPaused: true, wantAdvanced: true},
+		// Regression case for the label-hygiene gap Pruefer caught on PR #1388:
+		// pauseForPRClosedNotMerged must clear fabrik:awaiting-review, not just
+		// fabrik:awaiting-ci — cleanupClosedIssueTransientLabels no longer sweeps
+		// it at Validate (R6), so this is the only place left to clear it.
+		{name: "awaiting-review/closed-unmerged", gateLabel: "fabrik:awaiting-review", prMerged: false, prState: "closed", wantPaused: true},
+
+		{name: "paused-only/merged", gateLabel: "", prMerged: true, prState: "closed", alreadyPaused: true, wantAdvanced: true},
+
+		{name: "rebase-needed/merged", gateLabel: "fabrik:rebase-needed", prMerged: true, prState: "closed", wantAdvanced: true},
+		// Same regression case as above, for fabrik:rebase-needed.
+		{name: "rebase-needed/closed-unmerged", gateLabel: "fabrik:rebase-needed", prMerged: false, prState: "closed", wantPaused: true},
+
+		// Already paused + closed-unmerged — must skip to avoid a duplicate comment.
+		{name: "awaiting-ci+paused/closed-unmerged", gateLabel: "fabrik:awaiting-ci", prMerged: false, prState: "closed", alreadyPaused: true, wantSkipped: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockGitHubClient{
+				fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+					return &gh.PRDetails{Number: 10, Merged: tc.prMerged, State: tc.prState}, nil
+				},
+			}
+			eng := testEngineWithStages(t, client, stgs)
+
+			labels := []string{"stage:Implement:complete"}
+			if tc.gateLabel != "" {
+				labels = append(labels, tc.gateLabel)
+			}
+			if tc.alreadyPaused {
+				labels = append(labels, "fabrik:paused")
+			}
+
+			item := gh.ProjectItem{
+				Number:   42,
+				ItemID:   "PVTI_42",
+				Status:   "Validate",
+				IsClosed: true,
+				Labels:   labels,
+			}
+			board := &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{item}}
+			advancedItems := make(map[string]bool)
+			eng.settleClosedValidateAdvance(board, advancedItems)
+
+			iKey := issueKey(item, eng.defaultRepo())
+
+			switch {
+			case tc.wantAdvanced:
+				if !advancedItems[iKey] {
+					t.Errorf("expected closed item to be marked as advanced in advancedItems")
+				}
+				if len(client.updateStatusCalls) == 0 {
+					t.Errorf("expected advanceToNextStage to call UpdateProjectItemStatus")
+				}
+				added := addedLabelNames(client.addLabelCalls)
+				if !containsLabel(added, "stage:Validate:complete") {
+					t.Errorf("expected stage:Validate:complete to be added; got %v", added)
+				}
+				if tc.gateLabel != "" {
+					removed := removedLabelNames(client.removeLabelCalls)
+					if !containsLabel(removed, tc.gateLabel) {
+						t.Errorf("expected gate label %q to be removed; got %v", tc.gateLabel, removed)
+					}
+				}
+				if tc.alreadyPaused {
+					removed := removedLabelNames(client.removeLabelCalls)
+					if !containsLabel(removed, "fabrik:paused") {
+						t.Errorf("expected fabrik:paused to be removed; got %v", removed)
+					}
+				}
+
+			case tc.wantPaused:
+				if advancedItems[iKey] {
+					t.Errorf("expected closed item NOT to be advanced on closed-unmerged PR")
+				}
+				if len(client.addCommentCalls) == 0 {
+					t.Errorf("expected pauseForPRClosedNotMerged to post a comment")
+				}
+				added := addedLabelNames(client.addLabelCalls)
+				if !containsLabel(added, "fabrik:paused") {
+					t.Errorf("expected fabrik:paused to be added; got %v", added)
+				}
+				// pauseForPRClosedNotMerged must clear whichever gate label was
+				// present — cleanupClosedIssueTransientLabels no longer sweeps it
+				// independently for a closed item at Validate (R6, ADR-1387).
+				if tc.gateLabel != "" {
+					removed := removedLabelNames(client.removeLabelCalls)
+					if !containsLabel(removed, tc.gateLabel) {
+						t.Errorf("expected gate label %q to be removed on pause; got %v", tc.gateLabel, removed)
+					}
+				}
+
+			case tc.wantSkipped:
+				if advancedItems[iKey] {
+					t.Errorf("expected closed item NOT to be advanced")
+				}
+				if len(client.addCommentCalls) > 0 {
+					t.Errorf("expected no comment; got %d comment(s)", len(client.addCommentCalls))
+				}
+				if len(client.updateStatusCalls) > 0 {
+					t.Errorf("expected no status update; got %d call(s)", len(client.updateStatusCalls))
+				}
+			}
+		})
+	}
+}
+
+// TestSettleClosedValidateAdvance_AutoMergeWithoutComplete_Heals is the
+// closed-item counterpart of TestValidatePRTerminalAdvance_AutoMergeWithoutComplete_Heals:
+// a CLOSED item at Validate carrying fabrik:auto-merge-enabled without
+// stage:Validate:complete — dispatch admission refuses it (no
+// stage:Validate:complete, no cleanup stage) and checkAutoMergeConvergence
+// (Phase 1) is gated on hasComplete, so it never sees this item either.
+// Before this fix, settleClosedValidateAdvance's shared per-item logic
+// (advanceValidateTerminalItem) skipped with only a warning; because
+// fabrik:auto-merge-enabled is not in gateSettleOwnedTransientLabels, the
+// same poll's later cleanupClosedIssueTransientLabels sweep would remove it
+// unconditionally (closed-item items only), and the next poll would then heal
+// it normally — a one-poll-cycle delay, not the permanent strand the prior
+// version of this comment claimed (corrected on a follow-up review pass, PR
+// #1388). Healing inline is still worth it: no dependency on sweep ordering,
+// no wasted poll cycle, and it's the only fix available for the analogous
+// open-item case (TestValidatePRTerminalAdvance_AutoMergeWithoutComplete_Heals),
+// which has no sweep to fall back on since cleanupClosedIssueTransientLabels
+// only ever runs on closed issues.
+func TestSettleClosedValidateAdvance_AutoMergeWithoutComplete_Heals(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 11, Merged: true, State: "closed"}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	item := gh.ProjectItem{
+		Number:   44,
+		ItemID:   "PVTI_44",
+		Status:   "Validate",
+		IsClosed: true,
+		Labels:   []string{"stage:Implement:complete", "fabrik:auto-merge-enabled"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{item}}
+	advancedItems := make(map[string]bool)
+	eng.settleClosedValidateAdvance(board, advancedItems)
+
+	iKey := issueKey(item, eng.defaultRepo())
+	if !advancedItems[iKey] {
+		t.Error("expected the invariant-violating closed item to be healed (marked advanced)")
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected exactly one status update advancing the item to Done, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// TestSettleClosedValidateAdvance_OpenItemSkipped verifies the IsClosed
+// partition holds in the other direction: settleClosedValidateAdvance never
+// touches an open item, even one sourced from board.Items.
+func TestSettleClosedValidateAdvance_OpenItemSkipped(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	fetchCalls := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchCalls++
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	item := gh.ProjectItem{
+		Number:   43,
+		ItemID:   "PVTI_43",
+		Status:   "Validate",
+		IsClosed: false,
+		Labels:   []string{"stage:Implement:complete"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{item}}
+	advancedItems := make(map[string]bool)
+	eng.settleClosedValidateAdvance(board, advancedItems)
+
+	if fetchCalls != 0 {
+		t.Errorf("expected FetchLinkedPR to never be called for an open item, got %d call(s)", fetchCalls)
+	}
+	if advancedItems[issueKey(item, eng.defaultRepo())] {
+		t.Error("expected open item to not be marked as advanced by settleClosedValidateAdvance")
+	}
+}
+
+// TestSettleClosedValidateAdvance_NoDoubleAdvance verifies dedup via
+// advancedItems holds for the closed-item owner too, mirroring
+// TestValidatePRTerminalAdvance_NoDoubleAdvance.
+func TestSettleClosedValidateAdvance_NoDoubleAdvance(t *testing.T) {
+	stgs := terminalAdvanceStages()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, Merged: true}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	item := gh.ProjectItem{
+		Number:   20,
+		ItemID:   "PVTI_20",
+		Status:   "Validate",
+		IsClosed: true,
+		Labels:   []string{"stage:Implement:complete"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{item}}
+	advancedItems := map[string]bool{
+		issueKey(item, eng.defaultRepo()): true,
+	}
+	eng.settleClosedValidateAdvance(board, advancedItems)
+
+	if len(client.updateStatusCalls) > 0 {
+		t.Error("expected no status update for already-advanced closed item")
 	}
 }

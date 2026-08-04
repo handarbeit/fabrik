@@ -747,14 +747,59 @@ var transientLifecycleLabels = []string{
 	"fabrik:api-key-helper-detected",
 }
 
+// gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
+// that settleClosedValidateAdvance / runValidatePRTerminalAdvance clear
+// themselves, atomically, as part of a real merge/pause transition (ADR-1387,
+// R6). For a closed item resolved to the Validate stage specifically,
+// cleanupClosedIssueTransientLabels must not strip these out from under the
+// settle-owner before it gets a chance to observe them: doing so was the
+// second half of the mechanism behind the pre-ADR-1387 unbounded post-close
+// dispatch loop — the generic sweep removed fabrik:awaiting-ci (the label
+// suppressing re-dispatch) without ever supplying the stage:Validate:complete
+// it was deferring, leaving the item with neither. fabrik:auto-merge-enabled
+// is deliberately NOT included: attemptMergeOnValidate's auto-merge/enqueue/
+// direct-merge branches only ever apply it once stage:Validate:complete
+// already exists, so it never participates in the stranding mechanism and
+// excluding it here would be a no-op, not a fix.
+var gateSettleOwnedTransientLabels = map[string]struct{}{
+	"fabrik:awaiting-ci":     {},
+	"fabrik:awaiting-review": {},
+	"fabrik:rebase-needed":   {},
+}
+
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
 // closed issues on the board. It runs every poll cycle as a defensive sweep so
 // issues do not carry stale operational labels into terminal state (#617).
+//
+// For a closed item resolved specifically to the Validate stage — not
+// stageIsGateChecked generally, which also matches any other stage configured
+// with wait_for_reviews: true (e.g. the default Review stage): the settle-
+// owner pair (runValidatePRTerminalAdvance / settleClosedValidateAdvance)
+// only ever processes stage.Name == "Validate" (a pre-existing, deliberately
+// unchanged inconsistency — see ADR-1387), so excluding a label at any other
+// gate-checked stage would strand it with no owner left to clear it — the
+// labels in gateSettleOwnedTransientLabels are skipped (R6, ADR-1387). They
+// are owned by that settle-owner pair, which clears them itself as part of a
+// real transition; this sweep racing ahead of that transition previously
+// stranded the item with neither the gate label nor the completion label it
+// was deferring.
 func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 	for _, item := range board.Items {
 		if !item.IsClosed {
 			continue
 		}
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		atValidateStage := stage != nil && stage.Name == "Validate"
+		// A closed item at a gate-checked stage other than Validate (e.g. the
+		// shipped default Review stage, wait_for_reviews: true — see
+		// stages/examples/review.yaml) has its gate label swept unconditionally
+		// below, same as any non-Validate stage. This is safe: settleClosedItemsToDone
+		// (engine/closed_item_advance_settle.go) owns every closed item except
+		// Validate, unconditionally of label state, so sweeping the gate label
+		// here does not strand the item — it advances to Done regardless (ADR-1387
+		// follow-up, caught in review on PR #1388; a first version of this fix
+		// excluded stageIsGateChecked(stage) generally instead of stage.Name ==
+		// "Validate" specifically, which left exactly this case with no owner).
 		labelSet := make(map[string]struct{}, len(item.Labels))
 		for _, l := range item.Labels {
 			labelSet[l] = struct{}{}
@@ -764,6 +809,11 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 		for _, label := range transientLifecycleLabels {
 			if _, has := labelSet[label]; !has {
 				continue
+			}
+			if atValidateStage {
+				if _, owned := gateSettleOwnedTransientLabels[label]; owned {
+					continue
+				}
 			}
 			if err := e.client.RemoveLabelFromIssue(owner, repo, num, label); err != nil {
 				if errors.Is(err, gh.ErrNotFound) {
@@ -1110,7 +1160,22 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Single-owner PR terminal advance: the authoritative path for all
 	// "Validate-stage PR merged → advance to Done" transitions (ADR-056 D2).
 	// Runs regardless of which gate label is present; no label negation required.
+	// Open-item half only (ADR-1387) — sourced from deepFetchCandidates, which
+	// no longer admits closed items at Validate. The closed-item half is the
+	// board-sourced settleClosedValidateAdvance immediately below.
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
+
+	// Closed-item Validate terminal advance settle scan (ADR-1387): the
+	// exclusive owner of closed items at Validate specifically — not "any
+	// gate-checked stage" (advanceValidateTerminalItem hardcodes
+	// stage.Name == "Validate", not stageIsGateChecked; a closed item at a
+	// non-Validate gate-checked stage, e.g. the shipped default Review,
+	// wait_for_reviews: true, is instead handled by settleClosedItemsToDone's
+	// plain move-to-Done — see its doc comment). Runs over the raw board
+	// snapshot, not deepFetchCandidates — the whole point is independence
+	// from dispatch admission, which after ADR-1387 no longer admits closed
+	// items at Validate. See its doc comment.
+	e.settleClosedValidateAdvance(board, advancedItems)
 
 	// Awaiting-CI settle scan (#1270): the sole per-poll evaluator of the CI gate
 	// for open, not-yet-complete fabrik:awaiting-ci items. Runs over the raw board
@@ -1195,9 +1260,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// deepFetchCandidates and is never dispatched again — its worktree leaks and
 	// it never gets archived. Sourced from board.Items directly, same rationale
 	// as the child-placement scan above. Gate-checked stages (Validate) are
-	// excluded — those closed items remain the exclusive responsibility of
-	// runValidatePRTerminalAdvance, to avoid double-advance/racing between the
-	// two settle-owners.
+	// excluded — those closed items remain the exclusive responsibility of the
+	// settleClosedValidateAdvance/runValidatePRTerminalAdvance pair (ADR-1387),
+	// to avoid double-advance/racing between the settle-owners.
 	e.settleClosedItemsToDone(board)
 
 	// Done-item archival (ADR-068): archives board items that have sat in the Done

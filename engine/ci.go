@@ -499,7 +499,18 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 
 // pauseForPRClosedNotMerged pauses the issue when the linked PR was closed
 // without merging (R2). Posts an explanatory comment naming the PR, applies
-// fabrik:paused + fabrik:awaiting-input, and removes fabrik:awaiting-ci.
+// fabrik:paused + fabrik:awaiting-input, and removes all three gate labels
+// (fabrik:awaiting-ci, fabrik:awaiting-review, fabrik:rebase-needed) — not
+// just fabrik:awaiting-ci — so a closed-unmerged item carrying any one of
+// them doesn't get permanently stranded with that label once paused. This
+// matters specifically for a closed item at Validate (ADR-1387, R6):
+// cleanupClosedIssueTransientLabels now withholds these three labels from its
+// generic sweep there on the assumption the settle-owner
+// (advanceValidateTerminalItem, which calls this function on the
+// closed-and-not-merged branch) clears them atomically as part of its own
+// transition. Once fabrik:paused is set, subsequent polls short-circuit
+// before ever reaching this function again, so this is the only chance to
+// clear them.
 func (e *Engine) pauseForPRClosedNotMerged(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "ci-gate", "PR #%d closed without merging — pausing for human intervention\n", prNumber)
@@ -517,6 +528,8 @@ func (e *Engine) pauseForPRClosedNotMerged(_ *gh.ProjectBoard, item gh.ProjectIt
 		reactRocket:   true,
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
+	e.removeAwaitingReviewLabel(owner, repo, item)
+	e.removeRebaseNeededLabel(owner, repo, item)
 }
 
 // pauseForRequiredNeverRunningCheck pauses the issue when the linked PR is
