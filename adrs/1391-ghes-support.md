@@ -69,15 +69,31 @@ constructor Research found) share one `resolveGHESHost` helper rather than dupli
 the ladder logic. Absent configuration, `GHESHost` is `""` and every downstream
 consumer below falls back to literal `"github.com"` — the default path is unchanged.
 
-**Self-upgrade gets a dedicated, always-github.com client.** `Engine` gains a
-`releaseClient GitHubClient` field, always constructed via plain
-`gh.NewClient(cfg.Token)` regardless of `GHESHost`. `checkReleaseUpgrade` uses
-`e.releaseClient` instead of `e.client`. `NewWithDeps` (the test-construction path)
-sets `releaseClient = client`, so every existing mock-based upgrade test is unaffected
-— `releaseClient` only diverges from `client` in `New()` when a GHES host is actually
-configured. This directly addresses the self-upgrade wrong-host risk Research
-surfaced: Fabrik's own release always lives on `github.com/handarbeit/fabrik`, and now
+**Self-upgrade gets a dedicated, always-github.com client — endpoint and
+credential both.** `Engine` gains a `releaseClient GitHubClient` field,
+always constructed against `defaultBaseURL` regardless of `GHESHost`.
+`checkReleaseUpgrade` uses `e.releaseClient` instead of `e.client`.
+`NewWithDeps` (the test-construction path) sets `releaseClient = client`, so
+every existing mock-based upgrade test is unaffected — `releaseClient` only
+diverges from `client` in `New()` when a GHES host is actually configured.
+This directly addresses the self-upgrade wrong-host risk Research surfaced:
+Fabrik's own release always lives on `github.com/handarbeit/fabrik`, and now
 always resolves there no matter what the managed project's host is.
+
+The *credential* needed the same isolation as the endpoint, caught in review
+after the initial Implement pass: `releaseClient` was first built with
+`gh.NewClient(cfg.Token)`, which pins the URL to github.com but still sends
+`cfg.Token` as the bearer credential. When a GHES host is configured,
+`cfg.Token` authenticates *that* instance, not github.com — GitHub's REST
+API rejects a request bearing an invalid token with 401 "Bad credentials"
+rather than falling back to unauthenticated, so this would silently break
+self-upgrade end to end on every GHES deployment. `releaseUpgradeToken(cfg)`
+(`engine/upgrade.go`) returns `cfg.Token` unchanged on the default path and
+`""` whenever `GHESHost` is set; `handarbeit/fabrik`'s releases are public,
+so the unauthenticated fallback still works (just more tightly
+rate-limited). Both `releaseClient`'s construction in `New()` and
+`checkReleaseUpgrade`'s asset-download `Token` field go through this same
+helper, so the two can't drift.
 
 **A second concrete client for the version-floor preflight, not an interface
 addition.** `Engine` also gains `hostClient *gh.Client` — the same underlying client
