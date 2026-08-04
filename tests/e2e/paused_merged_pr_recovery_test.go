@@ -45,7 +45,7 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 		name      string
 		gateLabel string
 	}{
-		{"awaiting-ci", "fabrik:awaiting-ci"},       // R1
+		{"awaiting-ci", "fabrik:awaiting-ci"},         // R1
 		{"awaiting-review", "fabrik:awaiting-review"}, // R2
 		{"no-gate-label", ""},                         // R3 (control)
 	}
