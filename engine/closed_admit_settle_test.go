@@ -241,8 +241,8 @@ func TestItemMayNeedWork_OpenItems_UnaffectedByClosedIssueGuard(t *testing.T) {
 		{"Implement", "Implement", true},
 		{"Review", "Review", true},
 		{"Validate", "Validate", true},
-		{"CleanupWorktree_Done", "Done", false}, // no worktree on disk, not closed -> false
-		{"Unmanaged_Backlog", "Backlog", false}, // Unmanaged stages are never dispatched
+		{"CleanupWorktree_Done", "Done", false},  // no worktree on disk, not closed -> false
+		{"Unmanaged_Backlog", "Backlog", false},  // Unmanaged stages are never dispatched
 		{"HoldingStage_Queued", "Queued", false}, // Holding stages are batch-scoped, never per-item
 	}
 	for _, tc := range cases {
