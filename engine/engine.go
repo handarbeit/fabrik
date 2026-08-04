@@ -71,6 +71,7 @@ type Config struct {
 	SessionRetentionDays      int           // .session files older than this many days are pruned; 0 disables age-based pruning (default 14)
 	ArchiveAfter              time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
 	ArchiveDone               string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
+	GHESHost                  string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
@@ -88,6 +89,8 @@ type cloneCall struct {
 type Engine struct {
 	cfg                         Config
 	client                      GitHubClient
+	releaseClient               GitHubClient          // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
+	hostClient                  *gh.Client            // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	readClient                  boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                      ClaudeInvoker
 	statusField                 *gh.StatusField
@@ -194,6 +197,7 @@ func New(cfg Config) (*Engine, error) {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
 	claudeGHToken = cfg.Token
+	claudeGHHost = cfg.GHESHost
 	claudeAnthropicAPIKey = os.Getenv("FABRIK_ANTHROPIC_API_KEY")
 	claudeAnthropicEnvPassthrough = parseAnthropicEnvPassthrough(os.Getenv("FABRIK_ANTHROPIC_ENV_PASSTHROUGH"))
 
@@ -212,11 +216,22 @@ func New(cfg Config) (*Engine, error) {
 
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
-	ghClient := gh.NewClient(cfg.Token)
+	var ghClient *gh.Client
+	if cfg.GHESHost != "" {
+		ghClient = gh.NewClientForHost(cfg.Token, cfg.GHESHost)
+	} else {
+		ghClient = gh.NewClient(cfg.Token)
+	}
 	ghClient.SetMergeStrategy(cfg.AutoMergeStrategy)
+	// Fabrik's own release always lives on github.com/handarbeit/fabrik, never
+	// on a customer's GHES instance, so self-upgrade needs a dedicated client
+	// pinned to github.com regardless of cfg.GHESHost (see checkReleaseUpgrade).
+	releaseClient := gh.NewClient(cfg.Token)
 	eng := &Engine{
 		cfg:                      cfg,
 		client:                   ghClient,
+		releaseClient:            releaseClient,
+		hostClient:               ghClient,
 		claude:                   &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:         make(map[string]*WorktreeManager),
 		fabrikDir:                fabrikDir,
@@ -274,6 +289,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	eng := &Engine{
 		cfg:                      cfg,
 		client:                   client,
+		releaseClient:            client,
 		claude:                   claude,
 		worktreeManagers:         wms,
 		store:                    itemstate.NewStore(nil),
