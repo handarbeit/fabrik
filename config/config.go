@@ -47,6 +47,11 @@ type ProjectConfig struct {
 	TrainTrialWindow          *int     `yaml:"train_trial_window"`
 	MaxCommentCyclesPerWindow *int     `yaml:"max_comment_cycles_per_window"`
 	CommentCycleWindow        *int     `yaml:"comment_cycle_window"`
+	// GHESHost is the hostname of a GitHub Enterprise Server instance (e.g.
+	// "github.example.com"), with no scheme or trailing slash. Empty (the
+	// default) means github.com — no behavior change from before GHES
+	// support existed. See NormalizeGHESHost.
+	GHESHost string `yaml:"ghes_host"`
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no
@@ -133,6 +138,17 @@ func isInGitignore(filename string) bool {
 		return true
 	}
 	return false
+}
+
+// NormalizeGHESHost strips a leading "https://"/"http://" scheme and any
+// trailing "/" from a user-supplied GHES host value, so a flag/env/config
+// value of "https://github.example.com/" and "github.example.com" resolve
+// identically. An empty input returns empty (the github.com default).
+func NormalizeGHESHost(host string) string {
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimSuffix(host, "/")
+	return host
 }
 
 // Token returns the GitHub token, preferring FABRIK_TOKEN over GITHUB_TOKEN.
