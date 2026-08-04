@@ -321,6 +321,30 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		// No store entry (first dispatch or restart): admit.
 	}
 
+	// A closed item admitted by the gate at the top of this function via
+	// stage:<stage>:complete must never reach a real Claude invocation (R1,
+	// ADR-1387). A cleanup stage is the only other way through that gate and is
+	// R1's sole exception (worktree reaping, not computation), so it is excluded
+	// here. Every remaining path out of this function that
+	// can return true for such an item is comment-triggered — the awaiting-input
+	// resume, the paused-unpause resume, and the plain new-comment path below —
+	// so a single guard here closes all three.
+	//
+	// The plain new-comment path was originally the only one guarded, on the
+	// reasoning that the "already completed this stage" check further down
+	// rejects a closed item anyway. That reasoning does not hold for the two
+	// resume branches: both return before reaching it, so a closed item carrying
+	// stage:<stage>:complete together with fabrik:paused / fabrik:awaiting-input
+	// was still dispatched on a new human comment (Pruefer, PR #1388). That
+	// combination is reachable — the pause paths (comment_breaker.go, reviews.go)
+	// apply the pause labels without touching the completion label, and
+	// settleClosedItemsToDone deliberately treats closed+paused as a normal state
+	// (TestSettleClosedItemsToDone_IgnoresLabelState). Guarding once, ahead of
+	// all three, is what actually establishes the invariant.
+	if item.IsClosed && !stage.CleanupWorktree {
+		return false
+	}
+
 	// Awaiting-input items: new human comment = resume trigger; no human
 	// comment (or bot-only chatter) = skip.
 	if awaitingInput {
@@ -348,17 +372,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	// New comments are always worth processing (even on completed stages) —
-	// except on a closed item (R1, ADR-1387): a closed item must never reach a
-	// real Claude invocation, regardless of new comments. The closed-issue
-	// gate above only lets a closed item reach this point via stage:complete
-	// (or a cleanup stage, already returned earlier) — pre-existing,
-	// independent of this issue's original CI-gate-loop regression, but a
-	// second instance of the same class of bug (Pruefer, PR #1388). Not
-	// short-circuiting here for a closed item is sufficient on its own: the
-	// "already completed this stage" check below already rejects it.
+	// except on a closed item (R1, ADR-1387). The guard above already returns
+	// for every closed item other than one at a cleanup stage, so this check
+	// covers only that remaining case: a cleanup stage's dispatch exception
+	// exists for worktree reaping, which the fall-through below reaches; it is
+	// not a licence to route a closed item into comment processing.
 	if !item.IsClosed {
 		newComments := e.findNewComments(item)
-		if len(newComments) > 0 {
+		if len(newComments) > 0 && !item.IsClosed {
 			return true
 		}
 	}
@@ -460,6 +481,22 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.logf(item.Number, "skip", "is being edited\n")
 			return nil
 		}
+	}
+
+	// Mirror of itemNeedsWork's closed-item guard (R1, ADR-1387): the two
+	// comment-triggered resume branches below (awaiting-input, paused-unpause)
+	// each call processComments directly — a real Claude invocation — and
+	// neither is reached via the plain new-comment path further down that
+	// already carries an !item.IsClosed check. itemNeedsWork's guard prevents
+	// processItem from being invoked at all for this case, so this is a
+	// redundant-but-explicit ownership boundary rather than a load-bearing
+	// filter, matching the same idiom used elsewhere in ADR-1387 (e.g.
+	// runValidatePRTerminalAdvance's own IsClosed skip). Cleanup stages are
+	// excluded for the same reason as in itemNeedsWork: their dispatch
+	// exception is for worktree reaping, reached below, not comment processing.
+	if item.IsClosed && !stage.CleanupWorktree {
+		e.logf(item.Number, "skip", "closed issue — comment-triggered resume suppressed (ADR-1387)\n")
+		return nil
 	}
 
 	// Awaiting-input: paused because Claude needs user input. If the user has

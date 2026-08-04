@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -281,6 +282,89 @@ func TestItemMayNeedWork_OpenItems_UnaffectedByClosedIssueGuard(t *testing.T) {
 			got := eng.itemMayNeedWork(item)
 			if got != tc.want {
 				t.Errorf("itemMayNeedWork(open item at %s) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// R1/ADR-1387, second instance: the comment-triggered resume branches.
+//
+// A closed item carrying stage:<stage>:complete passes itemNeedsWork's
+// closed-issue gate. Before this guard, the awaiting-input and paused-unpause
+// branches both sat above the plain new-comment path's !item.IsClosed check and
+// returned true on a new human comment — dispatching a closed item to a real
+// Claude invocation, exactly the invariant ADR-1387 exists to establish. The
+// combination is reachable: the pause paths apply fabrik:paused /
+// fabrik:awaiting-input without touching the completion label, and
+// settleClosedItemsToDone deliberately treats closed+paused as normal
+// (TestSettleClosedItemsToDone_IgnoresLabelState).
+func TestItemNeedsWork_ClosedAtValidate_ResumeBranches_NotAdmitted(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+	}{
+		{"awaiting-input", []string{"stage:Validate:complete", "fabrik:paused", "fabrik:awaiting-input"}},
+		{"paused only", []string{"stage:Validate:complete", "fabrik:paused"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := gateCheckedEngine(t)
+			item := gh.ProjectItem{
+				Number:   21,
+				Status:   "Validate",
+				IsClosed: true,
+				Labels:   tc.labels,
+				Comments: []gh.Comment{
+					{ID: "C-human", Author: "a-real-person", Body: "please pick this back up"},
+				},
+			}
+			if eng.itemNeedsWork(item) {
+				t.Errorf("closed item with %v and a new human comment must NOT pass itemNeedsWork (R1, ADR-1387) — the resume branches route straight to processComments, a real Claude invocation", tc.labels)
+			}
+		})
+	}
+}
+
+// The same guard mirrored in processItem: even if itemNeedsWork were bypassed,
+// neither resume branch may reach processComments on a closed item. Asserted on
+// the invoker call count, not on a label transition, so it cannot pass by way of
+// some other path declining to run.
+//
+// The two subtests exercise different guards, and each was confirmed to fail
+// without its own. awaiting-input is blocked by the guard below, which is the
+// only thing standing between it and a direct processComments call. paused-only
+// falls through the unpause branch and is instead blocked by the pre-existing
+// !item.IsClosed condition on the plain new-comment dispatch further down; it is
+// kept here as the regression guard for that condition.
+func TestProcessItem_ClosedAtValidate_ResumeBranches_NoClaudeInvocation(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+	}{
+		{"awaiting-input", []string{"stage:Validate:complete", "fabrik:paused", "fabrik:awaiting-input"}},
+		{"paused only", []string{"stage:Validate:complete", "fabrik:paused"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			claude := &mockClaudeInvoker{}
+			eng := NewWithDeps(
+				Config{Owner: "o", Repo: "r", User: "u", Token: "t", Stages: gateCheckedStages()},
+				&mockGitHubClient{}, claude, NewWorktreeManager(t.TempDir()),
+			)
+			item := gh.ProjectItem{
+				Number:   22,
+				Status:   "Validate",
+				IsClosed: true,
+				Labels:   tc.labels,
+				Comments: []gh.Comment{
+					{ID: "C-human", Author: "a-real-person", Body: "please pick this back up"},
+				},
+			}
+			if err := eng.processItem(context.Background(), &gh.ProjectBoard{Items: []gh.ProjectItem{item}}, item); err != nil {
+				t.Fatalf("processItem returned error: %v", err)
+			}
+			if n := len(claude.calls) + len(claude.forCommentsCalls); n > 0 {
+				t.Errorf("closed item with %v produced %d Claude invocation(s); want 0 (R1, ADR-1387)", tc.labels, n)
 			}
 		})
 	}

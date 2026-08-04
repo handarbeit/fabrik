@@ -259,11 +259,29 @@ was this issue's original trigger — it predates commit `7311a14e` and is not a
 introduced.
 
 R1 as stated is unconditional ("a closed item is never dispatched … the sole exception is a
-`cleanup_worktree` stage"), so this is closed on the same terms as the rest of the invariant: both
-fast paths now skip when `item.IsClosed`. In `itemNeedsWork`, simply not short-circuiting on the new
-comment is sufficient — the pre-existing "already completed this stage" check just below it already
-rejects a closed+`stage:complete` item once the fast path stops pre-empting it. In `processItem`, the
-added `!item.IsClosed` guard is redundant-but-explicit (itemNeedsWork's gate already prevents
+`cleanup_worktree` stage"), so this is closed on the same terms as the rest of the invariant: every
+comment-triggered path out of `itemNeedsWork` now skips when `item.IsClosed`.
+
+**A first pass guarded only the plain new-comment fast path, which was not sufficient** — caught by a
+second Pruefer review on PR #1388. That pass rested on the reasoning that the "already completed this
+stage" check just below rejects a closed+`stage:complete` item once the fast path stops pre-empting
+it. That holds for the fast path itself, but not for the two *comment-triggered resume* branches
+above it: `awaitingInput` and `isPaused` each return `true` on a new human comment and never reach
+that check. Their `processItem` counterparts call `processComments` directly. So a closed item
+carrying `stage:<X>:complete` **together with** `fabrik:paused` / `fabrik:awaiting-input` was still
+dispatched on a human comment. That combination is reachable, not hypothetical: the pause paths
+(`comment_breaker.go`, `reviews.go`) apply the pause labels without touching the completion label,
+and `settleClosedItemsToDone` deliberately treats closed+paused as a normal state
+(`TestSettleClosedItemsToDone_IgnoresLabelState`).
+
+The guard is therefore placed **once, ahead of all three branches** — `if item.IsClosed &&
+!stage.CleanupWorktree { return false }` — rather than repeated per branch, so a future branch added
+above the fast path cannot reintroduce the same gap. The cleanup-stage exclusion is R1's stated
+exception: that dispatch exception exists for worktree reaping, which the fall-through below reaches,
+and is not a licence to route a closed item into comment processing — hence the `!item.IsClosed`
+condition on the fast path is retained as well, covering the one closed case the guard lets past.
+
+In `processItem`, the mirrored guard is redundant-but-explicit (itemNeedsWork's gate already prevents
 `processItem` from being invoked at all for a closed item outside a cleanup stage) — the same
 ownership-boundary idiom used for `runValidatePRTerminalAdvance`'s own `IsClosed` skip earlier in this
 ADR. A human comment on a closed, completed issue is no longer actionable by Fabrik at all — consistent
