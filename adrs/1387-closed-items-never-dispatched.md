@@ -154,8 +154,9 @@ is scoped to match exactly what the settle-owner pair actually processes.
 that is the entirety of ADR-064's contract ("closed items need reconciliation, not computation").
 Folding Validate's PR-fetch-and-decide logic into it would blur that contract and roughly double its
 complexity for no benefit: the two domains are already disjoint by construction
-(`stageIsGateChecked` partitions them in `settleClosedItemsToDone`), so consolidation would not
-improve race-safety, only increase blast radius. Keeping `settleClosedValidateAdvance` as a small,
+(`stage.Name == "Validate"` partitions them in `settleClosedItemsToDone` — see the "R1 Follow-up: Closed Item Stranded at a Non-Validate Gate-Checked Stage" section below
+for why this is `stage.Name`, not `stageIsGateChecked`), so consolidation would not improve
+race-safety, only increase blast radius. Keeping `settleClosedValidateAdvance` as a small,
 symmetric sibling to the existing open-item owner — sharing one extracted helper, not duplicating
 logic — is the smaller change and satisfies "single authoritative owner" (ADR-056 D2, ADR-057) in
 spirit: one union of healing logic, split only by feed and cost, never two independently-reasoning
@@ -185,12 +186,17 @@ depends on it.
 ### Why not generalize `advanceValidateTerminalItem` to `stageIsGateChecked` while touching this code?
 
 Doing so would let the settle-owner pair heal a closed item at *any* gate-checked stage, not just
-Validate — closing the "Known limitation" gap below. It is deliberately deferred: Validate is the
-only gate-checked stage today with real PR-merge/close authority (the standard pipeline shape merges
-PRs at or after Validate, never at Review), so this generalization has no current behavioral effect
-and would need its own test matrix for a hypothetical second gate-checked stage — unrelated to fixing
-this issue's confirmed, reported bug. Noted as an accepted pre-existing shape, not silently left
-unconsidered.
+Validate — one way to close the gap the "R1 Follow-up: Closed Item Stranded at a Non-Validate Gate-Checked Stage" section below describes. It is deliberately not taken:
+Validate is the only gate-checked stage today with real PR-merge/close authority (the standard
+pipeline shape merges PRs at or after Validate, never at Review), so the PR-fetch-and-decide logic
+`advanceValidateTerminalItem` implements (merged → fill labels/advance; closed-unmerged → pause) has
+nothing to check for a closed item at any other stage — that logic is Validate-specific, not a
+generic "any gate-checked stage" concern. The gap this would have closed is closed a different, smaller
+way instead: `settleClosedItemsToDone`'s exclusion is scoped to `stage.Name == "Validate"` rather than
+`stageIsGateChecked`, so a closed item at any other gate-checked stage (e.g. Review) gets the same
+plain "move to Done" treatment already correct for Specify/Plan/Implement — see the "R1 Follow-up:
+Closed Item Stranded at a Non-Validate Gate-Checked Stage" section below. Generalizing `advanceValidateTerminalItem` itself remains unnecessary: there is no PR-state
+nuance at Review for it to add.
 
 ## Consequences
 
@@ -207,22 +213,12 @@ unconsidered.
   for non-gate-checked columns — all explicitly out of scope and confirmed untouched.
 
 **Negative / Trade-offs:**
-- **Known limitation, deliberately out of scope, confirmed real (not hypothetical):** both shipped
-  default stage templates — `stages/examples/review.yaml` and `stages/examples/validate.yaml` — set
-  `wait_for_reviews: true`, so a deployment using the defaults has a **second** gate-checked stage
-  (Review) beyond Validate. A closed item stranded at Review with no `stage:Review:complete` is, after
-  this fix, never dispatched (R1 holds unconditionally) but also never healed by any settle-owner —
-  `settleClosedItemsToDone` already excludes `stageIsGateChecked` stages generally (pre-existing,
-  unchanged), deferring to "whichever settle-owner owns gate-checked closed items," but that owner
-  only ever answers for Validate. This is not a regression: before this fix, such an item was *admitted
-  to dispatch* and exhibited the identical unbounded-loop symptom this issue fixes for Validate, just
-  unreported. After this fix it trades a loud, token-burning symptom for a silent, stranding one.
-  Believed unreachable in the standard pipeline shape (PR-merge authority sits at Validate, not Review)
-  except via a human manually closing an issue mid-Review — see `docs/state-machine.md` §6.15 for the
-  full analysis.
 - `advanceValidateTerminalItem`'s pre-existing `stage.Name == "Validate"` hardcoding (rather than
-  `stageIsGateChecked`) is now load-bearing for two call sites instead of one — any future
-  generalization work touches both.
+  `stageIsGateChecked`) is now load-bearing for three call sites instead of one — `settleClosedItemsToDone`'s
+  exclusion (see the "R1 Follow-up: Closed Item Stranded at a Non-Validate Gate-Checked Stage" section
+  below) independently keys on the identical string comparison, for a
+  related but distinct reason. Any future generalization work (e.g. supporting a second real
+  gate-checked, PR-merging stage) touches all three.
 - **Unresolved-PR polling cost, pre-existing and unchanged by this fix:** for a closed item at
   Validate whose linked PR is neither merged nor closed (a human closed the issue without touching the
   PR — an unusual, out-of-band action, same trigger class as the loop this issue fixes),
@@ -275,3 +271,45 @@ with "a closed issue has no computable work left" (this ADR's own framing) apply
 processing exactly as it applies to stage re-invocation.
 
 **References:** [ADR-056: Consolidate Convergence Gate Recovery](056-consolidate-convergence-gate-recovery.md) (D2), [ADR-057: Single-Owner Validate PR Terminal Advance](057-validate-pr-terminal-advance.md), [ADR-064: Closed-Item-At-Any-Stage Advance To Done](064-closed-item-any-stage-advance-to-done.md), [ADR-1270: Awaiting-CI Settle Scan](1270-awaiting-ci-settle-scan.md), commit `7311a14e` (the regression point whose intent this ADR preserves, only changing its mechanism), issue #617 (the transient-label sweep whose interaction with the conjunctive gate is closed by this issue's R6)
+
+## R1 Follow-up: Closed Item Stranded at a Non-Validate Gate-Checked Stage
+
+Caught by human review (issue comment, PR #1388), after the fixes above landed and were themselves
+documented as a "known limitation." `settleClosedItemsToDone` (ADR-064) originally excluded any
+`stageIsGateChecked` stage — a broader category than "Validate" — on the theory that gate-checked
+stages were categorically deferred to the Validate-specific settle-owner pair. But
+`runValidatePRTerminalAdvance`/`settleClosedValidateAdvance` only ever process `stage.Name ==
+"Validate"`. Both shipped default stage templates, `stages/examples/review.yaml` and
+`stages/examples/validate.yaml`, set `wait_for_reviews: true` — so a deployment using the defaults has
+a second gate-checked stage (Review) that is neither Validate nor a plain non-gate-checked stage. For a
+closed item stranded there lacking `stage:Review:complete`: dispatch admission correctly refuses it
+(R1), no settle-owner processes anything but Validate, and `settleClosedItemsToDone`'s `stageIsGateChecked`
+exclusion skipped it too. **Zero remaining owners** — the item was never advanced, its worktree never
+reaped, never archived. The only signal was a per-poll warning log, which is not an owner.
+
+This was initially accepted as a documented, believed-rare trade-off. On review it was correctly
+rejected: closing a superseded, duplicate, or abandoned issue mid-pipeline is ordinary operator
+behavior, not a rare edge case, and it is exactly what produced the field evidence this whole ADR is
+built on (`fabrik-test-alpha#4246`, closed mid-Validate by `"Closing: e2e test teardown"`). Before this
+issue's fixes, such an item was at least admitted to dispatch and could still reach `stage:complete` and
+advance — a loud, wasteful, but *moving* bug. A silent permanent strand is worse: harder to notice,
+with no path to resolution short of a human manually fixing board state.
+
+**Fix:** narrow `settleClosedItemsToDone`'s exclusion from `stageIsGateChecked(stage)` to `stage.Name ==
+"Validate"` — matching the settle-owner pair's actual scope by name rather than by the broader category
+that happens to also catch Review. This is safe because the two functions do fundamentally different
+things: `advanceValidateTerminalItem` (the Validate-specific settle-owner logic) fetches the linked PR
+and decides merge-vs-pause because Fabrik's own PR merge action (`attemptMergeOnValidate`) only ever
+runs as part of Validate completing — no other stage has that nuance to get wrong. `advanceClosedItemToDone`
+(what `settleClosedItemsToDone` calls) never inspects the PR at all — it only moves the board column,
+exactly as it already does, unconditionally, for a closed item at Specify/Plan/Implement. Extending its
+reach to Review (or Backlog, or any future non-Validate stage) is not a new capability requiring new
+reasoning; it is the existing, already-correct "closed = move to Done" behavior no longer being
+incorrectly withheld from one particular stage.
+
+With the fix, the per-poll "no settle-owner" warning previously added to `cleanupClosedIssueTransientLabels`
+was removed along with the condition that produced it — the label sweep and the board-move now happen
+independently and safely regardless of ordering, since `advanceClosedItemToDone` doesn't care about
+label state (ADR-064's "deliberately not conditioned on any label" property, confirmed still holding here).
+
+**References:** [ADR-064: Closed-Item-At-Any-Stage Advance To Done](064-closed-item-any-stage-advance-to-done.md) (the scan whose exclusion this narrows), [ADR-056: Consolidate Convergence Gate Recovery](056-consolidate-convergence-gate-recovery.md) (D2, why Validate's PR-merge nuance doesn't generalize), `handarbeit/fabrik-test-alpha#4246` (the field evidence showing this is ordinary operator behavior, not a rare edge case)
