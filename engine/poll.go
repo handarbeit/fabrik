@@ -1166,10 +1166,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
 
 	// Closed-item Validate terminal advance settle scan (ADR-1387): the
-	// exclusive owner of closed items at Validate (or any gate-checked stage).
-	// Runs over the raw board snapshot, not deepFetchCandidates — the whole
-	// point is independence from dispatch admission, which after ADR-1387 no
-	// longer admits closed items at a gate-checked stage. See its doc comment.
+	// exclusive owner of closed items at Validate specifically — not "any
+	// gate-checked stage" (advanceValidateTerminalItem hardcodes
+	// stage.Name == "Validate", not stageIsGateChecked; a closed item at a
+	// non-Validate gate-checked stage, e.g. the shipped default Review,
+	// wait_for_reviews: true, is instead handled by settleClosedItemsToDone's
+	// plain move-to-Done — see its doc comment). Runs over the raw board
+	// snapshot, not deepFetchCandidates — the whole point is independence
+	// from dispatch admission, which after ADR-1387 no longer admits closed
+	// items at Validate. See its doc comment.
 	e.settleClosedValidateAdvance(board, advancedItems)
 
 	// Awaiting-CI settle scan (#1270): the sole per-poll evaluator of the CI gate
