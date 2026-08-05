@@ -72,7 +72,7 @@ Fabrik **uses labels as durable state**. The user **also** uses some labels to s
 |---|---|
 | `fabrik:paused` | You want to halt processing immediately. Add to pause, remove to resume. |
 | `fabrik:yolo` | Auto-advance through every stage **and** auto-merge the PR at Validate. Trust-the-pipeline mode. |
-| `fabrik:cruise` | Like `fabrik:yolo` but **stops at Validate** — no auto-merge, no Done. Good when you want a human to gate the merge. (`fabrik:yolo` wins if both are present.) |
+| `fabrik:cruise` | Like `fabrik:yolo` but **stops at Validate** — no auto-merge, no Done. Good when you want a human to gate the merge. (`fabrik:cruise` wins if both are present — the pipeline stops at Validate.) |
 | `fabrik:extend-turns` | The worker is making progress but ran out of `max_turns`. Pre-grants 2× budget for the next invocation; auto-removed on success. Safety valve. |
 | `fabrik:unrestricted` | Stage needs tools outside the default allowlist (e.g. `deno`, `bun`). **Removes all tool restrictions** — use sparingly. |
 | `model:opus` / `model:sonnet` | Override the model for this issue. |
