@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
@@ -34,6 +35,197 @@ type trainMember struct {
 	item    gh.ProjectItem
 	prNum   int
 	headSHA string
+}
+
+// trainCIDiagnostic captures the combined Validate's failure output at the point of
+// failure (R1/#1420), so it survives the bisection loop and is still in hand when the
+// ejection comment is composed — the only run in which a merge-train failure exists is
+// the combined trial that observed it (the branch's own CI is green by construction).
+//
+// Threaded as a return value through pollTrainCI -> assembleAndValidate ->
+// bisect/handleRedBatch/landOneAtATime -> ejectMember, never stashed in shared or
+// mutable state: bisection continues after isolating the poisoner (to validate the
+// reformed survivor batch), and that later run is unrelated and must not overwrite the
+// diagnostic that named the poisoner. A threaded return value makes that overwrite
+// structurally impossible — there is no shared field a later call could clobber.
+//
+// Exactly one of FailedChecks, FailedContexts, or Note is populated, reflecting which
+// branch of pollTrainCI produced the red result: ordinary check-run failures carry full
+// CheckRun data (name, output text/summary, details/html URL); classic commit-status
+// "required context" failures (ADR-933) carry only names, since there is no check-run
+// output to extract; a "dirty" mergeable_state (no per-check signal at all) carries a
+// free-text Note. nil means "no CI diagnostic available" — used at the three ejection
+// call sites whose cause isn't a combined-Validate failure (fetch/head-SHA failures,
+// unresolvable merge conflicts), which this issue leaves unaffected.
+type trainCIDiagnostic struct {
+	FailedChecks   []gh.CheckRun
+	FailedContexts []string
+	Note           string
+	PRNum          int
+	TrialSHA       string
+}
+
+// Truncation policy for rendering a trainCIDiagnostic into a comment body (R3): inline a
+// failing check's output in full up to trainDiagPerCheckInlineMax chars; beyond that,
+// inline trainDiagPerCheckHead chars from the start and trainDiagPerCheckTail from the
+// end with an explicit "chars omitted" marker. At most trainDiagMaxInlineChecks failing
+// checks get their output inlined; any remaining failing checks are named only. A final
+// hard cap (trainDiagBlockMax) truncates the whole assembled block as a belt-and-suspenders
+// against GitHub's ~65536-char comment limit, mirroring the tail-only idiom
+// formatOutputComment/formatReviewFeedbackComment already use in engine/pr.go.
+const (
+	trainDiagPerCheckInlineMax = 3000
+	trainDiagPerCheckHead      = 2000
+	trainDiagPerCheckTail      = 800
+	trainDiagMaxInlineChecks   = 5
+	trainDiagBlockMax          = 15000
+)
+
+// truncateMiddle returns s unchanged if it fits within max chars; otherwise it keeps the
+// first head chars and last tail chars, replacing the middle with an explicit
+// "chars omitted" marker so a reader knows content was cut rather than mistaking the
+// excerpt for the whole thing.
+func truncateMiddle(s string, max, head, tail int) string {
+	if len(s) <= max {
+		return s
+	}
+	omitted := len(s) - head - tail
+	headEnd := head
+	for headEnd > 0 && headEnd < len(s) && !utf8.RuneStart(s[headEnd]) {
+		headEnd--
+	}
+	tailStart := len(s) - tail
+	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+		tailStart++
+	}
+	return fmt.Sprintf("%s\n… (%d chars omitted) …\n%s", s[:headEnd], omitted, s[tailStart:])
+}
+
+// renderFailedChecks renders the failing check-run portion of a diagnostic block (R1/R3):
+// each check's name, status/conclusion, a truncated excerpt of its output (OutputText,
+// falling back to OutputSummary), and a Details link when GitHub provided one — always,
+// not only when truncated, since it's strictly more helpful. Beyond trainDiagMaxInlineChecks,
+// remaining failing checks are named only, so a wide red batch never balloons the comment.
+func renderFailedChecks(checks []gh.CheckRun) string {
+	if len(checks) == 0 {
+		return ""
+	}
+	inlineCount := len(checks)
+	if inlineCount > trainDiagMaxInlineChecks {
+		inlineCount = trainDiagMaxInlineChecks
+	}
+	var b strings.Builder
+	for i, cr := range checks[:inlineCount] {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		state := cr.Status
+		if cr.Status == "completed" {
+			state = cr.Conclusion
+		}
+		fmt.Fprintf(&b, "**%s** (%s)", cr.Name, state)
+		output := strings.TrimSpace(cr.OutputText)
+		if output == "" {
+			output = strings.TrimSpace(cr.OutputSummary)
+		}
+		if output != "" {
+			b.WriteString("\n```\n")
+			b.WriteString(truncateMiddle(output, trainDiagPerCheckInlineMax, trainDiagPerCheckHead, trainDiagPerCheckTail))
+			b.WriteString("\n```")
+		}
+		link := cr.HTMLURL
+		if link == "" {
+			link = cr.DetailsURL
+		}
+		if link != "" {
+			fmt.Fprintf(&b, "\nDetails: %s", link)
+		}
+	}
+	if len(checks) > inlineCount {
+		var rest []string
+		for _, cr := range checks[inlineCount:] {
+			rest = append(rest, cr.Name)
+		}
+		fmt.Fprintf(&b, "\n\n...and %d more failing check(s): %s", len(rest), strings.Join(rest, ", "))
+	}
+	return b.String()
+}
+
+// renderFailedContexts renders the classic-commit-status portion of a diagnostic block
+// (ADR-933's RequiredContextsFailed path) — names only, since a required context has no
+// check-run output to extract from. A pointer degraded to "name only" is still strictly
+// more than the "no diagnostic" this issue reports (R3's minimum-acceptable bar).
+func renderFailedContexts(contexts []string) string {
+	if len(contexts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Failed required status context(s): %s\n(no check-run output is available for classic commit statuses)", strings.Join(contexts, ", "))
+}
+
+// renderDiagnosticBlock composes the full R1/R3 diagnostic section of an ejection or
+// pause comment from diag, applying the final hard-cap truncation. Returns "" for a nil
+// diag (the three out-of-scope ejection call sites) or a diag whose fields are all empty.
+func renderDiagnosticBlock(diag *trainCIDiagnostic) string {
+	if diag == nil {
+		return ""
+	}
+	var body string
+	switch {
+	case len(diag.FailedChecks) > 0:
+		body = renderFailedChecks(diag.FailedChecks)
+	case len(diag.FailedContexts) > 0:
+		body = renderFailedContexts(diag.FailedContexts)
+	case diag.Note != "":
+		body = diag.Note
+	default:
+		return ""
+	}
+	block := fmt.Sprintf("**Diagnostic** (trial %s, integration PR #%d):\n\n%s", diag.TrialSHA, diag.PRNum, body)
+	if len(block) > trainDiagBlockMax {
+		block = truncateBlockHard(block, trainDiagBlockMax) + "\n\n... (truncated)"
+	}
+	return block
+}
+
+// truncateBlockHard cuts s to at most max bytes, at a boundary that never splits a
+// multi-byte UTF-8 rune and never leaves a dangling, unterminated ``` code fence open —
+// renderFailedChecks wraps each check's output in its own fence, and cutting a block
+// mid-fence would render every section after the cut (the batch-context sentence, the
+// "remains in Queued" boilerplate) as part of an open code block instead of prose.
+func truncateBlockHard(s string, max int) string {
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	s = s[:cut]
+	if strings.Count(s, "```")%2 != 0 {
+		s += "\n```"
+	}
+	return s
+}
+
+// renderBatchContext composes the R4 sentence naming the other members the isolated
+// member's batch was combined against — informational grounding so an operator knows
+// before investigating that the fault does not exist on their own branch (a merge-train
+// failure is, by construction, a failure that doesn't exist on the branch alone; it
+// arises from combining with a base that moved). otherMembers is the full batch at the
+// point the failure was observed (handleRedBatch's top-level red set for a
+// bisection-isolated poisoner; nil for landOneAtATime's fallback, which validates each
+// member as a true singleton with no batch at all). isolated is excluded from the named
+// list, and an empty remainder (a single-member train, or a genuine singleton
+// validation) gets a distinct, coherent sentence rather than an awkward empty list.
+func renderBatchContext(otherMembers []trainMember, isolated int) string {
+	var names []string
+	for _, m := range otherMembers {
+		if m.item.Number == isolated {
+			continue
+		}
+		names = append(names, fmt.Sprintf("#%d", m.item.Number))
+	}
+	if len(names) == 0 {
+		return "No other members were present in this train attempt — the failure is against the moved base branch alone, not a cross-PR interaction."
+	}
+	return fmt.Sprintf("This train attempt also combined the following member(s), which are not implicated — the failure does not exist on their branches either: %s.", strings.Join(names, ", "))
 }
 
 // mergeTrainWorkerState tracks an in-flight or completed merge-train worker.
@@ -372,7 +564,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		state.assembling = true
 		state.mu.Unlock()
 
-		survivors, result, prNum, aerr := e.assembleAndValidate(ctx, p, current, trialName)
+		survivors, result, prNum, diag, aerr := e.assembleAndValidate(ctx, p, current, trialName)
 		if aerr != nil {
 			e.logf(0, "merge-train", "assemble/validate failed for %s: %v\n", repoKey, aerr)
 			e.cleanupTrialArtifacts(p.wm, trialName)
@@ -417,7 +609,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			state.mu.Lock()
 			state.bisecting = true
 			state.mu.Unlock()
-			nextSurvivors, fellBack, runaway := e.handleRedBatch(ctx, state, p, survivors)
+			nextSurvivors, fellBack, runaway := e.handleRedBatch(ctx, state, p, survivors, diag)
 			state.mu.Lock()
 			state.bisecting = false
 			state.mu.Unlock()
@@ -445,12 +637,14 @@ func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batc
 		pr, fetchErr := e.client.FetchLinkedPR(owner, repo, member.Number)
 		if fetchErr != nil || pr == nil {
 			e.logf(member.Number, "merge-train", "cannot fetch linked PR for #%d: %v — ejecting\n", member.Number, fetchErr)
-			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr))
+			// Out of scope for #1420 (no combined-Validate diagnostic exists yet at
+			// this point — the fetch itself failed): diag and otherMembers are nil.
+			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr), nil, nil)
 			continue
 		}
 		if pr.HeadSHA == "" {
 			e.logf(member.Number, "merge-train", "#%d has no PR head SHA — ejecting\n", member.Number)
-			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA")
+			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA", nil, nil)
 			continue
 		}
 		members = append(members, trainMember{item: member, prNum: pr.Number, headSHA: pr.HeadSHA})
@@ -560,7 +754,9 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		} else {
 			reason = fmt.Sprintf("ejected from merge-train batch — %s (PR SHA %s)", reason, member.headSHA)
 		}
-		e.ejectMember(p.owner, p.repo, member.item, reason)
+		// Out of scope for #1420 (unresolvable merge conflict, not a combined-Validate
+		// failure): diag and otherMembers are nil.
+		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil)
 	}
 
 	if len(survivors) == 0 {
@@ -578,27 +774,29 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 }
 
 // assembleAndValidate builds a trial branch for members (off the pinned base SHA), opens a
-// draft CI PR, and polls the combined Validate. It returns the survivors, the CI result, and
-// the draft PR number. The local trial worktree and both branches persist after this returns
-// (success or failure) — the caller owns cleanup exactly once, via cleanupTrialArtifacts or an
-// equivalent direct CleanupTrainWorktree call, regardless of outcome.
+// draft CI PR, and polls the combined Validate. It returns the survivors, the CI result, the
+// draft PR number, and — for a red result — the diagnostic that observed it (R1/#1420, nil
+// for green/pending/error). The local trial worktree and both branches persist after this
+// returns (success or failure) — the caller owns cleanup exactly once, via
+// cleanupTrialArtifacts or an equivalent direct CleanupTrainWorktree call, regardless of
+// outcome.
 //
-// When e.trainValidateFn is set (tests), it short-circuits the whole git/CI path and returns
-// (members, e.trainValidateFn(ctx, members), 0, nil), keying the result on batch membership
-// alone (ADR-059 D4 test seam). This is the ONLY combined validation on the common path — a
-// green result must never trigger bisection (D-d).
-func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, error) {
+// When e.trainValidateFn is set (tests), it short-circuits the whole git/CI path, keying the
+// result (and diagnostic) on batch membership alone (ADR-059 D4 test seam). This is the ONLY
+// combined validation on the common path — a green result must never trigger bisection (D-d).
+func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
 	e.recordTrial(p.owner + "/" + p.repo)
 	if e.trainValidateFn != nil {
-		return members, e.trainValidateFn(ctx, members), 0, nil
+		result, diag := e.trainValidateFn(ctx, members)
+		return members, result, 0, diag, nil
 	}
 
 	survivors, trialSHA, err := e.assembleTrialBranch(ctx, p, members, trialName)
 	if err != nil {
-		return nil, TrainCIPending, 0, err
+		return nil, TrainCIPending, 0, nil, err
 	}
 	if len(survivors) == 0 {
-		return nil, TrainCIPending, 0, nil
+		return nil, TrainCIPending, 0, nil, nil
 	}
 
 	// Open a draft CI PR listing the survivors.
@@ -627,24 +825,30 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 	trialBranch := "fabrik/merge-train/" + trialName
 	prNum, err := e.client.CreateDraftPR(p.owner, p.repo, prTitle, trialBranch, p.baseBranch, prBody, 0)
 	if err != nil {
-		return nil, TrainCIPending, 0, fmt.Errorf("creating draft CI PR: %w", err)
+		return nil, TrainCIPending, 0, nil, fmt.Errorf("creating draft CI PR: %w", err)
 	}
 	e.logf(0, "merge-train", "opened draft CI PR #%d for %s/%s (%d survivor(s))\n", prNum, p.owner, p.repo, len(survivors))
 
-	result := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
-	return survivors, result, prNum, nil
+	result, diag := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
+	return survivors, result, prNum, diag, nil
 }
 
 // bisect recursively halves a known-red member set to isolate the single poisoning member
 // (ADR-059 D4 / FR-1), reusing assembleAndValidate for each trial in the bors-ng test order
-// (test half A; if red recurse into A; else test half B; if red recurse into B). It returns
-// the isolated poisoner, (nil, true, false) when the redness is a non-isolable cross-PR
-// interaction (both halves green) or the per-episode cost budget (*used vs costCap) is
-// exhausted — either degrades to the FR-5 one-at-a-time fallback (D-e) — or (nil, false, true)
-// when the runaway guard fires. red is assumed to be a validated-red set.
-func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, used *int, costCap int) (*trainMember, bool, bool) {
+// (test half A; if red recurse into A; else test half B; if red recurse into B). diag is the
+// diagnostic of the validation that established red is currently known-red (the caller's
+// initial validation, or — recursively — the half that was just found red); the base case
+// (len(red)==1) returns it unchanged rather than issuing a further validate call, which is
+// what makes "the run that isolates the member" the diagnostic's origin by construction
+// (R1/#1420): nothing after that isolating call can overwrite it, because there is no shared
+// state to overwrite — only a threaded return value. It returns the isolated poisoner and its
+// diagnostic, (nil, nil, true, false) when the redness is a non-isolable cross-PR interaction
+// (both halves green) or the per-episode cost budget (*used vs costCap) is exhausted — either
+// degrades to the FR-5 one-at-a-time fallback (D-e) — or (nil, nil, false, true) when the
+// runaway guard fires. red is assumed to be a validated-red set.
+func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, diag *trainCIDiagnostic, used *int, costCap int) (*trainMember, *trainCIDiagnostic, bool, bool) {
 	if len(red) == 1 {
-		return &red[0], false, false
+		return &red[0], diag, false, false
 	}
 
 	repoKey := p.owner + "/" + p.repo
@@ -652,44 +856,46 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, u
 	for _, half := range [][]trainMember{red[:mid], red[mid:]} {
 		if *used >= costCap {
 			e.logf(0, "merge-train", "bisection cost cap (%d validations) reached — degrading to one-at-a-time fallback\n", costCap)
-			return nil, true, false
+			return nil, nil, true, false
 		}
 		trialName := p.nextTrialName()
-		survivors, result, _, err := e.assembleAndValidate(ctx, p, half, trialName)
+		survivors, result, _, halfDiag, err := e.assembleAndValidate(ctx, p, half, trialName)
 		*used++
 		e.cleanupTrialArtifacts(p.wm, trialName)
 		if err != nil {
 			e.logf(0, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
 			if _, tripped := e.isRunawayTripped(repoKey); tripped {
-				return nil, false, true
+				return nil, nil, false, true
 			}
-			return nil, true, false
+			return nil, nil, true, false
 		}
 		if _, tripped := e.isRunawayTripped(repoKey); tripped {
-			return nil, false, true
+			return nil, nil, false, true
 		}
 		if result == TrainCIRed && len(survivors) > 0 {
-			return e.bisect(ctx, p, survivors, used, costCap)
+			return e.bisect(ctx, p, survivors, halfDiag, used, costCap)
 		}
 	}
 
 	// Both halves green: the redness spans the split — a non-isolable interaction (D-e).
-	return nil, true, false
+	return nil, nil, true, false
 }
 
 // handleRedBatch bisects a red batch to isolate and eject the poisoning member (FR-1/FR-2),
 // then returns the surviving members for the main loop to re-form and re-validate (FR-3).
-// When bisection cannot isolate a single culprit within the cost budget (a non-isolable
-// interaction or cost-cap exhaustion), it degrades to the one-at-a-time fallback (FR-5),
-// which lands/ejects every member itself, and returns (nil, true, false). Returns
-// (nil, false, true) when the runaway guard fires inside bisect or landOneAtATime. The
-// cost budget is per red-batch episode: it starts at 1 (the initial red validation) and
-// is capped at effectiveBisectCap().
-func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember) ([]trainMember, bool, bool) {
+// diag is the diagnostic of the validation that established red is currently red (the
+// caller's own top-level assembleAndValidate) — bisect's starting point (see its doc comment
+// for why this makes overwrite-by-a-later-run structurally impossible). When bisection cannot
+// isolate a single culprit within the cost budget (a non-isolable interaction or cost-cap
+// exhaustion), it degrades to the one-at-a-time fallback (FR-5), which lands/ejects every
+// member itself, and returns (nil, true, false). Returns (nil, false, true) when the runaway
+// guard fires inside bisect or landOneAtATime. The cost budget is per red-batch episode: it
+// starts at 1 (the initial red validation) and is capped at effectiveBisectCap().
+func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember, diag *trainCIDiagnostic) ([]trainMember, bool, bool) {
 	used := 1 // the initial red validation counts toward the per-episode budget
 	costCap := e.effectiveBisectCap()
 
-	poisoner, fellBack, runaway := e.bisect(ctx, p, red, &used, costCap)
+	poisoner, isolationDiag, fellBack, runaway := e.bisect(ctx, p, red, diag, &used, costCap)
 	if runaway {
 		return nil, false, true
 	}
@@ -699,10 +905,15 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 		return nil, true, runaway
 	}
 
-	// Eject the isolated poisoner (D-a shared counter, D-c comment, cap→pause reuse).
+	// Eject the isolated poisoner (D-a shared counter, D-c comment, cap→pause reuse). red —
+	// the full batch at the start of this episode — is passed as the R4 batch context: the
+	// isolating run itself always validates the poisoner alone (bisect's base case makes no
+	// further call), so "the other batch members" means who else rode in this train attempt,
+	// not the isolating run's own (always-singleton) inputs.
 	e.logf(poisoner.item.Number, "merge-train", "bisection isolated #%d as the batch poisoner — ejecting\n", poisoner.item.Number)
 	e.ejectMember(p.owner, p.repo, poisoner.item,
-		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number))
+		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
+		isolationDiag, red)
 
 	var survivors []trainMember
 	for i := range red {
@@ -738,7 +949,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		}
 
 		trialName := p.nextTrialName()
-		survivors, result, _, err := e.assembleAndValidate(ctx, p, []trainMember{m}, trialName)
+		survivors, result, _, diag, err := e.assembleAndValidate(ctx, p, []trainMember{m}, trialName)
 		if err != nil || len(survivors) == 0 {
 			e.logf(m.item.Number, "merge-train", "could not assemble #%d in isolation: %v — leaving in Queued\n", m.item.Number, err)
 			e.cleanupTrialArtifacts(p.wm, trialName)
@@ -758,8 +969,12 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		case TrainCIRed:
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — ejecting\n", m.item.Number)
+			// otherMembers is nil: this is a genuine singleton validation (no batch at
+			// all), distinct from a bisection-isolated poisoner that had batch-mates —
+			// renderBatchContext's "no other members" sentence covers this case exactly.
 			e.ejectMember(p.owner, p.repo, m.item,
-				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number))
+				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number),
+				diag, nil)
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
@@ -1363,14 +1578,78 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 	return regenResolved, reason, nil
 }
 
+// diagCauseSummary renders a short, name-only summary of a diagnostic's cause — the
+// failing check names, the failed required-context names, or the free-text Note —
+// for use in the pause-after-N comment (R5), which links to rather than repeats the
+// full diagnostic block. Returns "" for a nil diag.
+func diagCauseSummary(diag *trainCIDiagnostic) string {
+	if diag == nil {
+		return ""
+	}
+	switch {
+	case len(diag.FailedChecks) > 0:
+		names := make([]string, len(diag.FailedChecks))
+		for i, cr := range diag.FailedChecks {
+			names[i] = cr.Name
+		}
+		return strings.Join(names, ", ")
+	case len(diag.FailedContexts) > 0:
+		return strings.Join(diag.FailedContexts, ", ")
+	default:
+		return diag.Note
+	}
+}
+
+// pauseCauseLine composes R5's "name or link the cause" addendum to the pause-after-N
+// comment: the failing check/context names (or free-text Note) from diag, plus a
+// permalink to the ejection comment just posted (which carries the full diagnostic
+// block) when its ID is known. Returns "" — leaving the pause comment's wording exactly
+// as it was before #1420 — when diag is nil (an out-of-scope ejection cause) or when
+// AddComment failed to report a comment ID.
+func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, commentID int) string {
+	if diag == nil {
+		return ""
+	}
+	cause := diagCauseSummary(diag)
+	var link string
+	if commentID > 0 {
+		link = fmt.Sprintf("https://github.com/%s/%s/issues/%d#issuecomment-%d", owner, repo, issueNumber, commentID)
+	}
+	switch {
+	case cause != "" && link != "":
+		return fmt.Sprintf("Cause: %s. See the ejection comment above for the full diagnostic: %s", cause, link)
+	case cause != "":
+		return fmt.Sprintf("Cause: %s.", cause)
+	case link != "":
+		return fmt.Sprintf("See the ejection comment above for the full diagnostic: %s", link)
+	default:
+		return ""
+	}
+}
+
 // ejectMember posts an ejection comment on the member issue, increments the ejection
-// counter, and pauses the member after MaxMergeTrainEjections.
-func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string) {
-	msg := fmt.Sprintf("🏭 **Fabrik merge-train — ejected**\n\n%s\n\n"+
-		"This issue remains in the Queued column and will be retried in a future train with a different composition.",
-		reason)
-	if _, commentErr := e.client.AddComment(owner, repo, memberItem.Number, msg); commentErr != nil {
+// counter, and pauses the member after MaxMergeTrainEjections. diag is the combined-Validate
+// diagnostic that caused this ejection (R1) — nil for the three ejection causes this issue
+// (#1420) leaves unaffected (fetch/head-SHA failures, unresolvable merge conflicts).
+// otherMembers names the R4 batch context (the other members riding in this train attempt);
+// ignored when diag is nil. Every ejection comment carries diag's diagnostic, not only the
+// terminal pause comment (R2) — the first ejection is exactly as informative as the last.
+func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember) {
+	sections := []string{reason}
+	if diag != nil {
+		sections = append(sections, renderBatchContext(otherMembers, memberItem.Number))
+		if block := renderDiagnosticBlock(diag); block != "" {
+			sections = append(sections, block)
+		}
+	}
+	sections = append(sections, "This issue remains in the Queued column and will be retried in a future train with a different composition.")
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — ejected**\n\n%s", strings.Join(sections, "\n\n"))
+
+	var commentID int
+	if id, commentErr := e.client.AddComment(owner, repo, memberItem.Number, msg); commentErr != nil {
 		e.logf(memberItem.Number, "merge-train", "warn: could not post ejection comment: %v\n", commentErr)
+	} else {
+		commentID = id
 	}
 
 	counterKey := fmt.Sprintf("%s/%s#%d", owner, repo, memberItem.Number)
@@ -1391,10 +1670,13 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 		e.mergeTrainEjectionsMu.Unlock()
 
 		e.logf(memberItem.Number, "merge-train", "#%d ejected %d time(s) — pausing\n", memberItem.Number, count)
-		pauseMsg := fmt.Sprintf("🏭 **Fabrik merge-train — pausing after %d ejections**\n\n"+
-			"This issue has been ejected from the merge-train %d consecutive times. "+
+		pauseBody := fmt.Sprintf("This issue has been ejected from the merge-train %d consecutive times. "+
 			"Manual intervention is required. Remove `fabrik:paused` after resolving the underlying conflict.",
-			count, count)
+			count)
+		if line := pauseCauseLine(diag, owner, repo, memberItem.Number, commentID); line != "" {
+			pauseBody = pauseBody + "\n\n" + line
+		}
+		pauseMsg := fmt.Sprintf("🏭 **Fabrik merge-train — pausing after %d ejections**\n\n%s", count, pauseBody)
 		if _, err := e.client.AddComment(owner, repo, memberItem.Number, pauseMsg); err != nil {
 			e.logf(memberItem.Number, "merge-train", "warn: could not post pause comment: %v\n", err)
 		}
@@ -1958,7 +2240,10 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		state.assembling = true
 		state.mu.Unlock()
 
-		newSurvivors, result, newPRNum, aerr := e.assembleAndValidate(ctx, p, survivors, newTrialName)
+		// The rebase re-validate's diagnostic is intentionally discarded: a non-green
+		// result here dissolves the batch (see below), and dissolveBatch's messaging is
+		// out of this issue's scope (#1420) — only ejectMember's comments are in scope.
+		newSurvivors, result, newPRNum, _, aerr := e.assembleAndValidate(ctx, p, survivors, newTrialName)
 		e.cleanupTrialArtifacts(p.wm, oldTrialName)
 
 		state.mu.Lock()
@@ -2153,11 +2438,14 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 
 	e.logf(0, "merge-train", "reconstruct: resuming train for %s from open PR #%d (trial %s, %d member(s))\n", repoKey, pr.Number, trialName, len(survivors))
 
+	// The resumed trial's diagnostic is intentionally discarded: any non-green outcome
+	// here dissolves the batch (dissolveBatch's messaging is out of this issue's scope,
+	// #1420 — only ejectMember's comments are in scope).
 	var result TrainCIResult
 	if e.trainValidateFn != nil {
-		result = e.trainValidateFn(ctx, survivors)
+		result, _ = e.trainValidateFn(ctx, survivors)
 	} else {
-		result = e.pollTrainCI(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA)
+		result, _ = e.pollTrainCI(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA)
 	}
 
 	if result == TrainCIGreen {
@@ -2197,8 +2485,9 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 	return strings.Join(parts, ", ")
 }
 
-// pollTrainCI polls the integration PR's CI signals, returning the typed
-// result. Blocks until the result is known or the CIWaitTimeout elapses.
+// pollTrainCI polls the integration PR's CI signals, returning the typed result and,
+// for a red result, the diagnostic that observed it (R1/#1420) — nil for green/pending.
+// Blocks until the result is known or the CIWaitTimeout elapses.
 //
 // mergeable_state is a red/permission gate only, not a green shortcut:
 // GitHub computes it from required checks alone (per branch protection), so
@@ -2214,7 +2503,7 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // footprint at all (e.g. GitHub Actions disabled — see the zero-check-runs
 // branch below), since in that case there is no per-check signal to fall
 // back on.
-func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) TrainCIResult {
+func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) (TrainCIResult, *trainCIDiagnostic) {
 	ciWaitTimeout := e.cfg.CIWaitTimeout
 	if ciWaitTimeout <= 0 {
 		ciWaitTimeout = 30 * time.Minute
@@ -2236,13 +2525,13 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		select {
 		case <-ctx.Done():
 			e.logf(0, "merge-train", "context cancelled during CI poll for integration PR #%d\n", prNum)
-			return TrainCIPending
+			return TrainCIPending, nil
 		default:
 		}
 
 		if time.Now().After(deadline) {
 			logTimeout()
-			return TrainCIPending
+			return TrainCIPending, nil
 		}
 
 		_, mergeableState, err := e.client.FetchPRMergeableFields(owner, repo, prNum)
@@ -2250,7 +2539,11 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		if err != nil {
 			e.logf(0, "merge-train", "warn: FetchPRMergeableFields failed for PR #%d: %v\n", prNum, err)
 		} else if mergeableState == "dirty" {
-			return TrainCIRed
+			return TrainCIRed, &trainCIDiagnostic{
+				Note:     "The trial branch stopped merging cleanly onto its base (mergeable_state \"dirty\") — the base moved again after the trial was assembled.",
+				PRNum:    prNum,
+				TrialSHA: trialSHA,
+			}
 		} else if gh.MergeableStateAccepted(mergeableState) {
 			mergeableAccepted = true
 		}
@@ -2275,7 +2568,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				// wrong-direction Strict call costs one bisection cycle, not
 				// a silently reintroduced version of this issue.
 				e.logf(0, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
-				return TrainCIRed
+				return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
 			}
 			if status == gh.CheckRunsReady {
 				// ADR-933: don't declare the trial green until any configured
@@ -2287,10 +2580,10 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				switch rcStatus {
 				case gh.RequiredContextsSatisfied:
 					e.logf(0, "merge-train", "trial %s green — checks: %s\n", trialSHA, describeCheckRuns(checkRuns))
-					return TrainCIGreen
+					return TrainCIGreen, nil
 				case gh.RequiredContextsFailed:
 					e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
-					return TrainCIRed
+					return TrainCIRed, &trainCIDiagnostic{FailedContexts: rcFailed, PRNum: prNum, TrialSHA: trialSHA}
 				}
 			}
 			// CheckRunsPending (or a required context still pending above):
@@ -2312,7 +2605,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, trialSHA, nil)
 			if rcStatus == gh.RequiredContextsFailed {
 				e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
-				return TrainCIRed
+				return TrainCIRed, &trainCIDiagnostic{FailedContexts: rcFailed, PRNum: prNum, TrialSHA: trialSHA}
 			}
 			// #1153: with zero check runs there is no per-check completeness
 			// signal to consult at all, so an accepted mergeable_state is the
@@ -2321,7 +2614,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			// green.
 			if mergeableAccepted && rcStatus == gh.RequiredContextsSatisfied {
 				e.logf(0, "merge-train", "trial %s green — mergeable_state %q accepted, zero check runs, required contexts satisfied\n", trialSHA, mergeableState)
-				return TrainCIGreen
+				return TrainCIGreen, nil
 			}
 		}
 
@@ -2329,13 +2622,13 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		// block unnecessarily in the poll interval when the deadline has already elapsed.
 		if time.Now().After(deadline) {
 			logTimeout()
-			return TrainCIPending
+			return TrainCIPending, nil
 		}
 
 		// Poll again after 30 seconds.
 		select {
 		case <-ctx.Done():
-			return TrainCIPending
+			return TrainCIPending, nil
 		case <-time.After(30 * time.Second):
 		}
 	}

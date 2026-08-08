@@ -135,9 +135,11 @@ type Engine struct {
 	upgradeCheckFn func()
 	// trainValidateFn overrides the real assemble+combined-Validate path when non-nil.
 	// Tests inject a membership-keyed function so the merge-train bisection / re-form /
-	// fallback control flow (ADR-059 D4) can be exercised without real git or CI.
-	// Production leaves this nil. See assembleAndValidate.
-	trainValidateFn func(ctx context.Context, members []trainMember) TrainCIResult
+	// fallback control flow (ADR-059 D4) can be exercised without real git or CI. The
+	// diagnostic return mirrors pollTrainCI's (TrainCIResult, *trainCIDiagnostic) shape
+	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
+	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
+	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
 	// generatedFilesOverride overrides the package-level generatedFiles mapping when
 	// non-nil. Tests inject a synthetic path + fake regen command, since the throwaway
 	// repos built by setupTrainRepo have none of docs/llms-full.txt's real source files

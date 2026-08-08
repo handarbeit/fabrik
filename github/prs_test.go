@@ -487,8 +487,13 @@ func TestFetchCheckRuns_Success(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"check_runs": []map[string]string{
-				{"name": "ci/test", "status": "completed", "conclusion": "success"},
+			"check_runs": []map[string]interface{}{
+				{
+					"name": "ci/test", "status": "completed", "conclusion": "failure",
+					"output":      map[string]string{"summary": "1 test failed", "text": "FAIL: TestFoo\nline 141: assertion failed"},
+					"details_url": "https://ci.example.com/runs/1",
+					"html_url":    "https://github.com/owner/repo/runs/1",
+				},
 				{"name": "ci/lint", "status": "in_progress", "conclusion": ""},
 			},
 		})
@@ -503,8 +508,14 @@ func TestFetchCheckRuns_Success(t *testing.T) {
 	if len(runs) != 2 {
 		t.Fatalf("len(runs) = %d, want 2", len(runs))
 	}
-	if runs[0].Name != "ci/test" || runs[0].Status != "completed" || runs[0].Conclusion != "success" {
+	if runs[0].Name != "ci/test" || runs[0].Status != "completed" || runs[0].Conclusion != "failure" {
 		t.Errorf("runs[0] = %+v", runs[0])
+	}
+	if runs[0].OutputSummary != "1 test failed" || runs[0].OutputText != "FAIL: TestFoo\nline 141: assertion failed" {
+		t.Errorf("runs[0] output fields = %+v", runs[0])
+	}
+	if runs[0].DetailsURL != "https://ci.example.com/runs/1" || runs[0].HTMLURL != "https://github.com/owner/repo/runs/1" {
+		t.Errorf("runs[0] url fields = %+v", runs[0])
 	}
 	if runs[1].Name != "ci/lint" || runs[1].Status != "in_progress" || runs[1].Conclusion != "" {
 		t.Errorf("runs[1] = %+v", runs[1])
