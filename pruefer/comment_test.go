@@ -10,10 +10,13 @@ import (
 
 // fakeCommenter implements GitHubCommenter in-memory for tests.
 type fakeCommenter struct {
-	mu       sync.Mutex
-	comments []gh.Comment
-	fetchErr error
-	reactErr error
+	mu          sync.Mutex
+	comments    []gh.Comment
+	fetchErr    error
+	reactErr    error
+	addErr      error
+	addedBodies []string
+	nextAddID   int
 }
 
 func (f *fakeCommenter) FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error) {
@@ -25,6 +28,24 @@ func (f *fakeCommenter) FetchIssueComments(owner, repo string, issueNumber int) 
 	out := make([]gh.Comment, len(f.comments))
 	copy(out, f.comments)
 	return out, nil
+}
+
+func (f *fakeCommenter) AddComment(owner, repo string, issueNumber int, body string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.addErr != nil {
+		return 0, f.addErr
+	}
+	f.nextAddID++
+	f.addedBodies = append(f.addedBodies, body)
+	f.comments = append(f.comments, gh.Comment{DatabaseID: f.nextAddID, Body: body})
+	return f.nextAddID, nil
+}
+
+func (f *fakeCommenter) addCommentCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.addedBodies)
 }
 
 func (f *fakeCommenter) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {

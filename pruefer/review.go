@@ -2,6 +2,7 @@ package pruefer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -16,6 +17,11 @@ import (
 type GitHubReviewer interface {
 	GitHubCommenter
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
+	// FetchPRFiles returns the changed-path list via the paginated
+	// /pulls/{n}/files endpoint, which has no 20,000-line ceiling — the
+	// fallback source of changed paths when FetchPRDiff returns
+	// gh.ErrDiffTooLarge (see R3, adrs/1427-pruefer-diff-too-large-degrade-not-block.md).
+	FetchPRFiles(owner, repo string, prNumber int) ([]string, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error)
 	Token() string
@@ -52,6 +58,19 @@ type ReviewOutcome struct {
 // reviewed-at-SHA) run before any diff fetch; only a PR that passes those
 // triggers the FetchPRDiff call used for the size guard and path exclusion,
 // so a skip never costs an extra network round-trip.
+//
+// When FetchPRDiff returns gh.ErrDiffTooLarge — GitHub's deterministic 406
+// refusal to render a diff exceeding its 20,000-line ceiling — ReviewPR
+// degrades rather than blocks (R3): it falls back to FetchPRFiles (the
+// paginated /pulls/{n}/files endpoint, which has no such ceiling) to
+// reconstruct the changed-path list, and the review proceeds against the
+// local clone as normal, with diff treated as empty (so inline-comment
+// anchoring naturally demotes every finding into the review body — see
+// adrs/1427-pruefer-diff-too-large-degrade-not-block.md). Only when the
+// fallback also fails does this return the terminal SkipDiffTooLarge
+// disposition (R2), after posting a single idempotent PR notice (R4) so a
+// human can see why the PR was never reviewed rather than a hot retry every
+// poll with nothing to show for it.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
 	forceReview, err := PendingForceReview(client, owner, repo, pr.Number)
 	if err != nil {
@@ -78,14 +97,36 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
+	var changedPaths []string
 	if err != nil {
-		return ReviewOutcome{Err: fmt.Errorf("fetching diff: %w", err)}
+		if !errors.Is(err, gh.ErrDiffTooLarge) {
+			return ReviewOutcome{Err: fmt.Errorf("fetching diff: %w", err)}
+		}
+		logf(pr.Number, "select", "%s/%s#%d: diff exceeds GitHub's 406 too_large ceiling, attempting files-API fallback\n", owner, repo, pr.Number)
+		files, filesErr := client.FetchPRFiles(owner, repo, pr.Number)
+		if filesErr != nil {
+			logf(pr.Number, "select", "skipping %s/%s#%d: %s (files-API fallback also failed: %v)\n", owner, repo, pr.Number, SkipDiffTooLarge, filesErr)
+			if noticeErr := postDiffUnavailableNoticeOnce(client, owner, repo, pr.Number, pr.HeadSHA); noticeErr != nil {
+				logf(pr.Number, "warn", "posting diff-unavailable notice on %s/%s#%d: %v\n", owner, repo, pr.Number, noticeErr)
+			}
+			return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
+		}
+		// No diff text was ever obtained, so there is nothing for
+		// max_diff_bytes to measure — GitHub's 406 already establishes the
+		// diff exceeds 20,000 lines, which would exceed any reasonable
+		// max_diff_bytes anyway. diff stays "" for the rest of this call;
+		// validRightAnchors("") returns no anchors, so every finding
+		// demotes cleanly into the review body instead of risking an
+		// invalid inline-comment anchor.
+		changedPaths = files
+	} else {
+		if cfg.MaxDiffBytes > 0 && int64(len(diff)) > cfg.MaxDiffBytes {
+			logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, len(diff), cfg.MaxDiffBytes)
+			return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
+		}
+		changedPaths = ParseChangedPaths(diff)
 	}
-	if cfg.MaxDiffBytes > 0 && int64(len(diff)) > cfg.MaxDiffBytes {
-		logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, len(diff), cfg.MaxDiffBytes)
-		return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
-	}
-	if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(ParseChangedPaths(diff), cfg.ExcludedPaths) {
+	if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(changedPaths, cfg.ExcludedPaths) {
 		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
 		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
 	}

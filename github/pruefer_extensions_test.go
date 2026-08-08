@@ -7,6 +7,8 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -78,6 +80,121 @@ func TestFetchPRDiff(t *testing.T) {
 	}
 	if diff != diffText {
 		t.Errorf("diff = %q, want %q", diff, diffText)
+	}
+}
+
+func TestFetchPRDiff_406TooLarge_WrapsErrDiffTooLarge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(406)
+		w.Write([]byte(`{"message":"Sorry, the diff exceeded the maximum number of lines (20000)","errors":[{"resource":"PullRequest","field":"diff","code":"too_large"}],"status":"406"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.FetchPRDiff("owner", "repo", 42)
+	if !errors.Is(err, ErrDiffTooLarge) {
+		t.Fatalf("FetchPRDiff: expected wrapped ErrDiffTooLarge, got %v", err)
+	}
+}
+
+func TestFetchPRFiles_SinglePage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/pulls/42/files" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		page := r.URL.Query().Get("page")
+		if page == "1" {
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"filename": "a.go"},
+				{"filename": "b.go"},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	files, err := c.FetchPRFiles("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRFiles: %v", err)
+	}
+	if len(files) != 2 || files[0] != "a.go" || files[1] != "b.go" {
+		t.Errorf("files = %v, want [a.go b.go]", files)
+	}
+}
+
+func TestFetchPRFiles_MultiPage(t *testing.T) {
+	var mu sync.Mutex
+	var seenPages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		mu.Lock()
+		seenPages = append(seenPages, page)
+		mu.Unlock()
+		switch page {
+		case "1":
+			entries := make([]map[string]interface{}, 100)
+			for i := range entries {
+				entries[i] = map[string]interface{}{"filename": fmt.Sprintf("file%d.go", i)}
+			}
+			json.NewEncoder(w).Encode(entries)
+		case "2":
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"filename": "file100.go"}})
+		default:
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	files, err := c.FetchPRFiles("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRFiles: %v", err)
+	}
+	if len(files) != 101 {
+		t.Fatalf("expected 101 files across pages, got %d", len(files))
+	}
+	if files[100] != "file100.go" {
+		t.Errorf("files[100] = %q, want file100.go", files[100])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenPages) != 3 {
+		t.Errorf("expected 3 page requests (100, then 1, then empty stop), got %d: %v", len(seenPages), seenPages)
+	}
+}
+
+func TestFetchPRFiles_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	files, err := c.FetchPRFiles("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRFiles: %v", err)
+	}
+	if files != nil {
+		t.Errorf("files = %v, want nil for an empty result", files)
+	}
+}
+
+func TestFetchPRFiles_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	files, err := c.FetchPRFiles("owner", "repo", 999)
+	if err != nil {
+		t.Fatalf("expected nil error on 404, got %v", err)
+	}
+	if files != nil {
+		t.Errorf("expected nil files on 404, got %+v", files)
 	}
 }
 

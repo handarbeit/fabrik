@@ -17,6 +17,10 @@ const reviewCommand = "/pruefer review"
 type GitHubCommenter interface {
 	FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error)
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
+	// AddComment posts a comment on the PR (issue-numbered) and returns its
+	// database ID. Used by notice.go to post the diff-unavailable notice
+	// (R4) when a 406 too_large diff and its files-API fallback both fail.
+	AddComment(owner, repo string, issueNumber int, body string) (int, error)
 }
 
 // isReviewCommand reports whether body contains the /pruefer review
