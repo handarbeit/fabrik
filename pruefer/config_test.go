@@ -49,6 +49,81 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if !cfg.TUI {
 		t.Errorf("TUI = false, want true (default on)")
 	}
+	if cfg.LogFile != DefaultLogPath {
+		t.Errorf("LogFile = %q, want %q", cfg.LogFile, DefaultLogPath)
+	}
+}
+
+func TestLoadConfig_LogFilePrecedence(t *testing.T) {
+	dir := t.TempDir()
+
+	// YAML override.
+	path := writeYAMLConfig(t, dir, `log_file: /tmp/custom.log`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "/tmp/custom.log" {
+		t.Errorf("LogFile = %q, want /tmp/custom.log (from YAML)", cfg.LogFile)
+	}
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_LOG_FILE", "/tmp/env.log")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "/tmp/env.log" {
+		t.Errorf("LogFile = %q, want /tmp/env.log (env should override YAML)", cfg.LogFile)
+	}
+
+	// Flag overrides env.
+	cfg, err = LoadConfig([]string{"-config", path, "-log-file", "/tmp/flag.log"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "/tmp/flag.log" {
+		t.Errorf("LogFile = %q, want /tmp/flag.log (flag should override env)", cfg.LogFile)
+	}
+}
+
+func TestLoadConfig_LogFileYAMLExplicitEmptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `log_file: ""`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "" {
+		t.Errorf("LogFile = %q, want empty (YAML log_file: \"\" should disable file logging)", cfg.LogFile)
+	}
+}
+
+func TestLoadConfig_LogFileEnvExplicitEmptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `log_file: /tmp/custom.log`)
+	t.Setenv("PRUEFER_LOG_FILE", "")
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "" {
+		t.Errorf("LogFile = %q, want empty (PRUEFER_LOG_FILE= should disable file logging, overriding YAML)", cfg.LogFile)
+	}
+}
+
+func TestLoadConfig_LogFileFlagExplicitEmptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `log_file: /tmp/custom.log`)
+
+	cfg, err := LoadConfig([]string{"-config", path, "-log-file", ""})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "" {
+		t.Errorf("LogFile = %q, want empty (-log-file \"\" should disable file logging, overriding YAML)", cfg.LogFile)
+	}
 }
 
 func TestLoadConfig_TUIPrecedence(t *testing.T) {
