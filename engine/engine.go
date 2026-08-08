@@ -35,7 +35,8 @@ type Config struct {
 	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)
-	CIWaitTimeout             time.Duration       // How long to wait for CI in the merge guard before pausing (default 30m)
+	CIWaitTimeout             time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
+	CIBackstopTimeout         time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
 	RequiredStatusContexts    map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
 	PostPushDwell             time.Duration       // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
 	MaxCiFixCycles            int                 // Max CI-fix re-invocation cycles per issue before pausing (default 5)

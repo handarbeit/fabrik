@@ -99,6 +99,21 @@ func logClaudeConfigDir(configDir string, w io.Writer) {
 		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir)
 }
 
+// logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
+// notice: CIWaitTimeout's meaning changed from "cap on total CI wait" to
+// "CI-gate liveness-stall dwell" — an operator who tuned it must not
+// discover this silently. Unconditional (unlike logAnthropicAPIKeyOptIn/
+// logAnthropicEnvPassthrough, which are gated on an active opt-in): every
+// operator running the daemon needs this once per startup, whether or not
+// they've customized the value, since the setting's meaning changed under
+// them regardless of whether they ever touch it.
+func logCIWaitTimeoutSemantics(w io.Writer) {
+	fmt.Fprintf(w, "[startup] notice: CIWaitTimeout/--ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT now governs the "+
+		"CI-gate liveness-stall dwell (escalates only when CI shows no observable progress), not total CI wait "+
+		"time — a healthy, progressing CI suite waits indefinitely. See CIBackstopTimeout/--ci-backstop-timeout/"+
+		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
+}
+
 func (e *Engine) Run() error {
 	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
 	// processing the same project board concurrently. The lock file lives in
@@ -147,6 +162,7 @@ func (e *Engine) Run() error {
 		logClaudeConfigDir(configDir, w)
 		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", w)
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
+		logCIWaitTimeoutSemantics(w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
@@ -154,6 +170,7 @@ func (e *Engine) Run() error {
 		logClaudeConfigDir(configDir, os.Stderr)
 		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", os.Stderr)
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
+		logCIWaitTimeoutSemantics(os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
