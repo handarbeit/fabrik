@@ -700,6 +700,53 @@ func TestCheckStageColumnAlignment_NonHoldingStageStillFatalWhenMergeTrainOff(t 
 	}
 }
 
+// TestCheckStageColumnAlignment_FatalReportUsesDeferredFramingForCoOccurringHoldingMiss
+// covers a PR review finding on #1421: when merge_train is off and a
+// non-holding stage (fatal) and the holding stage (deferred) are missing at
+// the same time, the fatal report path — not the deferred-only path above —
+// is what runs. Before the fix, that path's per-holding-stage note omitted
+// the "not required to boot, must exist before enabling merge_train" framing
+// the deferred-only path carries, so the same holding-stage entry read
+// differently depending on what else happened to be missing. The fatal
+// report must carry that framing here too.
+func TestCheckStageColumnAlignment_FatalReportUsesDeferredFramingForCoOccurringHoldingMiss(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Both Plan (non-holding, fatal) and Queued (holding, deferred while
+		// off) are missing simultaneously.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Implement", "Validate"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing Plan column, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "terminal-only") {
+		t.Errorf("error should state the holding column's terminal-only role, got: %v", msg)
+	}
+	if !strings.Contains(msg, "Not required to boot while merge_train is off") {
+		t.Errorf("error should carry the same deferred framing as the deferred-only warning path, got: %v", msg)
+	}
+	if !strings.Contains(msg, "must exist on") {
+		t.Errorf("error should state the column must exist before enabling merge_train, got: %v", msg)
+	}
+}
+
 // TestCheckStageColumnAlignment_HoldingStagePresent verifies that when merge_train: on
 // and the Queued column exists on the board, startup succeeds.
 func TestCheckStageColumnAlignment_HoldingStagePresent(t *testing.T) {

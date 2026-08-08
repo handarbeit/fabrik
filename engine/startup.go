@@ -222,16 +222,33 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	fmt.Fprintf(&report, "Fix: add the missing columns to your GitHub Project board, or update\n")
 	fmt.Fprintf(&report, ".fabrik/stages/ to match your board column names (case-sensitive).\n")
 	for _, s := range missing {
-		if s.holdingStage {
+		if !s.holdingStage {
+			continue
+		}
+		if e.cfg.MergeTrain != "on" {
+			// This holding stage is only deferred-missing (merge_train is
+			// off/unset) — the fatal report was triggered by a different,
+			// co-occurring miss (fatalMissing is non-empty for some other
+			// reason). Give it the same "not required to boot, but must
+			// exist before enabling merge_train" framing as the deferred-only
+			// path above, so the two report paths never disagree about the
+			// same holding-stage entry (review finding).
 			fmt.Fprintf(&report, "\nNote: %q is a holding stage. Its board column serves a terminal-only\n", s.name)
 			fmt.Fprintf(&report, "landing role for the merge train — it is never a column to move items into\n")
-			fmt.Fprintf(&report, "manually. A Status of Todo/Backlog/null means Fabrik ignores the item, so\n")
-			fmt.Fprintf(&report, "guessing wrong here silently stalls it.\n")
-			fmt.Fprintf(&report, "Add a `%s` column to your GitHub Project board between `Validate` and `Done`,\n", s.name)
-			fmt.Fprintf(&report, "then restart. See docs/state-machine.md for setup steps.\n")
-			fmt.Fprintf(&report, "If you copied queued.yaml from a new Fabrik installation, ensure the column\n")
-			fmt.Fprintf(&report, "name on the board matches the 'name' field in the YAML (case-sensitive).\n")
+			fmt.Fprintf(&report, "manually. Not required to boot while merge_train is off, but must exist on\n")
+			fmt.Fprintf(&report, "the board before enabling merge_train: on. Add a `%s` column to your\n", s.name)
+			fmt.Fprintf(&report, "GitHub Project board before flipping merge_train on. See\n")
+			fmt.Fprintf(&report, "docs/state-machine.md for setup steps.\n")
+			continue
 		}
+		fmt.Fprintf(&report, "\nNote: %q is a holding stage. Its board column serves a terminal-only\n", s.name)
+		fmt.Fprintf(&report, "landing role for the merge train — it is never a column to move items into\n")
+		fmt.Fprintf(&report, "manually. A Status of Todo/Backlog/null means Fabrik ignores the item, so\n")
+		fmt.Fprintf(&report, "guessing wrong here silently stalls it.\n")
+		fmt.Fprintf(&report, "Add a `%s` column to your GitHub Project board between `Validate` and `Done`,\n", s.name)
+		fmt.Fprintf(&report, "then restart. See docs/state-machine.md for setup steps.\n")
+		fmt.Fprintf(&report, "If you copied queued.yaml from a new Fabrik installation, ensure the column\n")
+		fmt.Fprintf(&report, "name on the board matches the 'name' field in the YAML (case-sensitive).\n")
 	}
 
 	fmt.Fprint(os.Stderr, report.String())
