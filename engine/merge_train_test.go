@@ -2440,6 +2440,20 @@ func TestTruncateBlockHard_DoesNotSplitMultibyteRune(t *testing.T) {
 	}
 }
 
+// TestTruncateMiddle_DoesNotSplitMultibyteRune covers the same UTF-8 safety concern for
+// the per-check truncation helper: CI output text is arbitrary third-party content and
+// may contain non-ASCII, so both the head and tail cut points must land on rune
+// boundaries rather than splitting a multi-byte rune into invalid UTF-8.
+func TestTruncateMiddle_DoesNotSplitMultibyteRune(t *testing.T) {
+	// 'é' (2 bytes) straddles the head cut at byte 9; '日' (3 bytes) straddles the tail
+	// cut near the end.
+	s := strings.Repeat("a", 9) + "é" + strings.Repeat("x", 50) + "日" + strings.Repeat("b", 9)
+	got := truncateMiddle(s, len(s)-1, 10, 11)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateMiddle produced invalid UTF-8: %q (bytes: %v)", got, []byte(got))
+	}
+}
+
 // TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence is an end-to-end check that
 // enough large failing checks to exceed trainDiagBlockMax still produce a
 // balanced-fence, well-formed comment via the real ejectMember path.

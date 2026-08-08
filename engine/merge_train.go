@@ -90,7 +90,15 @@ func truncateMiddle(s string, max, head, tail int) string {
 		return s
 	}
 	omitted := len(s) - head - tail
-	return fmt.Sprintf("%s\n… (%d chars omitted) …\n%s", s[:head], omitted, s[len(s)-tail:])
+	headEnd := head
+	for headEnd > 0 && headEnd < len(s) && !utf8.RuneStart(s[headEnd]) {
+		headEnd--
+	}
+	tailStart := len(s) - tail
+	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+		tailStart++
+	}
+	return fmt.Sprintf("%s\n… (%d chars omitted) …\n%s", s[:headEnd], omitted, s[tailStart:])
 }
 
 // renderFailedChecks renders the failing check-run portion of a diagnostic block (R1/R3):
