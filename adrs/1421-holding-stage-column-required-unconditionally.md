@@ -116,9 +116,12 @@ introducing a new stderr-capture pattern this test file doesn't otherwise use, a
 
 **Positive:**
 - #1082's reported configuration — `merge_train` unset/off, a holding stage configured, its column
-  missing from the board — now fails startup loudly instead of booting clean and stranding work later,
-  at the single least recoverable point in the pipeline (merge time, where dependency edges have already
-  cleared on close).
+  missing from the board — no longer boots silently clean: Fabrik now surfaces a startup warning naming
+  the column, closing the exact gap #1082 reported (startup previously emitted only the unrelated
+  extra-columns warning, so the board appeared validated). See the Addendum below: the severity for this
+  specific configuration is a warn-and-boot, not a hard fail — only `merge_train: on` is fatal. The
+  guarantee this change actually adds is that the gap can no longer go *unnoticed*, not that it can no
+  longer occur while off.
 - The startup failure report is strictly more informative for every stage, not just holding stages: an
   operator now sees every required Status option's present/missing state in one place, rather than having
   to cross-reference a "missing" list against a separately printed "all columns found" list.
