@@ -660,6 +660,36 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 	return string(respBody), nil
 }
 
+// FetchPRFiles returns the list of file paths changed by a pull request via
+// the paginated GET /pulls/{n}/files endpoint, which has no line-count
+// ceiling (unlike the .diff media type FetchPRDiff uses) — the fallback path
+// for reconstructing a changed-path list when FetchPRDiff returns
+// ErrDiffTooLarge. Follows FetchLabelAppliedAt's pagination idiom: 100 per
+// page, stop on an empty page. Returns nil, nil on 404.
+func (c *Client) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	var out []string
+	for page := 1; ; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
+			c.baseURL, owner, repo, prNumber, page)
+		var raw []struct {
+			Filename string `json:"filename"`
+		}
+		if err := c.restGetJSON(apiURL, &raw); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("fetching files for PR #%d: %w", prNumber, err)
+		}
+		if len(raw) == 0 {
+			break
+		}
+		for _, f := range raw {
+			out = append(out, f.Filename)
+		}
+	}
+	return out, nil
+}
+
 // ReviewEvent selects the wire "event" value SubmitPRReview submits. Its
 // field is unexported so no package outside github can construct an
 // arbitrary value — the only way to obtain a ReviewEvent is to copy one of
