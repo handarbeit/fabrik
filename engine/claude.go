@@ -120,6 +120,26 @@ var defaultAllowedTools = []string{
 	"Bash(ls:*)", "Bash(cat:*)", "Bash(rm:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(mkdir:*)", "Bash(find:*)",
 }
 
+// disallowedTools lists harness tools that must never reach a headless Fabrik
+// stage worker, regardless of stage config or the unrestricted/dontAsk split.
+// Unlike --allowedTools (a call-time permission filter that does not prevent a
+// tool from being offered or invoked — see #1372 and #1365), --disallowedTools
+// is a construction-time exclusion: the tool is absent from the schema Claude
+// is given, so there is no permission check to reason around or bypass.
+var disallowedTools = []string{
+	// ScheduleWakeup promises cross-turn resumption via a scheduled wakeup.
+	// A headless Fabrik stage has no scheduler to deliver that wakeup: the
+	// turn ends, the stage exits without FABRIK_STAGE_COMPLETE, and the next
+	// retry re-derives the identical stall. See #1345, #1365.
+	"ScheduleWakeup",
+	// Workflow promises a <task-notification> on completion after spawning
+	// background subagents against the session budget. It is more damaging
+	// than ScheduleWakeup: nothing ever delivers the notification in a
+	// headless stage, so the failure mode is the stall plus the spend. See
+	// #1345, #1365.
+	"Workflow",
+}
+
 // CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.
 func CheckBlockedOnInput(output string) bool {
 	return blockedOnInputRE.MatchString(output)
@@ -966,6 +986,13 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 		args = append(args, "--dangerously-skip-permissions")
 	} else {
 		args = append(args, "--permission-mode", "dontAsk")
+	}
+
+	// Applies unconditionally on both invocation paths above: --disallowedTools
+	// is a construction-time exclusion, not a permission-mode behavior, so it
+	// must not live inside the unrestricted branch. See disallowedTools doc.
+	for _, tool := range disallowedTools {
+		args = append(args, "--disallowedTools", tool)
 	}
 
 	if claudePluginDir != "" {
