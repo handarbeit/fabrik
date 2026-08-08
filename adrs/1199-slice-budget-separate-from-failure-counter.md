@@ -83,14 +83,35 @@ if claudeRan {
 }
 ```
 
-**Escalation** on exceeding `MaxSliceRetries` is modeled directly on the merge-gate's
+**Escalation** on exceeding `MaxSliceRetries` is modeled on the merge-gate's
 `pauseForRebaseCycleLimit` (`engine/merge_gate.go`) — a live, tested, in-production
-precedent for exactly this shape: a second, independently-bounded counter with its own
-non-failure message. `pauseForSliceLimit` posts a comment stating explicitly that this is
-not a failure, names `--max-slice-retries`/`FABRIK_MAX_SLICE_RETRIES` as the override, and
-suggests `fabrik:extend-turns` (wider per-invocation turn budget → fewer slices needed) or
+precedent for a second, independently-bounded counter with its own non-failure message —
+with one deliberate divergence (see "Recovery" below). `pauseForSliceLimit` posts a
+comment stating explicitly that this is not a failure, names
+`--max-slice-retries`/`FABRIK_MAX_SLICE_RETRIES` as the override, and suggests
+`fabrik:extend-turns` (wider per-invocation turn budget → fewer slices needed) or
 splitting the issue. It applies `fabrik:paused` + `fabrik:awaiting-input` — **never**
 `stage:<name>:failed`, since the stage has not failed.
+
+**Recovery diverges from `pauseForRebaseCycleLimit`: `pauseForSliceLimit` applies
+`itemstate.EnginePaused`.** `RebaseCycles` has an independent path back to progress that
+doesn't depend on the counter resetting at all: a human resolves the underlying merge
+conflict directly, which changes `settle.Status` and lets the poll loop advance without
+ever re-checking `RebaseCycles` again. `SliceRetries` has no equivalent independent
+signal — the job simply needs more slices than the budget allowed, and there is nothing
+external to "fix." Without `EnginePaused`, `processItem`'s unpause guard
+(`wasPaused || hasFailedLabel`, both false for a pure slice-limit pause, since no failed
+label is ever applied) would never fire `clearFailedStage`, `SliceRetries` would never
+reset, and removing `fabrik:paused` — the pause comment's own documented recovery
+instruction — would be a no-op: the very next dispatch takes exactly one more slice,
+re-checks a counter already at the limit, and re-pauses immediately, with the operator
+getting exactly one slice of progress per manual unpause forever. Applying `EnginePaused`
+makes `snap.PausedByEngine(stageName)` true, so removing `fabrik:paused` genuinely
+triggers `clearFailedStage` → `StageRetryCleared`, resetting `SliceRetries` and giving the
+stage a fresh slice budget. `clearFailedStage`'s `stage:<name>:failed` removal is a
+harmless no-op on this path, since that label was never applied. (Caught in Validate
+review before merge — the first draft copied `pauseForRebaseCycleLimit`'s omission of
+`EnginePaused` without accounting for this precondition difference.)
 
 **`SliceRetries` is bound higher than `Attempts` by default (10 vs. 3)** and is
 independently configurable (flag + env, mirroring `MaxRebaseCycles`'s wiring tier — no
@@ -113,15 +134,14 @@ attempts/slices this run-to-completion took" and share the same natural reset po
 intervention**, bounded instead by `MaxSliceRetries` — the issue's headline acceptance
 criterion. `Attempts` is untouched by any number of turn-cap preemptions.
 
-**`pauseForSliceLimit` does not reset `SliceRetries` on pause**, mirroring
-`pauseForRebaseCycleLimit` exactly (which likewise does not apply `itemstate.EnginePaused`
-or a failure-style label). A manual `fabrik:paused` + `fabrik:awaiting-input` removal
-alone does not reset the counter — it is already at the limit, so the very next turn-cap
-exit re-escalates immediately unless the underlying condition changes (wider turn budget
-via `fabrik:extend-turns`, or splitting the issue). This is a deliberate, precedented gap:
-the identical shape exists today for `RebaseCycles`/`MaxRebaseCycles`, and the pause
-comment's suggested remedies are the intended path to actual progress rather than a bare
-unpause.
+**A manual `fabrik:paused` removal genuinely resets `SliceRetries`**, because
+`pauseForSliceLimit` applies `itemstate.EnginePaused` (see "Recovery diverges..." above).
+This does not itself change the underlying condition — if the job still needs more slices
+than `MaxSliceRetries` allows within a single fresh budget, it will re-hit the limit and
+re-pause — but each manual unpause now grants a full fresh slice budget rather than
+exactly one slice, so `fabrik:extend-turns` (wider per-invocation turn budget → fewer
+slices needed) or splitting the issue are genuine accelerants rather than the only way to
+make any progress at all.
 
 **`--max-retries` now means exactly what it is documented to mean** — failed attempts —
 closing the gap #1191 reported between the documented and actual behavior of

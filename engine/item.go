@@ -1766,6 +1766,22 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, r
 // a distinct, independently-bounded counter with its own non-failure message,
 // fabrik:paused + fabrik:awaiting-input, and deliberately no stage:<name>:failed
 // label — the stage has not failed (#1199).
+//
+// Unlike pauseForRebaseCycleLimit, this DOES apply itemstate.EnginePaused. The
+// rebase-cycle counter has an independent path back to progress: a human fixes
+// the underlying conflict directly, which changes settle.Status and lets the
+// poll loop advance without ever re-checking RebaseCycles. SliceRetries has no
+// such independent signal — the job simply needs more slices than the budget
+// allowed, and there is nothing to "fix" except widening the budget or
+// resetting the counter. Without EnginePaused, processItem's unpause guard
+// (wasPaused || hasFailedLabel, both false for this pause) never fires
+// clearFailedStage, SliceRetries never resets, and the documented "remove
+// fabrik:paused to resume" recovery is a no-op: the very next dispatch takes
+// exactly one more slice, re-hits a counter already at MaxSliceRetries, and
+// re-pauses immediately. Applying EnginePaused makes wasPaused true on the
+// next pass, so clearFailedStage's StageRetryCleared genuinely resets
+// SliceRetries — clearFailedStage's stage:<name>:failed removal is a
+// harmless no-op here since that label was never applied (#1199 review).
 func (e *Engine) pauseForSliceLimit(item gh.ProjectItem, stage *stages.Stage, sliceCount, maxSliceRetries int) {
 	e.logf(item.Number, "slice-limit", "slice limit %d reached for stage %q — pausing (not a failure)\n", maxSliceRetries, stage.Name)
 
@@ -1783,11 +1799,17 @@ func (e *Engine) pauseForSliceLimit(item gh.ProjectItem, stage *stages.Stage, sl
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
 // clearFailedStage is called when the user removes fabrik:paused from an issue
-// that was paused by the engine due to max retries. It removes the stage:<name>:failed
-// label and resets the retry count so the stage can be attempted again.
+// that was paused by the engine — either due to max retries (stage:<name>:failed
+// present) or a turn-cap slice budget exceeded (no failed label, only
+// PausedByEngine set by pauseForSliceLimit; #1199). It removes the
+// stage:<name>:failed label (a harmless no-op when it was never applied) and
+// resets both the failure and slice counters so the stage can be attempted again.
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
 

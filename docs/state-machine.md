@@ -2748,14 +2748,19 @@ is treated the same as a genuine error rather than inferred to be a slice. This 
 
 **Recovery:** `StageRetryCleared` — applied on normal stage completion and by `clearFailedStage()` on
 manual unpause — zeroes `SliceRetries(stageName)` alongside `Attempts(stageName)`; the two counters
-share one reset point. `pauseForSliceLimit()` does **not** apply `EnginePaused` or a `stage:<X>:failed`
-label (mirroring `pauseForRebaseCycleLimit` exactly), so a manual `fabrik:paused` +
-`fabrik:awaiting-input` removal alone does **not** reset `SliceRetries` — the counter is already at
-`MaxSliceRetries`, so the very next turn-cap exit re-escalates immediately. This is a deliberate,
-precedented gap (the identical shape exists for `RebaseCycles`/`MaxRebaseCycles`): the pause comment's
-suggested remedies (`fabrik:extend-turns`, splitting the issue) are the intended path to actually make
-progress, since `fabrik:extend-turns` widens the per-invocation turn budget and often lets the stage
-complete without hitting the cap again at all — at which point `StageRetryCleared` fires normally.
+share one reset point. Unlike `pauseForRebaseCycleLimit`, `pauseForSliceLimit()` **does** apply
+`itemstate.EnginePaused` (never `stage:<X>:failed`): `RebaseCycles` has an independent path back to
+progress (a human resolves the underlying merge conflict directly, which changes `settle.Status` and
+lets the poll loop advance without ever re-checking the counter), but `SliceRetries` has no such
+signal — the job simply needs more slices than the budget allowed, with nothing external to "fix."
+Without `EnginePaused`, `processItem()`'s unpause guard (`wasPaused || hasFailedLabel`, both false for
+a pure slice-limit pause) would never fire `clearFailedStage()`, `SliceRetries` would never reset, and
+removing `fabrik:paused` would be a no-op: the very next dispatch takes exactly one more slice,
+re-checks a counter already at `MaxSliceRetries`, and re-pauses immediately — the documented recovery
+path would not work. With `EnginePaused` applied, `snap.PausedByEngine(stageName)` is true on the next
+pass, so removing `fabrik:paused` genuinely triggers `clearFailedStage()` → `StageRetryCleared`, and
+the stage resumes with a fresh slice budget. `clearFailedStage()`'s `stage:<X>:failed` label removal is
+a harmless no-op on this path, since that label was never applied.
 
 **Regression guard:** a job that has already taken more turn-cap slices than `MaxRetries` (the old,
 accidental ceiling per #1191) is never paused as long as it stays within `MaxSliceRetries` — `Attempts`

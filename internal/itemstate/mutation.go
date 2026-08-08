@@ -477,8 +477,12 @@ type PRCreationFailedRecorded struct {
 func (PRCreationFailedRecorded) isMutation()       {}
 func (m PRCreationFailedRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// EnginePaused records that the engine has paused work on a stage due to
-// repeated failures. (The design doc listed this as "EngineEnginePaused" — typo.)
+// EnginePaused records that the engine has paused work on a stage — either
+// due to repeated failures (escalateFailedStage/escalatePRCreationFailure) or
+// a turn-cap slice budget exceeded (pauseForSliceLimit, #1199), both of which
+// need the same "a human manually removed fabrik:paused" detection to reset
+// their respective counters via clearFailedStage. (The design doc listed this
+// as "EngineEnginePaused" — typo.)
 type EnginePaused struct {
 	Repo      string
 	Number    int
