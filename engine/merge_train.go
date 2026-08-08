@@ -36,6 +36,172 @@ type trainMember struct {
 	headSHA string
 }
 
+// trainCIDiagnostic captures the combined Validate's failure output at the point of
+// failure (R1/#1420), so it survives the bisection loop and is still in hand when the
+// ejection comment is composed — the only run in which a merge-train failure exists is
+// the combined trial that observed it (the branch's own CI is green by construction).
+//
+// Threaded as a return value through pollTrainCI -> assembleAndValidate ->
+// bisect/handleRedBatch/landOneAtATime -> ejectMember, never stashed in shared or
+// mutable state: bisection continues after isolating the poisoner (to validate the
+// reformed survivor batch), and that later run is unrelated and must not overwrite the
+// diagnostic that named the poisoner. A threaded return value makes that overwrite
+// structurally impossible — there is no shared field a later call could clobber.
+//
+// Exactly one of FailedChecks, FailedContexts, or Note is populated, reflecting which
+// branch of pollTrainCI produced the red result: ordinary check-run failures carry full
+// CheckRun data (name, output text/summary, details/html URL); classic commit-status
+// "required context" failures (ADR-933) carry only names, since there is no check-run
+// output to extract; a "dirty" mergeable_state (no per-check signal at all) carries a
+// free-text Note. nil means "no CI diagnostic available" — used at the three ejection
+// call sites whose cause isn't a combined-Validate failure (fetch/head-SHA failures,
+// unresolvable merge conflicts), which this issue leaves unaffected.
+type trainCIDiagnostic struct {
+	FailedChecks   []gh.CheckRun
+	FailedContexts []string
+	Note           string
+	PRNum          int
+	TrialSHA       string
+}
+
+// Truncation policy for rendering a trainCIDiagnostic into a comment body (R3): inline a
+// failing check's output in full up to trainDiagPerCheckInlineMax chars; beyond that,
+// inline trainDiagPerCheckHead chars from the start and trainDiagPerCheckTail from the
+// end with an explicit "chars omitted" marker. At most trainDiagMaxInlineChecks failing
+// checks get their output inlined; any remaining failing checks are named only. A final
+// hard cap (trainDiagBlockMax) truncates the whole assembled block as a belt-and-suspenders
+// against GitHub's ~65536-char comment limit, mirroring the tail-only idiom
+// formatOutputComment/formatReviewFeedbackComment already use in engine/pr.go.
+const (
+	trainDiagPerCheckInlineMax = 3000
+	trainDiagPerCheckHead      = 2000
+	trainDiagPerCheckTail      = 800
+	trainDiagMaxInlineChecks   = 5
+	trainDiagBlockMax          = 15000
+)
+
+// truncateMiddle returns s unchanged if it fits within max chars; otherwise it keeps the
+// first head chars and last tail chars, replacing the middle with an explicit
+// "chars omitted" marker so a reader knows content was cut rather than mistaking the
+// excerpt for the whole thing.
+func truncateMiddle(s string, max, head, tail int) string {
+	if len(s) <= max {
+		return s
+	}
+	omitted := len(s) - head - tail
+	return fmt.Sprintf("%s\n… (%d chars omitted) …\n%s", s[:head], omitted, s[len(s)-tail:])
+}
+
+// renderFailedChecks renders the failing check-run portion of a diagnostic block (R1/R3):
+// each check's name, status/conclusion, a truncated excerpt of its output (OutputText,
+// falling back to OutputSummary), and a Details link when GitHub provided one — always,
+// not only when truncated, since it's strictly more helpful. Beyond trainDiagMaxInlineChecks,
+// remaining failing checks are named only, so a wide red batch never balloons the comment.
+func renderFailedChecks(checks []gh.CheckRun) string {
+	if len(checks) == 0 {
+		return ""
+	}
+	inlineCount := len(checks)
+	if inlineCount > trainDiagMaxInlineChecks {
+		inlineCount = trainDiagMaxInlineChecks
+	}
+	var b strings.Builder
+	for i, cr := range checks[:inlineCount] {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		state := cr.Status
+		if cr.Status == "completed" {
+			state = cr.Conclusion
+		}
+		fmt.Fprintf(&b, "**%s** (%s)", cr.Name, state)
+		output := strings.TrimSpace(cr.OutputText)
+		if output == "" {
+			output = strings.TrimSpace(cr.OutputSummary)
+		}
+		if output != "" {
+			b.WriteString("\n```\n")
+			b.WriteString(truncateMiddle(output, trainDiagPerCheckInlineMax, trainDiagPerCheckHead, trainDiagPerCheckTail))
+			b.WriteString("\n```")
+		}
+		link := cr.HTMLURL
+		if link == "" {
+			link = cr.DetailsURL
+		}
+		if link != "" {
+			fmt.Fprintf(&b, "\nDetails: %s", link)
+		}
+	}
+	if len(checks) > inlineCount {
+		var rest []string
+		for _, cr := range checks[inlineCount:] {
+			rest = append(rest, cr.Name)
+		}
+		fmt.Fprintf(&b, "\n\n...and %d more failing check(s): %s", len(rest), strings.Join(rest, ", "))
+	}
+	return b.String()
+}
+
+// renderFailedContexts renders the classic-commit-status portion of a diagnostic block
+// (ADR-933's RequiredContextsFailed path) — names only, since a required context has no
+// check-run output to extract from. A pointer degraded to "name only" is still strictly
+// more than the "no diagnostic" this issue reports (R3's minimum-acceptable bar).
+func renderFailedContexts(contexts []string) string {
+	if len(contexts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Failed required status context(s): %s\n(no check-run output is available for classic commit statuses)", strings.Join(contexts, ", "))
+}
+
+// renderDiagnosticBlock composes the full R1/R3 diagnostic section of an ejection or
+// pause comment from diag, applying the final hard-cap truncation. Returns "" for a nil
+// diag (the three out-of-scope ejection call sites) or a diag whose fields are all empty.
+func renderDiagnosticBlock(diag *trainCIDiagnostic) string {
+	if diag == nil {
+		return ""
+	}
+	var body string
+	switch {
+	case len(diag.FailedChecks) > 0:
+		body = renderFailedChecks(diag.FailedChecks)
+	case len(diag.FailedContexts) > 0:
+		body = renderFailedContexts(diag.FailedContexts)
+	case diag.Note != "":
+		body = diag.Note
+	default:
+		return ""
+	}
+	block := fmt.Sprintf("**Diagnostic** (trial %s, integration PR #%d):\n\n%s", diag.TrialSHA, diag.PRNum, body)
+	if len(block) > trainDiagBlockMax {
+		block = block[:trainDiagBlockMax] + "\n\n... (truncated)"
+	}
+	return block
+}
+
+// renderBatchContext composes the R4 sentence naming the other members the isolated
+// member's batch was combined against — informational grounding so an operator knows
+// before investigating that the fault does not exist on their own branch (a merge-train
+// failure is, by construction, a failure that doesn't exist on the branch alone; it
+// arises from combining with a base that moved). otherMembers is the full batch at the
+// point the failure was observed (handleRedBatch's top-level red set for a
+// bisection-isolated poisoner; nil for landOneAtATime's fallback, which validates each
+// member as a true singleton with no batch at all). isolated is excluded from the named
+// list, and an empty remainder (a single-member train, or a genuine singleton
+// validation) gets a distinct, coherent sentence rather than an awkward empty list.
+func renderBatchContext(otherMembers []trainMember, isolated int) string {
+	var names []string
+	for _, m := range otherMembers {
+		if m.item.Number == isolated {
+			continue
+		}
+		names = append(names, fmt.Sprintf("#%d", m.item.Number))
+	}
+	if len(names) == 0 {
+		return "No other members were present in this train attempt — the failure is against the moved base branch alone, not a cross-PR interaction."
+	}
+	return fmt.Sprintf("This train attempt also combined the following member(s), which are not implicated — the failure does not exist on their branches either: %s.", strings.Join(names, ", "))
+}
+
 // mergeTrainWorkerState tracks an in-flight or completed merge-train worker.
 // Stored in Engine.mergeTrainInFlight keyed by "owner/repo".
 // mu guards all fields that the poll loop reads while the goroutine writes them.
