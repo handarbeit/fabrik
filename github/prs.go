@@ -380,6 +380,21 @@ type CheckRun struct {
 	Name       string
 	Status     string // "queued", "in_progress", "completed"
 	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
+	// OutputSummary is the check run's output.summary field — a short
+	// Markdown summary the check author chose to surface. May be empty even
+	// on a failing run if the check never set it.
+	OutputSummary string
+	// OutputText is the check run's output.text field — the fuller Markdown
+	// body (e.g. a formatted log excerpt). May be empty even on a failing
+	// run if the check never set it.
+	OutputText string
+	// DetailsURL is the check run's details_url — the "Details" link GitHub
+	// shows in the checks UI, typically pointing at the CI provider's own
+	// run page.
+	DetailsURL string
+	// HTMLURL is the check run's html_url — the GitHub-hosted permalink to
+	// the check run itself.
+	HTMLURL string
 }
 
 // FetchCheckRuns retrieves check runs for a given commit SHA via the REST API.
@@ -391,6 +406,12 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
+			Output     struct {
+				Summary string `json:"summary"`
+				Text    string `json:"text"`
+			} `json:"output"`
+			DetailsURL string `json:"details_url"`
+			HTMLURL    string `json:"html_url"`
 		} `json:"check_runs"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
@@ -398,7 +419,16 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	}
 	out := make([]CheckRun, len(raw.CheckRuns))
 	for i, cr := range raw.CheckRuns {
-		out[i] = CheckRun{ID: cr.ID, Name: cr.Name, Status: cr.Status, Conclusion: cr.Conclusion}
+		out[i] = CheckRun{
+			ID:            cr.ID,
+			Name:          cr.Name,
+			Status:        cr.Status,
+			Conclusion:    cr.Conclusion,
+			OutputSummary: cr.Output.Summary,
+			OutputText:    cr.Output.Text,
+			DetailsURL:    cr.DetailsURL,
+			HTMLURL:       cr.HTMLURL,
+		}
 	}
 	return out, nil
 }
