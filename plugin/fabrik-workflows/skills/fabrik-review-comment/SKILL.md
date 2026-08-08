@@ -99,6 +99,8 @@ In preference order:
 
 **Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
 
+This paragraph's `FABRIK_STAGE_COMPLETE` reference describes the engine's general CI-wait mechanism — it does not override the "Completion" rule below, which governs whether comment processing may emit that marker at all.
+
 ## Numbering findings in your output
 
 When you list or summarize multiple review findings (e.g., distinguishing one Copilot comment from another, or grouping Gemini suggestions), **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
