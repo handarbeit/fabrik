@@ -67,17 +67,26 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	// Unmanaged stages (e.g. Backlog) are always excluded — they're parking
 	// columns Fabrik recognizes but never requires a matching board column for,
 	// regardless of merge_train.
-	// Holding stages are excluded when merge_train is off — they only require a
-	// board column when merge_train is on (the operator must add the Queued column).
+	// Holding stages (e.g. Queued) ARE required whenever configured, independent
+	// of the current merge_train mode. Membership in this set reflects
+	// reachability, not the mode flag's value at this particular startup:
+	// merge_train is an operator-togglable runtime setting that can flip from
+	// off to on across a restart without ever regenerating board columns, so a
+	// board validated while off can strand work the instant it's turned on (see
+	// #1082/#1421 and ADR-1421). This holds even though, per ADR-1072, the
+	// holding column is provably unreachable through any code path TODAY when
+	// merge_train is off (stages.NextStage unconditionally skips HoldingStage,
+	// so the only entry point is advanceToQueued, itself gated on
+	// merge_train: on) — that reachability finding is not license to exempt the
+	// column here; it only explains why the exemption existed. Every other
+	// non-cleanup, non-unmanaged stage is required unconditionally too, so this
+	// keeps holding stages on the same posture rather than a special case.
 	var checkStages []*stageNameOrder
 	for _, s := range e.cfg.Stages {
 		if s.CleanupWorktree {
 			continue
 		}
 		if s.Unmanaged {
-			continue
-		}
-		if s.HoldingStage && e.cfg.MergeTrain != "on" {
 			continue
 		}
 		checkStages = append(checkStages, &stageNameOrder{name: s.Name, order: s.Order, holdingStage: s.HoldingStage})
@@ -160,25 +169,38 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	}
 	sort.Strings(allCols)
 
-	fmt.Fprintf(os.Stderr, "Fabrik startup check failed: stage/board column mismatch\n\n")
-	fmt.Fprintf(os.Stderr, "Configured stages not found on board:\n")
-	for _, s := range missing {
-		fmt.Fprintf(os.Stderr, "  - %s (order %d)\n", s.name, s.order)
+	// Build a unified, per-required-stage present/missing report — R3 asks for
+	// "every required option and which are present," not just the first
+	// missing one. checkStages is already sorted by Order.
+	var report strings.Builder
+	fmt.Fprintf(&report, "Fabrik startup check failed: stage/board column mismatch\n\n")
+	fmt.Fprintf(&report, "Required Status options (derived from configured non-cleanup, non-unmanaged stages):\n")
+	for _, s := range checkStages {
+		status := "present"
+		if _, ok := sf.Options[s.name]; !ok {
+			status = "MISSING"
+		}
+		fmt.Fprintf(&report, "  - %s (order %d): %s\n", s.name, s.order, status)
 	}
-	fmt.Fprintf(os.Stderr, "\nBoard columns found:\n  %s\n\n", strings.Join(allCols, ", "))
-	fmt.Fprintf(os.Stderr, "Fix: add the missing columns to your GitHub Project board, or update\n")
-	fmt.Fprintf(os.Stderr, ".fabrik/stages/ to match your board column names (case-sensitive).\n")
+	fmt.Fprintf(&report, "\nBoard columns found:\n  %s\n\n", strings.Join(allCols, ", "))
+	fmt.Fprintf(&report, "Fix: add the missing columns to your GitHub Project board, or update\n")
+	fmt.Fprintf(&report, ".fabrik/stages/ to match your board column names (case-sensitive).\n")
 	for _, s := range missing {
 		if s.holdingStage {
-			fmt.Fprintf(os.Stderr, "\nNote: %q is a holding stage required by merge_train: on.\n", s.name)
-			fmt.Fprintf(os.Stderr, "Add a `%s` column to your GitHub Project board between `Validate` and `Done`,\n", s.name)
-			fmt.Fprintf(os.Stderr, "then restart. See docs/state-machine.md for setup steps.\n")
-			fmt.Fprintf(os.Stderr, "If you copied queued.yaml from a new Fabrik installation, ensure the column\n")
-			fmt.Fprintf(os.Stderr, "name on the board matches the 'name' field in the YAML (case-sensitive).\n")
+			fmt.Fprintf(&report, "\nNote: %q is a holding stage. Its board column serves a terminal-only\n", s.name)
+			fmt.Fprintf(&report, "landing role for the merge train — it is never a column to move items into\n")
+			fmt.Fprintf(&report, "manually. A Status of Todo/Backlog/null means Fabrik ignores the item, so\n")
+			fmt.Fprintf(&report, "guessing wrong here silently stalls it.\n")
+			fmt.Fprintf(&report, "Add a `%s` column to your GitHub Project board between `Validate` and `Done`,\n", s.name)
+			fmt.Fprintf(&report, "then restart. See docs/state-machine.md for setup steps.\n")
+			fmt.Fprintf(&report, "If you copied queued.yaml from a new Fabrik installation, ensure the column\n")
+			fmt.Fprintf(&report, "name on the board matches the 'name' field in the YAML (case-sensitive).\n")
 		}
 	}
 
-	return fmt.Errorf("startup check failed: stage/board column mismatch")
+	fmt.Fprint(os.Stderr, report.String())
+
+	return fmt.Errorf("%s", report.String())
 }
 
 // stageNameOrder is a helper for sorting and reporting stage names.
