@@ -280,12 +280,15 @@ Context files are available in .fabrik-context/
 --plugin-dir <absolute-path-to-.fabrik/plugin>
 --output-format json
 --verbose
+--disallowedTools <tool> ...  (always: ScheduleWakeup, Workflow — see below)
 --resume <sessionID>          (if retry)
 --model <override>            (if label or stage config)
 --max-turns <N>               (if configured)
 --allowedTools <tool> ...     (if restricted)
 --name <sentinel>             (if claude supports --name; probed once at startup)
 ```
+
+`--disallowedTools` is emitted unconditionally, outside the `--dangerously-skip-permissions`/`--permission-mode dontAsk` branch, so it applies on both invocation paths — it is a construction-time exclusion from the tool schema Claude is offered, not a call-time permission check like `--allowedTools`. `ScheduleWakeup` and `Workflow` are suppressed because both promise cross-turn resumption a headless stage cannot deliver (see `disallowedTools` in `engine/claude.go` and ADR-1365). `Agent` is deliberately not suppressed — subagents complete within the parent turn.
 
 ### Worker Session Naming (`--name`)
 

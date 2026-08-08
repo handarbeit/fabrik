@@ -2314,7 +2314,11 @@ If the named branch does not exist on the remote, Fabrik falls back to the repos
 
 ## 7. Permissions
 
-Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions — tools not in the allowed set are silently denied rather than triggering an interactive prompt. This ensures Fabrik works correctly in headless mode and shared environments regardless of the user's `~/.claude/settings.json`. Fabrik does not require users to pre-configure permissions in their Claude Code settings.
+Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions interactively. This ensures Fabrik works correctly in headless mode and shared environments regardless of the user's `~/.claude/settings.json`. Fabrik does not require users to pre-configure permissions in their Claude Code settings.
+
+**`allowed_tools` is a call-time permission filter, not an availability filter.** A tool absent from the allowed set is still offered to the model in its tool schema; under `--permission-mode dontAsk`, absence from the allowed list is not a guarantee the tool call is rejected either (see the Worktree Boundary Enforcement caveat below and #1372). The only mechanism that removes a tool from what the model is even offered is `--disallowedTools`, a separate, construction-time exclusion.
+
+**`ScheduleWakeup` and `Workflow` are unconditionally suppressed via `--disallowedTools`** on every invocation, regardless of stage config, `allowed_tools`, or whether `fabrik:unrestricted` is set. Both tools promise cross-turn resumption — a scheduled wakeup or a completion notification delivered after the current turn ends — that a headless Fabrik stage cannot honor: there is no running session to receive it. Without suppression, a stage worker calls one of these tools, the turn ends, the stage exits without `FABRIK_STAGE_COMPLETE`, and the next retry deterministically re-derives the identical stall (`Workflow` additionally risks spending session budget on background subagents that never report back). See ADR-1365.
 
 **Default allowed-tool set** (used when a stage does not specify `allowed_tools`):
 
