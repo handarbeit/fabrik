@@ -2268,15 +2268,21 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 }
 
 // pollForMergeable polls the integration PR until its mergeable_state is "clean" or
-// "unstable" (per gh.MergeableStateAccepted), blocking up to CIWaitTimeout.
+// "unstable" (per gh.MergeableStateAccepted), blocking up to CIBackstopTimeout.
 // Returns true when the PR is ready to merge.
 // On timeout, posts a warning comment on the first batch member issue and returns false.
+//
+// ADR-1410 (R6): bounded by CIBackstopTimeout, not the liveness-dwell
+// CIWaitTimeout — this is a synchronous blocking poll inside a single
+// goroutine, not re-entrant poll-driven state, so "wait indefinitely while
+// progressing" would hold the goroutine open for the suite's full duration, a
+// cost the async CI gate doesn't pay. It already degrades gracefully on
+// timeout (the batch retries next merge-train cycle, no pause), so #342's
+// destructive spurious-pause doesn't reproduce here; using the shorter,
+// repurposed CIWaitTimeout instead would force a wasted trial-branch rebuild
+// every ~30 minutes for a healthy-but-slow suite.
 func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum int, survivors []trainMember) bool {
-	ciWaitTimeout := e.cfg.CIWaitTimeout
-	if ciWaitTimeout <= 0 {
-		ciWaitTimeout = 30 * time.Minute
-	}
-	deadline := time.Now().Add(ciWaitTimeout)
+	deadline := time.Now().Add(e.ciBackstopTimeout())
 
 	for {
 		select {
@@ -2836,7 +2842,12 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 
 // pollTrainCI polls the integration PR's CI signals, returning the typed result and,
 // for a red result, the diagnostic that observed it (R1/#1420) — nil for green/pending.
-// Blocks until the result is known or the CIWaitTimeout elapses.
+// Blocks until the result is known or the CIBackstopTimeout elapses (ADR-1410, R6 —
+// see pollForMergeable's doc comment for why this synchronous blocking loop keeps an
+// elapsed-time bound, pointed at the backstop rather than the liveness-dwell
+// CIWaitTimeout, instead of adopting liveness semantics itself). A confirmed CI
+// failure (check-run or required-context) already returns TrainCIRed immediately
+// below, unconditionally — it never waits out the deadline.
 //
 // mergeable_state is a red/permission gate only, not a green shortcut:
 // GitHub computes it from required checks alone (per branch protection), so
@@ -2853,11 +2864,7 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // branch below), since in that case there is no per-check signal to fall
 // back on.
 func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) (TrainCIResult, *trainCIDiagnostic) {
-	ciWaitTimeout := e.cfg.CIWaitTimeout
-	if ciWaitTimeout <= 0 {
-		ciWaitTimeout = 30 * time.Minute
-	}
-	deadline := time.Now().Add(ciWaitTimeout)
+	deadline := time.Now().Add(e.ciBackstopTimeout())
 
 	var lastPending, lastFailed []gh.CheckRun
 
@@ -2946,7 +2953,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			// settlePRMergeState's zero-check-runs branch (pr_settle.go rule
 			// 13). Without this, a confirmed required-context failure on a
 			// trial branch with no check-run footprint at all would never
-			// resolve to TrainCIRed — it would just poll to CIWaitTimeout and
+			// resolve to TrainCIRed — it would just poll to CIBackstopTimeout and
 			// return TrainCIPending, stalling the batch instead of ejecting
 			// the poisoning member. A merely missing/pending required context
 			// is not short-circuited here — it keeps polling like any other
@@ -2967,8 +2974,9 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			}
 		}
 
-		// Check deadline again before the sleep so a short CIWaitTimeout doesn't
-		// block unnecessarily in the poll interval when the deadline has already elapsed.
+		// Check deadline again before the sleep so a short CIBackstopTimeout
+		// doesn't block unnecessarily in the poll interval when the deadline
+		// has already elapsed.
 		if time.Now().After(deadline) {
 			logTimeout()
 			return TrainCIPending, nil
