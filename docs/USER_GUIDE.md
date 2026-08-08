@@ -762,7 +762,8 @@ FABRIK_USER=my-personal-username
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
-| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
+| `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
@@ -809,7 +810,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds | `30` |
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
-| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited) | `3` |
+| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
+| `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -1303,9 +1305,30 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A Claude account usage-limit exit (see the `fabrik:claude-limit` troubleshooting
      note above) is exempted from this count entirely — the stage never ran, so it
      never consumes a retry attempt
+   - A turn-cap preemption (the invocation ran out of turns and will resume on the
+     next dispatch) is likewise exempted — it counts against a separate slice
+     counter instead. See below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
+
+> **Troubleshooting: an issue is paused with a "slice budget exceeded" comment,
+> not a failure comment.** `--max-retries` bounds genuine failures only — errors,
+> degenerate output, PR-creation failures. A turn-cap preemption (the invocation
+> hit its per-stage turn budget and stopped; the session resumes on the next
+> dispatch) is not a failure and is bounded separately by `--max-slice-retries`
+> (default 10). A large job that legitimately needs several slices completes
+> without pausing as long as it stays within that limit; only a job that keeps
+> hitting the turn cap `--max-slice-retries` times in a row is paused. The pause
+> comment names the specific cause and never says "failed to complete" — no
+> `stage:<name>:failed` label is applied, since the stage has not failed. It
+> applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
+> `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
+> slices are needed) or split the issue into smaller pieces, then remove
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
+> reset the slice counter — it is already at the limit, so the very next
+> turn-cap exit re-pauses immediately unless the underlying job size or turn
+> budget actually changes. See #1199 and #1191.
 
 ### Stages Waiting for Input
 

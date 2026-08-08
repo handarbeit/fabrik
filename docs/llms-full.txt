@@ -760,7 +760,8 @@ FABRIK_USER=my-personal-username
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
-| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
+| `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
@@ -807,7 +808,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds | `30` |
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
-| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited) | `3` |
+| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
+| `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -1301,9 +1303,30 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A Claude account usage-limit exit (see the `fabrik:claude-limit` troubleshooting
      note above) is exempted from this count entirely — the stage never ran, so it
      never consumes a retry attempt
+   - A turn-cap preemption (the invocation ran out of turns and will resume on the
+     next dispatch) is likewise exempted — it counts against a separate slice
+     counter instead. See below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
+
+> **Troubleshooting: an issue is paused with a "slice budget exceeded" comment,
+> not a failure comment.** `--max-retries` bounds genuine failures only — errors,
+> degenerate output, PR-creation failures. A turn-cap preemption (the invocation
+> hit its per-stage turn budget and stopped; the session resumes on the next
+> dispatch) is not a failure and is bounded separately by `--max-slice-retries`
+> (default 10). A large job that legitimately needs several slices completes
+> without pausing as long as it stays within that limit; only a job that keeps
+> hitting the turn cap `--max-slice-retries` times in a row is paused. The pause
+> comment names the specific cause and never says "failed to complete" — no
+> `stage:<name>:failed` label is applied, since the stage has not failed. It
+> applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
+> `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
+> slices are needed) or split the issue into smaller pieces, then remove
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
+> reset the slice counter — it is already at the limit, so the very next
+> turn-cap exit re-pauses immediately unless the underlying job size or turn
+> budget actually changes. See #1199 and #1191.
 
 ### Stages Waiting for Input
 
@@ -4127,8 +4150,9 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 | Column `<X>`, Locked + In Progress | No marker in output | `claudeRan` is true (includes both error-free runs and runs that errored mid-execution; excludes only start failures like binary-not-found) | Same column, Cooldown | | | `CooldownAt("periodic-re-eval")` recorded (via `CooldownRecorded`); cooldown = `PollSeconds * 10`; lock NOT released (stays locked through retries) |
 | Column `<X>`, Locked + In Progress | `FABRIK_STAGE_COMPLETE` present, but stripped output is degenerate (bare `@file`/absolute-path reference, §2.6) | `isDegenerateOutput(postOutput)` is true | Same column, Cooldown | | | Output not posted; `completed` forced to `false` before the marker-dispatch branches run; treated identically to "no marker in output" for retry purposes; first detection posts an immediate explanatory comment |
 | Same column, Cooldown | Poll tick | Cooldown expired | Same column, Locked + In Progress (retry) | | `stage:<X>:failed` (if present from prior escalation) | Claude re-invoked with `resume=true` |
-| Same column, Cooldown | Retry count ≥ MaxRetries | `claudeRan && MaxRetries > 0` | Same column, Paused + Failed | `fabrik:paused`, `stage:<X>:failed` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `escalateFailedStage()` posts comment; lock released |
-| Same column, Paused + Failed | Human removes `fabrik:paused` | `stage:<X>:failed` present OR `snap.PausedByEngine(stageName)` | Same column, Idle | | `stage:<X>:failed` | `clearFailedStage()` applies `StageRetryCleared`, `EngineUnpaused`, `StageLastAttemptCleared`, `EngineCyclesCleared` |
+| Same column, Cooldown | Retry count ≥ MaxRetries | `claudeRan && !turnLimited && MaxRetries > 0` (genuine error, or a clean run that never emitted `FABRIK_STAGE_COMPLETE` — see §7.12 for why the latter counts here rather than as a slice) | Same column, Paused + Failed | `fabrik:paused`, `stage:<X>:failed` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `escalateFailedStage()` posts comment; lock released; `Attempts` incremented via `StageRetryIncremented` (#1199 — `turnLimited` outcomes never reach this row; see the row below) |
+| Same column, Cooldown | Slice count ≥ MaxSliceRetries | `claudeRan && turnLimited && MaxSliceRetries > 0` | Same column, Paused + Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `pauseForSliceLimit()` posts a slice-budget comment (never "failed"); `SliceRetries` incremented via `SliceRetryIncremented`; **no** `stage:<X>:failed` — the stage has not failed (#1199, §7.12) |
+| Same column, Paused + Failed | Human removes `fabrik:paused` | `stage:<X>:failed` present OR `snap.PausedByEngine(stageName)` | Same column, Idle | | `stage:<X>:failed` | `clearFailedStage()` applies `StageRetryCleared` (also zeroes `SliceRetries` — the two counters share one reset point), `EngineUnpaused`, `StageLastAttemptCleared`, `EngineCyclesCleared` |
 
 > **In-flight items and cooldown (#544):** `CooldownAt("periodic-re-eval")` **is** stamped for in-flight items (those where a prior worker is still running at end-of-poll). Stamping is intentional: without it, once a prior expired cooldown ages out, the item would be re-admitted to the deep-fetch path on every poll cycle until the worker exits — causing repeated unnecessary deep-fetch evaluation work (and the fallback GraphQL fetch when the cache is invalidated or disabled) for items that can't be dispatched anyway (`snap.Worker() != nil` blocks them). The prompt re-dispatch after the worker finishes is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and wakes the poll loop immediately. Note: `WorkerLifecycleChanged` is excluded from `cycleSetFlags` (Fix B, issue #576), so it does not bypass the cooldown gate via `mayNeedWork` — but the cooldown is already expired (or was already bypassed by an entry in cycleSet from earlier in the worker's lifecycle). See §2.14, §9.2, and §9.9.
 
@@ -4143,7 +4167,7 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 >
 > Treat "turn limit hit" throughout this section as *this slice ended*, never as *this stage failed*. The distinction is load-bearing: the CLI reports it structurally as `subtype: "error_max_turns"` / `terminal_reason: "max_turns"` (captured since #1178), separate from a genuine fault, and the TUI renders it as `↻ (turn limit)` rather than `✗ (error)`.
 >
-> **Caveat — retry accounting does not yet match this model (#1199).** Today a turn-capped slice still calls `StageRetryIncremented` and is subject to the full `MaxRetries` escalation, exactly like a genuine failure — so a job needing more slices than `max_retries` is paused with `stage:<X>:failed` while progressing normally. `max_retries` is currently overloaded, bounding both genuine failures and total slices with one counter. This section describes what a turn cap *means*; it does not yet describe how the retry counter *treats* it. See #1199 and #1191.
+> **Retry accounting matches this model (#1199).** A turn-capped slice calls `SliceRetryIncremented`, not `StageRetryIncremented` — it is bounded by its own counter, `SliceRetries`/`MaxSliceRetries` (default 10), never by `MaxRetries` (default 3, unchanged). A job needing more slices than `max_retries` completes without pausing, as long as it stays within `MaxSliceRetries`. See §7.12 for the full detection/handling/recovery treatment, and #1191 for the operator-facing report this resolves.
 
 When Claude exits a stage invocation due to `max_turns` (i.e., the per-invocation turn usage satisfies `invUsage.TurnsUsed >= currentBudget` and `!completed && err == nil`), the engine evaluates whether to extend before entering the cooldown/retry path.
 
@@ -4177,8 +4201,8 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple < 3`; progress detected | Same column, Locked + In Progress (extension) | | | `totalMultiple++`; `resume=true`; output accumulated; no WIP commit or push between extensions |
-| Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; slice ends (a **preemption**, not a failure — the session resumes on the next dispatch). **However**: Cooldown still increments the retry counter, so per the Cooldown Retry table this can reach Paused + `stage:<X>:failed` once `MaxRetries` is hit — a preemption is not retry-free today (#1199). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages) |
-| Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; slice ends (a **preemption**, not a failure). Same caveat as the row above: Cooldown still counts toward `MaxRetries` and can reach Paused + `stage:<X>:failed` (#1199). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages) |
+| Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; slice ends (a **preemption**, not a failure — the session resumes on the next dispatch). Cooldown routes this to the slice counter (`SliceRetries`/`MaxSliceRetries`), never `MaxRetries` — see the "Slice count ≥ MaxSliceRetries" row above and §7.12 (#1199). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages) |
+| Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; slice ends (a **preemption**, not a failure). Same as the row above: Cooldown routes this to the slice counter, never `MaxRetries` (#1199, §7.12). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages) |
 | Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Normal completion flow; extend-turns label persists to next stage |
 
 #### Cleanup Stage
@@ -6100,6 +6124,84 @@ on `checkVersionSkew` for the same reasoning in code.
 **Non-goals.** No change to which conditions *produce* a warning, no TUI rendering change, and this is
 not a general warning-expiry/TTL mechanism — only subjects that have provably gone away (absent from a
 known-good set already computed elsewhere) are ever cleared. See ADR-1348.
+
+### 7.12 Slice Budget / Turn-Cap Preemption Limit
+
+`max_retries` (§7.2) is the **failure** counter: genuine errors, degenerate output, PR-creation
+failures, and a clean run that never emits `FABRIK_STAGE_COMPLETE`. It was previously overloaded to
+also bound turn-cap preemptions — a large job resuming across several slices looked identical to a
+stage that kept genuinely failing, so a job needing more slices than `max_retries` was paused with
+`stage:<X>:failed` while progressing normally (#816, #1114, #1183; reported independently as the
+undocumented `max_retries × max_turns` ceiling in #1191). §3.1's Turn Limit Extension subsection
+describes what a turn cap *means* — a resumable **preemption**, never a failure, per ADR-1178. This
+section describes how the retry accounting *treats* it (#1199).
+
+**The two counters:**
+
+| Counter | Field | Config | Default | Counts |
+|---------|-------|--------|---------|--------|
+| Failure counter | `StageState.Attempts` | `MaxRetries` / `--max-retries` / `FABRIK_MAX_RETRIES` | 3 (0 = unlimited) | Genuine errors, degenerate output, PR-creation failures, clean run with no completion marker |
+| Slice counter | `StageState.SliceRetries` | `MaxSliceRetries` / `--max-slice-retries` / `FABRIK_MAX_SLICE_RETRIES` | 10 | Turn-cap preemptions only (`turnLimited == true`, CLI `subtype: "error_max_turns"`) |
+
+The slice counter's default is intentionally higher than the failure counter's: a job legitimately
+needing several slices is routine, while a stage that keeps genuinely failing is not — the two want
+different bounds, which was exactly #1191's complaint about the single overloaded counter. `MaxRetries
+== 0` still means "unlimited failures"; there is no equivalent "unlimited slices" setting for
+`MaxSliceRetries` — it is resolved to its default (10) whenever configured as `0` or unset, the same
+tier `MaxRebaseCycles`/`MaxEnqueueCycles` use (flag + env only, no `config.yaml` field).
+
+**Detection:** `finalizeStageOutcome()` (`engine/item.go`) already computes `turnLimited :=
+errors.As(err, &turnLimitErr)` for the `InvocationRecorded` write (§3.1/ADR-1178) — the same boolean is
+reused here, so no new detection work exists. This is a *structural* signal (the CLI's own
+`subtype`/`terminal_reason`, captured since #1178), not an inference: distinguishing a preemption from a
+failure by a heuristic over output text would risk misclassifying either direction.
+
+**Handling:** Inside the existing non-completed/non-blocked `else` branch — after `StageAttempted`,
+`commitWIP`, the branch push, and `markCommentsSeenByStage` have already run unconditionally on
+`claudeRan` exactly as before (ADR-1178 requires this machinery keep running for a turn-cap exit; unlike
+§7.3's usage-limit exemption, which is a stage-never-ran early return, a turn-capped invocation *did*
+run and made progress) — the routing is a single branch on `turnLimited`:
+
+- **`turnLimited == true`:** applies `SliceRetryIncremented` (never `StageRetryIncremented`). If the
+  resulting `SliceRetries(stageName) >= MaxSliceRetries`, calls `pauseForSliceLimit()` instead of
+  `escalateFailedStage()` — modeled directly on the merge-gate's `pauseForRebaseCycleLimit` (§5, a live
+  in-production precedent for a second, independently-bounded, non-failure counter): posts a comment
+  that explicitly states this is not a failure, names
+  `--max-slice-retries`/`FABRIK_MAX_SLICE_RETRIES` as the override, and suggests `fabrik:extend-turns`
+  (wider per-invocation turn budget → fewer slices needed) or splitting the issue. Applies `fabrik:paused`
+  + `fabrik:awaiting-input` — **never** `stage:<X>:failed`. The degenerate-output first-detection comment
+  (§7.2) does not apply on this branch; degenerate output is a marker-content condition orthogonal to
+  `turnLimited`, and in practice a turn-capped exit's stripped output is never checked for it.
+- **`turnLimited == false`:** unchanged from before this issue — applies `StageRetryIncremented`,
+  compares to `MaxRetries`, escalates via `escalateFailedStage()` exactly as §7.2 describes. This covers
+  both a genuine error and a clean run with no completion marker.
+
+**The no-`FABRIK_STAGE_COMPLETE` decision (deferred by the issue to Plan):** a clean run
+(`err == nil`) that never emits `FABRIK_STAGE_COMPLETE` counts against the **failure** counter, not the
+slice counter. `turnLimited` is the only structurally verified signal available; a clean run with no
+marker has no equivalent structural signal distinguishing it from "stopped for an unknown reason," so it
+is treated the same as a genuine error rather than inferred to be a slice. This preserves today's
+(already narrow) protection against a silently-non-terminating stage.
+
+**Recovery:** `StageRetryCleared` — applied on normal stage completion and by `clearFailedStage()` on
+manual unpause — zeroes `SliceRetries(stageName)` alongside `Attempts(stageName)`; the two counters
+share one reset point. Unlike `pauseForRebaseCycleLimit`, `pauseForSliceLimit()` **does** apply
+`itemstate.EnginePaused` (never `stage:<X>:failed`): `RebaseCycles` has an independent path back to
+progress (a human resolves the underlying merge conflict directly, which changes `settle.Status` and
+lets the poll loop advance without ever re-checking the counter), but `SliceRetries` has no such
+signal — the job simply needs more slices than the budget allowed, with nothing external to "fix."
+Without `EnginePaused`, `processItem()`'s unpause guard (`wasPaused || hasFailedLabel`, both false for
+a pure slice-limit pause) would never fire `clearFailedStage()`, `SliceRetries` would never reset, and
+removing `fabrik:paused` would be a no-op: the very next dispatch takes exactly one more slice,
+re-checks a counter already at `MaxSliceRetries`, and re-pauses immediately — the documented recovery
+path would not work. With `EnginePaused` applied, `snap.PausedByEngine(stageName)` is true on the next
+pass, so removing `fabrik:paused` genuinely triggers `clearFailedStage()` → `StageRetryCleared`, and
+the stage resumes with a fresh slice budget. `clearFailedStage()`'s `stage:<X>:failed` label removal is
+a harmless no-op on this path, since that label was never applied.
+
+**Regression guard:** a job that has already taken more turn-cap slices than `MaxRetries` (the old,
+accidental ceiling per #1191) is never paused as long as it stays within `MaxSliceRetries` — `Attempts`
+is untouched by any number of turn-cap preemptions.
 
 ---
 

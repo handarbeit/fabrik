@@ -398,7 +398,8 @@ type StageRetryIncremented struct {
 func (StageRetryIncremented) isMutation()       {}
 func (m StageRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// StageRetryCleared resets the attempt counter for a stage.
+// StageRetryCleared resets the attempt counter (and the sibling SliceRetries
+// counter) for a stage.
 type StageRetryCleared struct {
 	Repo      string
 	Number    int
@@ -407,6 +408,20 @@ type StageRetryCleared struct {
 
 func (StageRetryCleared) isMutation()       {}
 func (m StageRetryCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// SliceRetryIncremented increments the turn-cap preemption ("slice") counter for
+// a stage. Applied instead of StageRetryIncremented when the invocation ended in
+// a turn-cap exit (CLI subtype error_max_turns) — a resumable time-slice, not a
+// failure — so it is bounded independently by MaxSliceRetries rather than
+// counting against MaxRetries (#1199).
+type SliceRetryIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (SliceRetryIncremented) isMutation()       {}
+func (m SliceRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ReviewCycleIncremented increments the review cycle counter for a stage.
 type ReviewCycleIncremented struct {
@@ -462,8 +477,12 @@ type PRCreationFailedRecorded struct {
 func (PRCreationFailedRecorded) isMutation()       {}
 func (m PRCreationFailedRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// EnginePaused records that the engine has paused work on a stage due to
-// repeated failures. (The design doc listed this as "EngineEnginePaused" — typo.)
+// EnginePaused records that the engine has paused work on a stage — either
+// due to repeated failures (escalateFailedStage/escalatePRCreationFailure) or
+// a turn-cap slice budget exceeded (pauseForSliceLimit, #1199), both of which
+// need the same "a human manually removed fabrik:paused" detection to reset
+// their respective counters via clearFailedStage. (The design doc listed this
+// as "EngineEnginePaused" — typo.)
 type EnginePaused struct {
 	Repo      string
 	Number    int
