@@ -1226,6 +1226,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.handleMergeTrainBatch(ctx, board)
 	}
 
+	// Queued review-finding settle scan (#1208): detects unresolved review-thread
+	// feedback arriving on a Queued merge-train member's linked PR — a window the
+	// HoldingStage exclusion in itemMayNeedWork/Phase 1's admission gate otherwise
+	// blacks out entirely — and ejects the member off Queued so the ordinary
+	// review-reinvoke path can address it. Gated on merge_train: on, same as
+	// handleMergeTrainBatch: the internal train (and its ejectMember mechanism) is
+	// the only Queued landing engine this scan's ejection semantics apply to.
+	if e.cfg.MergeTrain == "on" {
+		e.settleQueuedReviewFindings(board)
+	}
+
 	// Merge-train member-issue close settle scan (ADR-061): retries the outstanding
 	// landSingleton member-issue CloseIssue call for any item carrying
 	// fabrik:awaiting-member-close. Runs unconditionally, independent of merge_train:
