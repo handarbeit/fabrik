@@ -728,6 +728,205 @@ func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing
 	}
 }
 
+// TestSettleAwaitingCIScan_ResumedAfterTimeout_GreenCI_Advances is the #1408
+// regression for R1 and the Acceptance criterion's first bullet: an item that
+// previously hit the CI wait timeout — carrying fabrik:awaiting-ci, a stale
+// fabrik:awaiting-ci appliedAt (past CIWaitTimeout), and the pause comment the
+// original timeout posted — but no fabrik:paused (a human resumed it by
+// removing just that label, per the pause comment's own instructions) must be
+// re-evaluated against LIVE CI, not re-escalated blind from the stale
+// timestamp. Here CI has since gone green (mergeable_state=clean, the
+// ADR-033 shortcut) — the item must advance: stage:Validate:complete added,
+// fabrik:awaiting-ci removed, no new fabrik:paused, no new comment.
+//
+// This test fails against the pre-#1408 engine: the backstop unconditionally
+// calls pauseForCITimeout and continues once appliedAt exceeds CIWaitTimeout;
+// pauseForCITimeout finds the pre-existing pause comment via
+// hasCIGatePauseComment and no-ops entirely (no labels touched, no return
+// signal), and the continue skips the handler chain — so checkCIGate is never
+// reached and stage:Validate:complete is never added, regardless of live CI
+// state.
+func TestSettleAwaitingCIScan_ResumedAfterTimeout_GreenCI_Advances(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 44, HeadSHA: "cafebabe", State: "open", Merged: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // ADR-033 shortcut: PRMergeReady, CI gate clears
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-45 * time.Minute), nil // stale — past the default 30-minute CIWaitTimeout
+		},
+		addLabelToIssueFn:      func(_, _ string, _ int, _ string) error { return nil },
+		removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return nil },
+		addCommentFn:           func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn:   func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 45, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"}, // no fabrik:paused — resumed by a human
+				Comments: []gh.Comment{
+					{ID: "C1", Body: "🏭 **Fabrik — CI wait timeout**\n\nThe CI gate for stage **Validate** timed out waiting for checks to pass.\n\n" +
+						"Fabrik has paused this issue. Please check the PR's CI status, address any failures, and then remove the `fabrik:paused` label to resume."},
+				},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	completeAdded, pausedReapplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "stage:Validate:complete":
+			completeAdded = true
+		case "fabrik:paused":
+			pausedReapplied = true
+		}
+	}
+	if !completeAdded {
+		t.Error("expected stage:Validate:complete to be added — a resumed item with green CI must advance")
+	}
+	if pausedReapplied {
+		t.Error("fabrik:paused must not be reapplied when live CI is green")
+	}
+	ciRemoved := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			ciRemoved = true
+		}
+	}
+	if !ciRemoved {
+		t.Error("expected fabrik:awaiting-ci to be removed on gate clear")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected no new comment posted, got %d", len(client.addCommentCalls))
+	}
+}
+
+// TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_ReEscalates is the
+// #1408 regression for R4 and the Acceptance criterion's second bullet: same
+// fixture shape as the green-CI case above (stale fabrik:awaiting-ci
+// appliedAt, existing timeout pause comment, no fabrik:paused), but CI is
+// still failing. The item must be re-escalated — fabrik:paused +
+// fabrik:awaiting-input reapplied — not silently stranded, and the existing
+// pause comment must be reused rather than reposted.
+func TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_ReEscalates(t *testing.T) {
+	client := ciFailureSettleClient()
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return time.Now().Add(-45 * time.Minute), nil // stale — past the default 30-minute CIWaitTimeout
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 5
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 46, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"}, // no fabrik:paused — resumed by a human
+				Comments: []gh.Comment{
+					{ID: "C1", Body: "🏭 **Fabrik — CI wait timeout**\n\nThe CI gate for stage **Validate** timed out waiting for checks to pass.\n\n" +
+						"Fabrik has paused this issue. Please check the PR's CI status, address any failures, and then remove the `fabrik:paused` label to resume."},
+				},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	pausedReapplied, awaitingInputReapplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedReapplied = true
+		case "fabrik:awaiting-input":
+			awaitingInputReapplied = true
+		}
+	}
+	if !pausedReapplied {
+		t.Error("expected fabrik:paused to be reapplied — a resumed item with still-failing CI must be re-escalated, not silently stranded")
+	}
+	if !awaitingInputReapplied {
+		t.Error("expected fabrik:awaiting-input to be reapplied alongside fabrik:paused")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected the existing pause comment to be reused, not reposted — got %d new comment(s)", len(client.addCommentCalls))
+	}
+}
+
+// TestSettleAwaitingCIScan_ResumedAtCycleLimit_StillFailing_ReEscalates is the
+// #1408 regression for R5: pauseForCIFixCycleLimit shares hasCIGatePauseComment
+// and the same suppress-forever defect shape as pauseForCITimeout, but is
+// reached only via the live-checked handler chain (never the backstop
+// directly). A human resuming an item that was paused at the CI-fix cycle
+// limit removes fabrik:paused but not CIFixCycles (never reset — see
+// research), so on the next poll the item lands back at cycleCount >=
+// maxCycles with CI still failing and the old cycle-limit comment already
+// present. It must be re-escalated (labels reapplied), not silently
+// stranded, and must not repost a duplicate comment.
+func TestSettleAwaitingCIScan_ResumedAtCycleLimit_StillFailing_ReEscalates(t *testing.T) {
+	client := ciFailureSettleClient() // fetchLabelAppliedAtFn returns time.Now() — elapsed ≈ 0, backstop does not fire
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 2
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number: 47, Repo: "owner/repo", Status: "Validate",
+				Labels: []string{"fabrik:awaiting-ci"}, // no fabrik:paused — resumed by a human
+				Comments: []gh.Comment{
+					{ID: "C1", Body: "🏭 **Fabrik — CI fix cycle limit reached**\n\nThe stage **Validate** has been re-invoked to fix CI failures 2 time(s), " +
+						"which has reached the maximum configured limit (`FABRIK_MAX_CI_FIX_CYCLES=2`)."},
+				},
+			},
+		},
+	}
+	advancedItems := make(map[string]bool)
+
+	// CIFixCycles already sits at the limit from before the pause — R5's
+	// research confirmed pauseForCIFixCycleLimit never resets this counter, so
+	// it survives a resume unchanged.
+	for i := 0; i < eng.cfg.MaxCiFixCycles; i++ {
+		eng.store.Apply(itemstate.CIFixCycleIncremented{
+			Repo: "owner/repo", Number: 47, StageName: "Validate",
+		})
+	}
+
+	eng.settleAwaitingCIScan(context.Background(), board, advancedItems)
+	eng.wg.Wait()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	pausedReapplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedReapplied = true
+		}
+	}
+	if !pausedReapplied {
+		t.Error("expected fabrik:paused to be reapplied — a resumed item still at the CI-fix cycle limit must be re-escalated, not silently stranded")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected the existing cycle-limit comment to be reused, not reposted — got %d new comment(s)", len(client.addCommentCalls))
+	}
+}
+
 // TestSettleAwaitingCIScan_StaleCachedPendingCheckRuns_EndToEnd is the full
 // end-to-end regression test for #1303's confirmed root cause, reproducing the
 // exact field incident shape through the REAL boardcache.CacheImpl (not a mock

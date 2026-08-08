@@ -435,10 +435,16 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 }
 
 // hasCIGatePauseComment reports whether item already carries a Fabrik CI-gate
-// pause comment (CI wait timeout or CI-fix cycle limit) for the given stage, so
-// a redundant pauseForCITimeout/pauseForCIFixCycleLimit call — reachable within
-// the same poll when addCompleteLabelAndRemoveCI's two-call label swap races
-// (see settleAwaitingCIScan's doc comment) — does not post a duplicate.
+// pause comment (CI wait timeout or CI-fix cycle limit) for the given stage.
+// The match is unscoped by time — it scans the issue's entire comment
+// history, not just "this poll" — so it identifies a single timeout/cycle-
+// limit *episode* rather than a single call. That's deliberate: it's what
+// lets pauseForCITimeout/pauseForCIFixCycleLimit (below) tell a genuine
+// same-poll duplicate call (e.g. the two-call label-swap race in
+// addCompleteLabelAndRemoveCI — see settleAwaitingCIScan's doc comment) apart
+// from a later re-escalation of the *same* unresolved episode after a human
+// resumed the item by removing fabrik:paused (issue #1408) — both hit this
+// same check, but only the fix's caller-side context decides which one it is.
 // Mirrors hasSkippedComment's precedent (no_work_needed_settle.go): match on
 // the stable prose fragment rather than the full message, since cycleCount can
 // differ between the two posts.
@@ -453,13 +459,38 @@ func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
 	return false
 }
 
+// reapplyCIGatePauseLabels re-applies fabrik:paused + fabrik:awaiting-input
+// without posting a new comment. Used by pauseForCITimeout/
+// pauseForCIFixCycleLimit (issue #1408) when hasCIGatePauseComment finds an
+// existing pause comment for this episode: a human resuming the item removes
+// only fabrik:paused, never the comment, so a still-blocked item must be
+// re-escalated (labels reapplied) without spamming a duplicate comment.
+// applyLabelAdd's underlying AddLabelToIssue call is idempotent, so this is
+// safe to call even in the (should-be-rare) case the labels are still present.
+func (e *Engine) reapplyCIGatePauseLabels(item gh.ProjectItem) {
+	e.applyLabelAdd(item, "fabrik:paused", false)
+	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
+}
+
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
 // loop elapses. It posts an explanatory comment and applies fabrik:paused +
-// fabrik:awaiting-input.
-func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+// fabrik:awaiting-input, unless hasCIGatePauseComment finds this episode
+// already has a pause comment — in which case (issue #1408) it reapplies the
+// pause labels only, reusing the existing comment rather than reposting.
+// Every caller of this function has already done a live CI read this poll
+// (either the settleAwaitingCIScan backstop's own fresh-episode branch, or
+// checkCIGate/classifyCIFrom* via handleMergeAndCIGates) — reapplying labels
+// unconditionally here would be wrong the moment CI actually went green,
+// which is why the backstop itself never calls this in the suppressed case
+// (see ci_settle.go).
+//
+// Returns escalated: true when a fresh pause comment was posted (a genuine
+// new episode), false when an existing episode's pause was merely reapplied.
+func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (escalated bool) {
 	if hasCIGatePauseComment(item, stage) {
-		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already posted this poll — skipping duplicate\n")
-		return
+		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyCIGatePauseLabels(item)
+		return false
 	}
 	e.logf(item.Number, "ci-timeout", "CI wait timeout elapsed — pausing for human intervention\n")
 
@@ -472,14 +503,21 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	return true
 }
 
 // pauseForCIFixCycleLimit pauses the issue when the maximum CI-fix
-// re-invocation cycle count is reached.
-func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+// re-invocation cycle count is reached. See pauseForCITimeout's doc comment
+// for the reapply-without-repost behavior on an existing episode (issue
+// #1408) — identical shape, applied here for R5.
+//
+// Returns escalated: true when a fresh pause comment was posted, false when
+// an existing episode's pause was merely reapplied.
+func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
 	if hasCIGatePauseComment(item, stage) {
-		e.logf(item.Number, "ci-cycles", "CI-gate pause comment already posted this poll — skipping duplicate\n")
-		return
+		e.logf(item.Number, "ci-cycles", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyCIGatePauseLabels(item)
+		return false
 	}
 	e.logf(item.Number, "ci-cycles", "CI-fix cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
@@ -495,6 +533,7 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	return true
 }
 
 // pauseForPRClosedNotMerged pauses the issue when the linked PR was closed
