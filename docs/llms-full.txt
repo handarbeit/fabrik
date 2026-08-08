@@ -93,6 +93,21 @@ Without a URL, `fabrik init` behaves as before: if your terminal is interactive 
 prompts for owner, repo, project number, and username; otherwise it writes a
 fully-commented template for you to fill in.
 
+**GitHub Enterprise Server project URLs are also accepted.** Pass `--ghes-host` (or
+set `FABRIK_GHES_HOST`) alongside a project URL on your GHES instance:
+
+```bash
+./fabrik init --user you --ghes-host github.example.com \
+    https://github.example.com/orgs/your-org/projects/5
+```
+
+`init` runs before `.fabrik/config.yaml` exists, so the host can only come from the
+flag or environment variable at this point — never from `config.yaml`. The resolved
+host is written into the generated config (`ghes_host: github.example.com`), so you
+only need to supply it to `init` once; every subsequent `fabrik` invocation picks it
+up from `config.yaml`. See [GitHub Enterprise Server
+Support](#github-enterprise-server-support) below for the full effect of `ghes_host`.
+
 To refresh plugin skills without touching stages or config (e.g., after upgrading Fabrik):
 
 ```bash
@@ -317,6 +332,7 @@ Once configured, the GHES host governs:
 - **Bare-clone URLs** — both the HTTPS and SSH forms (`--ssh` / `git_ssh: true` still selects which protocol is used; see [Git Clone Protocol](#git-clone-protocol-https-vs-ssh) above).
 - **Commit author noreply email** — Fabrik-authored commits use `<user>@users.noreply.<host>` instead of `<user>@users.noreply.github.com`. **Note:** this mirrors github.com's own noreply-email convention with the configured host substituted, but has not been verified against a live GHES instance's actual private-commit-email behavior — GitHub's published GHES admin documentation does not explicitly confirm this format. If your GHES instance uses a different convention, please file an issue.
 - **`GH_HOST` in stage-worker subprocess environments** — every Claude-invoked stage worker's `gh` CLI calls (e.g. `fabrik-validate`'s Pre-Completion Gate, which runs `gh pr view` on every invocation) are pointed at the same GHES instance as the engine, via the `gh` CLI's own `GH_HOST` convention. See [Subprocess Environment](#subprocess-environment).
+- **`fabrik init`'s project-URL parsing** — a GHES project URL is accepted alongside github.com URLs when `--ghes-host`/`FABRIK_GHES_HOST` is supplied to `init`. See the `fabrik init` walkthrough near the top of this guide.
 
 **Self-upgrade (`--auto-upgrade`) stays on github.com, unauthenticated, when a GHES host is configured.** Fabrik's own releases always live at `github.com/handarbeit/fabrik`, never on your GHES instance. Your configured token authenticates your GHES host, not github.com, so it is never sent with the release-check/download request — sending it would fail outright with "Bad credentials" rather than falling back to unauthenticated. Since `handarbeit/fabrik`'s releases are public, self-upgrade still works unauthenticated; it's just subject to github.com's lower unauthenticated rate limit. See [Auto-upgrade](#auto-upgrade) below.
 

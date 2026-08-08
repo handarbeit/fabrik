@@ -13,9 +13,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mattn/go-isatty"
+	"github.com/handarbeit/fabrik/config"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/mattn/go-isatty"
 )
 
 // configYAMLTemplate is the all-commented-out template written by fabrik init.
@@ -40,6 +41,8 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 
 # Optional settings (defaults shown):
 # owner_type: organization         # Owner type parsed from project URL: "user" or "organization".
+# ghes_host: ""                 # GitHub Enterprise Server hostname (no scheme, no trailing slash).
+#                               # Absent means github.com. Also: --ghes-host flag or FABRIK_GHES_HOST env var.
 # stages: ./.fabrik/stages      # Path to stage YAML configs directory.
 # poll: 30                      # Polling interval in seconds. Lower = more responsive, higher = fewer API calls.
 # max_concurrent: 5             # Max parallel Claude sessions. Tune based on your API tier capacity.
@@ -56,7 +59,8 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 
 // parseProjectURL parses a GitHub Project URL and returns owner, project number
 // (as string), and ownerType ("user" or "organization").
-// Accepted forms:
+// Accepted forms (on github.com or, when ghesHost is non-empty, on the
+// configured GHES host as well):
 //
 //	https://github.com/users/<username>/projects/<N>
 //	https://github.com/users/<username>/projects/<N>/views/<V>
@@ -64,13 +68,22 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 //	https://github.com/orgs/<orgname>/projects/<N>/views/<V>
 //
 // A /views/<N> suffix is silently ignored.
-func parseProjectURL(rawURL string) (owner, project, ownerType string, err error) {
+//
+// ghesHost is the already-normalized (bare hostname) GHES host resolved from
+// --ghes-host/FABRIK_GHES_HOST, or "" if none is configured. When "", only
+// github.com is accepted — byte-identical to pre-GHES behavior, including
+// error text (existing callers/fixtures depend on this).
+func parseProjectURL(rawURL, ghesHost string) (owner, project, ownerType string, err error) {
 	u, parseErr := url.Parse(rawURL)
 	if parseErr != nil {
 		return "", "", "", fmt.Errorf("invalid URL %q: %w", rawURL, parseErr)
 	}
-	if u.Host != "github.com" {
-		return "", "", "", fmt.Errorf("invalid project URL %q: host must be github.com", rawURL)
+	if ghesHost == "" {
+		if u.Host != "github.com" {
+			return "", "", "", fmt.Errorf("invalid project URL %q: host must be github.com", rawURL)
+		}
+	} else if u.Host != "github.com" && u.Host != ghesHost {
+		return "", "", "", fmt.Errorf("invalid project URL %q: host must be github.com or %s", rawURL, ghesHost)
 	}
 
 	// Split path into clean segments, dropping empty strings.
@@ -119,10 +132,14 @@ func splitPathSegments(p string) []string {
 
 // writeConfigTemplate writes the .fabrik/config.yaml template.
 // owner, project, ownerType, user are pre-populated values (from a URL or flag).
+// ghesHost is the resolved --ghes-host/FABRIK_GHES_HOST value, or "" if none
+// configured; it is persisted into the written config regardless of which
+// branch below runs, so an operator who supplies it once to `init` does not
+// have to supply it again to every subsequent `fabrik` invocation.
 // If any are empty and stdin is a TTY, the user is prompted for missing values.
 // When owner is non-empty (URL provided), only user is prompted (if empty and TTY).
 // When owner is empty, the full interactive prompt runs for all four fields.
-func writeConfigTemplate(owner, project, ownerType, user string, force bool) error {
+func writeConfigTemplate(owner, project, ownerType, user, ghesHost string, force bool) error {
 	configPath := ".fabrik/config.yaml"
 
 	if !force {
@@ -136,18 +153,24 @@ func writeConfigTemplate(owner, project, ownerType, user string, force bool) err
 
 	isTTY := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 
-	if owner != "" {
+	switch {
+	case owner != "":
 		// URL-provided flow: owner/project/ownerType are known; only prompt for user.
 		if user == "" && isTTY {
 			user = promptForUser()
 		}
-		content = buildConfigWithValues(owner, "", project, ownerType, user)
-	} else if isTTY {
+		content = buildConfigWithValues(owner, "", project, ownerType, user, ghesHost)
+	case isTTY:
 		// Full interactive flow: prompt for all four required fields.
 		o, repo, proj, u := promptRequiredValues()
-		if o != "" || repo != "" || proj != "" || u != "" {
-			content = buildConfigWithValues(o, repo, proj, "", u)
+		if o != "" || repo != "" || proj != "" || u != "" || ghesHost != "" {
+			content = buildConfigWithValues(o, repo, proj, "", u, ghesHost)
 		}
+	case ghesHost != "":
+		// No project URL and no TTY to prompt, but a GHES host was still
+		// resolved from --ghes-host/FABRIK_GHES_HOST — persist it so it
+		// doesn't need to be supplied again on every subsequent run.
+		content = buildConfigWithValues("", "", "", "", "", ghesHost)
 	}
 
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
@@ -185,8 +208,8 @@ func promptRequiredValues() (owner, repo, project, user string) {
 
 // buildConfigWithValues returns a config.yaml where the supplied values are
 // written as uncommented entries; unset values remain commented out.
-// ownerType is written into the optional section when non-empty.
-func buildConfigWithValues(owner, repo, project, ownerType, user string) string {
+// ownerType and ghesHost are written into the optional section when non-empty.
+func buildConfigWithValues(owner, repo, project, ownerType, user, ghesHost string) string {
 	lines := strings.Split(configYAMLTemplate, "\n")
 	var out []string
 	for _, line := range lines {
@@ -201,6 +224,8 @@ func buildConfigWithValues(owner, repo, project, ownerType, user string) string 
 			out = append(out, "user: "+user)
 		case strings.HasPrefix(line, "# owner_type:") && ownerType != "":
 			out = append(out, "owner_type: "+ownerType)
+		case strings.HasPrefix(line, "# ghes_host:") && ghesHost != "":
+			out = append(out, "ghes_host: "+ghesHost)
 		default:
 			out = append(out, line)
 		}
@@ -220,10 +245,18 @@ func buildConfigWithValues(owner, repo, project, ownerType, user string) string 
 //
 // When provided, owner, project, and owner_type are parsed from the URL.
 // The --user flag sets the GitHub username for fully non-interactive setup.
+//
+// A GitHub Enterprise Server project URL (host matching --ghes-host or
+// FABRIK_GHES_HOST) is also accepted. init runs before .fabrik/config.yaml
+// exists, so the host can only come from the flag or env var, never from
+// config.yaml — resolveGHESHost is called with a zero-value ProjectConfig
+// for exactly this reason. The resolved host is persisted into the written
+// config so it doesn't need to be supplied again on every subsequent run.
 func runInit(args []string) error {
 	fset := flag.NewFlagSet("init", flag.ContinueOnError)
 	force := fset.Bool("force", false, "Overwrite existing files")
 	userFlag := fset.String("user", "", "Your GitHub username")
+	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
 
 	fset.Usage = func() {
 		fmt.Fprintf(fset.Output(), "Usage: fabrik init [<project-url>] [flags]\n\n")
@@ -231,7 +264,9 @@ func runInit(args []string) error {
 		fmt.Fprintf(fset.Output(), "  <project-url>    GitHub Project URL (optional); pre-fills owner, project number,\n")
 		fmt.Fprintf(fset.Output(), "                   and owner_type in .fabrik/config.yaml.\n")
 		fmt.Fprintf(fset.Output(), "                   Forms: https://github.com/orgs/<org>/projects/<N>\n")
-		fmt.Fprintf(fset.Output(), "                          https://github.com/users/<user>/projects/<N>\n\n")
+		fmt.Fprintf(fset.Output(), "                          https://github.com/users/<user>/projects/<N>\n")
+		fmt.Fprintf(fset.Output(), "                   A GitHub Enterprise Server host is also accepted when\n")
+		fmt.Fprintf(fset.Output(), "                   --ghes-host or FABRIK_GHES_HOST is set.\n\n")
 		fmt.Fprintf(fset.Output(), "Flags:\n")
 		fset.PrintDefaults()
 	}
@@ -243,11 +278,16 @@ func runInit(args []string) error {
 		return fmt.Errorf("init: too many positional arguments (expected at most one project URL)")
 	}
 
+	// Resolve GHES host from flag > FABRIK_GHES_HOST env var. No config.yaml
+	// fallback — it doesn't exist yet at init time — so a zero-value
+	// ProjectConfig is passed deliberately, not loaded from disk.
+	ghesHost := resolveGHESHost(*ghesHostFlag, config.ProjectConfig{})
+
 	// Parse URL if provided — must happen before any filesystem writes.
 	var owner, project, ownerType string
 	if fset.NArg() == 1 {
 		var err error
-		owner, project, ownerType, err = parseProjectURL(fset.Arg(0))
+		owner, project, ownerType, err = parseProjectURL(fset.Arg(0), ghesHost)
 		if err != nil {
 			return err
 		}
@@ -341,7 +381,7 @@ func runInit(args []string) error {
 	}
 
 	// Generate .fabrik/config.yaml template
-	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, *force); err != nil {
+	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, ghesHost, *force); err != nil {
 		return err
 	}
 

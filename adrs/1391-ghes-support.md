@@ -139,6 +139,11 @@ github.com's own scheme with the configured host substituted is the only
 self-consistent option that doesn't hardcode `github.com` into a GHES commit trail;
 `docs/USER_GUIDE.md`'s GHES section and this ADR both flag it as unverified so a user
 who hits a different convention on their instance has somewhere to report it.
+**Failure mode if the convention differs:** an unroutable committer email is quiet at
+commit time — `git commit` does not validate deliverability — and only surfaces if
+the GHES instance enforces a push rule on committer-email format/domain, or not at
+all if it doesn't. Watch for that on first real use against a live instance: a
+silently-wrong noreply domain won't fail loudly the way FR-7's version floor does.
 
 **`GH_HOST`, not a Fabrik-invented name.** `buildClaudeEnv` emits `GH_HOST` — the `gh`
 CLI's own established environment variable for pointing it at a non-github.com host —
@@ -148,6 +153,22 @@ entirely (not empty-valued) when no GHES host is configured. It sits outside
 `isAnthropicAuthNamespaceKey`'s scope entirely (not `ANTHROPIC_*`-prefixed, not a
 `claudeCodeAuthSelectors` entry), so it needs no interaction with the #1346 scrub/
 passthrough machinery, and none was added.
+
+**`fabrik init` accepts a GHES project URL too, not just the engine.** Review caught
+that `cmd/init.go`'s `parseProjectURL` still hardcoded `host must be github.com`,
+rejecting the documented onboarding path for the exact deployments this issue
+targets — a GHES operator could run the engine but not `fabrik init`. Fixed by
+threading `ghesHost` through `parseProjectURL` (accepting github.com *or* the
+configured host, never instead of github.com — a single engine may still manage a
+github.com project), and by giving `init` its own `--ghes-host`/`FABRIK_GHES_HOST`
+resolution via `resolveGHESHost(flagVal, config.ProjectConfig{})`. The
+`config.ProjectConfig{}` zero-value is deliberate, not a placeholder: `init` runs
+before `.fabrik/config.yaml` exists, so the host can only come from the flag or env
+var, never from config — unlike every other `resolveGHESHost` call site. The resolved
+host is persisted into the written config (`ghes_host: <host>`) so an operator
+supplies it once to `init`, not again on every subsequent `fabrik` invocation. A URL
+whose host matches neither github.com nor the configured GHES host is rejected with
+an error naming both accepted hosts, not just github.com.
 
 **No capability negotiation.** Consistent with the issue's explicit non-goal and the
 probe's own finding: no schema introspection, no adapter layer, no runtime
@@ -169,6 +190,10 @@ version string comparison, not a per-field capability check.
 - `cmd/watch.go` was brought into scope alongside the daemon path (`engine/engine.go`)
   — both bypasses of the configurable constructor are fixed together via the shared
   `resolveGHESHost` helper, rather than leaving `fabrik watch` as a tracked gap.
+- `cmd/init.go` was likewise brought into scope after review: the documented
+  onboarding path (`fabrik init <project-url>`) now accepts a GHES project URL and
+  persists the resolved host into the written config, rather than being left as an
+  undocumented manual-config workaround for the exact users this issue targets.
 - **Known, deliberate residual gaps, not fixed by this issue:** `checkStageColumnAlignment`'s
   human-facing project-board URL link and `checkURLRewrite`/`checkHTTPSCredentials`'s
   SSH-rewrite detection heuristics still hardcode `github.com`. Both are
