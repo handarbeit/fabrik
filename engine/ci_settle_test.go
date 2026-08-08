@@ -624,15 +624,16 @@ func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateCommen
 }
 
 // TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim is
-// a regression test for #1303's requested unconditional CIWaitTimeout
-// backstop: checkCIGate's own timeout guard only fires once checkCIGate is
-// actually reached, but any silent claim earlier in the Phase 1 handler chain
-// (this test pins settle to PRMergeUnsettled on every poll via a permanently
-// nil mergeable — mirroring the confirmed incident shape, where
-// checkMergeabilityGate claims the item and checkCIGate never runs) makes
-// that inner timeout dead. settleAwaitingCIScan must pause the issue on its
-// own once fabrik:awaiting-ci exceeds CIWaitTimeout, independent of what any
-// gate would otherwise classify or claim.
+// a regression test for #1303's requested unconditional backstop — now
+// CIBackstopTimeout (ADR-1410, R5), not CIWaitTimeout: checkCIGate's own
+// liveness guards only fire once checkCIGate is actually reached, but any
+// silent claim earlier in the Phase 1 handler chain (this test pins settle to
+// PRMergeUnsettled on every poll via a permanently nil mergeable — mirroring
+// the confirmed incident shape, where checkMergeabilityGate claims the item
+// and checkCIGate never runs) makes those inner guards dead. settleAwaitingCIScan
+// must pause the issue on its own once fabrik:awaiting-ci exceeds
+// CIBackstopTimeout, independent of what any gate would otherwise classify or
+// claim, and independent of CIWaitTimeout's own (much larger, here) value.
 func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -646,13 +647,19 @@ func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim(
 			return nil, "", nil
 		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
-			return time.Now().Add(-45 * time.Minute), nil // older than the default 30-minute CIWaitTimeout
+			return time.Now().Add(-45 * time.Minute), nil // older than CIBackstopTimeout below
 		},
 		addLabelToIssueFn:    func(_, _ string, _ int, _ string) error { return nil },
 		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
 		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
 	}
 	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	// ADR-1410: the backstop now reads CIBackstopTimeout, not CIWaitTimeout —
+	// set them to distinct values (CIWaitTimeout far larger than the 45m
+	// appliedAt age) to prove the backstop is decoupled from the liveness
+	// dwell, not merely reusing whichever var happens to be small.
+	eng.cfg.CIWaitTimeout = 6 * time.Hour
+	eng.cfg.CIBackstopTimeout = 30 * time.Minute
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -726,6 +733,90 @@ func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing
 	if snap.CIFixCycles("Validate") != 1 {
 		t.Errorf("CIFixCycles(Validate) = %d; want 1 — the normal gate-driven path must be unaffected by the new backstop", snap.CIFixCycles("Validate"))
 	}
+}
+
+// TestSettleAwaitingCIScan_342Repro_SlowButHealthyCI_DoesNotPause is the
+// Acceptance criterion's #342 reproduction: fabrik:awaiting-ci anchored 16
+// minutes before an 18-minute-long, otherwise-healthy CI suite started (34
+// elapsed minutes by the time it would have finished) must not be paused.
+// mergeable_state is left permanently unresolved (mirroring #342's field
+// shape and TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim)
+// so checkMergeabilityGate claims the item every poll and checkCIGate is
+// never reached — the ONLY thing that can pause this item is the
+// settleAwaitingCIScan backstop, which is exactly the mechanism #342 hit in
+// production (see the doc comment on the backstop test above).
+//
+// The first sub-test proves this fixture is non-vacuous: with
+// CIBackstopTimeout pointed at the pre-ADR-1410 30-minute default (what the
+// single, unrepurposed CIWaitTimeout constant would have compared 34 elapsed
+// minutes against), the backstop DOES fire. The second sub-test is the actual
+// fix: with CIBackstopTimeout left at its own, much larger default (4h, sized
+// independently of any suite's duration — R5), the same 34-elapsed-minute
+// item is not paused.
+func TestSettleAwaitingCIScan_342Repro_SlowButHealthyCI_DoesNotPause(t *testing.T) {
+	newClient := func() *mockGitHubClient {
+		return &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 344, HeadSHA: "4b0a7ac4", State: "open", Merged: false}, nil
+			},
+			fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+				return nil, "", nil // GitHub still computing mergeability — #342's field shape
+			},
+			fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+				// #342's own timeline: anchored 2026-08-04T12:51:45Z, CI green at
+				// 13:25:44Z — 33m59s elapsed by completion. Rounded to 34 minutes.
+				return time.Now().Add(-34 * time.Minute), nil
+			},
+			addLabelToIssueFn:    func(_, _ string, _ int, _ string) error { return nil },
+			addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+			addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+		}
+	}
+	newBoard := func() *gh.ProjectBoard {
+		return &gh.ProjectBoard{
+			Items: []gh.ProjectItem{
+				{Number: 342, Repo: "owner/repo", Status: "Validate", Labels: []string{"fabrik:awaiting-ci"}},
+			},
+		}
+	}
+
+	t.Run("unmodified-engine-equivalent pauses (non-vacuous)", func(t *testing.T) {
+		client := newClient()
+		eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+		eng.cfg.CIBackstopTimeout = 30 * time.Minute // pre-ADR-1410 CIWaitTimeout's own default
+
+		eng.settleAwaitingCIScan(context.Background(), newBoard(), make(map[string]bool))
+		eng.wg.Wait()
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		paused := false
+		for _, c := range client.addLabelCalls {
+			if c.labelName == "fabrik:paused" {
+				paused = true
+			}
+		}
+		if !paused {
+			t.Fatal("expected the 30-minute-equivalent backstop to fire at 34 elapsed minutes — this sub-test proves the fixture is non-vacuous")
+		}
+	})
+
+	t.Run("fixed engine does not pause", func(t *testing.T) {
+		client := newClient()
+		eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+		// CIBackstopTimeout left unset — defaults to 4h (the actual fix, R5).
+
+		eng.settleAwaitingCIScan(context.Background(), newBoard(), make(map[string]bool))
+		eng.wg.Wait()
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		for _, c := range client.addLabelCalls {
+			if c.labelName == "fabrik:paused" {
+				t.Error("expected no pause — #342's slow-but-healthy 34-elapsed-minute CI must not be paused (R1, R5)")
+			}
+		}
+	})
 }
 
 // TestSettleAwaitingCIScan_ResumedAfterTimeout_GreenCI_Advances is the #1408
@@ -814,17 +905,34 @@ func TestSettleAwaitingCIScan_ResumedAfterTimeout_GreenCI_Advances(t *testing.T)
 	}
 }
 
-// TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_ReEscalates is the
-// #1408 regression for R4 and the Acceptance criterion's second bullet: same
-// fixture shape as the green-CI case above (stale fabrik:awaiting-ci
-// appliedAt, existing timeout pause comment, no fabrik:paused), but CI is
-// still failing. The item must be re-escalated — fabrik:paused +
-// fabrik:awaiting-input reapplied — not silently stranded, and the existing
-// pause comment must be reused rather than reposted.
-func TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_ReEscalates(t *testing.T) {
+// TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_DispatchesCIFix
+// replaces the pre-ADR-1410 …_ReEscalates test, which relied on the exact R3
+// bug this issue fixes: under the old code, a CI failure occurring after
+// CIWaitTimeout was misreported as a timeout (see
+// TestCheckCIGate_Failed_NeverTimesOut_RegardlessOfElapsedTime), which
+// conveniently made this fixture re-escalate through pauseForCITimeout. Under
+// the corrected liveness/verdict split, a confirmed CI failure is always a
+// verdict — a resumed item whose pause comment says "CI wait timeout" (from
+// the old bug) but whose LIVE CI is now confirmed failing must dispatch
+// CI-fix reinvocation instead, never be silently re-paused. This demonstrates
+// R3 and #1408's resume flow compose correctly: the resumed item reaches
+// live-data-informed evaluation and gets the CORRECT classification, not a
+// re-derivation of the stale (buggy) one.
+//
+// Note: a genuinely-still-*pending* (never-verdicted) resumed item is not
+// separately covered here. checkMergeabilityGate unconditionally claims any
+// PRMergeUnsettled classification (which is what a pending check run always
+// settles to — pr_settle.go) ahead of checkCIGate, so classifyCIFromCheckRuns'
+// pending-branch liveness dwell — like the CIWaitTimeout guard it replaces —
+// is reachable only via a direct checkCIGate call (see the
+// TestCheckCIGate_Pending_* tests in ci_test.go), never via this scan's
+// handler chain; that claim-priority is pre-existing architecture unrelated
+// to ADR-1410 and out of this issue's scope (see Non-goals: no change to the
+// conjunctive CI/review gate's semantics, #895).
+func TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_DispatchesCIFix(t *testing.T) {
 	client := ciFailureSettleClient()
 	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
-		return time.Now().Add(-45 * time.Minute), nil // stale — past the default 30-minute CIWaitTimeout
+		return time.Now().Add(-45 * time.Minute), nil // stale — past CIWaitTimeout, well within CIBackstopTimeout's 4h default
 	}
 	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
 	eng.cfg.MaxCiFixCycles = 5
@@ -849,23 +957,17 @@ func TestSettleAwaitingCIScan_ResumedAfterTimeout_StillFailing_ReEscalates(t *te
 	client.mu.Lock()
 	defer client.mu.Unlock()
 
-	pausedReapplied, awaitingInputReapplied := false, false
 	for _, c := range client.addLabelCalls {
-		switch c.labelName {
-		case "fabrik:paused":
-			pausedReapplied = true
-		case "fabrik:awaiting-input":
-			awaitingInputReapplied = true
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be reapplied — a CI failure is a verdict (R3), routed to CI-fix reinvocation, not a re-pause")
 		}
 	}
-	if !pausedReapplied {
-		t.Error("expected fabrik:paused to be reapplied — a resumed item with still-failing CI must be re-escalated, not silently stranded")
-	}
-	if !awaitingInputReapplied {
-		t.Error("expected fabrik:awaiting-input to be reapplied alongside fabrik:paused")
+	snap, _ := eng.store.Get("owner/repo", 46)
+	if snap.CIFixCycles("Validate") != 1 {
+		t.Errorf("CIFixCycles(Validate) = %d; want 1 — a resumed item with a confirmed CI failure must dispatch CI-fix reinvocation", snap.CIFixCycles("Validate"))
 	}
 	if len(client.addCommentCalls) != 0 {
-		t.Errorf("expected the existing pause comment to be reused, not reposted — got %d new comment(s)", len(client.addCommentCalls))
+		t.Errorf("expected no new pause comment (this is the CI-fix path, not a pause), got %d", len(client.addCommentCalls))
 	}
 }
 
