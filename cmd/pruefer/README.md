@@ -106,6 +106,21 @@ Keyboard: `q` or `ctrl+c` to quit, `tab` to switch panes, `↑`/`↓` or `j`/`k`
 
 The TUI is purely observational — it never changes which PRs get reviewed, when, or how. Running with `-notui` disables it entirely and falls back to Pruefer's existing structured `logf`-based console output, with **identical review behavior** either way. Use `-notui` (or `PRUEFER_TUI=0` / `tui: false` in the YAML config) when running under systemd, tmux with no attached TTY, or any other non-interactive environment.
 
+## Logging
+
+Pruefer writes every daemon log line — poll cycles, review outcomes, warnings, auth events — to a timestamped, mutex-serialized log file at `.pruefer/pruefer.log` by default, so an incident is diagnosable from the daemon's own durable record instead of requiring reconstruction from the GitHub API. Set `log_file` (or `--log-file` / `PRUEFER_LOG_FILE`) to write elsewhere, or to an empty value to disable file logging entirely.
+
+Each line looks like:
+
+```
+2026-08-08T18:12:03Z [pr#103 warn] listing open PRs for verveguy/zusammen: context deadline exceeded — skipping this repo this cycle
+```
+
+- **With the TUI running** (the default on a real terminal), stderr output would corrupt the bubbletea display, so the log file is the sole destination. If `log_file` is disabled (or the log file can't be opened) while the TUI is running, log lines are discarded rather than written raw to stderr — the same corruption concern, just with no file to fall back to.
+- **In plain daemon mode** (`-notui`, or no TTY attached), logging is additive: every line is written to both stderr and the log file, so an operator watching the terminal keeps seeing exactly what they see today. With `log_file` disabled in plain mode, output stays on stderr only, matching Pruefer's behavior before this feature existed.
+
+The log file is append-only across restarts — it is never truncated on daemon startup, unlike Fabrik engine's own `fabrik.log` — so a restart doesn't erase the history an incident investigation needs. Growth is bounded by size-triggered rotation: once the file reaches 10 MB it's renamed to `pruefer.log.1` (existing numbered backups shift up, `pruefer.log.3` is dropped), and a fresh file is opened. Up to 3 rotated backups are retained.
+
 ## On-demand re-review
 
 Comment `/pruefer review` on any watched PR to force a fresh review of the current head, even if that SHA was already reviewed. Pruefer acknowledges the command with a 👀 reaction when it picks it up and a 🚀 reaction once the review has been submitted — the same idempotency convention Fabrik uses for its own comment processing.
@@ -157,6 +172,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from `watched_repos`) | Legacy pin: set to force every watched repo through one specific installation, regardless of owner |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
+| `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 
