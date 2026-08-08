@@ -639,12 +639,12 @@ func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batc
 			e.logf(member.Number, "merge-train", "cannot fetch linked PR for #%d: %v — ejecting\n", member.Number, fetchErr)
 			// Out of scope for #1420 (no combined-Validate diagnostic exists yet at
 			// this point — the fetch itself failed): diag and otherMembers are nil.
-			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr), nil, nil)
+			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr), nil, nil, true)
 			continue
 		}
 		if pr.HeadSHA == "" {
 			e.logf(member.Number, "merge-train", "#%d has no PR head SHA — ejecting\n", member.Number)
-			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA", nil, nil)
+			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA", nil, nil, true)
 			continue
 		}
 		members = append(members, trainMember{item: member, prNum: pr.Number, headSHA: pr.HeadSHA})
@@ -756,7 +756,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		}
 		// Out of scope for #1420 (unresolvable merge conflict, not a combined-Validate
 		// failure): diag and otherMembers are nil.
-		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil)
+		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil, true)
 	}
 
 	if len(survivors) == 0 {
@@ -913,7 +913,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 	e.logf(poisoner.item.Number, "merge-train", "bisection isolated #%d as the batch poisoner — ejecting\n", poisoner.item.Number)
 	e.ejectMember(p.owner, p.repo, poisoner.item,
 		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
-		isolationDiag, red)
+		isolationDiag, red, true)
 
 	var survivors []trainMember
 	for i := range red {
@@ -974,7 +974,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			// renderBatchContext's "no other members" sentence covers this case exactly.
 			e.ejectMember(p.owner, p.repo, m.item,
 				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number),
-				diag, nil)
+				diag, nil, true)
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
@@ -1629,12 +1629,22 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
 // counter, and pauses the member after MaxMergeTrainEjections. diag is the combined-Validate
-// diagnostic that caused this ejection (R1) — nil for the three ejection causes this issue
-// (#1420) leaves unaffected (fetch/head-SHA failures, unresolvable merge conflicts).
-// otherMembers names the R4 batch context (the other members riding in this train attempt);
-// ignored when diag is nil. Every ejection comment carries diag's diagnostic, not only the
-// terminal pause comment (R2) — the first ejection is exactly as informative as the last.
-func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember) {
+// diagnostic that caused this ejection (R1) — nil for the ejection causes that aren't a
+// combined-Validate failure (fetch/head-SHA failures, unresolvable merge conflicts, and
+// #1208's unresolved-review-finding cause). otherMembers names the R4 batch context (the
+// other members riding in this train attempt); ignored when diag is nil. Every ejection
+// comment carries diag's diagnostic, not only the terminal pause comment (R2) — the first
+// ejection is exactly as informative as the last.
+//
+// stayInQueue is true for every pre-#1208 ejection cause (fetch/head-SHA failure,
+// unresolvable conflict, bisection isolation): the member has nothing else to do but wait
+// for a future train with a different composition, so it stays in the Queued column.
+// #1208's new cause passes false — that ejection's whole point is to get the member off
+// Queued and back onto a stage the ordinary review-reinvoke path can reach (see
+// ejectQueuedMemberForReviewFindings), so the closing sentence must say the opposite of
+// the other causes. Callers reroute the member's board Status themselves before calling
+// this with stayInQueue=false; this function only varies the comment's wording.
+func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember, stayInQueue bool) {
 	sections := []string{reason}
 	if diag != nil {
 		sections = append(sections, renderBatchContext(otherMembers, memberItem.Number))
@@ -1642,7 +1652,11 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 			sections = append(sections, block)
 		}
 	}
-	sections = append(sections, "This issue remains in the Queued column and will be retried in a future train with a different composition.")
+	if stayInQueue {
+		sections = append(sections, "This issue remains in the Queued column and will be retried in a future train with a different composition.")
+	} else {
+		sections = append(sections, "This issue has left the Queued column so the unresolved review-thread finding above can be addressed via the normal review pipeline. Once addressed and Validate completes again, it will re-queue and join a later batch.")
+	}
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — ejected**\n\n%s", strings.Join(sections, "\n\n"))
 
 	var commentID int

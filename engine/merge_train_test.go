@@ -497,8 +497,7 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(1, "Test Issue")
-	eng.ejectMember("owner", "repo", member, "conflict with #2", nil, nil)
-
+	eng.ejectMember("owner", "repo", member, "conflict with #2", nil, nil, true)
 	client.mu.Lock()
 	calls := client.addCommentCalls
 	client.mu.Unlock()
@@ -511,6 +510,51 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	}
 }
 
+// TestEjectMember_StayInQueueWordingIsDistinguishable verifies the #1208 requirement
+// that an operator can tell from the ejection comment alone which of the four causes
+// fired: stayInQueue=true (the three pre-#1208 causes) must say the member remains in
+// Queued, while stayInQueue=false (the new unresolved-review-finding cause) must say
+// the opposite — that it has left Queued to be addressed via the review pipeline.
+func TestEjectMember_StayInQueueWordingIsDistinguishable(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	stayMember := makeTrainItem(1, "Stays")
+	eng.ejectMember("owner", "repo", stayMember, "conflict", nil, nil, true)
+
+	leaveMember := makeTrainItem(2, "Leaves")
+	eng.ejectMember("owner", "repo", leaveMember, "unresolved review finding", nil, nil, false)
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 ejection comments, got %d", len(calls))
+	}
+
+	stayBody := calls[0].body
+	leaveBody := calls[1].body
+
+	if !strings.Contains(stayBody, "remains in the Queued column") {
+		t.Errorf("stayInQueue=true comment should say the member remains in Queued, got: %s", stayBody)
+	}
+	if strings.Contains(stayBody, "has left the Queued column") {
+		t.Errorf("stayInQueue=true comment should not say the member left Queued, got: %s", stayBody)
+	}
+
+	if !strings.Contains(leaveBody, "has left the Queued column") {
+		t.Errorf("stayInQueue=false comment should say the member left Queued, got: %s", leaveBody)
+	}
+	if strings.Contains(leaveBody, "remains in the Queued column") {
+		t.Errorf("stayInQueue=false comment should not say the member remains in Queued, got: %s", leaveBody)
+	}
+
+	if stayBody == leaveBody {
+		t.Error("stayInQueue=true and stayInQueue=false ejection comments must be textually distinguishable")
+	}
+}
+
 func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
@@ -520,9 +564,8 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	member := makeTrainItem(5, "Problem Issue")
 
 	// First two ejections should not add pause labels.
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
 	client.mu.Lock()
 	pauseCount := 0
 	for _, c := range client.addLabelCalls {
@@ -536,8 +579,7 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	}
 
 	// Third ejection should trigger pause.
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
 	client.mu.Lock()
 	pauseCount = 0
 	awaitCount := 0
@@ -568,11 +610,10 @@ func TestEjectMember_EjectionCountIsPerMember(t *testing.T) {
 	member2 := makeTrainItem(2, "Issue 2")
 
 	// Eject member 1 three times and member 2 once.
-	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil) // triggers pause for #1
-	eng.ejectMember("owner", "repo", member2, "conflict", nil, nil) // should NOT trigger pause for #2
-
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true) // triggers pause for #1
+	eng.ejectMember("owner", "repo", member2, "conflict", nil, nil, true) // should NOT trigger pause for #2
 	client.mu.Lock()
 	pausedIssues := make(map[int]bool)
 	for _, c := range client.addLabelCalls {
@@ -611,10 +652,9 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 
 	member := makeTrainItem(5, "Problem Issue")
 
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil) // triggers pause
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true) // triggers pause
 	labels, err := cache.FetchLabels("owner", "repo", 5)
 	if err != nil {
 		t.Fatalf("FetchLabels: %v", err)
@@ -2458,8 +2498,7 @@ func TestEjectMember_TruncatesOversizedDiagnostic(t *testing.T) {
 		PRNum:    900,
 		TrialSHA: "deadbeef",
 	}
-	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil)
-
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil, true)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.addCommentCalls) == 0 {
@@ -2553,8 +2592,7 @@ func TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence(t *testing.T) {
 		})
 	}
 	diag := &trainCIDiagnostic{FailedChecks: checks, PRNum: 901, TrialSHA: "cafef00d"}
-	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil)
-
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil, true)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.addCommentCalls) == 0 {
