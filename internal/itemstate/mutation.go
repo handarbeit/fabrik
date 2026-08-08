@@ -398,7 +398,8 @@ type StageRetryIncremented struct {
 func (StageRetryIncremented) isMutation()       {}
 func (m StageRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// StageRetryCleared resets the attempt counter for a stage.
+// StageRetryCleared resets the attempt counter (and the sibling SliceRetries
+// counter) for a stage.
 type StageRetryCleared struct {
 	Repo      string
 	Number    int
@@ -407,6 +408,20 @@ type StageRetryCleared struct {
 
 func (StageRetryCleared) isMutation()       {}
 func (m StageRetryCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// SliceRetryIncremented increments the turn-cap preemption ("slice") counter for
+// a stage. Applied instead of StageRetryIncremented when the invocation ended in
+// a turn-cap exit (CLI subtype error_max_turns) — a resumable time-slice, not a
+// failure — so it is bounded independently by MaxSliceRetries rather than
+// counting against MaxRetries (#1199).
+type SliceRetryIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (SliceRetryIncremented) isMutation()       {}
+func (m SliceRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ReviewCycleIncremented increments the review cycle counter for a stage.
 type ReviewCycleIncremented struct {

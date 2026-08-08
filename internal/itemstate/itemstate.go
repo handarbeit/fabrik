@@ -271,6 +271,12 @@ type StageState struct {
 	// queue-thrash loop (enqueue→eject→re-enqueue→eject) independently of the
 	// RebaseCycles/CIFixCycles that the conflict/CI sub-paths increment.
 	EnqueueCycles map[string]int
+	// SliceRetries counts how many turn-cap preemptions (CLI subtype
+	// error_max_turns) each stage has hit. Bounded by MaxSliceRetries,
+	// independently of Attempts/MaxRetries — a turn-cap exit is a resumable
+	// time-slice, not a failure (#1199), so it must not count against the
+	// failure counter, but a non-converging job still needs its own bound.
+	SliceRetries map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage
