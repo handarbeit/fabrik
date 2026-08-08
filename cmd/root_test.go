@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/config"
 )
 
 // chdirTest changes to dir for the duration of the test, restoring original on cleanup.
@@ -33,6 +35,46 @@ func writeStageFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResolveGHESHost_FlagWins(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "env.example.com")
+	pc := config.ProjectConfig{GHESHost: "config.example.com"}
+	if got := resolveGHESHost("flag.example.com", pc); got != "flag.example.com" {
+		t.Errorf("resolveGHESHost = %q, want flag.example.com", got)
+	}
+}
+
+func TestResolveGHESHost_EnvBeatsConfig(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "env.example.com")
+	pc := config.ProjectConfig{GHESHost: "config.example.com"}
+	if got := resolveGHESHost("", pc); got != "env.example.com" {
+		t.Errorf("resolveGHESHost = %q, want env.example.com", got)
+	}
+}
+
+func TestResolveGHESHost_ConfigFallback(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "")
+	pc := config.ProjectConfig{GHESHost: "config.example.com"}
+	if got := resolveGHESHost("", pc); got != "config.example.com" {
+		t.Errorf("resolveGHESHost = %q, want config.example.com", got)
+	}
+}
+
+func TestResolveGHESHost_AllUnsetDefaultsEmpty(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "")
+	pc := config.ProjectConfig{}
+	if got := resolveGHESHost("", pc); got != "" {
+		t.Errorf("resolveGHESHost = %q, want empty (github.com default)", got)
+	}
+}
+
+func TestResolveGHESHost_Normalized(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "")
+	pc := config.ProjectConfig{}
+	if got := resolveGHESHost("https://flag.example.com/", pc); got != "flag.example.com" {
+		t.Errorf("resolveGHESHost = %q, want normalized flag.example.com", got)
 	}
 }
 

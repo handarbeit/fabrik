@@ -161,12 +161,96 @@ func TestNewClient(t *testing.T) {
 	if c.baseURL != defaultBaseURL {
 		t.Errorf("baseURL = %q, want %q", c.baseURL, defaultBaseURL)
 	}
+	if c.graphqlURL != defaultBaseURL+"/graphql" {
+		t.Errorf("graphqlURL = %q, want %q", c.graphqlURL, defaultBaseURL+"/graphql")
+	}
 }
 
 func TestNewClientWithBaseURL(t *testing.T) {
 	c := NewClientWithBaseURL("tok", "http://localhost:1234")
 	if c.baseURL != "http://localhost:1234" {
 		t.Errorf("baseURL = %q", c.baseURL)
+	}
+	if c.graphqlURL != "http://localhost:1234/graphql" {
+		t.Errorf("graphqlURL = %q, want %q", c.graphqlURL, "http://localhost:1234/graphql")
+	}
+}
+
+func TestNewClientForHost_DistinctRESTAndGraphQLEndpoints(t *testing.T) {
+	c := NewClientForHost("tok", "github.example.com")
+	if c.baseURL != "https://github.example.com/api/v3" {
+		t.Errorf("baseURL = %q, want %q", c.baseURL, "https://github.example.com/api/v3")
+	}
+	if c.graphqlURL != "https://github.example.com/api/graphql" {
+		t.Errorf("graphqlURL = %q, want %q", c.graphqlURL, "https://github.example.com/api/graphql")
+	}
+	if c.baseURL == c.graphqlURL {
+		t.Fatal("REST and GraphQL endpoints must be distinct values for a GHES host")
+	}
+	// Not a path-suffix relationship: /api/v3/graphql (what naive concatenation
+	// would produce) must NOT be the derived GraphQL URL.
+	if c.graphqlURL == c.baseURL+"/graphql" {
+		t.Errorf("graphqlURL must not be derived as baseURL+\"/graphql\" for GHES hosts")
+	}
+}
+
+func TestNewClientForHost_StripsSchemeAndTrailingSlash(t *testing.T) {
+	for _, host := range []string{
+		"github.example.com",
+		"https://github.example.com",
+		"http://github.example.com",
+		"github.example.com/",
+		"https://github.example.com/",
+	} {
+		c := NewClientForHost("tok", host)
+		if c.baseURL != "https://github.example.com/api/v3" {
+			t.Errorf("host=%q: baseURL = %q", host, c.baseURL)
+		}
+		if c.graphqlURL != "https://github.example.com/api/graphql" {
+			t.Errorf("host=%q: graphqlURL = %q", host, c.graphqlURL)
+		}
+	}
+}
+
+func TestNewClientForHost_Token(t *testing.T) {
+	c := NewClientForHost("my-token", "github.example.com")
+	if c.token != "my-token" {
+		t.Errorf("token = %q", c.token)
+	}
+}
+
+func TestFetchInstalledVersion_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/meta" {
+			t.Errorf("path = %q, want /meta", r.URL.Path)
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"installed_version":                  "3.19.8",
+			"verifiable_password_authentication": false,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	version, err := c.FetchInstalledVersion()
+	if err != nil {
+		t.Fatalf("FetchInstalledVersion: %v", err)
+	}
+	if version != "3.19.8" {
+		t.Errorf("version = %q, want %q", version, "3.19.8")
+	}
+}
+
+func TestFetchInstalledVersion_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.FetchInstalledVersion(); err == nil {
+		t.Fatal("expected error for 500 response")
 	}
 }
 

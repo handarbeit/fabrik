@@ -396,7 +396,7 @@ func TestParseProjectURL(t *testing.T) {
 		{"https://github.com/users/alice", "", "", "", true},
 	}
 	for _, tc := range cases {
-		owner, project, ownerType, err := parseProjectURL(tc.rawURL)
+		owner, project, ownerType, err := parseProjectURL(tc.rawURL, "")
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("parseProjectURL(%q): expected error, got nil", tc.rawURL)
@@ -416,6 +416,64 @@ func TestParseProjectURL(t *testing.T) {
 		if ownerType != tc.wantOwnerType {
 			t.Errorf("parseProjectURL(%q): ownerType = %q, want %q", tc.rawURL, ownerType, tc.wantOwnerType)
 		}
+	}
+}
+
+// TestParseProjectURL_GHESHost covers parseProjectURL's ghesHost parameter
+// directly: a configured GHES host is accepted alongside github.com (not
+// instead of it — a single engine may still manage a github.com project),
+// and a host matching neither is rejected with an error naming both.
+func TestParseProjectURL_GHESHost(t *testing.T) {
+	cases := []struct {
+		desc          string
+		rawURL        string
+		ghesHost      string
+		wantOwner     string
+		wantProject   string
+		wantOwnerType string
+		wantErr       bool
+		wantErrSubstr string
+	}{
+		{
+			desc:   "GHES host URL accepted when configured",
+			rawURL: "https://github.example.com/orgs/acme/projects/7", ghesHost: "github.example.com",
+			wantOwner: "acme", wantProject: "7", wantOwnerType: "organization",
+		},
+		{
+			desc:   "GHES host URL with /views suffix accepted when configured",
+			rawURL: "https://github.example.com/users/alice/projects/5/views/2", ghesHost: "github.example.com",
+			wantOwner: "alice", wantProject: "5", wantOwnerType: "user",
+		},
+		{
+			desc:   "github.com URL still accepted when a GHES host is configured",
+			rawURL: "https://github.com/orgs/acme/projects/7", ghesHost: "github.example.com",
+			wantOwner: "acme", wantProject: "7", wantOwnerType: "organization",
+		},
+		{
+			desc:   "host matching neither github.com nor the configured GHES host is rejected, naming both",
+			rawURL: "https://wrong-host.example.com/orgs/acme/projects/7", ghesHost: "github.example.com",
+			wantErr: true, wantErrSubstr: "host must be github.com or github.example.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			owner, project, ownerType, err := parseProjectURL(tc.rawURL, tc.ghesHost)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if owner != tc.wantOwner || project != tc.wantProject || ownerType != tc.wantOwnerType {
+				t.Errorf("got (%q, %q, %q), want (%q, %q, %q)", owner, project, ownerType, tc.wantOwner, tc.wantProject, tc.wantOwnerType)
+			}
+		})
 	}
 }
 
@@ -488,6 +546,146 @@ func TestRunInit_UserFlag(t *testing.T) {
 	}
 	if !strings.Contains(content, "user: acme") {
 		t.Errorf("expected 'user: acme', got:\n%s", content)
+	}
+}
+
+// TestRunInit_GHESHost_EnvVar_URLPopulatesConfig covers acceptance [1]:
+// FABRIK_GHES_HOST plus a matching GHES project URL parses successfully and
+// persists ghes_host into the written config, so it doesn't need to be
+// supplied again on every subsequent `fabrik` invocation.
+func TestRunInit_GHESHost_EnvVar_URLPopulatesConfig(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	t.Setenv("FABRIK_GHES_HOST", "github.example.com")
+
+	if err := runInit([]string{"https://github.example.com/orgs/acme/projects/7"}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".fabrik", "config.yaml"))
+	if err != nil {
+		t.Fatalf("config.yaml not written: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "owner: acme") {
+		t.Errorf("expected 'owner: acme' in config, got:\n%s", content)
+	}
+	if !strings.Contains(content, "project: 7") {
+		t.Errorf("expected 'project: 7' in config, got:\n%s", content)
+	}
+	if !strings.Contains(content, "ghes_host: github.example.com") {
+		t.Errorf("expected 'ghes_host: github.example.com' in config, got:\n%s", content)
+	}
+}
+
+// TestRunInit_GHESHostFlag_URLPopulatesConfig covers the --ghes-host flag
+// form of acceptance [1] (not just the env var).
+func TestRunInit_GHESHostFlag_URLPopulatesConfig(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := runInit([]string{"--ghes-host", "github.example.com", "https://github.example.com/orgs/acme/projects/7"}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".fabrik", "config.yaml"))
+	if err != nil {
+		t.Fatalf("config.yaml not written: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "ghes_host: github.example.com") {
+		t.Errorf("expected 'ghes_host: github.example.com' in config, got:\n%s", content)
+	}
+}
+
+// TestRunInit_NoGHESHost_GithubComURL_Unchanged covers acceptance [2]: with
+// no GHES host configured, a github.com URL behaves exactly as before this
+// change — including the config NOT gaining a ghes_host line. This is the
+// regression that matters most, since every existing user is on this path.
+func TestRunInit_NoGHESHost_GithubComURL_Unchanged(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	t.Setenv("FABRIK_GHES_HOST", "")
+
+	if err := runInit([]string{"https://github.com/orgs/acme/projects/7"}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".fabrik", "config.yaml"))
+	if err != nil {
+		t.Fatalf("config.yaml not written: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "owner: acme") {
+		t.Errorf("expected 'owner: acme' in config, got:\n%s", content)
+	}
+	if !strings.Contains(content, "project: 7") {
+		t.Errorf("expected 'project: 7' in config, got:\n%s", content)
+	}
+	if !strings.Contains(content, "# ghes_host:") {
+		t.Errorf("expected ghes_host to remain commented, got:\n%s", content)
+	}
+	if strings.Contains(content, "\nghes_host: ") {
+		t.Errorf("ghes_host should not be written when unconfigured, got:\n%s", content)
+	}
+}
+
+// TestRunInit_GHESHost_MismatchedHostRejected covers acceptance [3]: a URL
+// whose host matches neither github.com nor the configured GHES host is
+// rejected, and the error names both accepted hosts rather than only
+// github.com — a GHES operator who typos the host should not be told the
+// answer is "github.com".
+func TestRunInit_GHESHost_MismatchedHostRejected(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	t.Setenv("FABRIK_GHES_HOST", "github.example.com")
+
+	err = runInit([]string{"https://typo-host.example.com/orgs/acme/projects/7"})
+	if err == nil {
+		t.Fatal("expected error for mismatched host, got nil")
+	}
+	if !strings.Contains(err.Error(), "github.com") || !strings.Contains(err.Error(), "github.example.com") {
+		t.Errorf("expected error to name both accepted hosts, got: %v", err)
+	}
+
+	// No config.yaml should have been written — the URL parse failure must
+	// happen before any filesystem writes.
+	if _, statErr := os.Stat(filepath.Join(dir, ".fabrik", "config.yaml")); statErr == nil {
+		t.Error("config.yaml should not be written when URL parsing fails")
 	}
 }
 
