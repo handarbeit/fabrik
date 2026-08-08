@@ -177,9 +177,15 @@ and should recognize.
   mergeability determination it certified no longer applies). Prevents
   re-invocation of that stage and drives catch-up advancement to the next
   one.
-- **`stage:<name>:failed`** — Applied after a stage exhausts its retry
-  budget; always paired with `fabrik:paused`. Cleared only when the user
-  manually removes `fabrik:paused` (signaling they've intervened).
+- **`stage:<name>:failed`** — Applied after a stage exhausts its
+  *failure* budget (`max_retries`) — genuine errors, degenerate output,
+  PR-creation failures; always paired with `fabrik:paused`. A turn-cap
+  preemption (the invocation ran out of turns and will resume on the
+  next dispatch) is not a failure and never applies this label — it is
+  bounded separately by `max_slice_retries`, escalating instead with
+  `fabrik:paused` + `fabrik:awaiting-input` and a "slice budget exceeded"
+  comment. Cleared only when the user manually removes `fabrik:paused`
+  (signaling they've intervened).
 - **`fabrik:sub-issue`** — Applied to a child issue created by Plan's
   `FABRIK_SPAWN_CHILD_*` decomposition mechanism. Purely informational —
   carries no gating semantics of its own.
