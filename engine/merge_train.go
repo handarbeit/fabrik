@@ -1044,6 +1044,38 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 	return false
 }
 
+// landedCommentRetryDelay is the base delay for addLandedCommentWithRetry's retry backoff.
+// Declared as a var (not const) so tests can set it to 0 to avoid sleeping.
+var landedCommentRetryDelay = 200 * time.Millisecond
+
+// addLandedCommentWithRetry posts the "landed via ..." comment on a member's PR, retrying
+// transient failures with exponential backoff. This comment is the sole cross-landing-path,
+// member-scoped record of which integration/singleton PR actually landed the change (issue
+// #1275) — losing it to a transient API hiccup silently degrades the audit trail even though
+// the landing itself succeeded. The comment is purely informational and never gates a state
+// transition, so on exhaustion this falls back to the pre-existing warn-and-continue behavior
+// unchanged; it must never block or delay landing.
+func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNum int, body string) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		_, err := e.client.AddComment(owner, repo, prNum, body)
+		if err == nil {
+			return
+		}
+		if !isTransientError(err) {
+			e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", prNum, err)
+			return
+		}
+		lastErr = err
+		if attempt < maxAttempts-1 {
+			delay := landedCommentRetryDelay << attempt
+			time.Sleep(delay)
+		}
+	}
+	e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d after %d attempts: %v\n", prNum, maxAttempts, lastErr)
+}
+
 // landSingleton lands a single member from its own validated-green trial branch. It creates a
 // dedicated integration PR WITHOUT the shared batch marker — sequential singleton lands must
 // not collide on findIntegrationPR (which matches merged PRs via ListPRs state=all), which
@@ -1090,9 +1122,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	// Close the member's linked PR with a landing comment.
 	if m.prNum != 0 {
 		landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed one-at-a-time via singleton PR #%d.", prNum)
-		if _, commentErr := e.client.AddComment(p.owner, p.repo, m.prNum, landedComment); commentErr != nil {
-			e.logf(m.item.Number, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", m.prNum, commentErr)
-		}
+		e.addLandedCommentWithRetry(p.owner, p.repo, m.item.Number, m.prNum, landedComment)
 		if closeErr := e.client.CloseIssue(p.owner, p.repo, m.prNum); closeErr != nil {
 			e.logf(m.item.Number, "merge-train", "warn: could not close member PR #%d: %v\n", m.prNum, closeErr)
 		}
@@ -2337,9 +2367,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// Close member PR with a comment citing the integration PR.
 		if m.prNum != 0 {
 			landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed via batch PR #%d.", integrationPRNum)
-			if _, commentErr := e.client.AddComment(owner, repo, m.prNum, landedComment); commentErr != nil {
-				e.logf(m.item.Number, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", m.prNum, commentErr)
-			}
+			e.addLandedCommentWithRetry(owner, repo, m.item.Number, m.prNum, landedComment)
 			if closeErr := e.client.CloseIssue(owner, repo, m.prNum); closeErr != nil {
 				e.logf(m.item.Number, "merge-train", "warn: could not close member PR #%d: %v\n", m.prNum, closeErr)
 			} else {
