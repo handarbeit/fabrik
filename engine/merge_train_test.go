@@ -930,6 +930,105 @@ func TestEjectQueuedMemberForReviewFindings_Success(t *testing.T) {
 	}
 }
 
+// ── #1208 pending-eject signal: mark/take/apply ─────────────────────────────────
+
+func TestTakePendingReviewEject_UnflaggedMember_NoOp(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	count, ok := eng.takePendingReviewEject("owner/repo", 1)
+	if ok || count != 0 {
+		t.Fatalf("expected (0, false) for an unflagged member, got (%d, %v)", count, ok)
+	}
+}
+
+func TestMarkAndTakePendingReviewEject_TakeClearsTheSignal(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	eng.markPendingReviewEject("owner/repo", 1, 3)
+
+	count, ok := eng.takePendingReviewEject("owner/repo", 1)
+	if !ok || count != 3 {
+		t.Fatalf("expected (3, true) on first take, got (%d, %v)", count, ok)
+	}
+
+	// A second take must observe the signal already cleared — one-shot semantics.
+	count, ok = eng.takePendingReviewEject("owner/repo", 1)
+	if ok || count != 0 {
+		t.Fatalf("expected (0, false) on second take (already consumed), got (%d, %v)", count, ok)
+	}
+}
+
+func TestMarkPendingReviewEject_ScopedPerRepoAndIssue(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	eng.markPendingReviewEject("owner/repo", 1, 1)
+	eng.markPendingReviewEject("owner/repo", 2, 5)
+	eng.markPendingReviewEject("owner/other", 1, 9)
+
+	if count, ok := eng.takePendingReviewEject("owner/repo", 1); !ok || count != 1 {
+		t.Errorf("owner/repo#1: got (%d, %v), want (1, true)", count, ok)
+	}
+	if count, ok := eng.takePendingReviewEject("owner/repo", 2); !ok || count != 5 {
+		t.Errorf("owner/repo#2: got (%d, %v), want (5, true)", count, ok)
+	}
+	if count, ok := eng.takePendingReviewEject("owner/other", 1); !ok || count != 9 {
+		t.Errorf("owner/other#1: got (%d, %v), want (9, true)", count, ok)
+	}
+}
+
+func TestApplyPendingReviewEjects_EjectsFlaggedMembersOnly(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	members := []trainMember{
+		{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued"}},
+	}
+	eng.markPendingReviewEject("owner/repo", 2, 4)
+
+	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+
+	if ejectedCount != 1 {
+		t.Fatalf("expected ejectedCount=1, got %d", ejectedCount)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("expected 2 remaining members, got %d", len(remaining))
+	}
+	for _, m := range remaining {
+		if m.item.Number == 2 {
+			t.Errorf("ejected member #2 must not appear in remaining, got: %+v", remaining)
+		}
+	}
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected the flagged member to be rerouted (1 status update), got %d", len(client.updateStatusCalls))
+	}
+
+	// The signal is one-shot — a second call with the same members must not re-eject.
+	remaining2, ejectedCount2 := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	if ejectedCount2 != 0 || len(remaining2) != 3 {
+		t.Errorf("expected second apply to be a no-op (signal already consumed), got ejectedCount=%d remaining=%d", ejectedCount2, len(remaining2))
+	}
+}
+
+func TestApplyPendingReviewEjects_NoFlags_ReturnsAllUnchanged(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	members := []trainMember{
+		{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
+	}
+
+	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	if ejectedCount != 0 {
+		t.Errorf("expected ejectedCount=0, got %d", ejectedCount)
+	}
+	if len(remaining) != 2 {
+		t.Errorf("expected all members to remain, got %d", len(remaining))
+	}
+}
+
 // ── dispatch guard tests ──────────────────────────────────────────────────────
 
 func TestDispatchMergeTrainWorker_SkipsWhenAlreadyAssembling(t *testing.T) {
