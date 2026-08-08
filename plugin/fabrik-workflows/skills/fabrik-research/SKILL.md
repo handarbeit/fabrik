@@ -103,6 +103,10 @@ other-owner/other-repo
 
 The `### Repositories` section is **mandatory** in every Research output. It lists every repo the Plan stage may need to spawn sub-issues into — one `owner/repo` per line, including the parent's own repo. When no cross-repo signals exist, list only the parent repo. Plan uses this as its authoritative set of valid spawn targets and will not spawn into any repo not listed here.
 
+## Never Wait on CI or a Backgrounded Task
+
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
 ## What You Do NOT Do
 
 - **Do not design the solution** — that's for the Plan stage

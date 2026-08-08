@@ -58,6 +58,8 @@ In preference order:
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite — rather than backgrounding it.
 6. **If backgrounding is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver it, so the stage ends without `FABRIK_STAGE_COMPLETE`. Poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
 ### Update the task checklist
 
 If the user's change affects task completion status (e.g., a previously checked task needs to be reopened, or a new sub-task is implied), update the Plan stage comment accordingly.

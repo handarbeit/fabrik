@@ -35,6 +35,8 @@ Read the user's comment carefully to understand what they're requesting:
 - The same discipline applies to re-running test suites, benchmarks, or CI waits: run them synchronously in the foreground with the framework's own timeout flag (e.g. `go test -timeout`, `pytest --timeout`, `jest --testTimeout`) so the outcome is known before the turn ends — prefer this over `timeout(1)`, which is GNU coreutils and absent on stock macOS, so relying on it can fail with `command not found` and tempt a fallback to backgrounding; if it won't fit in one turn, reduce scope (fewer tests, a subset of the suite) rather than backgrounding it. If backgrounding is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage — there is no interactive session to deliver it, so the stage ends without `FABRIK_STAGE_COMPLETE`. Poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 - Update the validation report with the new results
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
 **Apply a minor fix**: The user has identified a small issue to address before closing.
 - Make the targeted fix
 - Verify it compiles and tests pass
