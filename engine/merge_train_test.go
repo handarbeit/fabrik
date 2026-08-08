@@ -182,7 +182,7 @@ func TestPollTrainCI_MergeableStateClean_ReturnsGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen for clean mergeable_state, got %v", result)
 	}
@@ -200,7 +200,7 @@ func TestPollTrainCI_MergeableStateUnstable_ReturnsGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen for unstable mergeable_state, got %v", result)
 	}
@@ -213,7 +213,7 @@ func TestPollTrainCI_FailedCheckRun_ReturnsRed(t *testing.T) {
 		},
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
 			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "failure"},
+				{Name: "build", Status: "completed", Conclusion: "failure", OutputText: "line 141: assertion failed"},
 			}, nil
 		},
 	}
@@ -222,9 +222,21 @@ func TestPollTrainCI_FailedCheckRun_ReturnsRed(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, diag := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIRed {
 		t.Errorf("expected TrainCIRed for failed check run, got %v", result)
+	}
+	// R1/AC1/AC2: pollTrainCI must return the failing check's diagnostic, not just the
+	// enum — this is the point of capture that #1420 fixes. Neutralizing it (returning
+	// an empty diagnostic here) must turn this assertion red.
+	if diag == nil {
+		t.Fatal("expected a non-nil diagnostic for a red result, got nil")
+	}
+	if len(diag.FailedChecks) != 1 || diag.FailedChecks[0].Name != "build" {
+		t.Fatalf("expected diag.FailedChecks to name the failing check \"build\", got %+v", diag.FailedChecks)
+	}
+	if diag.FailedChecks[0].OutputText != "line 141: assertion failed" {
+		t.Errorf("expected diag.FailedChecks[0].OutputText to carry the check's output, got %q", diag.FailedChecks[0].OutputText)
 	}
 }
 
@@ -245,7 +257,7 @@ func TestPollTrainCI_AllChecksPass_ReturnsGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen when all checks pass, got %v", result)
 	}
@@ -280,7 +292,7 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIPending {
 		t.Errorf("expected TrainCIPending on CIWaitTimeout, got %v", result)
 	}
@@ -316,7 +328,7 @@ func TestPollTrainCI_AllSkippedRequiredContext_NotGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result == TrainCIGreen {
 		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen when a required context is only skipped/neutral/absent on the trial head")
 	}
@@ -350,7 +362,7 @@ func TestPollTrainCI_RequiredContextFailedViaCommitStatus_ReturnsRed(t *testing.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIRed {
 		t.Errorf("expected TrainCIRed for a required context confirmed-failed via classic commit status, got %v", result)
 	}
@@ -381,7 +393,7 @@ func TestPollTrainCI_EmptyCheckRuns_RequiredContextFailedViaCommitStatus_Returns
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIRed {
 		t.Errorf("expected TrainCIRed for a required context confirmed-failed via classic commit status with zero check runs, got %v", result)
 	}
@@ -407,7 +419,7 @@ func TestPollTrainCI_Unconfigured_AllSkippedChecks_StillGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen for skipped checks on an unconfigured repo (no behavior change), got %v", result)
 	}
@@ -442,7 +454,7 @@ func TestPollTrainCI_MergeableStateAccepted_NonRequiredCheckStillPending_NotGree
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result == TrainCIGreen {
 		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen while a non-required check is still in_progress, even with an accepted mergeable_state")
 	}
@@ -470,7 +482,7 @@ func TestPollTrainCI_ContextCancelled_ReturnsPending(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIPending {
 		t.Errorf("expected TrainCIPending when context cancelled, got %v", result)
 	}
@@ -484,7 +496,7 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(1, "Test Issue")
-	eng.ejectMember("owner", "repo", member, "conflict with #2")
+	eng.ejectMember("owner", "repo", member, "conflict with #2", nil, nil)
 
 	client.mu.Lock()
 	calls := client.addCommentCalls
@@ -507,8 +519,8 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	member := makeTrainItem(5, "Problem Issue")
 
 	// First two ejections should not add pause labels.
-	eng.ejectMember("owner", "repo", member, "conflict")
-	eng.ejectMember("owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
 
 	client.mu.Lock()
 	pauseCount := 0
@@ -523,7 +535,7 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	}
 
 	// Third ejection should trigger pause.
-	eng.ejectMember("owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
 
 	client.mu.Lock()
 	pauseCount = 0
@@ -555,10 +567,10 @@ func TestEjectMember_EjectionCountIsPerMember(t *testing.T) {
 	member2 := makeTrainItem(2, "Issue 2")
 
 	// Eject member 1 three times and member 2 once.
-	eng.ejectMember("owner", "repo", member1, "conflict")
-	eng.ejectMember("owner", "repo", member1, "conflict")
-	eng.ejectMember("owner", "repo", member1, "conflict") // triggers pause for #1
-	eng.ejectMember("owner", "repo", member2, "conflict") // should NOT trigger pause for #2
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil) // triggers pause for #1
+	eng.ejectMember("owner", "repo", member2, "conflict", nil, nil) // should NOT trigger pause for #2
 
 	client.mu.Lock()
 	pausedIssues := make(map[int]bool)
@@ -598,9 +610,9 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 
 	member := makeTrainItem(5, "Problem Issue")
 
-	eng.ejectMember("owner", "repo", member, "conflict")
-	eng.ejectMember("owner", "repo", member, "conflict")
-	eng.ejectMember("owner", "repo", member, "conflict") // triggers pause
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil) // triggers pause
 
 	labels, err := cache.FetchLabels("owner", "repo", 5)
 	if err != nil {
@@ -1410,7 +1422,7 @@ func TestAssembleAndValidate_LeavesWorktreeForCallerCleanup(t *testing.T) {
 	members := []trainMember{{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1}}
 	const trialName = "assemble-persist-trial"
 
-	survivors, result, prNum, err := eng.assembleAndValidate(context.Background(), p, members, trialName)
+	survivors, result, prNum, _, err := eng.assembleAndValidate(context.Background(), p, members, trialName)
 	if err != nil {
 		t.Fatalf("assembleAndValidate: %v", err)
 	}
