@@ -26,6 +26,7 @@ const (
 	DefaultMaxDiffBytes   = 500_000 // 500 KB
 	DefaultConfigPath     = ".pruefer/config.yaml"
 	DefaultPrivateKeyPath = ".pruefer/app-private-key.pem"
+	DefaultLogPath        = ".pruefer/pruefer.log"
 )
 
 // Config holds Pruefer's fully-resolved runtime configuration, after
@@ -64,6 +65,13 @@ type Config struct {
 	// gates this on a real terminal being detected (see tui_run.go's useTUI).
 	TUI bool
 
+	// LogFile is the path Pruefer's daemon log lines are written to, resolved
+	// relative to the process cwd (the same way DefaultConfigPath and
+	// AppPrivateKeyPath are resolved). Defaults to DefaultLogPath. An
+	// explicitly empty value (YAML `log_file: ""`, PRUEFER_LOG_FILE=, or
+	// --log-file "") disables file logging entirely.
+	LogFile string
+
 	AppID             int64
 	AppPrivateKeyPath string
 	// AppInstallationID is a legacy pin/escape hatch: when set (non-zero),
@@ -94,6 +102,7 @@ type yamlConfig struct {
 	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
 	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
 	TUI                     *bool    `yaml:"tui"`
+	LogFile                 *string  `yaml:"log_file"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
@@ -131,6 +140,7 @@ type flagValues struct {
 	appInstallationID       int64
 	configPath              string
 	noTUI                   bool
+	logFile                 string
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -158,6 +168,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
 	fs.StringVar(&fv.configPath, "config", DefaultConfigPath, "Path to Pruefer's YAML config file")
 	fs.BoolVar(&fv.noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
+	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -189,6 +200,7 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedLabels:    yc.ExcludedLabels,
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
 		TUI:               true,
+		LogFile:           DefaultLogPath,
 	}
 	if yc.RequestChangesThreshold != "" {
 		cfg.RequestChangesThreshold = Severity(yc.RequestChangesThreshold)
@@ -222,6 +234,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AppInstallationID != nil {
 		cfg.AppInstallationID = *yc.AppInstallationID
+	}
+	if yc.LogFile != nil {
+		cfg.LogFile = *yc.LogFile
 	}
 
 	applyEnv(&cfg)
@@ -270,6 +285,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["notui"] {
 		cfg.TUI = !fv.noTUI
+	}
+	if explicit["log-file"] {
+		cfg.LogFile = fv.logFile
 	}
 
 	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
@@ -340,6 +358,13 @@ func applyEnv(cfg *Config) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.TUI = b
 		}
+	}
+	// Unlike every other PRUEFER_* var above, an explicitly empty
+	// PRUEFER_LOG_FILE must be distinguished from "unset" (R2: empty
+	// disables file logging entirely). os.LookupEnv, not the v != "" idiom
+	// used above, is what makes that distinction possible.
+	if v, ok := os.LookupEnv("PRUEFER_LOG_FILE"); ok {
+		cfg.LogFile = v
 	}
 }
 
