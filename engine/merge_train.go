@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
@@ -173,9 +174,26 @@ func renderDiagnosticBlock(diag *trainCIDiagnostic) string {
 	}
 	block := fmt.Sprintf("**Diagnostic** (trial %s, integration PR #%d):\n\n%s", diag.TrialSHA, diag.PRNum, body)
 	if len(block) > trainDiagBlockMax {
-		block = block[:trainDiagBlockMax] + "\n\n... (truncated)"
+		block = truncateBlockHard(block, trainDiagBlockMax) + "\n\n... (truncated)"
 	}
 	return block
+}
+
+// truncateBlockHard cuts s to at most max bytes, at a boundary that never splits a
+// multi-byte UTF-8 rune and never leaves a dangling, unterminated ``` code fence open —
+// renderFailedChecks wraps each check's output in its own fence, and cutting a block
+// mid-fence would render every section after the cut (the batch-context sentence, the
+// "remains in Queued" boilerplate) as part of an open code block instead of prose.
+func truncateBlockHard(s string, max int) string {
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	s = s[:cut]
+	if strings.Count(s, "```")%2 != 0 {
+		s += "\n```"
+	}
+	return s
 }
 
 // renderBatchContext composes the R4 sentence naming the other members the isolated

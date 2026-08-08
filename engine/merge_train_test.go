@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
@@ -2396,6 +2397,84 @@ func TestEjectMember_TruncatesOversizedDiagnostic(t *testing.T) {
 	}
 	if !strings.Contains(body, "https://github.com/owner/repo/runs/123") {
 		t.Errorf("expected a details/run link in the truncated comment, got: %s", body)
+	}
+}
+
+// TestTruncateBlockHard_ClosesDanglingCodeFence covers a gap in R3's truncation policy:
+// renderDiagnosticBlock's whole-block hard cap (trainDiagBlockMax) can land its cut
+// partway through one of renderFailedChecks' per-check ``` fences when enough failing
+// checks are inlined — an odd number of ``` markers past the cut would render every
+// following section (the batch-context sentence, the "remains in Queued" boilerplate)
+// as part of an open code block instead of prose. truncateBlockHard must always leave a
+// balanced (even) fence count.
+func TestTruncateBlockHard_ClosesDanglingCodeFence(t *testing.T) {
+	// A block whose hard-cap cut point (at byte 20) lands inside an open fence.
+	block := "0123456789" + "```\nsome code that runs past the cut point\n```" + " trailing prose"
+	got := truncateBlockHard(block, 20)
+	if strings.Count(got, "```")%2 != 0 {
+		t.Fatalf("expected a balanced (even) number of ``` fence markers, got %d in: %q", strings.Count(got, "```"), got)
+	}
+	if !strings.HasSuffix(got, "\n```") {
+		t.Errorf("expected the dangling fence to be closed with a trailing \\n```, got: %q", got)
+	}
+}
+
+// TestTruncateBlockHard_NoSplitOnEvenFenceCount covers the already-balanced case: a cut
+// point that lands after a complete, closed fence must not add a spurious extra fence.
+func TestTruncateBlockHard_NoSplitOnEvenFenceCount(t *testing.T) {
+	block := "```\ncode\n```" + strings.Repeat("z", 100)
+	got := truncateBlockHard(block, 12) // cuts exactly after the closing fence
+	if got != "```\ncode\n```" {
+		t.Errorf("expected no extra fence appended for an already-balanced cut, got: %q", got)
+	}
+}
+
+// TestTruncateBlockHard_DoesNotSplitMultibyteRune covers UTF-8 safety: a byte-index cut
+// must never land in the middle of a multi-byte rune, which would produce invalid UTF-8
+// in the posted comment.
+func TestTruncateBlockHard_DoesNotSplitMultibyteRune(t *testing.T) {
+	block := strings.Repeat("a", 9) + "é" + strings.Repeat("b", 20) // 'é' is 2 bytes, straddling index 10
+	got := truncateBlockHard(block, 10)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateBlockHard produced invalid UTF-8: %q (bytes: %v)", got, []byte(got))
+	}
+}
+
+// TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence is an end-to-end check that
+// enough large failing checks to exceed trainDiagBlockMax still produce a
+// balanced-fence, well-formed comment via the real ejectMember path.
+func TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(8, "Many Failing Checks Issue")
+	var checks []gh.CheckRun
+	for i := 0; i < 5; i++ {
+		checks = append(checks, gh.CheckRun{
+			// Long name + long URL, on top of 5 near-max-inline-cap outputs, is what
+			// pushes the assembled block past trainDiagBlockMax in practice.
+			Name:       fmt.Sprintf("ci/check-%d-%s", i, strings.Repeat("x", 60)),
+			Status:     "completed",
+			Conclusion: "failure",
+			OutputText: strings.Repeat(fmt.Sprintf("line %d ", i), 1000), // well over the per-check inline cap
+			HTMLURL:    "https://github.com/owner/repo/actions/runs/" + strings.Repeat("9", 80),
+		})
+	}
+	diag := &trainCIDiagnostic{FailedChecks: checks, PRNum: 901, TrialSHA: "cafef00d"}
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected an ejection comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "(truncated)") {
+		t.Fatalf("expected the block-level hard cap to have engaged, got a body of length %d", len(body))
+	}
+	if strings.Count(body, "```")%2 != 0 {
+		t.Errorf("expected a balanced (even) number of ``` fence markers, got %d — the block-level truncation left a code fence open:\n%s", strings.Count(body, "```"), body)
 	}
 }
 
