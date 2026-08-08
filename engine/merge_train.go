@@ -2596,7 +2596,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		// Hook 2 (landing loop): apply any pending review-finding ejects flagged
 		// while this rebase cycle's assemble/validate was running (#1208). This
 		// loop is the one place a green trial can spend a second full CI wait
-		// (up to CIWaitTimeout) without ever returning control to the outer
+		// (up to CIBackstopTimeout, ADR-1410) without ever returning control to the outer
 		// re-form loop in runMergeTrainWorker, where the primary Hook 2 lives —
 		// so a finding arriving during a main-moved rebase would otherwise ride
 		// the newly-green trial straight to landMergeTrainBatch. Discard the
