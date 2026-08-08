@@ -101,12 +101,12 @@ func (fl *fileLogger) Logf(prNumber int, tag, format string, args ...any) {
 //
 // Backup shifting happens before fl.file is closed, since it touches only
 // the numbered *.N siblings, never fl.path itself — a failure there leaves
-// fl.file untouched and still perfectly usable. Only the final rename of
-// fl.path itself requires the file to already be closed (required for
-// Windows rename semantics, which forbids renaming an open file). If that
-// step — or the reopen after it — fails, fl.file is always left reopened
-// and appendable with fl.size resynced via Stat: without this, a caller
-// that left fl.file closed on error would silently drop every subsequent
+// fl.file untouched and still perfectly usable. Every failure from the
+// Close() below onward — closing fl.file, renaming/removing fl.path itself,
+// or the reopen after it — always leaves fl.file reopened and appendable
+// with fl.size resynced via Stat: without this, a caller that left fl.file
+// closed (or worse, left it as a handle that already failed to close, which
+// must not be used further) on error would silently drop every subsequent
 // WriteString forever (its error is deliberately ignored in Logf), and with
 // fl.size never advancing, every future call would re-attempt — and re-fail
 // — the same already-closed Close(), for the rest of the process's life.
@@ -124,7 +124,18 @@ func (fl *fileLogger) rotateLocked() error {
 	}
 
 	if err := fl.file.Close(); err != nil {
-		return fmt.Errorf("closing %s before rotation: %w", fl.path, err)
+		// fl.path hasn't been touched yet at this point (the rename below is
+		// what rotates it), so reopening it in place — the same recovery the
+		// later failure paths use — gives back a live, appendable handle
+		// instead of leaving fl.file as one that already failed to close.
+		closeErr := fmt.Errorf("closing %s before rotation: %w", fl.path, err)
+		if f, reopenErr := os.OpenFile(fl.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); reopenErr == nil {
+			fl.file = f
+			if info, statErr := f.Stat(); statErr == nil {
+				fl.size = info.Size()
+			}
+		}
+		return closeErr
 	}
 
 	var rotateErr error
