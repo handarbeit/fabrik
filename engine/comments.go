@@ -217,6 +217,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
+	// Circuit breaker (#1089, moved earlier by #1413): record this invocation
+	// now that the working comment slice is final, before any setup side
+	// effect (👀 reactions, editing label, worktree setup) runs. Recording
+	// here — rather than just before the Claude invocation — means a setup
+	// failure (e.g. an editing-label API failure) DOES count as a cycle: the
+	// three setup-failure early-returns below each also call
+	// checkCommentBreaker so a persistently failing setup step trips the
+	// breaker instead of looping unbounded (see #1382/#1386).
+	e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
+
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 	startedAt := time.Now()
 	e.emitStructural(tui.JobStartedEvent{
@@ -241,6 +251,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
+		e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
 		return fmt.Errorf("adding editing label: %w", err)
 	} else {
 		e.syncLabelAdd(item, "fabrik:editing", true)
@@ -251,6 +262,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
+		e.checkCommentBreaker(item, fmt.Sprintf("resolving the base branch failed: %v", err))
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 	// Merge-queue awareness (ADR-058 D3): skip the preemptive rebase when the PR is
@@ -260,6 +272,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
+		e.checkCommentBreaker(item, fmt.Sprintf("setting up the worktree failed: %v", err))
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
@@ -299,13 +312,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Snapshot extend-turns label before loop (stable across any mid-loop FetchItemDetails re-fetch).
 	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
 
-	// Circuit breaker (#1089): record this invocation now that Claude is actually
-	// about to run — recording here (not up at the JobStartedEvent emission above)
-	// means an early return before this point (e.g. editing-label API failure)
-	// doesn't count as a wasted cycle. Capture the pre-invocation HEAD so a commit
-	// landed during this cycle resets the counter below.
+	// Capture the pre-invocation HEAD so a commit landed during this cycle
+	// resets the breaker counter below. The invocation itself was already
+	// recorded above, before setup — see the comment there.
 	preInvokeSHA, _ := gitHeadSHA(workDir)
-	e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
 
 	output, usage, invCompleted, err := e.runCommentExtensionLoop(ctx, stage, &item, comments, workDir, invokeOpts, hadExtendTurnsLabel)
 
@@ -371,7 +381,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		// A non-completing, erroring invocation is exactly the "no forward progress"
 		// case the circuit breaker exists to catch — check it here too, not only
 		// on the successful-completion path below.
-		e.checkCommentBreaker(item)
+		e.checkCommentBreaker(item, "")
 		return err
 	}
 	if err != nil {
@@ -385,7 +395,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Checked last so any reset applied above (stage-complete inside
 	// finalizeComments, or an issue-body update inside publishCommentOutput)
 	// takes effect before evaluating whether this cycle tripped the breaker.
-	e.checkCommentBreaker(item)
+	e.checkCommentBreaker(item, "")
 
 	return nil
 }

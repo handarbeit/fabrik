@@ -83,22 +83,32 @@ func (e *Engine) resetCommentBreaker(item gh.ProjectItem) {
 // breaker has tripped (commentBreakerCount >= threshold N within window T)
 // and, if so, pauses the issue and suppresses further dispatch. Called at the
 // tail of processComments, after the invocation for this cycle has already
-// been recorded and any progress reset for this cycle has already been applied.
-func (e *Engine) checkCommentBreaker(item gh.ProjectItem) {
+// been recorded and any progress reset for this cycle has already been
+// applied — and also from each of the three setup-failure early-return paths
+// (editing-label add, base-branch resolution, worktree setup), now that the
+// invocation is recorded before those steps run (#1413). reason names the
+// setup step and error that caused this cycle to fail; pass "" on the
+// existing invocation-failure and success-tail paths, where the generic
+// "no forward progress" framing is accurate on its own.
+func (e *Engine) checkCommentBreaker(item gh.ProjectItem, reason string) {
 	n, window := e.effectiveCommentBreakerWindow()
 	count := e.commentBreakerCount(item)
 	if count < n {
 		return
 	}
-	e.tripCommentBreaker(item, count, window)
+	e.tripCommentBreaker(item, count, window, reason)
 }
 
 // tripCommentBreaker pauses item, posts an explanatory comment naming the
 // loop (invocation count, window, last comment author, resume instructions),
 // and emits a structural TUI event. Reuses fabrik:paused + fabrik:awaiting-input
 // via the shared pauseIssue helper (engine/mutate.go) so the pause is
-// honorable per ADR-069 — a subsequent bot comment cannot lift it.
-func (e *Engine) tripCommentBreaker(item gh.ProjectItem, count int, window time.Duration) {
+// honorable per ADR-069 — a subsequent bot comment cannot lift it. When reason
+// is non-empty, the tripping cycle was a setup failure (#1413) and the pause
+// comment names it, since a bare "no forward progress" pause is not
+// diagnosable when the actual cause is an unexplained label-add or worktree
+// failure.
+func (e *Engine) tripCommentBreaker(item gh.ProjectItem, count int, window time.Duration, reason string) {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
 	lastAuthor := snap.CommentBreakerLastAuthor()
@@ -107,19 +117,29 @@ func (e *Engine) tripCommentBreaker(item gh.ProjectItem, count int, window time.
 		displayAuthor = "unknown"
 	}
 
-	e.logf(item.Number, "comment-breaker", "circuit breaker tripped: %d comment-processing invocation(s) within %s with no forward progress — pausing\n", count, window)
+	if reason != "" {
+		e.logf(item.Number, "comment-breaker", "circuit breaker tripped: %d comment-processing invocation(s) within %s — last cycle failed during setup: %s — pausing\n", count, window, reason)
+	} else {
+		e.logf(item.Number, "comment-breaker", "circuit breaker tripped: %d comment-processing invocation(s) within %s with no forward progress — pausing\n", count, window)
+	}
+
+	var reasonClause string
+	if reason != "" {
+		reasonClause = fmt.Sprintf("The cycle that tripped this breaker failed during setup: %s.\n\n", reason)
+	}
 
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — comment-processing circuit breaker tripped**\n\n"+
 			"This issue underwent **%d comment-processing invocations** within the last %s "+
 			"with **no forward progress** (no stage completion, new commit, or PR state change).\n\n"+
+			"%s"+
 			"Last comment author: **%s**.\n\n"+
 			"This is a defense-in-depth backstop against a self-sustaining comment loop "+
 			"(see incident #1083) — it should rarely if ever fire. Fabrik has paused this issue "+
 			"for human review.\n\n"+
 			"**To resume:** investigate why comment-processing wasn't making progress, then remove "+
 			"the `fabrik:paused` label.",
-		count, window, displayAuthor,
+		count, window, reasonClause, displayAuthor,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
