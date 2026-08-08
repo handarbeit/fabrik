@@ -118,6 +118,8 @@ type Engine struct {
 	mergeTrainEjectionCounts    map[string]int           // key: "owner/repo#N", ejection count per member
 	mergeTrainTrialsMu          sync.Mutex               // guards mergeTrainTrials
 	mergeTrainTrials            map[string][]time.Time   // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
+	queuedReviewEjectsMu        sync.Mutex               // guards queuedReviewEjects
+	queuedReviewEjects          map[string]map[int]int   // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
 	issueCtxs                   sync.Map                 // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
 	baseBranchWarnedSet         sync.Map                 // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	mergeTrainBatchSnapshotSeen sync.Map                 // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
@@ -249,6 +251,7 @@ func New(cfg Config) (*Engine, error) {
 		sem:                      make(chan struct{}, cfg.MaxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
+		queuedReviewEjects:       make(map[string]map[int]int),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -306,6 +309,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		sem:                      make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
+		queuedReviewEjects:       make(map[string]map[int]int),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf

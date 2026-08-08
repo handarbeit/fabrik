@@ -16,6 +16,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -239,6 +240,18 @@ type mergeTrainWorkerState struct {
 	CIResult   TrainCIResult // final CI result (set by pollTrainCI on exit)
 	trialName  string        // trial name of the most recent trial (churns during bisection)
 	projectID  string        // board project ID for advanceToNextStage (immutable after dispatch)
+
+	// batchNumbers is the set of issue numbers this worker was dispatched with — the
+	// capBatch(trainItems, effectiveMaxBatchSize())-truncated batch, set once in
+	// dispatchMergeTrainWorker and never mutated afterward (like projectID). Worker
+	// membership only ever shrinks from here (ejection/landing), never grows, so this
+	// is a safe upper bound on "issue numbers this worker's checkpoints could ever
+	// touch." settleQueuedReviewFindings (#1208) reads it via mergeTrainBatchMembers
+	// to tell a Queued member genuinely inside the live batch (must use the
+	// pending-eject signal — the worker owns its state) apart from one merely Queued
+	// in the same repo but excluded by the batch cap (safe to eject directly — the
+	// worker never looks at it, exactly like the no-worker-in-flight case).
+	batchNumbers map[int]bool
 }
 
 // sanitizeBranchName replaces characters that are invalid in directory names
@@ -318,9 +331,14 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 	owner, repo := itemOwnerRepo(batch[0], e.defaultRepo())
 	repoKey := owner + "/" + repo
 
+	batchNumbers := make(map[int]bool, len(batch))
+	for _, item := range batch {
+		batchNumbers[item.Number] = true
+	}
+
 	// Use LoadOrStore so the check-and-register is atomic: two concurrent callers
 	// can never both pass the "not loaded" path and launch duplicate workers.
-	candidate := &mergeTrainWorkerState{assembling: true, projectID: projectID}
+	candidate := &mergeTrainWorkerState{assembling: true, projectID: projectID, batchNumbers: batchNumbers}
 	existing, loaded := e.mergeTrainInFlight.LoadOrStore(repoKey, candidate)
 	if loaded {
 		state := existing.(*mergeTrainWorkerState)
@@ -402,6 +420,24 @@ func (e *Engine) finishTrain(repoKey string) {
 // avoid racing a live batch member that was closed without merging.
 func (e *Engine) mergeTrainWorkerActive(repoKey string) bool {
 	return e.store.RepoWorkerActive(repoKey)
+}
+
+// mergeTrainBatchMembers returns the dispatched-batch issue-number set of the
+// in-flight worker for repoKey (its immutable batchNumbers, see
+// mergeTrainWorkerState's doc comment), or (nil, false) if no worker is currently
+// registered for repoKey in mergeTrainInFlight. Used by settleQueuedReviewFindings
+// (#1208) to distinguish a Queued member the live worker actually owns from one
+// merely Queued in the same repo but excluded by the batch cap (effectiveMaxBatchSize)
+// — the latter is safe to eject directly even while a worker is active for the repo,
+// since the worker never looks at it. A nil/false result (no worker registered, e.g.
+// a narrow race with the worker's own exit) is treated by the caller as "not owned by
+// any live batch," which is always safe to eject directly.
+func (e *Engine) mergeTrainBatchMembers(repoKey string) (map[int]bool, bool) {
+	v, ok := e.mergeTrainInFlight.Load(repoKey)
+	if !ok {
+		return nil, false
+	}
+	return v.(*mergeTrainWorkerState).batchNumbers, true
 }
 
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
@@ -584,6 +620,20 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			return
 		}
 
+		// Hook 2: apply any pending review-finding ejects flagged externally while this
+		// trial was assembling/CI-polling (#1208) — mirrors Hook 1's "poll writes a
+		// signal, worker consumes it at a checkpoint" shape. A flagged member's trial
+		// is always discarded here, regardless of its own CI result: a green trial
+		// containing a flagged member must never reach landGreenBatch. An empty
+		// `remaining` falls through to continue and is caught by the top-of-loop
+		// zero-survivors return, so no special-casing is needed here.
+		if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
+			e.logf(0, "merge-train", "%d member(s) ejected for unresolved review findings mid-trial — discarding trial and re-forming for %s\n", ejectedCount, repoKey)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			current = remaining
+			continue
+		}
+
 		state.mu.Lock()
 		state.prNum = prNum
 		state.assembling = false
@@ -639,12 +689,12 @@ func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batc
 			e.logf(member.Number, "merge-train", "cannot fetch linked PR for #%d: %v — ejecting\n", member.Number, fetchErr)
 			// Out of scope for #1420 (no combined-Validate diagnostic exists yet at
 			// this point — the fetch itself failed): diag and otherMembers are nil.
-			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr), nil, nil)
+			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr), nil, nil, true)
 			continue
 		}
 		if pr.HeadSHA == "" {
 			e.logf(member.Number, "merge-train", "#%d has no PR head SHA — ejecting\n", member.Number)
-			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA", nil, nil)
+			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA", nil, nil, true)
 			continue
 		}
 		members = append(members, trainMember{item: member, prNum: pr.Number, headSHA: pr.HeadSHA})
@@ -756,7 +806,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		}
 		// Out of scope for #1420 (unresolvable merge conflict, not a combined-Validate
 		// failure): diag and otherMembers are nil.
-		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil)
+		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil, true)
 	}
 
 	if len(survivors) == 0 {
@@ -913,7 +963,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 	e.logf(poisoner.item.Number, "merge-train", "bisection isolated #%d as the batch poisoner — ejecting\n", poisoner.item.Number)
 	e.ejectMember(p.owner, p.repo, poisoner.item,
 		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
-		isolationDiag, red)
+		isolationDiag, red, true)
 
 	var survivors []trainMember
 	for i := range red {
@@ -963,6 +1013,17 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			return true
 		}
 
+		// Hook 2: apply any pending review-finding eject flagged externally while this
+		// singleton trial was assembling/CI-polling (#1208) — mirrors the re-form loop's
+		// identical checkpoint in runMergeTrainWorker. A flagged singleton's trial is
+		// discarded regardless of its own CI result — there is nothing left to land or
+		// eject via the normal green/red path this iteration, so move on to the next member.
+		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
+			e.logf(m.item.Number, "merge-train", "pending review-finding eject flagged for singleton #%d — discarding trial\n", m.item.Number)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			continue
+		}
+
 		switch result {
 		case TrainCIGreen:
 			e.landSingleton(ctx, state, p, m, trialName)
@@ -974,7 +1035,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			// renderBatchContext's "no other members" sentence covers this case exactly.
 			e.ejectMember(p.owner, p.repo, m.item,
 				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number),
-				diag, nil)
+				diag, nil, true)
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
@@ -1629,12 +1690,22 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
 // counter, and pauses the member after MaxMergeTrainEjections. diag is the combined-Validate
-// diagnostic that caused this ejection (R1) — nil for the three ejection causes this issue
-// (#1420) leaves unaffected (fetch/head-SHA failures, unresolvable merge conflicts).
-// otherMembers names the R4 batch context (the other members riding in this train attempt);
-// ignored when diag is nil. Every ejection comment carries diag's diagnostic, not only the
-// terminal pause comment (R2) — the first ejection is exactly as informative as the last.
-func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember) {
+// diagnostic that caused this ejection (R1) — nil for the ejection causes that aren't a
+// combined-Validate failure (fetch/head-SHA failures, unresolvable merge conflicts, and
+// #1208's unresolved-review-finding cause). otherMembers names the R4 batch context (the
+// other members riding in this train attempt); ignored when diag is nil. Every ejection
+// comment carries diag's diagnostic, not only the terminal pause comment (R2) — the first
+// ejection is exactly as informative as the last.
+//
+// stayInQueue is true for every pre-#1208 ejection cause (fetch/head-SHA failure,
+// unresolvable conflict, bisection isolation): the member has nothing else to do but wait
+// for a future train with a different composition, so it stays in the Queued column.
+// #1208's new cause passes false — that ejection's whole point is to get the member off
+// Queued and back onto a stage the ordinary review-reinvoke path can reach (see
+// ejectQueuedMemberForReviewFindings), so the closing sentence must say the opposite of
+// the other causes. Callers reroute the member's board Status themselves before calling
+// this with stayInQueue=false; this function only varies the comment's wording.
+func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember, stayInQueue bool) {
 	sections := []string{reason}
 	if diag != nil {
 		sections = append(sections, renderBatchContext(otherMembers, memberItem.Number))
@@ -1642,7 +1713,11 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 			sections = append(sections, block)
 		}
 	}
-	sections = append(sections, "This issue remains in the Queued column and will be retried in a future train with a different composition.")
+	if stayInQueue {
+		sections = append(sections, "This issue remains in the Queued column and will be retried in a future train with a different composition.")
+	} else {
+		sections = append(sections, "This issue has left the Queued column so the unresolved review-thread finding above can be addressed via the normal review pipeline. Once addressed and Validate completes again, it will re-queue and join a later batch.")
+	}
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — ejected**\n\n%s", strings.Join(sections, "\n\n"))
 
 	var commentID int
@@ -1710,6 +1785,167 @@ func (e *Engine) resetEjectionCount(owner, repo string, memberNum int) {
 	e.mergeTrainEjectionsMu.Lock()
 	delete(e.mergeTrainEjectionCounts, counterKey)
 	e.mergeTrainEjectionsMu.Unlock()
+}
+
+// stageBeforeHolding returns the non-Unmanaged stage with the highest Order strictly
+// less than hs's Order — the reroute target for a Queued member ejected for an
+// unresolved review finding (#1208). Derived structurally by Order rather than
+// hardcoded to "Validate", so a custom stage config where the stage immediately
+// preceding the holding stage isn't literally named "Validate" is still handled
+// correctly — mirroring holdingStage/cleanupStage's own order-based lookup idiom
+// above. Returns nil if hs is nil or no such stage exists.
+func stageBeforeHolding(cfg Config, hs *stages.Stage) *stages.Stage {
+	if hs == nil {
+		return nil
+	}
+	var best *stages.Stage
+	for _, s := range cfg.Stages {
+		if s.Unmanaged || s.Order >= hs.Order {
+			continue
+		}
+		if best == nil || s.Order > best.Order {
+			best = s
+		}
+	}
+	return best
+}
+
+// rerouteQueuedMemberOffHolding moves item's board Status from the holding stage
+// (Queued) back to the stage stageBeforeHolding resolves (normally Validate) — the
+// routing half of #1208's new ejection cause. It is deliberately a plain status move,
+// nothing else: it must NOT add, remove, or otherwise touch stage:Validate:complete
+// (already present from the original Validate completion, and never removed by
+// advanceToQueued) or any ReviewCycles counter. Preserving both untouched is what lets
+// the existing MaxReviewCycles-bounded review-reinvoke loop pick this member back up
+// "for free" on the very next poll — see ejectQueuedMemberForReviewFindings's doc
+// comment and docs/state-machine.md's Queued Review-Finding Ejection section.
+//
+// Returns false, with no side effect, when the status-field metadata or target stage
+// cannot be resolved, or when the status mutation itself fails — the caller must not
+// proceed to post an ejection comment or increment the ejection counter in that case,
+// so a transient failure here looks like nothing happened and is simply retried whole
+// by the next settle scan pass.
+func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.ProjectItem) bool {
+	hs := holdingStage(e.cfg)
+	target := stageBeforeHolding(e.cfg, hs)
+	if target == nil {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — no preceding stage configured\n")
+		return false
+	}
+	if e.statusField == nil {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — status field metadata not available\n")
+		return false
+	}
+	optionID, ok := e.statusField.Options[target.Name]
+	if !ok {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — no status option %q found on project board\n", target.Name)
+		return false
+	}
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — status move to %s failed: %v\n", target.Name, err)
+		return false
+	}
+	if c := e.cache(); c != nil {
+		c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), target.Name)
+	}
+	// Advances the probe staleness baseline (#1090), mirroring advanceToQueued/
+	// advanceToNextStage — the status move above just bumped the item's real GitHub
+	// updatedAt via the project-item mutation.
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
+	}
+
+	e.logf(item.Number, "merge-train", "rerouted off %s to %s — unresolved review finding will be addressed via the normal review pipeline\n", hs.Name, target.Name)
+	return true
+}
+
+// ejectQueuedMemberForReviewFindings ejects a Queued merge-train member whose linked
+// PR has developed unresolved review-thread feedback while it sat in Queued (#1208) —
+// the fourth ejectMember cause, and the only one that must NOT leave the member in
+// Queued (see ejectMember's stayInQueue doc comment).
+//
+// Reroute happens BEFORE the ejection comment/counter, not after: if
+// rerouteQueuedMemberOffHolding fails, nothing is posted and nothing is counted, so a
+// transient board-mutation failure can never produce a duplicate ejection comment or
+// double-count toward MaxMergeTrainEjections — the settle scan simply re-detects the
+// same still-unresolved thread on a member still sitting in Queued and retries the
+// whole operation on the next poll.
+func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.ProjectItem, findingCount int) {
+	if !e.rerouteQueuedMemberOffHolding(projectID, item) {
+		return
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	reason := fmt.Sprintf(
+		"ejected from merge-train — %d unresolved review-thread finding(s) arrived on the linked PR while this issue was Queued.",
+		findingCount,
+	)
+	// diag/otherMembers are nil (no combined-Validate diagnostic exists for this
+	// cause, per ADR-1420's contract); stayInQueue is false — this is the one
+	// ejectMember cause where the member must leave Queued rather than stay.
+	e.ejectMember(owner, repo, item, reason, nil, nil, false)
+}
+
+// markPendingReviewEject records that issueNumber (in repoKey) has count unresolved
+// review-thread findings and should be ejected at the worker's next checkpoint (#1208),
+// rather than immediately — used by settleQueuedReviewFindings when a merge-train
+// worker is currently in flight for repoKey, so the ejection is applied by the worker
+// goroutine itself (runMergeTrainWorker's re-form loop, landOneAtATime) rather than by
+// the settle scan racing that goroutine's own in-memory batch state. Mirrors the
+// existing isRunawayTripped/mergeTrainTrials "poll writes a signal, worker consumes it
+// at a checkpoint" shape.
+func (e *Engine) markPendingReviewEject(repoKey string, issueNumber, count int) {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	if e.queuedReviewEjects[repoKey] == nil {
+		e.queuedReviewEjects[repoKey] = make(map[int]int)
+	}
+	e.queuedReviewEjects[repoKey][issueNumber] = count
+}
+
+// takePendingReviewEject returns and clears the pending-eject finding count for
+// issueNumber in repoKey, if any. Clearing on read makes this a one-shot signal: once a
+// worker checkpoint consumes it, the same flag can't be double-applied by a later
+// checkpoint in the same or a subsequent worker run.
+func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, bool) {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	byIssue := e.queuedReviewEjects[repoKey]
+	if byIssue == nil {
+		return 0, false
+	}
+	count, ok := byIssue[issueNumber]
+	if !ok {
+		return 0, false
+	}
+	delete(byIssue, issueNumber)
+	if len(byIssue) == 0 {
+		delete(e.queuedReviewEjects, repoKey)
+	}
+	return count, true
+}
+
+// applyPendingReviewEjects checks every member in members for a pending review-finding
+// eject signal (#1208) and, for each flagged member, ejects it via
+// ejectQueuedMemberForReviewFindings and excludes it from the returned remaining slice.
+// Called from inside the merge-train worker goroutine at its natural checkpoints —
+// after assembleAndValidate returns in runMergeTrainWorker's re-form loop, and inside
+// landOneAtATime's per-singleton loop — so a flagged member can never ride a trial
+// (green or otherwise) to landing: the caller must discard the current trial whenever
+// ejectedCount > 0, regardless of that trial's own CI result.
+func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
+	for _, m := range members {
+		if count, ok := e.takePendingReviewEject(repoKey, m.item.Number); ok {
+			e.logf(m.item.Number, "merge-train", "applying pending review-finding eject flagged mid-trial (%d finding(s))\n", count)
+			e.ejectQueuedMemberForReviewFindings(projectID, m.item, count)
+			ejectedCount++
+			continue
+		}
+		remaining = append(remaining, m)
+	}
+	return remaining, ejectedCount
 }
 
 // effectiveTrialWindow returns the runaway-guard threshold (N) and rolling window (M),
@@ -2257,6 +2493,26 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 				"the base branch advanced and the batch could not be re-assembled onto it")
 			return
 		}
+
+		// Hook 2 (landing loop): apply any pending review-finding ejects flagged
+		// while this rebase cycle's assemble/validate was running (#1208). This
+		// loop is the one place a green trial can spend a second full CI wait
+		// (up to CIWaitTimeout) without ever returning control to the outer
+		// re-form loop in runMergeTrainWorker, where the primary Hook 2 lives —
+		// so a finding arriving during a main-moved rebase would otherwise ride
+		// the newly-green trial straight to landMergeTrainBatch. Discard the
+		// whole trial and stop: the (non-flagged) remaining survivors are still
+		// sitting in Queued untouched, so they simply re-form fresh on the next
+		// poll's dispatchMergeTrainWorker — the same "checkpoint, not continuous
+		// preemption" granularity the runaway guard and the other Hook 2 already
+		// have, rather than threading a resume-with-reduced-membership path back
+		// into this loop.
+		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
+			e.logf(0, "merge-train", "%d member(s) ejected for unresolved review findings during main-moved rebase for %s/%s — discarding trial; remaining survivors will re-form on a future poll\n", ejectedCount, p.owner, p.repo)
+			e.cleanupTrialArtifacts(p.wm, newTrialName)
+			return
+		}
+
 		if result != TrainCIGreen {
 			// A red/pending re-validation after a rebase dissolves (disjoint from
 			// bisection); the next poll re-forms a fresh train that bisects cleanly.

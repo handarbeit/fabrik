@@ -14,6 +14,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -55,11 +56,16 @@ func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeI
 		wm,
 	)
 	// Pre-set statusField so advanceToNextStage can find the "Done" board column.
+	// "Implement" (opt-implement) is included so rerouteQueuedMemberOffHolding
+	// (#1208) can resolve its reroute target — the stage stageBeforeHolding derives
+	// structurally as the highest-Order non-Unmanaged stage before Queued (Order 10),
+	// which is Implement (Order 3) in this stage set.
 	eng.statusField = &gh.StatusField{
 		FieldID: "sf-test-1",
 		Options: map[string]string{
-			"Done":   "opt-done",
-			"Queued": "opt-queued",
+			"Done":      "opt-done",
+			"Queued":    "opt-queued",
+			"Implement": "opt-implement",
 		},
 	}
 	return eng
@@ -497,8 +503,7 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(1, "Test Issue")
-	eng.ejectMember("owner", "repo", member, "conflict with #2", nil, nil)
-
+	eng.ejectMember("owner", "repo", member, "conflict with #2", nil, nil, true)
 	client.mu.Lock()
 	calls := client.addCommentCalls
 	client.mu.Unlock()
@@ -511,6 +516,51 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	}
 }
 
+// TestEjectMember_StayInQueueWordingIsDistinguishable verifies the #1208 requirement
+// that an operator can tell from the ejection comment alone which of the four causes
+// fired: stayInQueue=true (the three pre-#1208 causes) must say the member remains in
+// Queued, while stayInQueue=false (the new unresolved-review-finding cause) must say
+// the opposite — that it has left Queued to be addressed via the review pipeline.
+func TestEjectMember_StayInQueueWordingIsDistinguishable(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	stayMember := makeTrainItem(1, "Stays")
+	eng.ejectMember("owner", "repo", stayMember, "conflict", nil, nil, true)
+
+	leaveMember := makeTrainItem(2, "Leaves")
+	eng.ejectMember("owner", "repo", leaveMember, "unresolved review finding", nil, nil, false)
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 ejection comments, got %d", len(calls))
+	}
+
+	stayBody := calls[0].body
+	leaveBody := calls[1].body
+
+	if !strings.Contains(stayBody, "remains in the Queued column") {
+		t.Errorf("stayInQueue=true comment should say the member remains in Queued, got: %s", stayBody)
+	}
+	if strings.Contains(stayBody, "has left the Queued column") {
+		t.Errorf("stayInQueue=true comment should not say the member left Queued, got: %s", stayBody)
+	}
+
+	if !strings.Contains(leaveBody, "has left the Queued column") {
+		t.Errorf("stayInQueue=false comment should say the member left Queued, got: %s", leaveBody)
+	}
+	if strings.Contains(leaveBody, "remains in the Queued column") {
+		t.Errorf("stayInQueue=false comment should not say the member remains in Queued, got: %s", leaveBody)
+	}
+
+	if stayBody == leaveBody {
+		t.Error("stayInQueue=true and stayInQueue=false ejection comments must be textually distinguishable")
+	}
+}
+
 func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
@@ -520,9 +570,8 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	member := makeTrainItem(5, "Problem Issue")
 
 	// First two ejections should not add pause labels.
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
 	client.mu.Lock()
 	pauseCount := 0
 	for _, c := range client.addLabelCalls {
@@ -536,8 +585,7 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	}
 
 	// Third ejection should trigger pause.
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
 	client.mu.Lock()
 	pauseCount = 0
 	awaitCount := 0
@@ -568,11 +616,10 @@ func TestEjectMember_EjectionCountIsPerMember(t *testing.T) {
 	member2 := makeTrainItem(2, "Issue 2")
 
 	// Eject member 1 three times and member 2 once.
-	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil) // triggers pause for #1
-	eng.ejectMember("owner", "repo", member2, "conflict", nil, nil) // should NOT trigger pause for #2
-
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true) // triggers pause for #1
+	eng.ejectMember("owner", "repo", member2, "conflict", nil, nil, true) // should NOT trigger pause for #2
 	client.mu.Lock()
 	pausedIssues := make(map[int]bool)
 	for _, c := range client.addLabelCalls {
@@ -611,10 +658,9 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 
 	member := makeTrainItem(5, "Problem Issue")
 
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil)
-	eng.ejectMember("owner", "repo", member, "conflict", nil, nil) // triggers pause
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true) // triggers pause
 	labels, err := cache.FetchLabels("owner", "repo", 5)
 	if err != nil {
 		t.Fatalf("FetchLabels: %v", err)
@@ -685,6 +731,451 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}
 	if !awaitingEcho {
 		t.Error("expected fabrik:awaiting-input webhook echo to be registered")
+	}
+}
+
+// ── #1208 Queued review-finding ejection: stageBeforeHolding / reroute / eject ──
+
+func TestStageBeforeHolding_ReturnsHighestOrderPrecedingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Research", Order: 1},
+		{Name: "Plan", Order: 2},
+		{Name: "Implement", Order: 3},
+		{Name: "Queued", Order: 10, HoldingStage: true},
+		{Name: "Done", Order: 99, CleanupWorktree: true},
+	}}
+	hs := holdingStage(cfg)
+	got := stageBeforeHolding(cfg, hs)
+	if got == nil || got.Name != "Implement" {
+		t.Fatalf("expected Implement (highest Order < holding stage's Order), got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_SkipsUnmanagedStages(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Research", Order: 1},
+		{Name: "Backlog", Order: 5, Unmanaged: true},
+		{Name: "Queued", Order: 10, HoldingStage: true},
+	}}
+	hs := holdingStage(cfg)
+	got := stageBeforeHolding(cfg, hs)
+	if got == nil || got.Name != "Research" {
+		t.Fatalf("expected Research (Backlog is Unmanaged and must be skipped), got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_NilHoldingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{{Name: "Research", Order: 1}}}
+	if got := stageBeforeHolding(cfg, nil); got != nil {
+		t.Fatalf("expected nil for nil holding stage, got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_NoPrecedingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Queued", Order: 1, HoldingStage: true},
+	}}
+	hs := holdingStage(cfg)
+	if got := stageBeforeHolding(cfg, hs); got != nil {
+		t.Fatalf("expected nil when nothing precedes the holding stage, got %+v", got)
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_MovesStatusToPrecedingStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	ok := eng.rerouteQueuedMemberOffHolding("PVT_1", item)
+	if !ok {
+		t.Fatal("expected reroute to succeed")
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+	call := client.updateStatusCalls[0]
+	if call.projectID != "PVT_1" || call.optionID != "opt-implement" {
+		t.Errorf("update call = %+v, expected move to opt-implement", call)
+	}
+}
+
+// TestRerouteQueuedMemberOffHolding_DoesNotTouchLabelsOrClearCycles pins the #1208
+// stall-risk constraint: the reroute must be a plain status move only. It must never
+// add/remove stage:Validate:complete (already present from the original Validate
+// completion) and must never clear ReviewCycles — either would break the "MaxReviewCycles
+// applies for free across the eject/re-queue cycle" property the design relies on.
+func TestRerouteQueuedMemberOffHolding_DoesNotTouchLabelsOrClearCycles(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	repoStr := "owner/repo"
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: 1, StageName: "Implement"})
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: 1, StageName: "Implement"})
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: repoStr, Status: "Queued",
+		Labels: []string{"stage:Implement:complete"}}
+	if !eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to succeed")
+	}
+
+	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no label mutations from reroute, got add=%v remove=%v", client.addLabelCalls, client.removeLabelCalls)
+	}
+
+	snap, err := eng.store.Get(repoStr, 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != 2 {
+		t.Errorf("expected ReviewCycles to remain 2 (untouched by reroute), got %d", got)
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_NoPrecedingStage_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", MaxConcurrent: 1,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 1, HoldingStage: true},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+	eng.statusField = &gh.StatusField{FieldID: "sf-1", Options: map[string]string{"Queued": "opt-queued"}}
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	if eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to fail when no stage precedes the holding stage")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no status update call on failure, got %d", len(client.updateStatusCalls))
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_StatusMoveFails_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	if eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to fail when UpdateProjectItemStatus errors")
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount verifies the
+// reroute-then-eject ordering: when the status move fails, ejectQueuedMemberForReviewFindings
+// must not post an ejection comment or increment the ejection counter — a failed reroute
+// looks like nothing happened, so a retry on the next settle scan pass can't double-count.
+func TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 0 {
+		t.Errorf("expected no ejection comment when reroute fails, got %d", comments)
+	}
+
+	eng.mergeTrainEjectionsMu.Lock()
+	count := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if count != 0 {
+		t.Errorf("expected ejection counter to remain 0 when reroute fails, got %d", count)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_Success verifies the full happy path: status
+// moves off Queued, an ejection comment distinguishable from the stay-in-Queue wording
+// is posted, and the ejection counter increments.
+func TestEjectQueuedMemberForReviewFindings_Success(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 2)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ejection comment, got %d", len(calls))
+	}
+	if !strings.Contains(calls[0].body, "has left the Queued column") {
+		t.Errorf("expected ejection comment to use the leaves-Queued wording, got: %s", calls[0].body)
+	}
+	if !strings.Contains(calls[0].body, "2 unresolved review-thread finding") {
+		t.Errorf("expected ejection comment to name the finding count, got: %s", calls[0].body)
+	}
+
+	eng.mergeTrainEjectionsMu.Lock()
+	count := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if count != 1 {
+		t.Errorf("expected ejection counter to be 1, got %d", count)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_MaxReviewCyclesComposesAcrossCycle is the
+// key #1208 stall-risk regression named in the issue's Requirements and Risks
+// sections: a member ejected repeatedly for the same unresolved review finding,
+// rerouted back to Implement (the stage preceding Queued in this test's stage
+// set), and re-picked-up by the ordinary review-reinvoke path (handleReviewGate,
+// completely unmodified by this issue) must have its ReviewCycles counter keep
+// counting across every eject/reroute cycle — never reset — so it eventually
+// escalates via pauseForReviewCycleLimit instead of oscillating Queued<->Implement
+// forever. Also confirms MaxMergeTrainEjections (a separate, already-existing
+// bound reused via ejectMember) fires independently of ReviewCycles, per the
+// issue's own framing of the two bounds as distinct.
+func TestEjectQueuedMemberForReviewFindings_MaxReviewCyclesComposesAcrossCycle(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxReviewCycles = 3
+
+	item := gh.ProjectItem{
+		Number: 1,
+		ItemID: "PVTI_1",
+		Repo:   "owner/repo",
+		Status: "Queued",
+		Labels: []string{"stage:Implement:complete"},
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Please fix this.", ReviewThreadID: "RT_1"},
+		},
+	}
+	// implementStage mirrors stageBeforeHolding's own resolution for trainTestEngine's
+	// stage set (Implement, Order 3, is the stage immediately preceding Queued, Order 10).
+	implementStage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	pausedByEnd := false
+	for i := 0; i <= eng.cfg.MaxReviewCycles; i++ {
+		// Step 1: eject the member off Queued — simulates settleQueuedReviewFindings
+		// having detected the still-unresolved thread on this poll.
+		eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+
+		// Step 2: simulate the ordinary review-reinvoke path picking the rerouted
+		// item back up on the very next poll — the exact same, unmodified
+		// handleReviewGate any non-Queued item with an unresolved thread goes through.
+		advancedItems := make(map[string]bool)
+		pctx := &phase1Ctx{
+			ctx: context.Background(), board: board, item: item, stage: implementStage,
+			hasComplete: true, advancedItems: advancedItems,
+		}
+		if claimed := eng.handleReviewGate(pctx); !claimed {
+			t.Fatalf("iteration %d: expected handleReviewGate to claim the item", i)
+		}
+		eng.wg.Wait()
+
+		if advancedItems["owner/repo#1"] {
+			continue // a reinvoke dispatched this cycle — keep going
+		}
+		pausedByEnd = true // no dispatch this cycle: the cap was hit and it paused
+		break
+	}
+
+	if !pausedByEnd {
+		t.Fatal("expected the cycle to eventually pause at MaxReviewCycles instead of dispatching forever")
+	}
+
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != eng.cfg.MaxReviewCycles {
+		t.Errorf("ReviewCycles(Implement) = %d; want exactly %d — must not reset across the eject/reroute cycle", got, eng.cfg.MaxReviewCycles)
+	}
+
+	client.mu.Lock()
+	hasPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	client.mu.Unlock()
+	if !hasPaused {
+		t.Error("expected fabrik:paused to be added once the review cycle limit was reached")
+	}
+
+	// MaxMergeTrainEjections (3 in trainTestEngine) is a separate bound reused via
+	// ejectMember: it fires — and resets — purely from repeated ejections in this
+	// loop, independent of ReviewCycles. Assert it is a valid, in-range value
+	// rather than an exact count, since ejectMember resets its own counter to 0
+	// once it pauses (so the exact value depends on loop length vs. the cap).
+	eng.mergeTrainEjectionsMu.Lock()
+	ejections := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if ejections < 0 || ejections >= eng.cfg.MaxMergeTrainEjections {
+		t.Errorf("unexpected ejection counter value: %d (want in [0, %d))", ejections, eng.cfg.MaxMergeTrainEjections)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_MaxMergeTrainEjectionsFiresIndependently
+// confirms the issue's Risks-section expectation directly: MaxMergeTrainEjections
+// (ejectMember's own pre-existing consecutive-ejection pause cap) can pause a
+// member purely from repeated review-finding ejections, entirely independent of —
+// and potentially before — MaxReviewCycles ever fires, since the two bounds are
+// driven by different counters incremented from different call sites.
+func TestEjectQueuedMemberForReviewFindings_MaxMergeTrainEjectionsFiresIndependently(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxMergeTrainEjections = 2
+	eng.cfg.MaxReviewCycles = 100 // deliberately far out of reach in this test
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+	client.mu.Lock()
+	pausedAfterFirst := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAfterFirst = true
+		}
+	}
+	client.mu.Unlock()
+	if pausedAfterFirst {
+		t.Fatal("did not expect fabrik:paused after only 1 ejection (MaxMergeTrainEjections=2)")
+	}
+
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+	client.mu.Lock()
+	pausedAfterSecond := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAfterSecond = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedAfterSecond {
+		t.Error("expected fabrik:paused after 2 ejections (MaxMergeTrainEjections=2), purely from review-finding ejections")
+	}
+
+	// ReviewCycles is untouched by this path entirely — this test never dispatches
+	// through handleReviewGate — confirming the two bounds are driven independently.
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0 (MaxMergeTrainEjections must fire independently of it)", got)
+	}
+}
+
+// ── #1208 pending-eject signal: mark/take/apply ─────────────────────────────────
+
+func TestTakePendingReviewEject_UnflaggedMember_NoOp(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	count, ok := eng.takePendingReviewEject("owner/repo", 1)
+	if ok || count != 0 {
+		t.Fatalf("expected (0, false) for an unflagged member, got (%d, %v)", count, ok)
+	}
+}
+
+func TestMarkAndTakePendingReviewEject_TakeClearsTheSignal(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	eng.markPendingReviewEject("owner/repo", 1, 3)
+
+	count, ok := eng.takePendingReviewEject("owner/repo", 1)
+	if !ok || count != 3 {
+		t.Fatalf("expected (3, true) on first take, got (%d, %v)", count, ok)
+	}
+
+	// A second take must observe the signal already cleared — one-shot semantics.
+	count, ok = eng.takePendingReviewEject("owner/repo", 1)
+	if ok || count != 0 {
+		t.Fatalf("expected (0, false) on second take (already consumed), got (%d, %v)", count, ok)
+	}
+}
+
+func TestMarkPendingReviewEject_ScopedPerRepoAndIssue(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	eng.markPendingReviewEject("owner/repo", 1, 1)
+	eng.markPendingReviewEject("owner/repo", 2, 5)
+	eng.markPendingReviewEject("owner/other", 1, 9)
+
+	if count, ok := eng.takePendingReviewEject("owner/repo", 1); !ok || count != 1 {
+		t.Errorf("owner/repo#1: got (%d, %v), want (1, true)", count, ok)
+	}
+	if count, ok := eng.takePendingReviewEject("owner/repo", 2); !ok || count != 5 {
+		t.Errorf("owner/repo#2: got (%d, %v), want (5, true)", count, ok)
+	}
+	if count, ok := eng.takePendingReviewEject("owner/other", 1); !ok || count != 9 {
+		t.Errorf("owner/other#1: got (%d, %v), want (9, true)", count, ok)
+	}
+}
+
+func TestApplyPendingReviewEjects_EjectsFlaggedMembersOnly(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	members := []trainMember{
+		{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued"}},
+	}
+	eng.markPendingReviewEject("owner/repo", 2, 4)
+
+	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+
+	if ejectedCount != 1 {
+		t.Fatalf("expected ejectedCount=1, got %d", ejectedCount)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("expected 2 remaining members, got %d", len(remaining))
+	}
+	for _, m := range remaining {
+		if m.item.Number == 2 {
+			t.Errorf("ejected member #2 must not appear in remaining, got: %+v", remaining)
+		}
+	}
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected the flagged member to be rerouted (1 status update), got %d", len(client.updateStatusCalls))
+	}
+
+	// The signal is one-shot — a second call with the same members must not re-eject.
+	remaining2, ejectedCount2 := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	if ejectedCount2 != 0 || len(remaining2) != 3 {
+		t.Errorf("expected second apply to be a no-op (signal already consumed), got ejectedCount=%d remaining=%d", ejectedCount2, len(remaining2))
+	}
+}
+
+func TestApplyPendingReviewEjects_NoFlags_ReturnsAllUnchanged(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	members := []trainMember{
+		{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
+	}
+
+	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	if ejectedCount != 0 {
+		t.Errorf("expected ejectedCount=0, got %d", ejectedCount)
+	}
+	if len(remaining) != 2 {
+		t.Errorf("expected all members to remain, got %d", len(remaining))
 	}
 }
 
@@ -952,6 +1443,114 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	}
 	if state.CIResult != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen, got %v", state.CIResult)
+	}
+}
+
+// TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms verifies
+// Hook 2 (#1208): a pending review-finding eject flagged for a member while its
+// batch's trial is assembling/CI-polling must cause the worker to discard that
+// trial — even though its CI result is green — and re-form with the reduced
+// membership, rather than landing the flagged member via landGreenBatch. This is
+// the "checkpoint-consumed-by-the-worker-itself" half of the coordination design;
+// settleQueuedReviewFindings (the settle-scan half) is exercised separately.
+func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately, every trial
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	// Flag #1 for a pending review-finding eject BEFORE the worker runs — simulates
+	// settleQueuedReviewFindings having observed an unresolved thread on #1 while a
+	// worker was already in flight for this repo.
+	eng.markPendingReviewEject("owner/repo", 1, 2)
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	// #1 must have been rerouted off Queued (the ejection), not landed.
+	if len(client.updateStatusCalls) == 0 {
+		t.Fatal("expected at least 1 status update call rerouting #1 off Queued")
+	}
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Errorf("expected a reroute-to-Implement status update among %+v", client.updateStatusCalls)
+	}
+
+	client.mu.Lock()
+	var ejectionComment string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 {
+			ejectionComment = c.body
+		}
+	}
+	client.mu.Unlock()
+	if !strings.Contains(ejectionComment, "has left the Queued column") {
+		t.Errorf("expected #1's ejection comment to use the leaves-Queued wording, got: %q", ejectionComment)
+	}
+
+	// The pending-eject signal must have been consumed (one-shot).
+	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
+		t.Error("expected the pending-eject signal for #1 to already be consumed")
+	}
+
+	// The worker must have re-formed and landed #2 normally — trainInFlight/store
+	// liveness clears only once the (re-formed) train actually finishes.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared once the re-formed train finishes")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness to be cleared once the re-formed train finishes")
+	}
+
+	// At least 2 draft PRs: the discarded 2-member trial, and the re-formed
+	// 1-member trial that actually lands #2.
+	mu.Lock()
+	prs := createdPRs
+	mu.Unlock()
+	if prs < 2 {
+		t.Errorf("expected at least 2 draft PR creations (discarded trial + re-formed trial), got %d", prs)
 	}
 }
 
@@ -2458,8 +3057,7 @@ func TestEjectMember_TruncatesOversizedDiagnostic(t *testing.T) {
 		PRNum:    900,
 		TrialSHA: "deadbeef",
 	}
-	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil)
-
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil, true)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.addCommentCalls) == 0 {
@@ -2553,8 +3151,7 @@ func TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence(t *testing.T) {
 		})
 	}
 	diag := &trainCIDiagnostic{FailedChecks: checks, PRNum: 901, TrialSHA: "cafef00d"}
-	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil)
-
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil, true)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.addCommentCalls) == 0 {
@@ -2687,6 +3284,94 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 	client.mu.Unlock()
 	if singletonPRs != 4 {
 		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
+
+// TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead verifies Hook 2
+// (#1208) inside the one-at-a-time fallback: a pending review-finding eject flagged
+// for a member at the moment its own singleton trial validates must be honored
+// instead of that singleton's normal green/red outcome — the member is rerouted off
+// Queued and ejected with the distinct #1208 wording, not landed via landSingleton
+// (even though its singleton trial is green) and not ejected via the ordinary
+// fails-even-in-isolation red path.
+func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+
+	// Red iff both #1 and #2 are present (forces bisection -> non-isolable
+	// interaction -> the landOneAtATime fallback with the full original 2-member
+	// set). Marks #2's pending-eject signal at the exact moment its own singleton
+	// trial validates — simulating settleQueuedReviewFindings having flagged it
+	// mid-CI-wait, just before landOneAtATime's own checkpoint would otherwise
+	// decide its fate via the normal green/red switch.
+	eng.trainValidateFn = func(_ context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
+		present := make(map[int]bool, len(members))
+		for _, m := range members {
+			present[m.item.Number] = true
+		}
+		if len(members) == 1 && members[0].item.Number == 2 {
+			eng.markPendingReviewEject("owner/repo", 2, 5)
+		}
+		if present[1] && present[2] {
+			return TrainCIRed, &trainCIDiagnostic{Note: "interaction", PRNum: 900, TrialSHA: "seam-sha"}
+		}
+		return TrainCIGreen, nil
+	}
+
+	batch := makeSeamBatch(2)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Fatalf("expected the interaction to degrade to one-at-a-time; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	var singletonTitles []string
+	for _, c := range client.createPRCalls {
+		if strings.Contains(c.title, "singleton") {
+			singletonTitles = append(singletonTitles, c.title)
+		}
+	}
+	client.mu.Unlock()
+	if len(singletonTitles) != 1 {
+		t.Fatalf("expected exactly 1 singleton landing PR (#1 only — #2 must be ejected, not landed), got %d: %v", len(singletonTitles), singletonTitles)
+	}
+	if strings.Contains(singletonTitles[0], "#2") {
+		t.Errorf("expected #2 NOT to be landed as a singleton, got title: %s", singletonTitles[0])
+	}
+
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Errorf("expected #2 to be rerouted to Implement, got status updates: %+v", client.updateStatusCalls)
+	}
+
+	client.mu.Lock()
+	var ejectionComment string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 2 {
+			ejectionComment = c.body
+		}
+	}
+	client.mu.Unlock()
+	if !strings.Contains(ejectionComment, "has left the Queued column") {
+		t.Errorf("expected #2's ejection comment to use the leaves-Queued wording, got: %q", ejectionComment)
+	}
+
+	if _, ok := eng.takePendingReviewEject("owner/repo", 2); ok {
+		t.Error("expected the pending-eject signal for #2 to already be consumed")
 	}
 }
 
@@ -2966,6 +3651,84 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 	}
 	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
 	// defer, not by landGreenBatch/landMergeTrainBatch (ADR-067).
+}
+
+// TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding
+// closes the gap the outer re-form loop's and landOneAtATime's Hook 2 checkpoints
+// don't cover (#1208): landGreenBatch's own main-moved rebase-and-revalidate loop
+// can itself spend a full combined-Validate wait without ever returning control to
+// runMergeTrainWorker, where the primary Hook 2 lives. A review-finding eject
+// flagged for a member while that rebase re-validation is running must still stop
+// the batch from landing — it must not ride the freshly-green rebased trial to
+// landMergeTrainBatch just because this loop never re-checked the signal.
+func TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+
+	// Behind on the first landing-gate check (forces exactly one rebase cycle),
+	// up to date thereafter — same shape as TestLandGreenBatch_BehindOnceThenLands.
+	var mu sync.Mutex
+	behindCalls := 0
+	client.fetchCommitsBehindFn = func(_, _, _, _ string) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		behindCalls++
+		if behindCalls == 1 {
+			return 1, nil // main moved
+		}
+		return 0, nil // caught up after rebase
+	}
+
+	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
+
+	// Flag #1 for a pending review-finding eject — simulates settleQueuedReviewFindings
+	// observing an unresolved thread on #1 while the rebase re-validate is in flight.
+	eng.markPendingReviewEject("owner/repo", 1, 3)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.landGreenBatch(ctx, state, p, survivors)
+
+	// The rebased trial must NOT land: no merge, no member advanced to Done.
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+	if merges != 0 {
+		t.Errorf("expected the flagged trial to be discarded rather than landed, got %d merge(s)", merges)
+	}
+
+	// #1 must have been rerouted off Queued and carry the distinct ejection wording.
+	foundReroute := false
+	client.mu.Lock()
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	client.mu.Unlock()
+	if !foundReroute {
+		t.Error("expected #1 to be rerouted off Queued to Implement")
+	}
+	bodies := ejectionCommentBodies(client, 1)
+	if len(bodies) != 1 || !strings.Contains(bodies[0], "has left the Queued column") {
+		t.Errorf("expected #1's ejection comment to use the leaves-Queued wording, got: %v", bodies)
+	}
+
+	// The pending-eject signal must have been consumed (one-shot).
+	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
+		t.Error("expected the pending-eject signal for #1 to already be consumed")
+	}
+
+	// #2 (not flagged) must not have been touched — no comment, no reroute — it
+	// simply re-forms fresh on a future poll's dispatchMergeTrainWorker call.
+	if len(ejectionCommentBodies(client, 2)) != 0 {
+		t.Error("expected #2 to be left untouched, not ejected")
+	}
 }
 
 // TestLandGreenBatch_ExhaustionDissolves verifies FR-2/FR-5: when the trial keeps
