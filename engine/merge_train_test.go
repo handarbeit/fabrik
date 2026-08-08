@@ -2138,6 +2138,21 @@ func ejectionCommentCount(client *mockGitHubClient, issueNumber int) int {
 	return n
 }
 
+// ejectionCommentBodies returns the bodies of every ejection comment posted on a given
+// member issue number, in posting order — for asserting on comment *content* (#1420
+// R1-R4), not just that an ejection occurred.
+func ejectionCommentBodies(client *mockGitHubClient, issueNumber int) []string {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == issueNumber && strings.Contains(c.body, "ejected") {
+			bodies = append(bodies, c.body)
+		}
+	}
+	return bodies
+}
+
 // TestMergeTrainBisect_GreenCommonPath is the D-d hard invariant: a green batch costs exactly
 // one combined validation, performs zero bisection, and lands.
 func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
@@ -2254,6 +2269,173 @@ func TestMergeTrainBisect_RepeatedEjectionPauses(t *testing.T) {
 	}
 	if !awaiting {
 		t.Error("expected #3 to get fabrik:awaiting-input at the shared eject cap")
+	}
+}
+
+// ── #1420 acceptance tests: ejection comment carries the combined-Validate diagnostic ──
+
+// TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic covers #1420 AC1/AC3: the
+// FIRST ejection comment for a bisection-isolated poisoner — not only a later or pause
+// comment — must contain the failing check name and its output. A test that only asserts
+// ejection occurred (the pre-#1420 state) would pass vacuously; this asserts on comment
+// body text instead.
+func TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 3)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #3, got %d", len(comments))
+	}
+	first := comments[0]
+	if !strings.Contains(first, "ci/test") {
+		t.Errorf("first ejection comment must name the failing check, got: %s", first)
+	}
+	if !strings.Contains(first, "synthetic seam failure output") {
+		t.Errorf("first ejection comment must include the failure output, got: %s", first)
+	}
+}
+
+// TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers covers #1420 R4/AC5: the
+// ejection comment must name the other members the isolated poisoner's batch was
+// combined against, so an operator knows the failure is combination-only before
+// investigating their own branch.
+func TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 3)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #3, got %d", len(comments))
+	}
+	body := comments[0]
+	for _, other := range []string{"#1", "#2", "#4", "#5"} {
+		if !strings.Contains(body, other) {
+			t.Errorf("expected ejection comment to name batch member %s, got: %s", other, body)
+		}
+	}
+	if strings.Contains(body, "No other members were present") {
+		t.Errorf("expected a populated batch-context sentence (not the singleton fallback), got: %s", body)
+	}
+}
+
+// TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers covers R4's single-member-train
+// case: when the red batch has exactly one member, bisect's base case fires without any
+// further validation, and there is no batch to name — the comment must say so explicitly
+// rather than rendering an awkward empty list.
+func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return true }) // always red
+
+	batch := makeSeamBatch(1)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 1)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #1, got %d", len(comments))
+	}
+	if !strings.Contains(comments[0], "No other members were present") {
+		t.Errorf("expected the single-member-train sentence, got: %s", comments[0])
+	}
+}
+
+// TestEjectMember_TruncatesOversizedDiagnostic covers #1420 R3/AC4: an output exceeding
+// the inline budget must produce a truncated body plus a run/job link, and the whole
+// comment must stay within GitHub's ~65536-char comment limit.
+func TestEjectMember_TruncatesOversizedDiagnostic(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(7, "Big Output Issue")
+	hugeOutput := strings.Repeat("x", 50000)
+	diag := &trainCIDiagnostic{
+		FailedChecks: []gh.CheckRun{
+			{Name: "ci/huge", Status: "completed", Conclusion: "failure", OutputText: hugeOutput, HTMLURL: "https://github.com/owner/repo/runs/123"},
+		},
+		PRNum:    900,
+		TrialSHA: "deadbeef",
+	}
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected an ejection comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if len(body) > 65536 {
+		t.Errorf("ejection comment body exceeds GitHub's comment size limit: %d chars", len(body))
+	}
+	if !strings.Contains(body, "chars omitted") {
+		t.Errorf("expected a truncated-output marker, got a body of length %d", len(body))
+	}
+	if !strings.Contains(body, "https://github.com/owner/repo/runs/123") {
+		t.Errorf("expected a details/run link in the truncated comment, got: %s", body)
+	}
+}
+
+// TestMergeTrainBisect_PauseCommentNamesCause covers #1420 R5/AC6: the pause-after-N
+// comment must name or link the cause, not just instruct the operator to "resolve the
+// underlying conflict" with nothing to go on.
+func TestMergeTrainBisect_PauseCommentNamesCause(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	// Pre-seed #3's ejection counter to one below the cap so this run triggers the pause.
+	eng.mergeTrainEjectionsMu.Lock()
+	eng.mergeTrainEjectionCounts["owner/repo#3"] = eng.cfg.MaxMergeTrainEjections - 1
+	eng.mergeTrainEjectionsMu.Unlock()
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	var pauseBody string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 && strings.Contains(c.body, "pausing after") {
+			pauseBody = c.body
+		}
+	}
+	client.mu.Unlock()
+	if pauseBody == "" {
+		t.Fatal("expected a pause comment to be posted for #3")
+	}
+	if !strings.Contains(pauseBody, "ci/test") {
+		t.Errorf("expected pause comment to name the failing check, got: %s", pauseBody)
+	}
+	if !strings.Contains(pauseBody, "issuecomment-") {
+		t.Errorf("expected pause comment to link the ejection comment, got: %s", pauseBody)
 	}
 }
 
