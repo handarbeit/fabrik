@@ -2027,9 +2027,14 @@ type recordingValidator struct {
 	mu      sync.Mutex
 	calls   [][]int
 	redWhen func(present map[int]bool) bool
+	// diagFor optionally overrides the synthetic default diagnostic returned on a red
+	// result, keyed on the validated batch's member-number set — for tests asserting
+	// specific diagnostic content (#1420 AC1-AC6). nil means every red result gets the
+	// same generic synthetic diagnostic below.
+	diagFor func(present map[int]bool) *trainCIDiagnostic
 }
 
-func (rv *recordingValidator) fn(_ context.Context, members []trainMember) TrainCIResult {
+func (rv *recordingValidator) fn(_ context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
 	present := make(map[int]bool, len(members))
 	nums := make([]int, 0, len(members))
 	for _, m := range members {
@@ -2039,10 +2044,17 @@ func (rv *recordingValidator) fn(_ context.Context, members []trainMember) Train
 	rv.mu.Lock()
 	rv.calls = append(rv.calls, nums)
 	rv.mu.Unlock()
-	if rv.redWhen(present) {
-		return TrainCIRed
+	if !rv.redWhen(present) {
+		return TrainCIGreen, nil
 	}
-	return TrainCIGreen
+	if rv.diagFor != nil {
+		return TrainCIRed, rv.diagFor(present)
+	}
+	return TrainCIRed, &trainCIDiagnostic{
+		FailedChecks: []gh.CheckRun{{Name: "ci/test", Status: "completed", Conclusion: "failure", OutputText: "synthetic seam failure output"}},
+		PRNum:        900,
+		TrialSHA:     "seam-trial-sha",
+	}
 }
 
 func (rv *recordingValidator) count() int {
@@ -2957,7 +2969,7 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 	eng.worktreeManagers["ownerB/repoB"] = wmB
 	eng.mu.Unlock()
 
-	eng.trainValidateFn = func(_ context.Context, _ []trainMember) TrainCIResult {
+	eng.trainValidateFn = func(_ context.Context, _ []trainMember) (TrainCIResult, *trainCIDiagnostic) {
 		mu.Lock()
 		inFlight++
 		if inFlight > maxInFlight {
@@ -2975,7 +2987,7 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 		mu.Lock()
 		inFlight--
 		mu.Unlock()
-		return TrainCIGreen
+		return TrainCIGreen, nil
 	}
 
 	itemA := gh.ProjectItem{Number: 1, Repo: "ownerA/repoA", Status: "Queued", ItemID: "a1"}
