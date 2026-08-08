@@ -16,6 +16,11 @@ import (
 type GitHubReviewer interface {
 	GitHubCommenter
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
+	// FetchPRFiles returns the changed-path list via the paginated
+	// /pulls/{n}/files endpoint, which has no 20,000-line ceiling — the
+	// fallback source of changed paths when FetchPRDiff returns
+	// gh.ErrDiffTooLarge (see R3, adrs/1427-pruefer-diff-too-large-degrade-not-block.md).
+	FetchPRFiles(owner, repo string, prNumber int) ([]string, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error)
 	Token() string

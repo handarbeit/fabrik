@@ -16,16 +16,19 @@ import (
 type fakeReviewer struct {
 	*fakeCommenter
 
-	diff       string
-	diffErr    error
-	reviews    []gh.PRReview
-	reviewsErr error
-	submitErr  error
-	token      string
+	diff        string
+	diffErr     error
+	filesResult []string
+	filesErr    error
+	reviews     []gh.PRReview
+	reviewsErr  error
+	submitErr   error
+	token       string
 
 	mu          sync.Mutex
 	submitCalls []submitCall
 	diffCalls   int
+	filesCalls  int
 }
 
 type submitCall struct {
@@ -45,6 +48,22 @@ func (f *fakeReviewer) FetchPRDiff(owner, repo string, prNumber int) (string, er
 		return "", f.diffErr
 	}
 	return f.diff, nil
+}
+
+func (f *fakeReviewer) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	f.mu.Lock()
+	f.filesCalls++
+	f.mu.Unlock()
+	if f.filesErr != nil {
+		return nil, f.filesErr
+	}
+	return f.filesResult, nil
+}
+
+func (f *fakeReviewer) filesCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.filesCalls
 }
 
 func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
