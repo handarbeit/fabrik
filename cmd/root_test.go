@@ -424,6 +424,35 @@ func TestMaxEnqueueCycles_Default(t *testing.T) {
 	}
 }
 
+func TestExecute_MaxSliceRetriesFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-slice-retries", "20"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --max-slice-retries" {
+		t.Error("--max-slice-retries flag not registered")
+	}
+}
+
+// TestMaxSliceRetries_Default covers the higher-than-MaxRetries default (#1199):
+// a turn-cap preemption is a resumable slice, not a failure, so its bound is
+// wider than max-retries's default of 3.
+func TestMaxSliceRetries_Default(t *testing.T) {
+	if got := maxSliceRetries(0); got != 10 {
+		t.Errorf("maxSliceRetries(0) = %d, want default 10", got)
+	}
+	if got := maxSliceRetries(-1); got != 10 {
+		t.Errorf("maxSliceRetries(-1) = %d, want default 10", got)
+	}
+	if got := maxSliceRetries(25); got != 25 {
+		t.Errorf("maxSliceRetries(25) = %d, want passthrough 25", got)
+	}
+}
+
 func TestExecute_HelpIncludesSubcommands(t *testing.T) {
 	resetFlags()
 	// Route flag.CommandLine output to a buffer so we can inspect usage text.
