@@ -196,15 +196,59 @@ If blocked, describe exactly what's wrong. Be specific enough that someone can a
 
 Before you emit `FABRIK_STAGE_COMPLETE`, you MUST complete this checklist. Do not skip it even if validation passed and tests are green.
 
-### Step 1 — Final rebase verification
+### Step 1 — Conditional final rebase
 
-Get the PR's actual target base branch, then rebase against it:
+A rebase pushes, and a push restarts CI. Rebasing unconditionally on every Validate invocation can livelock a repo whose required-check duration exceeds its merge interarrival time — each attempt rebases onto a newer base and restarts a check that can never finish before the base moves again — and it can eject a PR that is already sitting in a merge queue, burning a `MaxEnqueueCycles` cycle for nothing. So before rebasing, run three checks in order. Each either skips the rebase (recording why, for Step 3) or falls through to the next. If none apply, rebase exactly as before.
+
+First, resolve the PR's base branch and owner/repo, then fetch:
 
 ```bash
 base_branch=$(gh pr view --json baseRefName --jq .baseRefName)
+pr_number=$(gh pr view --json number --jq .number)
+owner_repo=$(gh repo view --json owner,name --jq '.owner.login + " " + .name')
+read -r owner repo <<< "$owner_repo"
 git fetch origin "$base_branch"
+```
+
+**Check A — merge-queue safety (skip if queued or unknown).** Query the PR's live queue membership via GraphQL — `gh pr view --json` has no field for this:
+
+```bash
+in_queue=$(gh api graphql -f query='
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){ isInMergeQueue }
+    }
+  }' -F owner="$owner" -F repo="$repo" -F number="$pr_number" \
+  --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null)
+```
+
+If `$in_queue` is `true`, **skip the rebase** — record outcome `skipped-in-queue`. If the query errors, or `$in_queue` is anything other than exactly `true`/`false` (empty, malformed, `null`), also **skip the rebase** — record outcome `skipped-detection-failed`. This is a deliberate asymmetry from Check C below: skipping a rebase that was actually needed is self-healing (the engine's own rebase-needed path catches a stale branch after Validate completes), but rebasing a PR that was actually queued ejects it, which nothing downstream can undo. When this check can't tell, treat "unknown" as "queued."
+
+(The internal merge-train's `Queued` column has no equivalent live check here: it is a holding stage the engine never dispatches Validate from, so the two states can't coexist in a running Validate session — there is nothing for this check to observe.)
+
+**Check B — already up to date (skip if nothing to gain).** Only reached if Check A did not skip:
+
+```bash
+behind_count=$(git rev-list --count HEAD..origin/"$base_branch")
+```
+
+If `$behind_count` is `0`, **skip the rebase** — record outcome `skipped-up-to-date`. Rebasing here would push nothing, so it can't restart CI or fix anything; this alone breaks the common-case livelock. If you aborted a rebase earlier in this same invocation, that abort left the branch strictly behind `origin/$base_branch`, so `$behind_count` is never `0` here — this check cannot mask an earlier abort, it can only skip when there is truly nothing to rebase.
+
+**Check C — branch protection doesn't require up to date (skip if `strict: false`).** Only reached if Checks A and B did not skip:
+
+```bash
+strict=$(gh api repos/"$owner"/"$repo"/branches/"$base_branch"/protection --jq '.required_status_checks.strict' 2>/dev/null)
+```
+
+If `$strict` is exactly `false`, **skip the rebase** — record outcome `skipped-non-strict`. On this repo, being up to date isn't a merge precondition, so the rebase is pure cost. On any read failure (this call commonly 403s for tokens without admin-level repo access — a known, already-documented limitation, not new risk) or any value other than exactly `false` (including `true` or `null` for a repo with no required-status-checks config), **do not skip** — fall through to the rebase. This is the opposite default from Check A on purpose: here, a redundant rebase only costs CI time, while wrongly skipping a genuinely required one risks a branch that can't merge with no downstream catch as clean as Check A's.
+
+**Otherwise — rebase.** None of the checks skipped: rebase exactly as before.
+
+```bash
 git rebase "origin/$base_branch"
 ```
+
+Record outcome `rebased` (or, if it fails, handle it below).
 
 If the rebase succeeds cleanly, continue to Step 2.
 
@@ -213,7 +257,7 @@ If the rebase produces conflicts:
 - Run the project's build and test commands (as specified in `CLAUDE.md`) to verify the resolution is correct
 - If you cannot confidently resolve the conflicts, run `git rebase --abort` and emit `FABRIK_BLOCKED_ON_INPUT` with a list of the conflicting files
 
-**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/<base_branch>`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers.
+**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/<base_branch>`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers. Conditionality doesn't reopen this hole: an earlier abort always leaves the branch behind, so Check B's up-to-date test is false and execution falls through to a real rebase attempt here, same as before this change.
 
 ### Step 2 — PR mergeability check
 
@@ -235,17 +279,17 @@ Both signals mean the PR has merge conflicts that must be resolved before merge.
 
 **Proceed (emit `FABRIK_STAGE_COMPLETE`) if** `mergeable` is `"MERGEABLE"` (or `"UNKNOWN"` after the wait) and `mergeStateStatus` is anything except `"DIRTY"`.
 
-### Step 3 — Include merge state in the summary
+### Step 3 — Include rebase outcome and merge state in the summary
 
-When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include the PR merge state:
+When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-non-strict`) alongside the PR merge state, so an operator reading the stage comment can tell a deliberate skip from a forgotten one:
 
 ```
 FABRIK_SUMMARY_BEGIN
-Validation passed. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. All N requirements verified, tests pass (M packages), no regressions.
+Validation passed. Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. All N requirements verified, tests pass (M packages), no regressions.
 FABRIK_SUMMARY_END
 ```
 
-If no linked PR exists, say so: `"No linked PR found."`.
+If no linked PR exists, say so: `"No linked PR found."` — and skip both the rebase outcome and merge-state fields, since neither check ran.
 
 This gives operators reading the issue comment a fast signal about merge readiness without opening the PR.
 
