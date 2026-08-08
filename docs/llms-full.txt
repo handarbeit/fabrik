@@ -93,6 +93,21 @@ Without a URL, `fabrik init` behaves as before: if your terminal is interactive 
 prompts for owner, repo, project number, and username; otherwise it writes a
 fully-commented template for you to fill in.
 
+**GitHub Enterprise Server project URLs are also accepted.** Pass `--ghes-host` (or
+set `FABRIK_GHES_HOST`) alongside a project URL on your GHES instance:
+
+```bash
+./fabrik init --user you --ghes-host github.example.com \
+    https://github.example.com/orgs/your-org/projects/5
+```
+
+`init` runs before `.fabrik/config.yaml` exists, so the host can only come from the
+flag or environment variable at this point — never from `config.yaml`. The resolved
+host is written into the generated config (`ghes_host: github.example.com`), so you
+only need to supply it to `init` once; every subsequent `fabrik` invocation picks it
+up from `config.yaml`. See [GitHub Enterprise Server
+Support](#github-enterprise-server-support) below for the full effect of `ghes_host`.
+
 To refresh plugin skills without touching stages or config (e.g., after upgrading Fabrik):
 
 ```bash
@@ -286,6 +301,59 @@ git -C .fabrik/repos/owner-repo.git remote set-url origin git@github.com:owner/r
 #### URL Rewriting
 
 If you have `url.<base>.insteadOf` configured in your global `~/.gitconfig` (a common way to redirect HTTPS to SSH globally), Fabrik will notice at startup and print an informational message. Git applies URL rewriting transparently, so Fabrik's HTTPS clone URLs will automatically use your SSH configuration — no additional Fabrik setting is needed.
+
+> **GitHub Enterprise Server:** clone URLs (both HTTPS and SSH) are built against the configured `ghes_host` when set, instead of `github.com`. See [GitHub Enterprise Server Support](#github-enterprise-server-support) below.
+
+### GitHub Enterprise Server Support
+
+Fabrik can run against a GitHub Enterprise Server (GHES) instance instead of github.com. This was verified against a live GHES 3.19.8 instance with full API parity for everything Fabrik uses — no adapter layer, schema introspection, or capability negotiation is involved. It's pure endpoint/host configuration.
+
+#### Configuring a GHES host
+
+Set the hostname of your GHES instance (no scheme, no trailing slash) via any of the usual precedence layers:
+
+```bash
+# Flag
+fabrik --ghes-host github.example.com --owner myorg --project 5 --user me
+
+# Environment variable
+export FABRIK_GHES_HOST=github.example.com
+
+# .fabrik/config.yaml
+ghes_host: github.example.com
+```
+
+Precedence is flag > `FABRIK_GHES_HOST` > `config.yaml`'s `ghes_host`, matching every other setting. A value with a `https://`/`http://` scheme or a trailing `/` is normalized automatically, so `https://github.example.com/` and `github.example.com` are equivalent.
+
+**Absent any GHES configuration, behavior is exactly today's github.com behavior** — this is the default path and does not regress.
+
+Once configured, the GHES host governs:
+- **REST and GraphQL API endpoints** — REST resolves to `https://<host>/api/v3/...`, GraphQL to `https://<host>/api/graphql`. These are independently derived, not one path-suffixed from the other — GHES puts them at different paths (`/api/v3/graphql` is a 404 on GHES; `/api/graphql` is the correct endpoint).
+- **Bare-clone URLs** — both the HTTPS and SSH forms (`--ssh` / `git_ssh: true` still selects which protocol is used; see [Git Clone Protocol](#git-clone-protocol-https-vs-ssh) above).
+- **Commit author noreply email** — Fabrik-authored commits use `<user>@users.noreply.<host>` instead of `<user>@users.noreply.github.com`. **Note:** this mirrors github.com's own noreply-email convention with the configured host substituted, but has not been verified against a live GHES instance's actual private-commit-email behavior — GitHub's published GHES admin documentation does not explicitly confirm this format. If your GHES instance uses a different convention, please file an issue.
+- **`GH_HOST` in stage-worker subprocess environments** — every Claude-invoked stage worker's `gh` CLI calls (e.g. `fabrik-validate`'s Pre-Completion Gate, which runs `gh pr view` on every invocation) are pointed at the same GHES instance as the engine, via the `gh` CLI's own `GH_HOST` convention. See [Subprocess Environment](#subprocess-environment).
+- **`fabrik init`'s project-URL parsing** — a GHES project URL is accepted alongside github.com URLs when `--ghes-host`/`FABRIK_GHES_HOST` is supplied to `init`. See the `fabrik init` walkthrough near the top of this guide.
+
+**Self-upgrade (`--auto-upgrade`) stays on github.com, unauthenticated, when a GHES host is configured.** Fabrik's own releases always live at `github.com/handarbeit/fabrik`, never on your GHES instance. Your configured token authenticates your GHES host, not github.com, so it is never sent with the release-check/download request — sending it would fail outright with "Bad credentials" rather than falling back to unauthenticated. Since `handarbeit/fabrik`'s releases are public, self-upgrade still works unauthenticated; it's just subject to github.com's lower unauthenticated rate limit. See [Auto-upgrade](#auto-upgrade) below.
+
+#### Minimum supported version
+
+Fabrik requires **GHES 3.19 or later**. At startup, when a GHES host is configured, Fabrik queries the instance's unauthenticated `/meta` endpoint for `installed_version` and refuses to start if it's below the floor:
+
+```
+GHES instance github.example.com reports version 3.18.5, below Fabrik's minimum supported version 3.19 —
+upgrade the GHES instance or remove the ghes_host configuration. See docs/USER_GUIDE.md
+```
+
+If the `/meta` fetch itself fails (network error, auth problem), Fabrik logs a non-fatal warning and continues — connectivity issues surface more clearly moments later when the project board fetch runs. This preflight only applies when a GHES host is configured; github.com deployments never see it.
+
+#### Known limitations
+
+A few advisory-only, non-gating features still hardcode `github.com` and have not been updated for GHES:
+- The startup board-validation check's human-facing project board URL link.
+- The URL-rewrite and HTTPS-credential-helper startup checks' SSH-rewrite detection heuristics.
+
+None of these affect correctness — they may just show a `github.com`-shaped link or an inapplicable advisory message on a GHES deployment. Webhook support and `projects_v2_item` availability on GHES are also unverified; Fabrik always falls back to polling when webhooks aren't available, so this is not a blocker.
 
 ### Auto-upgrade
 
@@ -527,6 +595,12 @@ user: your-github-username
 
 # Optional settings (defaults shown):
 
+# GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent
+# (the default) means github.com — byte-identical to today's behavior. See
+# "GitHub Enterprise Server Support" above for the full effect and the
+# minimum supported version (3.19).
+# ghes_host: ""
+
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
 
@@ -717,6 +791,7 @@ FABRIK_USER=my-personal-username
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off`; also `FABRIK_ARCHIVE_DONE` | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
+| `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
 ### Environment Variables
 
@@ -768,6 +843,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
 | `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -1986,6 +2062,8 @@ After each rebase onto the base branch, both the `fabrik-review` and `fabrik-val
 
 Before emitting `FABRIK_STAGE_COMPLETE`, the `fabrik-validate` skill checks the linked PR's mergeability via `gh pr view --json mergeable,mergeStateStatus`. When the `mergeable` value is `CONFLICTING` or `mergeStateStatus` is `DIRTY` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
 
+Before that mergeability check, the skill's Pre-Completion Gate also decides whether to rebase the branch onto its base at all. Rebasing pushes, and a push restarts CI, so an unconditional rebase on every Validate invocation can livelock a repo whose required-check duration exceeds its merge interarrival time, or eject a PR already sitting in a merge queue. The skill skips the rebase when the branch is already up to date with its base (nothing to gain), when the linked PR is in a merge queue or the check can't confirm it isn't (pushing there would eject the PR), or when every one of the PR's required checks has already succeeded against the current base branch tip — measured by comparing the base branch's own commit time against the *earliest* start time among those required checks (not completion time — a long-running check can finish after the base has moved again, so only the start time proves the check began against a tree at least as new as the current base; and the earliest, not the most recent, since one fresh required check says nothing about a sibling required check that hasn't rerun), not by reading branch-protection config, since a repo can allow merging on a stale check regardless of how up-to-date-ness is enforced. It still rebases in the one case that needs it: behind its base, not queued, with no fresh-enough successful check run to fall back on. Either way, the stage summary states which outcome applied (`rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, or `skipped-ci-fresh`), so a skipped rebase reads as a deliberate decision, not an omission. See ADR-1364.
+
 ### Customizing Skills
 
 Skills live in `.fabrik/plugin/skills/<skill-name>/SKILL.md`. Edit them to change
@@ -2566,9 +2644,13 @@ but it is not inherited unfiltered: Fabrik scrubs the Anthropic/Claude-Code auth
 namespace by default (see below) so no ambient credential can silently redirect
 billing, then shadows a small, explicit set of keys it cares about
 (`CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, the
-`FABRIK_*` invocation facts, `GH_TOKEN`/`GITHUB_TOKEN`) so that Fabrik's own value
-for those specific keys always wins over an ambient one, no matter which happened
-to be set first. Everything else — anything outside the scrubbed namespace and
+`FABRIK_*` invocation facts, `GH_TOKEN`/`GITHUB_TOKEN`, `GH_HOST`) so that Fabrik's
+own value for those specific keys always wins over an ambient one, no matter which
+happened to be set first. `GH_HOST` is only emitted when a GHES host is configured
+(`ghes_host` / `FABRIK_GHES_HOST`) — see [GitHub Enterprise Server
+Support](#github-enterprise-server-support); it is a Fabrik-computed override, not
+part of the Anthropic auth namespace, so it is never subject to the scrub described
+below. Everything else — anything outside the scrubbed namespace and
 not on the shadowed-keys list — passes through untouched. If you want a
 stage-specific variable to reach Claude reliably regardless of what's ambient,
 pass it explicitly via your stage YAML or a shell wrapper script rather than
@@ -3514,7 +3596,9 @@ A batch is **usually green**: every member already passed Validate individually,
 
 **Bisection on red (FR-1):** when the combined Validate is red, `handleRedBatch` opens a **per-episode cost budget** (`used = 1` for the initial red validation, capped at `effectiveBisectCap()` = `MaxBisectValidations`, default `2·⌈log₂(max_batch_size)⌉ + 1 ≈ 7`) and calls `bisect`. `bisect` recursively halves the red member set in bors-ng order — validate half A; if red recurse into A; else validate half B; if red recurse into B — until a **red singleton** (the poisoner) is isolated. Every trial (initial and every sub-trial) is assembled by `assembleAndValidate` off the **same base SHA pinned once at batch start** (D-b, via `EnsureTrainWorktreeAt`), so redness is attributable to member composition, not a moving base branch (main-moved is D5, out of scope). Each sub-trial's branch + worktree + draft CI PR is reaped immediately by `cleanupTrialArtifacts`.
 
-**Eject + re-form + re-validate (FR-2/FR-3):** the isolated poisoner is ejected via the **unchanged `ejectMember`** (D-a — the same shared `MaxMergeTrainEjections` counter that assembly-conflict ejections increment; D-c — the ejection comment is the attention marker; cap→pause reuse: after `MaxMergeTrainEjections` ejections the member gets `fabrik:paused` + `fabrik:awaiting-input`). The poisoner **remains in the Queued column** — `ejectMember` never moves it off the board — so a still-unpaused poisoner is retried in a future differently-composed train. **Poison-well guard:** once a member is `fabrik:paused` (or its issue is closed), `groupQueuedByRepo` excludes it from every subsequent batch snapshot. Without this, a poisoner that reds the combined Validate *even in isolation* — paused but left in Queued — would be re-snapshotted into every future batch, reding and bisecting the train indefinitely and starving clean members from ever landing. A human removing `fabrik:paused` after resolving the underlying conflict re-admits the member. `handleRedBatch` returns the surviving members; the main loop **re-forms and re-validates** them (a survivor batch is not assumed green — a second poisoner or interaction may remain). Terminal states are clean: an empty survivor set completes the train with nothing to land (the existing zero-survivor path); each episode ejects ≥1 member or falls back, so the loop runs ≤ N episodes.
+**Eject + re-form + re-validate (FR-2/FR-3):** the isolated poisoner is ejected via `ejectMember` (D-a — the same shared `MaxMergeTrainEjections` counter that assembly-conflict ejections increment; D-c — the ejection comment is the attention marker; cap→pause reuse: after `MaxMergeTrainEjections` ejections the member gets `fabrik:paused` + `fabrik:awaiting-input`). The poisoner **remains in the Queued column** — `ejectMember` never moves it off the board — so a still-unpaused poisoner is retried in a future differently-composed train. **Poison-well guard:** once a member is `fabrik:paused` (or its issue is closed), `groupQueuedByRepo` excludes it from every subsequent batch snapshot. Without this, a poisoner that reds the combined Validate *even in isolation* — paused but left in Queued — would be re-snapshotted into every future batch, reding and bisecting the train indefinitely and starving clean members from ever landing. A human removing `fabrik:paused` after resolving the underlying conflict re-admits the member. `handleRedBatch` returns the surviving members; the main loop **re-forms and re-validates** them (a survivor batch is not assumed green — a second poisoner or interaction may remain). Terminal states are clean: an empty survivor set completes the train with nothing to land (the existing zero-survivor path); each episode ejects ≥1 member or falls back, so the loop runs ≤ N episodes.
+
+**Ejection comment carries the combined-Validate diagnostic (#1420).** Because a merge-train failure is, by construction, a failure that does not exist on any member's own branch — it arises only from combining with a base that moved since the branch was cut — the combined-Validate run that observed it is the *only* place the failure output ever exists. `pollTrainCI` builds a `trainCIDiagnostic` (failing check names, output text/summary, and details/run URL for ordinary check-run failures; context names only for classic-commit-status `RequiredContextsFailed` failures, which carry no check-run output; a free-text `Note` for a dirty `mergeable_state` with no per-check signal at all) at the point of failure and threads it as a plain return value — never shared or mutable state — through `assembleAndValidate` → `bisect`/`handleRedBatch`/`landOneAtATime` → `ejectMember`, so the run that isolates the poisoner is always the diagnostic's origin, and bisection's later, unrelated re-validation of the reformed survivor batch cannot overwrite it. `ejectMember` renders the diagnostic (bounded per-check inline excerpt, degrading to a head/tail truncation plus a details/run link when oversized, capped again at a whole-block hard limit well under GitHub's comment size limit) into **every** ejection comment for that failure — the first as fully as the last, so an operator doesn't pay for three uninformative cycles before learning there's something to look at — alongside a sentence naming the other members riding in that train attempt (or stating explicitly that none were present, for a single-member train), so the operator knows before investigating that the fault does not exist on their own branch. The pause-after-`MaxMergeTrainEjections` comment names the same failing check(s)/context(s) and links the permalink of the ejection comment that carries the full diagnostic, rather than repeating "resolve the underlying conflict" with nothing to act on. The three ejection call sites outside this issue's scope (unfetchable PR/head-SHA, unresolvable merge conflict) pass a nil diagnostic, leaving their ejection comments exactly as before. See ADR-1420.
 
 **One-at-a-time fallback (FR-5):** when bisection cannot isolate a single culprit within the cost budget — either the budget is exhausted, or both halves validate green (a **non-isolable cross-PR interaction**: each half green alone, the union red — D-e, no bespoke interaction-detection in v1) — `handleRedBatch` logs the degrade clearly (never silent) and calls `landOneAtATime`, which validates and lands each remaining member as its **own singleton batch**. A green singleton lands via `landSingleton`; a red singleton (fails even in isolation) is ejected; a pending singleton stays in Queued. This dissolves any interaction by construction (no two members co-reside). Two non-obvious correctness points:
 
@@ -4589,6 +4673,8 @@ When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's p
 | `engine/stages.go` `attemptMergeOnValidate` `MergePR` fallback | direct merge | **no new guard** — the D2 enqueue early-return (`cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled`) returns before `MergePR` is reached on a queue repo; a queued PR is never directly merged | FR-1 (audit) |
 
 **Non-mutating (no guard needed):** `engine/pr_terminal_advance.go` rebase-needed handling is `removeRebaseNeededLabel` only (label cleanup, no git/PR mutation) and runs only after a PR is already merged/closed.
+
+**Skill-side complement (ADR-1364):** the guards above cover only engine-initiated mutations. The `fabrik-validate` skill's own Pre-Completion Gate rebase is skill-initiated — it runs inside the worker subprocess via `gh`/`git`, with no access to the engine's `ProjectItem` snapshot — so none of the guards in the table above reach it. ADR-1364 extends the same queue-awareness principle to that site with an in-session `gh api graphql` check (plus an up-to-date check and a CI-freshness check comparing the base branch's commit time against the *earliest* start time among the PR's required-check runs, requiring every one of them to be currently successful — start time, not completion time, since a long-running check can finish after the base has moved again, and earliest rather than most recent, since one fresh required check does not vouch for a sibling required check that hasn't rerun), closing a gap where CI-fix re-invocation or `fabrik:revalidate` could otherwise push an already-enqueued PR out of its queue.
 
 **Scope boundary.** These guards cover **engine-initiated** mutations. Claude-driven `git push`/`rebase` inside a stage (the default tool allowlist includes `Bash(git:*)`) is outside engine control. Stages rarely run while a PR is in the queue (queue entry happens at Validate completion), so the realistic exposure is the rebase-reinvoke synthetic comment — which is guarded at dispatch.
 
@@ -7386,6 +7472,8 @@ The stage-name component is passed through `sanitizeSentinelComponent`, which co
 ### Worker Environment: GitHub Identity
 
 The Claude worker subprocess's environment is assembled as `mergeEnv(os.Environ(), extraEnv)` — the base is the engine process's own environment, with `extraEnv` entries taking precedence on key collision (last-wins). Alongside `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` and `CLAUDE_CODE_EFFORT_LEVEL`, `extraEnv` includes `GH_TOKEN` and `GITHUB_TOKEN`, both set to the engine's resolved GitHub token (`Config.Token`, the same value used for the engine's own `gh.NewClient` calls). This guarantees the worker's `gh` invocations (available via the default `Bash(gh:*)` allowed tool) always authenticate as the same identity as the engine itself, regardless of what `GH_TOKEN`/`GITHUB_TOKEN` the launching shell happens to export. Injection is skipped only when the engine's resolved token is empty, which should not occur in practice since a token is mandatory at startup.
+
+`extraEnv` also includes `GH_HOST`, set to the engine's resolved GHES host (`Config.GHESHost`, the same value used for the engine's own client construction via `gh.NewClientForHost` — see ADR-1391), immediately after `GH_TOKEN`/`GITHUB_TOKEN` — but only when `Config.GHESHost` is non-empty. This is the `gh` CLI's own established convention for pointing it at a non-github.com host, so it requires no extra wiring on the worker side: `fabrik-validate`'s Pre-Completion Gate (which runs `gh pr view --json baseRefName` on every Validate invocation) and any other stage's ambient `gh` calls automatically target the same GHES instance as the engine rather than silently falling through to github.com. Unlike `GH_TOKEN`/`GITHUB_TOKEN`, absence is the default and expected case — when no GHES host is configured, `GH_HOST` is omitted from `extraEnv` entirely (not emitted as an empty value), preserving today's behavior byte-for-byte. `GH_HOST` is a Fabrik-computed override like `GH_TOKEN`, not part of the Anthropic auth namespace described below, so it is never subject to the scrub or passthrough machinery.
 
 ### Worker Environment: Anthropic Auth Namespace Scrub
 

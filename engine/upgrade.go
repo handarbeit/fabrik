@@ -58,6 +58,23 @@ func (e *Engine) checkAndUpgrade() {
 	})
 }
 
+// releaseUpgradeToken returns the token to authenticate self-upgrade's
+// github.com requests (both the release-metadata lookup and the asset
+// download) with. cfg.Token authenticates whatever host the engine is
+// configured against; when that's a GHES host, cfg.Token is a credential
+// scoped to the GHES instance and is not valid on github.com — sending it
+// to api.github.com fails with "Bad credentials" (401) rather than
+// succeeding unauthenticated. handarbeit/fabrik's releases are public, so
+// self-upgrade works fine unauthenticated (just more tightly rate-limited);
+// dropping the token entirely when a GHES host is configured is safer than
+// sending one guaranteed to be rejected.
+func releaseUpgradeToken(cfg Config) string {
+	if cfg.GHESHost != "" {
+		return ""
+	}
+	return cfg.Token
+}
+
 // checkReleaseUpgrade is the release-based upgrade path. It checks the GitHub
 // Releases API for a version newer than the running binary, downloads the
 // matching platform asset, atomically replaces the running binary, and re-execs.
@@ -72,12 +89,12 @@ func (e *Engine) checkReleaseUpgrade() {
 	// contract is non-fatal — the poll loop continues regardless (unlike the
 	// foreground `fabrik upgrade` command).
 	_ = selfupgrade.PerformReleaseUpgrade(selfupgrade.ReleaseConfig{
-		Client:     e.client,
+		Client:     e.releaseClient,
 		Owner:      fabrikOwner,
 		Repo:       fabrikRepo,
 		BinaryName: "fabrik",
 		Version:    e.cfg.Version,
-		Token:      e.cfg.Token,
+		Token:      releaseUpgradeToken(e.cfg),
 		ExtraEnv:   []string{"FABRIK_AUTO_UPGRADED=1"},
 		Logf:       logf,
 	})

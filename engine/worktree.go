@@ -51,11 +51,16 @@ func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeMan
 
 // buildCloneURL returns the git clone URL for a GitHub repo. Pure helper so
 // the URL-construction logic can be unit-tested without shelling out to git.
-func buildCloneURL(owner, repo string, useSSH bool) string {
-	if useSSH {
-		return fmt.Sprintf("git@github.com:%s/%s.git", owner, repo)
+// host is the configured GHES hostname; an empty host defaults to
+// "github.com", preserving today's behavior byte-for-byte (FR-2, FR-4).
+func buildCloneURL(owner, repo string, useSSH bool, host string) string {
+	if host == "" {
+		host = "github.com"
 	}
-	return fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	if useSSH {
+		return fmt.Sprintf("git@%s:%s/%s.git", host, owner, repo)
+	}
+	return fmt.Sprintf("https://%s/%s/%s.git", host, owner, repo)
 }
 
 // nonInteractiveGitEnv returns os.Environ() with GIT_TERMINAL_PROMPT and
@@ -82,7 +87,10 @@ func nonInteractiveGitEnv() []string {
 // in worktrees of this clone are attributed to FABRIK_USER rather than
 // whatever the system-global git identity happens to be. Existing values
 // are preserved.
-func ensureBareClone(baseDir, owner, repo, user string, useSSH bool) (string, error) {
+//
+// host is the configured GHES hostname (see buildCloneURL); an empty host
+// defaults to "github.com".
+func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	env := nonInteractiveGitEnv()
 
@@ -110,7 +118,7 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool) (string, er
 		refreshCmd.Env = env
 		refreshCmd.CombinedOutput() // best-effort
 
-		setCommitterIdentity(bareDir, user, env)
+		setCommitterIdentity(bareDir, user, env, host)
 		return bareDir, nil
 	}
 
@@ -118,7 +126,7 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool) (string, er
 		return "", fmt.Errorf("creating .fabrik/repos dir: %w", err)
 	}
 
-	cloneURL := buildCloneURL(owner, repo, useSSH)
+	cloneURL := buildCloneURL(owner, repo, useSSH, host)
 	cmd := exec.Command("git", "clone", "--bare", cloneURL, bareDir)
 	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -149,7 +157,7 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool) (string, er
 	refreshCmd.Env = env
 	refreshCmd.CombinedOutput() // best-effort
 
-	setCommitterIdentity(bareDir, user, env)
+	setCommitterIdentity(bareDir, user, env, host)
 	return bareDir, nil
 }
 
@@ -160,14 +168,21 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool) (string, er
 // missing config so users who set a specific identity manually keep it.
 //
 // The default email uses GitHub's noreply format
-// (<user>@users.noreply.github.com), which attributes commits to the
-// GitHub account without exposing a real email address.
+// (<user>@users.noreply.<host>), which attributes commits to the GitHub
+// account without exposing a real email address. host is the configured
+// GHES hostname; an empty host defaults to "github.com", preserving
+// today's <user>@users.noreply.github.com byte-for-byte (FR-9). The exact
+// GHES noreply-domain convention is unverified against a live instance —
+// see docs/USER_GUIDE.md's GHES section.
 //
 // A non-empty user is required; when empty, this is a no-op (legacy /
 // test callers).
-func setCommitterIdentity(repoDir, user string, env []string) {
+func setCommitterIdentity(repoDir, user string, env []string, host string) {
 	if user == "" {
 		return
+	}
+	if host == "" {
+		host = "github.com"
 	}
 	setIfUnset := func(key, value string) {
 		check := exec.Command("git", "config", "--local", "--get", key)
@@ -182,7 +197,7 @@ func setCommitterIdentity(repoDir, user string, env []string) {
 		set.CombinedOutput() // best-effort
 	}
 	setIfUnset("user.name", user)
-	setIfUnset("user.email", user+"@users.noreply.github.com")
+	setIfUnset("user.email", user+"@users.noreply."+host)
 }
 
 // BaseDir returns the main repository directory.

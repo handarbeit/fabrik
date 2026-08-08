@@ -228,6 +228,13 @@ func (e *Engine) Run() error {
 		return err
 	}
 
+	// GHES version-floor preflight (FR-7): a no-op unless a GHES host is
+	// configured. Runs alongside the other unconditional startup gates,
+	// before the board-column check.
+	if err := e.checkGHESVersionFloor(); err != nil {
+		return err
+	}
+
 	// Validate stage names against project board columns before first poll.
 	if err := e.checkStageColumnAlignment(ctx); err != nil {
 		return err

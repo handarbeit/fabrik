@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -537,6 +538,81 @@ func (e *Engine) checkAPIKeyHelper() error {
 			"remove it and restart. See docs/USER_GUIDE.md", found.path, found.layer)
 	}
 	return nil
+}
+
+// ghesVersionFloorMajor/ghesVersionFloorMinor are the minimum supported GHES
+// major.minor version (FR-7). 3.19 is the version Fabrik's capability probe
+// (scripts/ghes-probe.sh) was run against and confirmed full API parity for
+// everything Fabrik uses — see adrs/1391-ghes-support.md. Patch version is
+// deliberately ignored: the floor is stated as "3.19", not a specific patch.
+const (
+	ghesVersionFloorMajor = 3
+	ghesVersionFloorMinor = 19
+)
+
+// checkGHESVersionFloor is the FR-7 startup preflight: when a GHES host is
+// configured, it fetches /meta's installed_version and fails startup loudly,
+// naming both the detected and required versions, if the instance is below
+// the verified-supported floor. A no-op when no GHES host is configured —
+// github.com's version is not in question (FR-2's no-regression
+// requirement). Delegates to checkGHESVersionFloorAgainst so the comparison
+// logic unit-tests directly against a *gh.Client + httptest, without needing
+// an Engine or the engine-level GitHubClient mocks.
+func (e *Engine) checkGHESVersionFloor() error {
+	if e.cfg.GHESHost == "" {
+		return nil
+	}
+	if e.hostClient == nil {
+		// Defensive: New() always sets hostClient when GHESHost is configured.
+		// A nil hostClient here (e.g. an unusual test construction) has no safe
+		// version to check against, so skip rather than panic.
+		return nil
+	}
+	return checkGHESVersionFloorAgainst(e.hostClient, e.cfg.GHESHost, func(format string, args ...any) {
+		e.logf(0, "startup", format, args...)
+	})
+}
+
+// checkGHESVersionFloorAgainst is the testable core of checkGHESVersionFloor.
+// A /meta fetch error (network, auth) is a non-fatal warning, mirroring
+// checkStageColumnAlignment's existing "log and skip" precedent for fetch
+// failures — connectivity/auth problems already surface loudly elsewhere
+// (the board fetch immediately after), and conflating them here would
+// misreport a network blip as "your GHES is too old." An unparseable
+// installed_version is likewise a non-fatal warning, not a hard failure.
+func checkGHESVersionFloorAgainst(client *gh.Client, host string, logf func(format string, args ...any)) error {
+	version, err := client.FetchInstalledVersion()
+	if err != nil {
+		logf("warning: could not verify GHES version for %s: %v\n", host, err)
+		return nil
+	}
+	major, minor, ok := parseMajorMinor(version)
+	if !ok {
+		logf("warning: could not parse GHES installed_version %q from %s — skipping version floor check\n", version, host)
+		return nil
+	}
+	if major < ghesVersionFloorMajor || (major == ghesVersionFloorMajor && minor < ghesVersionFloorMinor) {
+		return fmt.Errorf("GHES instance %s reports version %s, below Fabrik's minimum supported version %d.%d — "+
+			"upgrade the GHES instance or remove the ghes_host configuration. See docs/USER_GUIDE.md",
+			host, version, ghesVersionFloorMajor, ghesVersionFloorMinor)
+	}
+	return nil
+}
+
+// parseMajorMinor extracts the major and minor integers from a version
+// string like "3.19.8", ignoring any patch/suffix component. Returns
+// ok=false if the string doesn't start with "<int>.<int>".
+func parseMajorMinor(version string) (major, minor int, ok bool) {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	minor, errMinor := strconv.Atoi(parts[1])
+	if errMajor != nil || errMinor != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // logAnthropicAPIKeyOptIn is the testable core of the R9 startup notice: when
