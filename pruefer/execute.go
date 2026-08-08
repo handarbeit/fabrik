@@ -61,13 +61,8 @@ func Execute() error {
 		clients[owner] = client
 	}
 
-	daemon := &Daemon{
-		Clients:  clients,
-		Claude:   &RealClaudeInvoker{},
-		Clone:    CloneForReview,
-		Config:   cfg,
-		BotLogin: authSet.BotLogin,
-	}
+	daemon, closeLog := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, authSet.BotLogin)
+	defer closeLog()
 
 	if useTUI(cfg) {
 		return runTUI(ctx, daemon)

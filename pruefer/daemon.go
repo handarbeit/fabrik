@@ -68,6 +68,51 @@ func (d *Daemon) emit(ev ptui.Event) {
 	}
 }
 
+// NewDaemon is the sole production construction path for Daemon: it builds
+// the Daemon and, when cfg.LogFile is non-empty, opens a rotating file
+// logger and assigns it to the package-level pruefer.Logf hook so every
+// logf call in this package routes to a timestamped, mutex-serialized log
+// file instead of stderr (issue #1428, R1/R2). The returned close function
+// closes the log file and clears Logf; callers should defer it.
+//
+// Deliberately NOT called from Daemon's own methods (Run/poll) — daemon_test.go
+// builds Daemon{} literals directly and calls Run/poll without going through
+// NewDaemon, relying on Logf staying nil in that path (R1: "Logf staying nil
+// in tests must remain true"). Execute is the only production caller.
+//
+// In TUI mode (per useTUI(cfg)), stderr output would corrupt the bubbletea
+// display, so the file is the sole destination; in plain daemon mode,
+// logging is additive — lines are teed to both stderr and the file (R5).
+//
+// A log-file open failure is non-fatal: it's logged as a warning to stderr
+// and Logf is left nil (falling back to stderr for every line), mirroring
+// engine/poll.go's own non-fatal fabrik.log open-failure handling.
+func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker, clone CloneFunc, botLogin string) (*Daemon, func() error) {
+	d := &Daemon{
+		Clients:  clients,
+		Claude:   claude,
+		Clone:    clone,
+		Config:   cfg,
+		BotLogin: botLogin,
+	}
+
+	closeLog := func() error { return nil }
+	if cfg.LogFile != "" {
+		fl, err := newFileLogger(cfg.LogFile, logRotateMaxBytes, logRotateBackups, !useTUI(cfg))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pruefer: could not open log file %s: %v (falling back to stderr)\n", cfg.LogFile, err)
+		} else {
+			Logf = fl.Logf
+			closeLog = func() error {
+				Logf = nil
+				return fl.Close()
+			}
+		}
+	}
+
+	return d, closeLog
+}
+
 func (d *Daemon) lockPath() string {
 	dir := d.FabrikDir
 	if dir == "" {
