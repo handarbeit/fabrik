@@ -197,18 +197,40 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// provably the only way it can happen) makes checkCIGate unreachable,
 		// leaving that inner timeout dead. This check does not depend on the
 		// handler chain at all, so it bounds the whole class rather than just
-		// the one confirmed cause. Idempotent: pauseForCITimeout no-ops via
-		// hasCIGatePauseComment if a pause comment was already posted this
-		// poll (e.g. by the normal checkCIGate path reached for a different
-		// item), and a FetchLabelAppliedAt error or zero timestamp leaves this
-		// a no-op, falling through to the normal gate-driven path unchanged.
+		// the one confirmed cause.
+		//
+		// #1408: this backstop must not treat "a pause comment already exists
+		// for this episode" the same as "a fresh pause was just posted" — the
+		// former can mean either a genuine same-poll duplicate call (the
+		// two-call label-swap race this comment used to describe as the only
+		// case) or a *resumed* item (fabrik:paused removed by a human, the
+		// pause comment left untouched) whose CI may since have gone green.
+		// Only the latter distinction matters here: a resumed item must reach
+		// live-data-informed evaluation (checkCIGate et al., below) to get a
+		// correct verdict, not be escalated blind from a stale appliedAt. So
+		// when hasCIGatePauseComment is already true, this backstop does NOT
+		// call pauseForCITimeout and does NOT continue — it falls through to
+		// the handler chain, which either clears the gate cleanly (green CI,
+		// no pause-label churn at all) or re-derives timedOut/ciFailure from
+		// the same stale appliedAt and calls back into
+		// pauseForCITimeout/pauseForCIFixCycleLimit from a live-checked
+		// context, where the existing comment is reused (labels reapplied,
+		// no repost) rather than silently no-op'd. Only in the genuinely-fresh
+		// case (no comment yet) does this backstop pause and continue,
+		// unchanged from before #1408. A FetchLabelAppliedAt error or zero
+		// timestamp also leaves this a no-op, falling through to the normal
+		// gate-driven path unchanged.
 		owner, repoName := itemOwnerRepo(item, e.defaultRepo())
 		if appliedAt, err := e.labelAppliedAt(item, owner, repoName, "fabrik:awaiting-ci"); err != nil {
 			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIWaitTimeout backstop: %v\n", err)
 		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
-			e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())
-			e.pauseForCITimeout(board, item, stage)
-			continue
+			if hasCIGatePauseComment(item, stage) {
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) but a pause comment already exists for this episode — deferring to the live-data-informed handler chain instead of re-escalating blind\n", e.ciWaitTimeout())
+			} else {
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())
+				e.pauseForCITimeout(board, item, stage)
+				continue
+			}
 		}
 
 		// #1303: prime the store with a genuinely fresh check-run read before

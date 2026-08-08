@@ -321,6 +321,9 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		return true
 	}
 	if ciTimedOut {
+		// escalated return value intentionally discarded here: this claim (return
+		// true) is correct whether the call posted a fresh pause or reused an
+		// existing one (issue #1408) — the caller doesn't need to distinguish them.
 		e.pauseForCITimeout(pctx.board, pctx.item, pctx.stage)
 		return true
 	}
@@ -348,6 +351,9 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchCIFixReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — see the ciTimedOut
+				// branch above; this pause callback doesn't need to distinguish a
+				// fresh post from a reused one either.
 				e.pauseForCIFixCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxCiFixCycles)
 			},
 		)
