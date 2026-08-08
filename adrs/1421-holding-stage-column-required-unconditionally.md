@@ -62,6 +62,12 @@ column is now required whenever that stage is present in `.fabrik/stages/`, with
 missing-column hard-fail treatment as every other non-cleanup, non-unmanaged stage — independent of
 `merge_train`'s value at any given startup.
 
+**This describes the initial cut's design only.** See the Addendum below: before merge, PR review found
+the unconditional hard-fail breaks the default `fabrik init` onboarding path, and the shipped behavior
+splits *severity* from *membership* — the column stays in the required set unconditionally as described
+above, but a missing one is fatal only when `merge_train: on`; off/unset produces a startup warning
+instead, and Fabrik still boots.
+
 Two accompanying changes to the failure report, both scoped to `checkStageColumnAlignment`:
 
 1. **The report is now a unified per-required-stage present/missing list** (`<name> (order N):
