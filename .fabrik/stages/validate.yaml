@@ -8,6 +8,7 @@ comment_max_turns: 50
 max_wall_time: "60m"
 post_to_pr: true
 wait_for_reviews: true
+review_authority: authoritative
 expected_reviewers:
   - handarbeit-pruefer
 wait_for_ci: true
