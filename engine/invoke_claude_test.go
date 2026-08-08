@@ -375,6 +375,32 @@ func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
 	})
 }
 
+func TestBuildClaudeArgs_DisallowedTools(t *testing.T) {
+	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
+
+	assertDisallowed := func(t *testing.T, args []string, tool string) {
+		t.Helper()
+		for i, a := range args {
+			if a == "--disallowedTools" && i+1 < len(args) && args[i+1] == tool {
+				return
+			}
+		}
+		t.Fatalf("expected --disallowedTools %s in args, got %v", tool, args)
+	}
+
+	t.Run("dontAsk path", func(t *testing.T) {
+		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
+		assertDisallowed(t, args, "ScheduleWakeup")
+		assertDisallowed(t, args, "Workflow")
+	})
+
+	t.Run("dangerously-skip-permissions path", func(t *testing.T) {
+		args := buildClaudeArgs(stage, "", "", 0, true, "", "")
+		assertDisallowed(t, args, "ScheduleWakeup")
+		assertDisallowed(t, args, "Workflow")
+	})
+}
+
 func TestInvokeClaude_WithResume_WhitespaceOnlySessionFile(t *testing.T) {
 	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
