@@ -16,6 +16,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -1724,6 +1725,107 @@ func (e *Engine) resetEjectionCount(owner, repo string, memberNum int) {
 	e.mergeTrainEjectionsMu.Lock()
 	delete(e.mergeTrainEjectionCounts, counterKey)
 	e.mergeTrainEjectionsMu.Unlock()
+}
+
+// stageBeforeHolding returns the non-Unmanaged stage with the highest Order strictly
+// less than hs's Order — the reroute target for a Queued member ejected for an
+// unresolved review finding (#1208). Derived structurally by Order rather than
+// hardcoded to "Validate", so a custom stage config where the stage immediately
+// preceding the holding stage isn't literally named "Validate" is still handled
+// correctly — mirroring holdingStage/cleanupStage's own order-based lookup idiom
+// above. Returns nil if hs is nil or no such stage exists.
+func stageBeforeHolding(cfg Config, hs *stages.Stage) *stages.Stage {
+	if hs == nil {
+		return nil
+	}
+	var best *stages.Stage
+	for _, s := range cfg.Stages {
+		if s.Unmanaged || s.Order >= hs.Order {
+			continue
+		}
+		if best == nil || s.Order > best.Order {
+			best = s
+		}
+	}
+	return best
+}
+
+// rerouteQueuedMemberOffHolding moves item's board Status from the holding stage
+// (Queued) back to the stage stageBeforeHolding resolves (normally Validate) — the
+// routing half of #1208's new ejection cause. It is deliberately a plain status move,
+// nothing else: it must NOT add, remove, or otherwise touch stage:Validate:complete
+// (already present from the original Validate completion, and never removed by
+// advanceToQueued) or any ReviewCycles counter. Preserving both untouched is what lets
+// the existing MaxReviewCycles-bounded review-reinvoke loop pick this member back up
+// "for free" on the very next poll — see ejectQueuedMemberForReviewFindings's doc
+// comment and docs/state-machine.md's Queued Review-Finding Ejection section.
+//
+// Returns false, with no side effect, when the status-field metadata or target stage
+// cannot be resolved, or when the status mutation itself fails — the caller must not
+// proceed to post an ejection comment or increment the ejection counter in that case,
+// so a transient failure here looks like nothing happened and is simply retried whole
+// by the next settle scan pass.
+func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.ProjectItem) bool {
+	hs := holdingStage(e.cfg)
+	target := stageBeforeHolding(e.cfg, hs)
+	if target == nil {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — no preceding stage configured\n")
+		return false
+	}
+	if e.statusField == nil {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — status field metadata not available\n")
+		return false
+	}
+	optionID, ok := e.statusField.Options[target.Name]
+	if !ok {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — no status option %q found on project board\n", target.Name)
+		return false
+	}
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — status move to %s failed: %v\n", target.Name, err)
+		return false
+	}
+	if c := e.cache(); c != nil {
+		c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), target.Name)
+	}
+	// Advances the probe staleness baseline (#1090), mirroring advanceToQueued/
+	// advanceToNextStage — the status move above just bumped the item's real GitHub
+	// updatedAt via the project-item mutation.
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
+	}
+
+	e.logf(item.Number, "merge-train", "rerouted off %s to %s — unresolved review finding will be addressed via the normal review pipeline\n", hs.Name, target.Name)
+	return true
+}
+
+// ejectQueuedMemberForReviewFindings ejects a Queued merge-train member whose linked
+// PR has developed unresolved review-thread feedback while it sat in Queued (#1208) —
+// the fourth ejectMember cause, and the only one that must NOT leave the member in
+// Queued (see ejectMember's stayInQueue doc comment).
+//
+// Reroute happens BEFORE the ejection comment/counter, not after: if
+// rerouteQueuedMemberOffHolding fails, nothing is posted and nothing is counted, so a
+// transient board-mutation failure can never produce a duplicate ejection comment or
+// double-count toward MaxMergeTrainEjections — the settle scan simply re-detects the
+// same still-unresolved thread on a member still sitting in Queued and retries the
+// whole operation on the next poll.
+func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.ProjectItem, findingCount int) {
+	if !e.rerouteQueuedMemberOffHolding(projectID, item) {
+		return
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	reason := fmt.Sprintf(
+		"ejected from merge-train — %d unresolved review-thread finding(s) arrived on the linked PR while this issue was Queued.",
+		findingCount,
+	)
+	// diag/otherMembers are nil (no combined-Validate diagnostic exists for this
+	// cause, per ADR-1420's contract); stayInQueue is false — this is the one
+	// ejectMember cause where the member must leave Queued rather than stay.
+	e.ejectMember(owner, repo, item, reason, nil, nil, false)
 }
 
 // effectiveTrialWindow returns the runaway-guard threshold (N) and rolling window (M),

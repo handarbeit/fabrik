@@ -14,6 +14,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -55,11 +56,16 @@ func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeI
 		wm,
 	)
 	// Pre-set statusField so advanceToNextStage can find the "Done" board column.
+	// "Implement" (opt-implement) is included so rerouteQueuedMemberOffHolding
+	// (#1208) can resolve its reroute target — the stage stageBeforeHolding derives
+	// structurally as the highest-Order non-Unmanaged stage before Queued (Order 10),
+	// which is Implement (Order 3) in this stage set.
 	eng.statusField = &gh.StatusField{
 		FieldID: "sf-test-1",
 		Options: map[string]string{
-			"Done":   "opt-done",
-			"Queued": "opt-queued",
+			"Done":      "opt-done",
+			"Queued":    "opt-queued",
+			"Implement": "opt-implement",
 		},
 	}
 	return eng
@@ -725,6 +731,202 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}
 	if !awaitingEcho {
 		t.Error("expected fabrik:awaiting-input webhook echo to be registered")
+	}
+}
+
+// ── #1208 Queued review-finding ejection: stageBeforeHolding / reroute / eject ──
+
+func TestStageBeforeHolding_ReturnsHighestOrderPrecedingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Research", Order: 1},
+		{Name: "Plan", Order: 2},
+		{Name: "Implement", Order: 3},
+		{Name: "Queued", Order: 10, HoldingStage: true},
+		{Name: "Done", Order: 99, CleanupWorktree: true},
+	}}
+	hs := holdingStage(cfg)
+	got := stageBeforeHolding(cfg, hs)
+	if got == nil || got.Name != "Implement" {
+		t.Fatalf("expected Implement (highest Order < holding stage's Order), got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_SkipsUnmanagedStages(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Research", Order: 1},
+		{Name: "Backlog", Order: 5, Unmanaged: true},
+		{Name: "Queued", Order: 10, HoldingStage: true},
+	}}
+	hs := holdingStage(cfg)
+	got := stageBeforeHolding(cfg, hs)
+	if got == nil || got.Name != "Research" {
+		t.Fatalf("expected Research (Backlog is Unmanaged and must be skipped), got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_NilHoldingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{{Name: "Research", Order: 1}}}
+	if got := stageBeforeHolding(cfg, nil); got != nil {
+		t.Fatalf("expected nil for nil holding stage, got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_NoPrecedingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Queued", Order: 1, HoldingStage: true},
+	}}
+	hs := holdingStage(cfg)
+	if got := stageBeforeHolding(cfg, hs); got != nil {
+		t.Fatalf("expected nil when nothing precedes the holding stage, got %+v", got)
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_MovesStatusToPrecedingStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	ok := eng.rerouteQueuedMemberOffHolding("PVT_1", item)
+	if !ok {
+		t.Fatal("expected reroute to succeed")
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+	call := client.updateStatusCalls[0]
+	if call.projectID != "PVT_1" || call.optionID != "opt-implement" {
+		t.Errorf("update call = %+v, expected move to opt-implement", call)
+	}
+}
+
+// TestRerouteQueuedMemberOffHolding_DoesNotTouchLabelsOrClearCycles pins the #1208
+// stall-risk constraint: the reroute must be a plain status move only. It must never
+// add/remove stage:Validate:complete (already present from the original Validate
+// completion) and must never clear ReviewCycles — either would break the "MaxReviewCycles
+// applies for free across the eject/re-queue cycle" property the design relies on.
+func TestRerouteQueuedMemberOffHolding_DoesNotTouchLabelsOrClearCycles(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	repoStr := "owner/repo"
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: 1, StageName: "Implement"})
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: 1, StageName: "Implement"})
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: repoStr, Status: "Queued",
+		Labels: []string{"stage:Implement:complete"}}
+	if !eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to succeed")
+	}
+
+	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no label mutations from reroute, got add=%v remove=%v", client.addLabelCalls, client.removeLabelCalls)
+	}
+
+	snap, err := eng.store.Get(repoStr, 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != 2 {
+		t.Errorf("expected ReviewCycles to remain 2 (untouched by reroute), got %d", got)
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_NoPrecedingStage_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", MaxConcurrent: 1,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 1, HoldingStage: true},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+	eng.statusField = &gh.StatusField{FieldID: "sf-1", Options: map[string]string{"Queued": "opt-queued"}}
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	if eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to fail when no stage precedes the holding stage")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no status update call on failure, got %d", len(client.updateStatusCalls))
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_StatusMoveFails_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	if eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to fail when UpdateProjectItemStatus errors")
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount verifies the
+// reroute-then-eject ordering: when the status move fails, ejectQueuedMemberForReviewFindings
+// must not post an ejection comment or increment the ejection counter — a failed reroute
+// looks like nothing happened, so a retry on the next settle scan pass can't double-count.
+func TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 0 {
+		t.Errorf("expected no ejection comment when reroute fails, got %d", comments)
+	}
+
+	eng.mergeTrainEjectionsMu.Lock()
+	count := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if count != 0 {
+		t.Errorf("expected ejection counter to remain 0 when reroute fails, got %d", count)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_Success verifies the full happy path: status
+// moves off Queued, an ejection comment distinguishable from the stay-in-Queue wording
+// is posted, and the ejection counter increments.
+func TestEjectQueuedMemberForReviewFindings_Success(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 2)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ejection comment, got %d", len(calls))
+	}
+	if !strings.Contains(calls[0].body, "has left the Queued column") {
+		t.Errorf("expected ejection comment to use the leaves-Queued wording, got: %s", calls[0].body)
+	}
+	if !strings.Contains(calls[0].body, "2 unresolved review-thread finding") {
+		t.Errorf("expected ejection comment to name the finding count, got: %s", calls[0].body)
+	}
+
+	eng.mergeTrainEjectionsMu.Lock()
+	count := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if count != 1 {
+		t.Errorf("expected ejection counter to be 1, got %d", count)
 	}
 }
 
