@@ -240,6 +240,8 @@ The plain REST-flavored `gh pr view --json statusCheckRollup` has no `isRequired
 
 The comparison uses each check's **start** time, not its completion time. A long-running required check (the ADR's own livelock example cites 18 minutes) can be *in flight against a stale tree* when a new base commit lands, and still complete successfully afterward — completion order is not proof the tested tree contains that commit, only that the run finished after the wall clock passed it. A run's start time is a much tighter (though not perfect — GitHub's checkout can lag slightly behind the workflow's start event) bound on which base state it could have tested: a check that started before the current base commit landed cannot have tested a tree containing it, no matter when it finished.
 
+A repo can have more than one required check (this repo has two: `Analyze (go)` and `Verify llms-full.txt is up to date`). Freshness must hold for **all** of them, not just the one that happens to have started most recently — a single fresh required check does not make a *different* stale (or not-yet-rerun) required check any less stale. So the query takes the **minimum** start time across every required check, and only if every required check is currently successful; if any required check is missing, pending, or failed, there is no meaningful "fresh" verdict to compute and the check falls through to a rebase.
+
 ```bash
 base_epoch=$(git log -1 --format=%ct "origin/$base_branch")
 ci_time=$(gh api graphql -f query='
@@ -265,15 +267,16 @@ ci_time=$(gh api graphql -f query='
     }
   }' -F owner="$owner" -F repo="$repo" -F number="$pr_number" \
   --jq '[.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?
-    | select(.isRequired==true)
-    | select((.conclusion=="SUCCESS") or (.state=="SUCCESS"))
-    | (.startedAt // .createdAt)] | sort | last' 2>/dev/null)
+      | select(.isRequired==true)] as $required
+    | ($required | map(select((.conclusion=="SUCCESS") or (.state=="SUCCESS")))) as $ok
+    | if ($required | length) == 0 or ($ok | length) != ($required | length) then empty
+      else ($ok | map(.startedAt // .createdAt) | min) end' 2>/dev/null)
 ci_epoch=$(date -u -d "$ci_time" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ci_time" +%s 2>/dev/null)
 ```
 
-(`date -u -d ...` covers GNU date on Linux runners; the `-j -f` fallback covers BSD date on macOS. `gh`'s `startedAt`/`createdAt` are always UTC `...Z`, so both branches parse it identically. Comparing epoch seconds avoids lexically comparing two ISO-8601 strings in different offset notations, which is not reliably sortable. `StatusContext` — GitHub's legacy commit-status API, as opposed to the modern Checks API's `CheckRun` — has no `startedAt` equivalent; `createdAt`, the timestamp of the status's first report, is the closest available proxy for "when this check began" and is used as the fallback via `//` for that type, not as a stand-in for `completedAt`.)
+(`date -u -d ...` covers GNU date on Linux runners; the `-j -f` fallback covers BSD date on macOS. `gh`'s `startedAt`/`createdAt` are always UTC `...Z`, so both branches parse it identically. Comparing epoch seconds avoids lexically comparing two ISO-8601 strings in different offset notations, which is not reliably sortable. `StatusContext` — GitHub's legacy commit-status API, as opposed to the modern Checks API's `CheckRun` — has no `startedAt` equivalent; `createdAt`, the timestamp of the status's first report, is the closest available proxy for "when this check began" and is used as the fallback via `//` for that type, not as a stand-in for `completedAt`. The jq filter binds `$required` to every required-check context regardless of outcome, and `$ok` to the subset that's currently successful; when those two counts don't match — a required check is pending, failed, or simply absent from the rollup — the filter emits nothing rather than a timestamp from a partial view, matching the read-failure fallback below.)
 
-If `$ci_epoch` is non-empty and greater than `$base_epoch`, **skip the rebase** — record outcome `skipped-ci-fresh`. The most recent successful *required*-check run only *started* at or after the current base tip landed, so it cannot have been testing a stale tree — rebasing would only restart checks that already covered the same ground. On any read failure, an empty `$ci_time`/`$ci_epoch`, or a successful required run that started at or before the current base landed (`$ci_epoch` not greater than `$base_epoch`) — including one still in flight, testing a tree from before the current base tip — **do not skip** — fall through to the rebase. This keeps Check C's original fail-toward-rebase default: a redundant rebase only costs CI time, while wrongly skipping a genuinely required one risks a branch that can't merge with no downstream catch as clean as Check A's.
+If `$ci_epoch` is non-empty and greater than `$base_epoch`, **skip the rebase** — record outcome `skipped-ci-fresh`. Every required check is currently successful, and the *earliest* of their start times still started at or after the current base tip landed — so none of them can have been testing a stale tree, and rebasing would only restart checks that already covered the same ground. On any read failure, an empty `$ci_time`/`$ci_epoch`, a required check that isn't (yet) successful, or a minimum start time at or before the current base landed (`$ci_epoch` not greater than `$base_epoch`) — including one still in flight, testing a tree from before the current base tip — **do not skip** — fall through to the rebase. This keeps Check C's original fail-toward-rebase default: a redundant rebase only costs CI time, while wrongly skipping a genuinely required one risks a branch that can't merge with no downstream catch as clean as Check A's.
 
 **Otherwise — rebase.** None of the checks skipped: rebase exactly as before.
 
