@@ -232,15 +232,20 @@ If `$in_queue` is `true`, **skip the rebase** — record outcome `skipped-in-que
 behind_count=$(git rev-list --count HEAD..origin/"$base_branch")
 ```
 
-If `$behind_count` is `0`, **skip the rebase** — record outcome `skipped-up-to-date`. Rebasing here would push nothing, so it can't restart CI or fix anything; this alone breaks the common-case livelock. If you aborted a rebase earlier in this same invocation, that abort left the branch strictly behind `origin/$base_branch`, so `$behind_count` is never `0` here — this check cannot mask an earlier abort, it can only skip when there is truly nothing to rebase.
+If `$behind_count` is `0`, **skip the rebase** — record outcome `skipped-up-to-date`. Rebasing here would push nothing, so it can't restart CI or fix anything — this eliminates rebase cost whenever the branch happens to already be current. It does **not** by itself address the repeated-restart livelock in the Problem section: there, the base keeps moving faster than checks complete, so the branch is behind on every single attempt and `$behind_count` is never `0`. Check C below is what breaks that case. If you aborted a rebase earlier in this same invocation, that abort left the branch strictly behind `origin/$base_branch`, so `$behind_count` is never `0` here either — this check cannot mask an earlier abort, it can only skip when there is truly nothing to rebase.
 
-**Check C — branch protection doesn't require up to date (skip if `strict: false`).** Only reached if Checks A and B did not skip:
+**Check C — CI has already run against the current base (skip if the last successful check run is fresh enough).** Only reached if Checks A and B did not skip. This is the check that actually addresses the reported livelock: a branch protection `strict: false` setting only tells you GitHub won't *enforce* up-to-date-ness as a merge precondition — it says nothing about whether the last check run is stale. A repo can have `strict: false` and still merge a PR whose last green run tested a base-branch state from days ago. So freshness is measured directly, by comparing the base branch's own commit time against the most recent successful check run's completion time:
 
 ```bash
-strict=$(gh api repos/"$owner"/"$repo"/branches/"$base_branch"/protection --jq '.required_status_checks.strict' 2>/dev/null)
+base_epoch=$(git log -1 --format=%ct "origin/$base_branch")
+ci_time=$(gh pr view "$pr_number" --json statusCheckRollup \
+  --jq '[.statusCheckRollup[]?|select(.conclusion=="SUCCESS")|.completedAt]|sort|last' 2>/dev/null)
+ci_epoch=$(date -u -d "$ci_time" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ci_time" +%s 2>/dev/null)
 ```
 
-If `$strict` is exactly `false`, **skip the rebase** — record outcome `skipped-non-strict`. On this repo, being up to date isn't a merge precondition, so the rebase is pure cost. On any read failure (this call commonly 403s for tokens without admin-level repo access — a known, already-documented limitation, not new risk) or any value other than exactly `false` (including `true` or `null` for a repo with no required-status-checks config), **do not skip** — fall through to the rebase. This is the opposite default from Check A on purpose: here, a redundant rebase only costs CI time, while wrongly skipping a genuinely required one risks a branch that can't merge with no downstream catch as clean as Check A's.
+(`date -u -d ...` covers GNU date on Linux runners; the `-j -f` fallback covers BSD date on macOS. `gh`'s `completedAt` is always UTC `...Z`, so both branches parse it identically. Comparing epoch seconds avoids lexically comparing two ISO-8601 strings in different offset notations, which is not reliably sortable.)
+
+If `$ci_epoch` is non-empty and greater than `$base_epoch`, **skip the rebase** — record outcome `skipped-ci-fresh`. The most recent successful required-check run already completed against a base tip at least as new as the one currently at `origin/$base_branch`, so rebasing would only restart checks that already covered the same ground. On any read failure, an empty `$ci_time`/`$ci_epoch`, or a successful run that predates the current base (`$ci_epoch` not greater than `$base_epoch`), **do not skip** — fall through to the rebase. This keeps Check C's original fail-toward-rebase default: a redundant rebase only costs CI time, while wrongly skipping a genuinely required one risks a branch that can't merge with no downstream catch as clean as Check A's.
 
 **Otherwise — rebase.** None of the checks skipped: rebase exactly as before.
 
@@ -281,7 +286,7 @@ Both signals mean the PR has merge conflicts that must be resolved before merge.
 
 ### Step 3 — Include rebase outcome and merge state in the summary
 
-When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-non-strict`) alongside the PR merge state, so an operator reading the stage comment can tell a deliberate skip from a forgotten one:
+When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-ci-fresh`) alongside the PR merge state, so an operator reading the stage comment can tell a deliberate skip from a forgotten one:
 
 ```
 FABRIK_SUMMARY_BEGIN
