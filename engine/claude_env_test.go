@@ -104,6 +104,37 @@ func containsPrefix(env []string, prefix string) bool {
 	return false
 }
 
+// TestBuildClaudeEnv_GHHost_EmittedWhenConfigured covers FR-6: when a GHES
+// host is configured, buildClaudeEnv must emit GH_HOST so a stage worker's
+// `gh` invocations (e.g. fabrik-validate's Pre-Completion Gate) target the
+// same instance as the engine rather than silently hitting github.com.
+func TestBuildClaudeEnv_GHHost_EmittedWhenConfigured(t *testing.T) {
+	old := claudeGHHost
+	claudeGHHost = "github.example.com"
+	t.Cleanup(func() { claudeGHHost = old })
+
+	got := constructedEnv(nil, InvokeOptions{})
+	if !containsExact(got, "GH_HOST=github.example.com") {
+		t.Errorf("expected GH_HOST=github.example.com in env, got %v", got)
+	}
+}
+
+// TestBuildClaudeEnv_GHHost_OmittedWhenNotConfigured covers FR-6's other
+// half: absent GHES configuration, GH_HOST must not appear at all —
+// byte-identical to pre-GHES behavior, not merely empty-valued.
+func TestBuildClaudeEnv_GHHost_OmittedWhenNotConfigured(t *testing.T) {
+	old := claudeGHHost
+	claudeGHHost = ""
+	t.Cleanup(func() { claudeGHHost = old })
+
+	got := constructedEnv(nil, InvokeOptions{})
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "GH_HOST=") || kv == "GH_HOST" {
+			t.Errorf("expected no GH_HOST entry when unconfigured, found %q in %v", kv, got)
+		}
+	}
+}
+
 func envTestStage() *stages.Stage {
 	return &stages.Stage{Name: "Implement", Prompt: "do it", Completion: stages.CompletionCriteria{Type: "claude"}}
 }

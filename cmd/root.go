@@ -80,6 +80,7 @@ type Config struct {
 	SessionRetentionDays      int    // days; 14 = default; 0 disables age-based session pruning
 	ArchiveAfter              string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone               string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
+	GHESHost                  string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
 }
 
 func Execute() error {
@@ -186,6 +187,7 @@ func Execute() error {
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
+	flag.StringVar(&cfg.GHESHost, "ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST; default: unset, meaning github.com)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -276,6 +278,7 @@ func Execute() error {
 	if !cfg.GitSSH {
 		cfg.GitSSH = resolveBool("FABRIK_GIT_SSH", pc.GitSSH)
 	}
+	cfg.GHESHost = resolveGHESHost(cfg.GHESHost, pc)
 	if cfg.PollSeconds == 30 {
 		if v := os.Getenv("FABRIK_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -778,6 +781,7 @@ func Execute() error {
 		SessionRetentionDays:      cfg.SessionRetentionDays,
 		ArchiveAfter:              archiveAfter(cfg.ArchiveAfter),
 		ArchiveDone:               archiveDoneMode(cfg.ArchiveDone),
+		GHESHost:                  cfg.GHESHost,
 		ReadyCh:                   testReadyCh,
 	})
 	if err != nil {
@@ -837,6 +841,24 @@ func resolveBool(envVar string, pcVal bool) bool {
 		return lv == "true" || lv == "1" || lv == "yes"
 	}
 	return pcVal
+}
+
+// resolveGHESHost resolves the GHES host from flag > FABRIK_GHES_HOST env var
+// > config.yaml's ghes_host, normalizing whichever value wins (stripping a
+// scheme and trailing slash) so downstream consumers always see a bare
+// hostname. flagVal is the already-parsed --ghes-host value; pass "" if no
+// flag was set. Shared by both the daemon (cmd/root.go) and `fabrik watch`
+// (cmd/watch.go) so the two entry points can't drift on precedence.
+func resolveGHESHost(flagVal string, pc config.ProjectConfig) string {
+	host := flagVal
+	if host == "" {
+		if v := os.Getenv("FABRIK_GHES_HOST"); v != "" {
+			host = v
+		} else {
+			host = pc.GHESHost
+		}
+	}
+	return config.NormalizeGHESHost(host)
 }
 
 // resolveInt resolves an integer config value from an environment variable

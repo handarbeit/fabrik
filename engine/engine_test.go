@@ -259,6 +259,67 @@ func TestNew_WiresMergeStrategy(t *testing.T) {
 	}
 }
 
+// TestNew_GHESHost_ReleaseClientStaysOnGithubCom covers the self-upgrade
+// wrong-host risk Research surfaced: when a GHES host is configured,
+// eng.client must be GHES-targeted while eng.releaseClient (used by
+// checkReleaseUpgrade to fetch Fabrik's own release from
+// handarbeit/fabrik) must remain a distinct, github.com-targeted client.
+// A shared/aliased client here would silently misdirect fabrik upgrade's
+// release lookup at the customer's GHES instance instead of github.com.
+func TestNew_GHESHost_ReleaseClientStaysOnGithubCom(t *testing.T) {
+	skipIfNoGit(t)
+	origSupported := claudeNameFlagSupported
+	defer func() { claudeNameFlagSupported = origSupported }()
+	t.Setenv("PATH", t.TempDir())
+
+	cfg := Config{
+		Owner:    "o",
+		Repo:     "r",
+		Token:    "tok",
+		GHESHost: "github.example.com",
+	}
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ghesClient, ok := eng.client.(*gh.Client)
+	if !ok {
+		t.Fatalf("eng.client is %T, want *gh.Client", eng.client)
+	}
+	releaseClient, ok := eng.releaseClient.(*gh.Client)
+	if !ok {
+		t.Fatalf("eng.releaseClient is %T, want *gh.Client", eng.releaseClient)
+	}
+	if ghesClient == releaseClient {
+		t.Fatal("eng.releaseClient must be a distinct client instance from eng.client when a GHES host is configured — sharing one client would let the GHES baseURL leak into the release-upgrade path")
+	}
+	if eng.hostClient != ghesClient {
+		t.Errorf("eng.hostClient = %p, want same instance as eng.client (%p)", eng.hostClient, ghesClient)
+	}
+	// cfg.Token authenticates the configured GHES host, not github.com — it
+	// must not be forwarded to the github.com-pinned releaseClient, or every
+	// self-upgrade request would fail with "Bad credentials" instead of
+	// succeeding unauthenticated against fabrik's public release repo.
+	if got := releaseClient.Token(); got != "" {
+		t.Errorf("releaseClient.Token() = %q, want empty (cfg.Token is GHES-scoped, not valid on github.com)", got)
+	}
+}
+
+// TestReleaseUpgradeToken covers the token-isolation half of the self-upgrade
+// wrong-host risk: cfg.Token must pass through unchanged for the default
+// github.com path, but must be dropped (not forwarded to github.com) when a
+// GHES host is configured, since it authenticates the GHES instance, not
+// github.com.
+func TestReleaseUpgradeToken(t *testing.T) {
+	if got := releaseUpgradeToken(Config{Token: "tok"}); got != "tok" {
+		t.Errorf("releaseUpgradeToken with no GHES host = %q, want %q (unchanged default)", got, "tok")
+	}
+	if got := releaseUpgradeToken(Config{Token: "tok", GHESHost: "github.example.com"}); got != "" {
+		t.Errorf("releaseUpgradeToken with GHES host = %q, want empty", got)
+	}
+}
+
 func TestRun_ShutdownOnSignal(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {

@@ -252,6 +252,62 @@ version: "2.0.0"
 	}
 }
 
+func TestLoadProjectConfig_GHESHost(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+ghes_host: github.example.com
+`
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
+
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pc.GHESHost != "github.example.com" {
+		t.Errorf("ghes_host: want github.example.com, got %q", pc.GHESHost)
+	}
+}
+
+func TestLoadProjectConfig_GHESHostDefaultEmpty(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: myorg\n"), 0644)
+
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pc.GHESHost != "" {
+		t.Errorf("ghes_host: want empty (github.com default), got %q", pc.GHESHost)
+	}
+}
+
+func TestNormalizeGHESHost(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"github.example.com", "github.example.com"},
+		{"https://github.example.com", "github.example.com"},
+		{"http://github.example.com", "github.example.com"},
+		{"github.example.com/", "github.example.com"},
+		{"https://github.example.com/", "github.example.com"},
+	}
+	for _, c := range cases {
+		if got := NormalizeGHESHost(c.in); got != c.want {
+			t.Errorf("NormalizeGHESHost(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestLoadProjectConfig_UnknownKeysIgnored(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)

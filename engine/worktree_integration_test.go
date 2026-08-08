@@ -26,7 +26,7 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 	// but we can test the error path: clone of a non-existent github URL fails.
 	// Instead we test that the function creates the .fabrik directory and returns an error
 	// when git clone fails (no real network in CI).
-	_, err := ensureBareClone(tmpDir, "nonexistent-owner-xyz", "nonexistent-repo-xyz-abc", "", false)
+	_, err := ensureBareClone(tmpDir, "nonexistent-owner-xyz", "nonexistent-repo-xyz-abc", "", false, "")
 	// We expect an error because the github URL doesn't exist. The key check is that
 	// the function attempts the clone and returns a wrapped error.
 	if err == nil {
