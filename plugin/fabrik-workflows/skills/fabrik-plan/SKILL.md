@@ -125,6 +125,12 @@ Note that Plan is a `read_only` stage, so the engine does **not** commit partial
 
 So: prefer steady, incremental progress in your reasoning over racing to finish inside one slice. If you are resuming, take stock of what you have already established — the research you have read, the approach you have settled on, the tasks you have already enumerated — and carry on from there rather than re-deriving it.
 
+## Never Wait on CI or a Backgrounded Task
+
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
+This paragraph's CI-gating language is generic boilerplate shared across stages: Plan runs before Implement creates the PR, so there is no CI to gate on yet and `wait_for_ci` is never set for this stage — the load-bearing guidance here is the backgrounded-local-task rule.
+
 ## What You Do NOT Do
 
 - **Do not write code** — you're designing, not implementing

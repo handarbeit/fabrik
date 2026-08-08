@@ -48,6 +48,10 @@ Read the user's comment carefully to understand what they're requesting:
 **Issue is resolved**: The user explicitly indicates validation is complete and the issue can close.
 - See Completion section below
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
+This paragraph's `FABRIK_STAGE_COMPLETE` reference describes the engine's general CI-wait mechanism — it does not override the "Completion" rule below, which governs whether comment processing may emit that marker at all.
+
 ### Commit and push
 
 After making any code changes:

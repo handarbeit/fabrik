@@ -152,6 +152,10 @@ In preference order:
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it.
 6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent. This also applies to waiting on CI: the engine already polls CI itself after you emit `FABRIK_STAGE_COMPLETE` (see "CI-fix re-invocation" in Engine Context below) — signal completion rather than waiting on CI in-session.
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
+This paragraph's CI-gating language applies only if `wait_for_ci: true` is configured for this stage — see "CI-fix re-invocation" in Engine Context below, which is conditional on that same setting and is unset by default for Review.
+
 ## Output
 
 The engine captures your stdout and posts it on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
