@@ -930,6 +930,156 @@ func TestEjectQueuedMemberForReviewFindings_Success(t *testing.T) {
 	}
 }
 
+// TestEjectQueuedMemberForReviewFindings_MaxReviewCyclesComposesAcrossCycle is the
+// key #1208 stall-risk regression named in the issue's Requirements and Risks
+// sections: a member ejected repeatedly for the same unresolved review finding,
+// rerouted back to Implement (the stage preceding Queued in this test's stage
+// set), and re-picked-up by the ordinary review-reinvoke path (handleReviewGate,
+// completely unmodified by this issue) must have its ReviewCycles counter keep
+// counting across every eject/reroute cycle — never reset — so it eventually
+// escalates via pauseForReviewCycleLimit instead of oscillating Queued<->Implement
+// forever. Also confirms MaxMergeTrainEjections (a separate, already-existing
+// bound reused via ejectMember) fires independently of ReviewCycles, per the
+// issue's own framing of the two bounds as distinct.
+func TestEjectQueuedMemberForReviewFindings_MaxReviewCyclesComposesAcrossCycle(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxReviewCycles = 3
+
+	item := gh.ProjectItem{
+		Number: 1,
+		ItemID: "PVTI_1",
+		Repo:   "owner/repo",
+		Status: "Queued",
+		Labels: []string{"stage:Implement:complete"},
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Please fix this.", ReviewThreadID: "RT_1"},
+		},
+	}
+	// implementStage mirrors stageBeforeHolding's own resolution for trainTestEngine's
+	// stage set (Implement, Order 3, is the stage immediately preceding Queued, Order 10).
+	implementStage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	pausedByEnd := false
+	for i := 0; i <= eng.cfg.MaxReviewCycles; i++ {
+		// Step 1: eject the member off Queued — simulates settleQueuedReviewFindings
+		// having detected the still-unresolved thread on this poll.
+		eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+
+		// Step 2: simulate the ordinary review-reinvoke path picking the rerouted
+		// item back up on the very next poll — the exact same, unmodified
+		// handleReviewGate any non-Queued item with an unresolved thread goes through.
+		advancedItems := make(map[string]bool)
+		pctx := &phase1Ctx{
+			ctx: context.Background(), board: board, item: item, stage: implementStage,
+			hasComplete: true, advancedItems: advancedItems,
+		}
+		if claimed := eng.handleReviewGate(pctx); !claimed {
+			t.Fatalf("iteration %d: expected handleReviewGate to claim the item", i)
+		}
+		eng.wg.Wait()
+
+		if advancedItems["owner/repo#1"] {
+			continue // a reinvoke dispatched this cycle — keep going
+		}
+		pausedByEnd = true // no dispatch this cycle: the cap was hit and it paused
+		break
+	}
+
+	if !pausedByEnd {
+		t.Fatal("expected the cycle to eventually pause at MaxReviewCycles instead of dispatching forever")
+	}
+
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != eng.cfg.MaxReviewCycles {
+		t.Errorf("ReviewCycles(Implement) = %d; want exactly %d — must not reset across the eject/reroute cycle", got, eng.cfg.MaxReviewCycles)
+	}
+
+	client.mu.Lock()
+	hasPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	client.mu.Unlock()
+	if !hasPaused {
+		t.Error("expected fabrik:paused to be added once the review cycle limit was reached")
+	}
+
+	// MaxMergeTrainEjections (3 in trainTestEngine) is a separate bound reused via
+	// ejectMember: it fires — and resets — purely from repeated ejections in this
+	// loop, independent of ReviewCycles. Assert it is a valid, in-range value
+	// rather than an exact count, since ejectMember resets its own counter to 0
+	// once it pauses (so the exact value depends on loop length vs. the cap).
+	eng.mergeTrainEjectionsMu.Lock()
+	ejections := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if ejections < 0 || ejections >= eng.cfg.MaxMergeTrainEjections {
+		t.Errorf("unexpected ejection counter value: %d (want in [0, %d))", ejections, eng.cfg.MaxMergeTrainEjections)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_MaxMergeTrainEjectionsFiresIndependently
+// confirms the issue's Risks-section expectation directly: MaxMergeTrainEjections
+// (ejectMember's own pre-existing consecutive-ejection pause cap) can pause a
+// member purely from repeated review-finding ejections, entirely independent of —
+// and potentially before — MaxReviewCycles ever fires, since the two bounds are
+// driven by different counters incremented from different call sites.
+func TestEjectQueuedMemberForReviewFindings_MaxMergeTrainEjectionsFiresIndependently(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxMergeTrainEjections = 2
+	eng.cfg.MaxReviewCycles = 100 // deliberately far out of reach in this test
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+	client.mu.Lock()
+	pausedAfterFirst := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAfterFirst = true
+		}
+	}
+	client.mu.Unlock()
+	if pausedAfterFirst {
+		t.Fatal("did not expect fabrik:paused after only 1 ejection (MaxMergeTrainEjections=2)")
+	}
+
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+	client.mu.Lock()
+	pausedAfterSecond := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAfterSecond = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedAfterSecond {
+		t.Error("expected fabrik:paused after 2 ejections (MaxMergeTrainEjections=2), purely from review-finding ejections")
+	}
+
+	// ReviewCycles is untouched by this path entirely — this test never dispatches
+	// through handleReviewGate — confirming the two bounds are driven independently.
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0 (MaxMergeTrainEjections must fire independently of it)", got)
+	}
+}
+
 // ── #1208 pending-eject signal: mark/take/apply ─────────────────────────────────
 
 func TestTakePendingReviewEject_UnflaggedMember_NoOp(t *testing.T) {
