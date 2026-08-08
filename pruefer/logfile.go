@@ -78,7 +78,10 @@ func (fl *fileLogger) Logf(prNumber int, tag, format string, args ...any) {
 	defer fl.mu.Unlock()
 
 	if fl.maxBytes > 0 && fl.size+int64(len(line)) > fl.maxBytes {
-		if err := fl.rotateLocked(); err != nil {
+		if err := fl.rotateLocked(); err != nil && fl.tee {
+			// Gated on fl.tee, matching every other stderr write in this
+			// method — in TUI mode (tee=false) a raw stderr write here would
+			// corrupt the bubbletea display exactly as R5 exists to prevent.
 			fmt.Fprintf(os.Stderr, "pruefer: log rotation failed for %s: %v\n", fl.path, err)
 		}
 	}
@@ -95,11 +98,19 @@ func (fl *fileLogger) Logf(prNumber int, tag, format string, args ...any) {
 // dropping the oldest beyond fl.backups), renames the current file to
 // path.1, and reopens a fresh empty file at path. Must be called with fl.mu
 // held.
+//
+// Backup shifting happens before fl.file is closed, since it touches only
+// the numbered *.N siblings, never fl.path itself — a failure there leaves
+// fl.file untouched and still perfectly usable. Only the final rename of
+// fl.path itself requires the file to already be closed (required for
+// Windows rename semantics, which forbids renaming an open file). If that
+// step — or the reopen after it — fails, fl.file is always left reopened
+// and appendable with fl.size resynced via Stat: without this, a caller
+// that left fl.file closed on error would silently drop every subsequent
+// WriteString forever (its error is deliberately ignored in Logf), and with
+// fl.size never advancing, every future call would re-attempt — and re-fail
+// — the same already-closed Close(), for the rest of the process's life.
 func (fl *fileLogger) rotateLocked() error {
-	if err := fl.file.Close(); err != nil {
-		return fmt.Errorf("closing %s before rotation: %w", fl.path, err)
-	}
-
 	oldest := fmt.Sprintf("%s.%d", fl.path, fl.backups)
 	if err := os.Remove(oldest); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing oldest backup %s: %w", oldest, err)
@@ -111,20 +122,41 @@ func (fl *fileLogger) rotateLocked() error {
 			return fmt.Errorf("renaming %s to %s: %w", src, dst, err)
 		}
 	}
+
+	if err := fl.file.Close(); err != nil {
+		return fmt.Errorf("closing %s before rotation: %w", fl.path, err)
+	}
+
+	var rotateErr error
 	if fl.backups >= 1 {
 		dst := fmt.Sprintf("%s.1", fl.path)
 		if err := os.Rename(fl.path, dst); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("renaming %s to %s: %w", fl.path, dst, err)
+			rotateErr = fmt.Errorf("renaming %s to %s: %w", fl.path, dst, err)
 		}
 	} else if err := os.Remove(fl.path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing %s: %w", fl.path, err)
+		rotateErr = fmt.Errorf("removing %s: %w", fl.path, err)
 	}
 
 	f, err := os.OpenFile(fl.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
+		// fl.file is left as the prior (closed) handle here — there is no
+		// file left to reopen it to, so there is nothing to recover into.
 		return fmt.Errorf("reopening %s after rotation: %w", fl.path, err)
 	}
 	fl.file = f
+
+	if rotateErr != nil {
+		// The rename/remove of fl.path itself failed, so the reopened
+		// handle points at the still-oversized, unrotated file rather than
+		// a fresh one — resync fl.size to its real size (instead of
+		// resetting to 0) so the next call correctly re-attempts rotation
+		// rather than assuming it already succeeded.
+		if info, statErr := f.Stat(); statErr == nil {
+			fl.size = info.Size()
+		}
+		return rotateErr
+	}
+
 	fl.size = 0
 	return nil
 }

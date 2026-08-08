@@ -56,34 +56,37 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 
 func TestLoadConfig_LogFilePrecedence(t *testing.T) {
 	dir := t.TempDir()
+	custom := filepath.Join(t.TempDir(), "custom.log")
+	fromEnv := filepath.Join(t.TempDir(), "env.log")
+	fromFlag := filepath.Join(t.TempDir(), "flag.log")
 
 	// YAML override.
-	path := writeYAMLConfig(t, dir, `log_file: /tmp/custom.log`)
+	path := writeYAMLConfig(t, dir, "log_file: "+custom)
 	cfg, err := LoadConfig([]string{"-config", path})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.LogFile != "/tmp/custom.log" {
-		t.Errorf("LogFile = %q, want /tmp/custom.log (from YAML)", cfg.LogFile)
+	if cfg.LogFile != custom {
+		t.Errorf("LogFile = %q, want %q (from YAML)", cfg.LogFile, custom)
 	}
 
 	// Env overrides YAML.
-	t.Setenv("PRUEFER_LOG_FILE", "/tmp/env.log")
+	t.Setenv("PRUEFER_LOG_FILE", fromEnv)
 	cfg, err = LoadConfig([]string{"-config", path})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.LogFile != "/tmp/env.log" {
-		t.Errorf("LogFile = %q, want /tmp/env.log (env should override YAML)", cfg.LogFile)
+	if cfg.LogFile != fromEnv {
+		t.Errorf("LogFile = %q, want %q (env should override YAML)", cfg.LogFile, fromEnv)
 	}
 
 	// Flag overrides env.
-	cfg, err = LoadConfig([]string{"-config", path, "-log-file", "/tmp/flag.log"})
+	cfg, err = LoadConfig([]string{"-config", path, "-log-file", fromFlag})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.LogFile != "/tmp/flag.log" {
-		t.Errorf("LogFile = %q, want /tmp/flag.log (flag should override env)", cfg.LogFile)
+	if cfg.LogFile != fromFlag {
+		t.Errorf("LogFile = %q, want %q (flag should override env)", cfg.LogFile, fromFlag)
 	}
 }
 
@@ -101,7 +104,7 @@ func TestLoadConfig_LogFileYAMLExplicitEmptyDisables(t *testing.T) {
 
 func TestLoadConfig_LogFileEnvExplicitEmptyDisables(t *testing.T) {
 	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, `log_file: /tmp/custom.log`)
+	path := writeYAMLConfig(t, dir, "log_file: "+filepath.Join(t.TempDir(), "custom.log"))
 	t.Setenv("PRUEFER_LOG_FILE", "")
 
 	cfg, err := LoadConfig([]string{"-config", path})
@@ -115,7 +118,7 @@ func TestLoadConfig_LogFileEnvExplicitEmptyDisables(t *testing.T) {
 
 func TestLoadConfig_LogFileFlagExplicitEmptyDisables(t *testing.T) {
 	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, `log_file: /tmp/custom.log`)
+	path := writeYAMLConfig(t, dir, "log_file: "+filepath.Join(t.TempDir(), "custom.log"))
 
 	cfg, err := LoadConfig([]string{"-config", path, "-log-file", ""})
 	if err != nil {
