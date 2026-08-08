@@ -389,10 +389,9 @@ func TestReviewPR_ExcludedPath_Skipped(t *testing.T) {
 // SkipExcludedPath analog of TestReviewPR_ForceReview_StillTooLarge_
 // MarksProcessedWithoutDuplicateNotice: a forced "/pruefer review" against a
 // PR whose every touched path matches excluded_paths must still mark the
-// command processed, not just acknowledged — otherwise there is no notice
-// (unlike the too-large path) to serve as a durable "nothing to do here"
-// signal, and the command would be re-acknowledged and re-skipped on every
-// poll forever.
+// command processed, and — like every other terminal outcome of a forced
+// review — leave a human-readable PR comment behind so the operator isn't
+// left with only reactions to go on.
 func TestReviewPR_ForceReview_AllPathsExcluded_MarksProcessed(t *testing.T) {
 	client := newFakeReviewer()
 	client.diff = "diff --git a/docs/readme.md b/docs/readme.md\n+change\n"
@@ -413,6 +412,77 @@ func TestReviewPR_ForceReview_AllPathsExcluded_MarksProcessed(t *testing.T) {
 	reviewComment := client.comments[0]
 	if !reviewComment.HasReaction("EYES") || !reviewComment.HasReaction("ROCKET") {
 		t.Errorf("review command reactions = %+v, want both EYES and ROCKET (seen and processed, even though nothing was reviewable)", reviewComment.Reactions)
+	}
+	if client.addCommentCallCount() != 1 {
+		t.Fatalf("AddComment called %d times, want exactly 1 — a forced review must leave a human-readable comment even when nothing was reviewable", client.addCommentCallCount())
+	}
+	notice := client.addedCalls[0].body
+	if !strings.Contains(notice, "excluded_paths") || !strings.Contains(notice, "docs/readme.md") {
+		t.Errorf("notice = %q, want it to name excluded_paths and the excluded file", notice)
+	}
+}
+
+// TestReviewPR_ExcludedPath_NotForced_NoComment proves the all-excluded
+// notice is scoped to forced reviews only: an ordinary poll-driven skip
+// (no "/pruefer review" comment) must stay silent-but-safe, exactly as
+// before — posting a comment on every routine poll would spam the PR.
+func TestReviewPR_ExcludedPath_NotForced_NoComment(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = "diff --git a/docs/readme.md b/docs/readme.md\n+change\n"
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"docs/*"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
+		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath", outcome)
+	}
+	if client.addCommentCallCount() != 0 {
+		t.Errorf("AddComment called %d times, want 0 — a non-forced excluded-path skip must stay silent, not spam every poll", client.addCommentCallCount())
+	}
+}
+
+// TestReviewPR_AllExcluded_PreambleAloneTooLarge_NoticesInsteadOfSilentSkip
+// covers the gap identified against an earlier revision of this PR: when
+// every touched file matches excluded_paths but the diff's unattributed
+// preamble bytes alone already exceed max_diff_bytes, ReviewPR must still
+// go through the too-large notice path — not silently resolve to
+// SkipExcludedPath, which would leave the operator with no visible signal
+// at all that the diff was also too large.
+func TestReviewPR_AllExcluded_PreambleAloneTooLarge_NoticesInsteadOfSilentSkip(t *testing.T) {
+	client := newFakeReviewer()
+	// No "diff --git" header at all: every byte lands in the unattributed
+	// preamble, which filterExcludedPaths can never touch (files is empty),
+	// so allExcluded's own len(files) > 0 guard means this scenario is
+	// instead reached via a real file that IS excluded, with a huge
+	// preamble in front of it (e.g. mirroring the documented C-quoted-path
+	// gap in diffsplit.go, where a whole file's block falls into preamble).
+	client.diff = strings.Repeat("some malformed leading content\n", 100) +
+		"diff --git a/docs/readme.md b/docs/readme.md\n+change\n"
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"docs/*"}, MaxDiffBytes: 100}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge — an oversized preamble must not be masked by an all-excluded skip", outcome)
+	}
+	if outcome.SizeDetail == nil {
+		t.Fatal("outcome.SizeDetail = nil, want a populated detail")
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("must skip before cloning or invoking claude")
+	}
+	if client.addCommentCallCount() != 1 {
+		t.Fatalf("AddComment called %d times, want exactly 1 — the too-large notice must post", client.addCommentCallCount())
+	}
+	notice := client.addedCalls[0].body
+	if !strings.Contains(notice, "too large") {
+		t.Errorf("notice = %q, want the too-large notice, not an excluded-path-only message", notice)
 	}
 }
 
@@ -723,9 +793,15 @@ func TestReviewPR_TrimExhausted_StillOverCap_NoticesAndSkips(t *testing.T) {
 	if outcome.SizeDetail == nil || len(outcome.SizeDetail.TrimAttempted) == 0 {
 		t.Fatalf("outcome.SizeDetail = %+v, want TrimAttempted populated — a trim was actually attempted here", outcome.SizeDetail)
 	}
+	if len(outcome.SizeDetail.DominantPaths) != 0 {
+		t.Errorf("SizeDetail.DominantPaths = %+v, want empty — trimToFit dropped every file, so there are no remaining contributors left to list, and listing them again would just duplicate TrimAttempted", outcome.SizeDetail.DominantPaths)
+	}
 	notice := client.addedCalls[0].body
 	if !strings.Contains(notice, "also tried automatically dropping") {
 		t.Errorf("notice = %q, want it to say Pruefer already tried auto-dropping the largest file(s)", notice)
+	}
+	if strings.Contains(notice, "Largest remaining contributors") {
+		t.Errorf("notice = %q, want no 'Largest remaining contributors' section — it would just repeat the paths already listed under the trim-attempted section", notice)
 	}
 }
 

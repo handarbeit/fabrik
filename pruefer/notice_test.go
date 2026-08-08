@@ -1,6 +1,7 @@
 package pruefer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -87,5 +88,68 @@ func TestBuildTooLargeNoticeBody_NoTrimAttempted_OmitsSection(t *testing.T) {
 	body := buildTooLargeNoticeBody(detail, "sha1")
 	if strings.Contains(body, "also tried automatically dropping") {
 		t.Errorf("body = %q, want no trim-attempted section when TrimAttempted is empty", body)
+	}
+}
+
+// TestBuildTooLargeNoticeBody_ManyOmittedPaths_ListIsBounded proves the
+// fix for the unbounded-comment-length gap: an excluded_paths glob that
+// matches hundreds of files (e.g. a whole vendor/ tree) must not grow the
+// notice body without limit — GitHub caps PR/issue comments at ~65536
+// characters, and a comment that fails to post never gets its idempotency
+// marker onto the PR, so the same failure would otherwise repeat forever.
+func TestBuildTooLargeNoticeBody_ManyOmittedPaths_ListIsBounded(t *testing.T) {
+	paths := make([]string, 500)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("vendor/pkg%d/file.go", i)
+	}
+	detail := DiffSizeDetail{MeasuredBytes: 600_000, MaxBytes: 500_000, OmittedPaths: paths}
+	body := buildTooLargeNoticeBody(detail, "sha1")
+
+	if len(body) > 10_000 {
+		t.Errorf("body length = %d, want well under GitHub's ~65536-char comment cap for %d omitted paths", len(body), len(paths))
+	}
+	if !strings.Contains(body, "and 480 more") {
+		t.Errorf("body = %q, want a truncation summary naming how many paths were omitted from the list", body)
+	}
+}
+
+// TestBuildTooLargeNoticeBody_ManyTrimAttemptedPaths_ListIsBounded is the
+// TrimAttempted analog of TestBuildTooLargeNoticeBody_ManyOmittedPaths_
+// ListIsBounded — a trim pass that drops many small files must not grow
+// the notice without limit either.
+func TestBuildTooLargeNoticeBody_ManyTrimAttemptedPaths_ListIsBounded(t *testing.T) {
+	paths := make([]string, 500)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("pkg/generated/file%d.go", i)
+	}
+	detail := DiffSizeDetail{MeasuredBytes: 600_000, MaxBytes: 500_000, TrimAttempted: paths}
+	body := buildTooLargeNoticeBody(detail, "sha1")
+
+	if len(body) > 10_000 {
+		t.Errorf("body length = %d, want well under GitHub's ~65536-char comment cap for %d trim-attempted paths", len(body), len(paths))
+	}
+	if !strings.Contains(body, "and 480 more") {
+		t.Errorf("body = %q, want a truncation summary naming how many trim-attempted paths were omitted from the list", body)
+	}
+}
+
+func TestBuildAllExcludedNoticeBody_NamesExcludedPaths(t *testing.T) {
+	body := buildAllExcludedNoticeBody([]string{"docs/readme.md", "docs/guide.md"})
+	if !strings.Contains(body, "excluded_paths") {
+		t.Errorf("body = %q, want it to mention excluded_paths", body)
+	}
+	if !strings.Contains(body, "docs/readme.md") || !strings.Contains(body, "docs/guide.md") {
+		t.Errorf("body = %q, want both excluded paths named", body)
+	}
+}
+
+func TestBuildAllExcludedNoticeBody_ManyPaths_ListIsBounded(t *testing.T) {
+	paths := make([]string, 500)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("docs/page%d.md", i)
+	}
+	body := buildAllExcludedNoticeBody(paths)
+	if len(body) > 10_000 {
+		t.Errorf("body length = %d, want well under GitHub's ~65536-char comment cap for %d excluded paths", len(body), len(paths))
 	}
 }

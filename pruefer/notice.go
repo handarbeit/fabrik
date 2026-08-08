@@ -50,6 +50,35 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), units[exp])
 }
 
+// noticePathListLimit caps how many paths any single path-list section of a
+// posted notice renders explicitly. OmittedPaths and TrimAttempted are, unlike
+// DominantPaths (already capped at dominantPathsLimit upstream), unbounded —
+// a diff whose excluded_paths glob matches a whole vendor/ or generated/ tree,
+// or whose trim pass drops many small files, could otherwise grow past
+// GitHub's ~65536-character PR/issue comment limit. A silently-failed
+// AddComment leaves no marker on the PR, so alreadyNoticedTooLarge never
+// finds it and the same failure repeats every poll — reproducing the exact
+// silent, repeated-failure mode this notice mechanism exists to close.
+const noticePathListLimit = 20
+
+// writePathList renders paths as a Markdown bullet list, truncated to
+// noticePathListLimit with a summary line for the remainder — see
+// noticePathListLimit.
+func writePathList(b *strings.Builder, paths []string) {
+	shown := paths
+	truncated := 0
+	if len(shown) > noticePathListLimit {
+		truncated = len(shown) - noticePathListLimit
+		shown = shown[:noticePathListLimit]
+	}
+	for _, p := range shown {
+		fmt.Fprintf(b, "- `%s`\n", p)
+	}
+	if truncated > 0 {
+		fmt.Fprintf(b, "- _(and %d more)_\n", truncated)
+	}
+}
+
 // buildTooLargeNoticeBody renders the PR comment posted when a diff cannot
 // be reviewed even after exclusion and FR-5's best-effort trim — FR-3's
 // "measured size, cap, dominant contributing paths" plus something an
@@ -62,16 +91,12 @@ func buildTooLargeNoticeBody(detail DiffSizeDetail, headSHA string) string {
 	fmt.Fprintf(&b, "Measured %s of diff against a %s cap (`max_diff_bytes`).\n\n", humanBytes(detail.MeasuredBytes), humanBytes(detail.MaxBytes))
 	if len(detail.OmittedPaths) > 0 {
 		b.WriteString("Already excluded via `excluded_paths` (not enough on its own):\n\n")
-		for _, p := range detail.OmittedPaths {
-			fmt.Fprintf(&b, "- `%s`\n", p)
-		}
+		writePathList(&b, detail.OmittedPaths)
 		b.WriteString("\n")
 	}
 	if len(detail.TrimAttempted) > 0 {
 		b.WriteString("Pruefer also tried automatically dropping the largest remaining file(s), but the rest was still over the cap:\n\n")
-		for _, p := range detail.TrimAttempted {
-			fmt.Fprintf(&b, "- `%s`\n", p)
-		}
+		writePathList(&b, detail.TrimAttempted)
 		b.WriteString("\n")
 	}
 	if len(detail.DominantPaths) > 0 {
@@ -84,5 +109,26 @@ func buildTooLargeNoticeBody(detail DiffSizeDetail, headSHA string) string {
 	b.WriteString("To get this PR reviewed, add the path(s) above to `excluded_paths`, or split the PR so the reviewable code isn't bundled with the oversized file(s).\n\n")
 	b.WriteString(diffTooLargeMarker(headSHA))
 	b.WriteString("\n")
+	return b.String()
+}
+
+// buildAllExcludedNoticeBody renders the acknowledgment comment posted when
+// a forced "/pruefer review" resolves to "every touched file matches
+// excluded_paths" — the one terminal outcome of a forced review that would
+// otherwise leave no human-readable comment behind (success, still-too-large,
+// and already-noticed-too-large all post one; see ReviewPR). Unlike the
+// too-large notice this carries no idempotency marker: it is only ever
+// posted in direct response to an unprocessed "/pruefer review" comment,
+// which ReviewPR marks processed in the same call, so it can never repeat
+// for the same command.
+func buildAllExcludedNoticeBody(excludedPaths []string) string {
+	var b strings.Builder
+	b.WriteString("**Pruefer could not review this pull request: every touched file matches `excluded_paths`.**\n\n")
+	if len(excludedPaths) > 0 {
+		b.WriteString("Excluded paths:\n\n")
+		writePathList(&b, excludedPaths)
+		b.WriteString("\n")
+	}
+	b.WriteString("Nothing left to review once exclusions are applied.\n")
 	return b.String()
 }

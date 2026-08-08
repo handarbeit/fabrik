@@ -245,7 +245,14 @@ func trimToFit(files []diffFile, preambleBytes, maxBytes int64) (kept, dropped [
 		total += f.Bytes
 	}
 	if total <= maxBytes {
-		return files, nil, len(files) > 0
+		// In practice ReviewPR only calls trimToFit after already confirming
+		// total > maxBytes with this same accounting, so this branch is
+		// unreachable from that caller — but fits is spelled out with the
+		// exact "total <= maxBytes && len(kept) > 0" formula the general
+		// path below uses (not just len(files) > 0), so a future caller that
+		// invokes trimToFit without that pre-check gets the same rule rather
+		// than a subtly different one.
+		return files, nil, total <= maxBytes && len(files) > 0
 	}
 
 	order := make([]int, len(files))

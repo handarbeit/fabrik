@@ -127,20 +127,13 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	preambleBytes := int64(len(preamble))
 
 	kept, excluded := filterExcludedPaths(files, cfg.ExcludedPaths)
-	if len(cfg.ExcludedPaths) > 0 && len(files) > 0 && len(kept) == 0 {
-		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
-		if forceReview {
-			// The forced re-check happened and every touched file is
-			// excluded — there's nothing to review. Mark the command
-			// processed so it isn't re-acknowledged and re-skipped forever;
-			// unlike the too-large path there's no notice to act as the
-			// durable "nothing to do here" signal, so this is the only one.
-			if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
-				logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
-			}
-		}
-		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
-	}
+	// allExcluded is checked AFTER the MaxDiffBytes measurement below, not
+	// returned immediately: an all-excluded diff whose preamble bytes alone
+	// (e.g. a malformed diff, or a C-quoted path per diffsplit.go's
+	// documented gap) already exceed the cap is still genuinely too large,
+	// and must go through the too-large notice path rather than silently
+	// resolving to SkipExcludedPath with no visible signal at all.
+	allExcluded := len(cfg.ExcludedPaths) > 0 && len(files) > 0 && len(kept) == 0
 
 	reviewFiles := kept
 	omittedPaths := pathsOf(excluded)
@@ -157,7 +150,13 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 				reviewFiles = trimmedKept
 				omittedPaths = append(omittedPaths, pathsOf(trimmedDropped)...)
 			} else {
-				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, kept, pathsOf(excluded), pathsOf(trimmedDropped))
+				// DominantPaths is computed from trimmedKept (the survivors
+				// of the trim attempt), not kept (the pre-trim set): when
+				// trimToFit gives up entirely, trimmedKept is empty and
+				// trimmedDropped is all of kept — using kept here would make
+				// DominantPaths list the exact same paths TrimAttempted just
+				// listed, duplicating them in the rendered notice.
+				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, trimmedKept, pathsOf(excluded), pathsOf(trimmedDropped))
 				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after exclusions, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, measured, cfg.MaxDiffBytes)
 				if noticeAlreadyExists {
 					// forceReview bypassed the pre-check above to get this
@@ -191,6 +190,26 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 				return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge, SizeDetail: &detail}
 			}
 		}
+	}
+
+	if allExcluded {
+		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
+		if forceReview {
+			// The forced re-check happened and every touched file is
+			// excluded — there's nothing to review. Post a human-readable
+			// acknowledgment: every other terminal outcome of a forced
+			// review (success, still-too-large, already-noticed) leaves a
+			// comment behind, and this was the one silent-to-a-human path
+			// left. Then mark the command processed so it isn't
+			// re-acknowledged and re-skipped forever.
+			if _, err := client.AddComment(owner, repo, pr.Number, buildAllExcludedNoticeBody(omittedPaths)); err != nil {
+				logf(pr.Number, "warn", "posting all-excluded notice on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+			}
+			if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
+				logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+			}
+		}
+		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
 	}
 
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)
