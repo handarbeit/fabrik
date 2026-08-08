@@ -762,7 +762,8 @@ FABRIK_USER=my-personal-username
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
-| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
+| `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
@@ -809,7 +810,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds | `30` |
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
-| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited) | `3` |
+| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
+| `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -1190,7 +1192,7 @@ Both engines drain the same `Queued` column and advance their members to **Done*
    ```
 3. **Enable the train**: `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml`.
 
-> **Startup requirement.** When `merge_train: on`, the `Queued` board column is **mandatory** — Fabrik fails startup if it is missing (the same board-validation that guards every non-cleanup stage). This is why the train is **off by default**: flipping it on globally would break startup on every board that has not yet added the column. Enable it per deployment only after step 1.
+> **Startup requirement.** Whenever a `holding_stage: true` stage (e.g. `Queued`) is configured in `.fabrik/stages/`, its board column is part of the required set, the same board-validation that guards every non-cleanup stage — but the *severity* of a missing column depends on `merge_train`'s value, because that's what determines whether the column is actually reachable. With `merge_train: on`, a missing `Queued` column **fails startup** — the column is live (the train writes to it) and an unvalidated board would strand merged, closed issues the moment the batch lands, the least recoverable point in the pipeline, since native dependency edges clear on *close*, not on *merge* (see #1082, ADR-1421). With `merge_train` off/unset — the default, and the state of every fresh `fabrik init`, since `init` extracts `queued.yaml` unconditionally regardless of whether you intend to use the train — a missing `Queued` column instead prints a **startup warning** naming the column and stating it must exist before `merge_train` can be enabled; Fabrik still boots. `merge_train` is a runtime-togglable setting that does not regenerate board columns, so add the column (step 1 above) before flipping it on, even though the warning alone won't stop you. The `Queued` column itself is **terminal-only**: it is never a valid column to move items into manually, and a Status of `Todo`/`Backlog`/null means Fabrik ignores the item entirely.
 
 **Batch tuning.** `--max-batch-size` (default 5) caps how many `Queued` items land in one batch, **per repo**. A red batch (a genuine cross-PR conflict — rare, since every member already passed Validate alone) is isolated by halving bisection, bounded by `--max-bisect-validations`; the poisoner is ejected and the survivors re-form. If the base branch moves under an in-flight batch (an external push), the trial is rebased and re-validated up to `--max-train-rebase-cycles` times before the batch dissolves back to `Queued`. See the flag reference above for all knobs.
 
@@ -1303,9 +1305,30 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A Claude account usage-limit exit (see the `fabrik:claude-limit` troubleshooting
      note above) is exempted from this count entirely — the stage never ran, so it
      never consumes a retry attempt
+   - A turn-cap preemption (the invocation ran out of turns and will resume on the
+     next dispatch) is likewise exempted — it counts against a separate slice
+     counter instead. See below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
+
+> **Troubleshooting: an issue is paused with a "slice budget exceeded" comment,
+> not a failure comment.** `--max-retries` bounds genuine failures only — errors,
+> degenerate output, PR-creation failures. A turn-cap preemption (the invocation
+> hit its per-stage turn budget and stopped; the session resumes on the next
+> dispatch) is not a failure and is bounded separately by `--max-slice-retries`
+> (default 10). A large job that legitimately needs several slices completes
+> without pausing as long as it stays within that limit; only a job that keeps
+> hitting the turn cap `--max-slice-retries` times in a row is paused. The pause
+> comment names the specific cause and never says "failed to complete" — no
+> `stage:<name>:failed` label is applied, since the stage has not failed. It
+> applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
+> `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
+> slices are needed) or split the issue into smaller pieces, then remove
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
+> reset the slice counter — it is already at the limit, so the very next
+> turn-cap exit re-pauses immediately unless the underlying job size or turn
+> budget actually changes. See #1199 and #1191.
 
 ### Stages Waiting for Input
 

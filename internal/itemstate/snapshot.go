@@ -36,6 +36,7 @@ type Snapshot struct {
 //   - ItemState.StageState.CIFixCycles
 //   - ItemState.StageState.RebaseCycles
 //   - ItemState.StageState.EnqueueCycles
+//   - ItemState.StageState.SliceRetries
 //   - ItemState.StageState.ProcessedComments
 //   - ItemState.StageState.LinkageHealAttempted
 //   - LinkedPRState.Reviews
@@ -223,6 +224,12 @@ func (s Snapshot) EnqueueCycles(stageName string) int {
 	return s.state.StageState.EnqueueCycles[stageName]
 }
 
+// SliceRetries returns the turn-cap preemption ("slice") count for a given
+// stage, or zero. Bounded independently of Attempts/MaxRetries (#1199).
+func (s Snapshot) SliceRetries(stageName string) int {
+	return s.state.StageState.SliceRetries[stageName]
+}
+
 // LastEnqueuedSHA returns the PR head SHA recorded at the last merge-queue enqueue,
 // or "" if not recorded (LinkedPR is nil or no enqueue has occurred).
 func (s Snapshot) LastEnqueuedSHA() string {
@@ -379,6 +386,7 @@ func copyStageState(s StageState) StageState {
 		CIFixCycles:          copyMap(s.CIFixCycles),
 		RebaseCycles:         copyMap(s.RebaseCycles),
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
+		SliceRetries:         copyMap(s.SliceRetries),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 		LastTurnsUsed:        copyMap(s.LastTurnsUsed),

@@ -393,9 +393,28 @@ func TestApplyStageRetryIncremented(t *testing.T) {
 func TestApplyStageRetryCleared(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	s.Apply(StageRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
+	s.Apply(SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
 	applyExpect(t, s, StageRetryCleared{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
 	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
 		t.Error("Attempts not cleared")
+	}
+	if getItem(t, s, testRepo, 1).StageState.SliceRetries["Implement"] != 0 {
+		t.Error("SliceRetries not cleared alongside Attempts")
+	}
+}
+
+// ---- SliceRetryIncremented ----
+
+func TestApplySliceRetryIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	if getItem(t, s, testRepo, 1).StageState.SliceRetries["Implement"] != 1 {
+		t.Error("SliceRetries not incremented to 1")
+	}
+	// SliceRetries is independent of Attempts — a turn-cap preemption must not
+	// also count against the failure counter (#1199).
+	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
+		t.Error("Attempts must not be touched by SliceRetryIncremented")
 	}
 }
 
@@ -618,6 +637,21 @@ func TestEngineCyclesClearedClearsEnqueueCycles(t *testing.T) {
 	}
 	if got := st.StageState.RebaseCycles["Validate"]; got != 0 {
 		t.Errorf("RebaseCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
+	}
+}
+
+// TestSliceRetriesSnapshotIsDeepCopy verifies that a Snapshot taken before a
+// later SliceRetryIncremented retains its original count — confirming
+// copyStageState deep-copies the SliceRetries map (no shared backing map).
+func TestSliceRetriesSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	if held.SliceRetries("Implement") != 1 {
+		t.Fatalf("precondition: held snapshot SliceRetries = %d, want 1", held.SliceRetries("Implement"))
+	}
+	s.Apply(SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
+	if held.SliceRetries("Implement") != 1 {
+		t.Errorf("held snapshot mutated by later increment: SliceRetries = %d, want 1", held.SliceRetries("Implement"))
 	}
 }
 

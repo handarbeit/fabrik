@@ -43,6 +43,7 @@ type Config struct {
 	PollSeconds               int
 	MaxConcurrent             int
 	MaxRetries                int
+	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
 	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
 	MaxReviewCycles           int    // 0 means use default (5)
 	CIWaitTimeout             int    // minutes; 0 means use default (30)
@@ -150,6 +151,7 @@ func Execute() error {
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
@@ -323,6 +325,9 @@ func Execute() error {
 				cfg.MaxRetries = *pc.MaxRetries
 			}
 		}
+	}
+	if !explicitFlags["max-slice-retries"] {
+		cfg.MaxSliceRetries = resolveInt(cfg.MaxSliceRetries, "FABRIK_MAX_SLICE_RETRIES", "", 10)
 	}
 	if !explicitFlags["review-wait-timeout"] {
 		cfg.ReviewWaitTimeout = resolveInt(cfg.ReviewWaitTimeout, "FABRIK_REVIEW_WAIT_TIMEOUT", "of minutes", 15)
@@ -700,6 +705,7 @@ func Execute() error {
 		} else {
 			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
 		}
+		fmt.Printf("  max-slice-retries: %d\n", maxSliceRetries(cfg.MaxSliceRetries))
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
@@ -741,6 +747,7 @@ func Execute() error {
 		PollSeconds:               cfg.PollSeconds,
 		MaxConcurrent:             cfg.MaxConcurrent,
 		MaxRetries:                cfg.MaxRetries,
+		MaxSliceRetries:           maxSliceRetries(cfg.MaxSliceRetries),
 		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
@@ -1007,6 +1014,18 @@ func maxCiFixCycles(n int) int {
 func maxRebaseCycles(n int) int {
 	if n <= 0 {
 		return 3
+	}
+	return n
+}
+
+// maxSliceRetries returns the configured MaxSliceRetries value, defaulting to
+// 10 when n is 0 (unset). The default is higher than max-retries because a
+// turn-cap preemption is a resumable time-slice, not a failure — a job
+// legitimately needing several slices is routine and must not be conflated
+// with a stage that keeps genuinely failing (#1199).
+func maxSliceRetries(n int) int {
+	if n <= 0 {
+		return 10
 	}
 	return n
 }

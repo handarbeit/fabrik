@@ -1536,25 +1536,48 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		// Escalation is decided before stall-hint arming (see below) so arming can be
 		// skipped on the attempt that triggers it.
-		willEscalate := false
-		if claudeRan && e.cfg.MaxRetries > 0 {
-			e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-			var count int
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
-				count = snap.Attempts(stage.Name)
+		//
+		// A turn-cap preemption (turnLimited) is routed to the SliceRetries counter
+		// instead of Attempts/MaxRetries: the CLI's own structural signal (subtype
+		// error_max_turns) says the session ended by running out of turns, not by
+		// failing — it is a resumable time-slice of a job that is still progressing,
+		// and must not count toward "this keeps breaking, stop." A non-turn-limited
+		// outcome (genuine error, or a clean run that never emitted
+		// FABRIK_STAGE_COMPLETE) has no equivalent structural signal distinguishing
+		// it from a failure, so both continue to count against Attempts/MaxRetries
+		// exactly as before (#1199).
+		willEscalateFailure := false
+		willEscalateSlice := false
+		var sliceCount int
+		if claudeRan {
+			if turnLimited {
+				if e.cfg.MaxSliceRetries > 0 {
+					e.store.Apply(itemstate.SliceRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+						sliceCount = snap.SliceRetries(stage.Name)
+					}
+					willEscalateSlice = sliceCount >= e.cfg.MaxSliceRetries
+				}
+			} else if e.cfg.MaxRetries > 0 {
+				e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+				var count int
+				if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+					count = snap.Attempts(stage.Name)
+				}
+				if degenerateReason != "" && count == 1 && count < e.cfg.MaxRetries {
+					// Surface the problem immediately on first detection rather than staying
+					// silent until MaxRetries is hit — matches the existing empty-output
+					// warning's visibility level.
+					warnComment := fmt.Sprintf(
+						"🏭 **Fabrik — degenerate stage output**\n\nStage **%s** produced output that was just a bare file reference (`%s`) instead of real content, likely because the model wrote its output to a file and returned a dangling reference. The comment was not posted and the stage did not advance; it will be retried.",
+						stage.Name, degenerateReason,
+					)
+					e.postItemComment(item, warnComment, true)
+				}
+				willEscalateFailure = count >= e.cfg.MaxRetries
 			}
-			if degenerateReason != "" && count == 1 && count < e.cfg.MaxRetries {
-				// Surface the problem immediately on first detection rather than staying
-				// silent until MaxRetries is hit — matches the existing empty-output
-				// warning's visibility level.
-				warnComment := fmt.Sprintf(
-					"🏭 **Fabrik — degenerate stage output**\n\nStage **%s** produced output that was just a bare file reference (`%s`) instead of real content, likely because the model wrote its output to a file and returned a dangling reference. The comment was not posted and the stage did not advance; it will be retried.",
-					stage.Name, degenerateReason,
-				)
-				e.postItemComment(item, warnComment, true)
-			}
-			willEscalate = count >= e.cfg.MaxRetries
 		}
+		willEscalate := willEscalateFailure || willEscalateSlice
 		// Stall detection/recording is independent of MaxRetries: max_retries: 0 is a
 		// first-class "unlimited retries" config, not an edge case, and is exactly the
 		// setting where a stalled stage would otherwise grind identical retries forever
@@ -1587,8 +1610,11 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		if claudeRan && !willEscalate {
 			e.detectAndArmStallHint(item, stage, repoStr, usage, err == nil || turnLimited)
 		}
-		if willEscalate {
+		if willEscalateFailure {
 			e.escalateFailedStage(item, stage, degenerateReason)
+			releaseLock() // permanently giving up — release the lock
+		} else if willEscalateSlice {
+			e.pauseForSliceLimit(item, stage, sliceCount, e.cfg.MaxSliceRetries)
 			releaseLock() // permanently giving up — release the lock
 		}
 	}
@@ -1733,9 +1759,57 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, r
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
+// pauseForSliceLimit pauses the issue when a stage has hit its turn cap
+// (subtype error_max_turns) too many times in a row — the job is not failing,
+// it is simply larger than its per-invocation slice budget allows within
+// MaxSliceRetries resumptions. Modeled directly on pauseForRebaseCycleLimit:
+// a distinct, independently-bounded counter with its own non-failure message,
+// fabrik:paused + fabrik:awaiting-input, and deliberately no stage:<name>:failed
+// label — the stage has not failed (#1199).
+//
+// Unlike pauseForRebaseCycleLimit, this DOES apply itemstate.EnginePaused. The
+// rebase-cycle counter has an independent path back to progress: a human fixes
+// the underlying conflict directly, which changes settle.Status and lets the
+// poll loop advance without ever re-checking RebaseCycles. SliceRetries has no
+// such independent signal — the job simply needs more slices than the budget
+// allowed, and there is nothing to "fix" except widening the budget or
+// resetting the counter. Without EnginePaused, processItem's unpause guard
+// (wasPaused || hasFailedLabel, both false for this pause) never fires
+// clearFailedStage, SliceRetries never resets, and the documented "remove
+// fabrik:paused to resume" recovery is a no-op: the very next dispatch takes
+// exactly one more slice, re-hits a counter already at MaxSliceRetries, and
+// re-pauses immediately. Applying EnginePaused makes wasPaused true on the
+// next pass, so clearFailedStage's StageRetryCleared genuinely resets
+// SliceRetries — clearFailedStage's stage:<name>:failed removal is a
+// harmless no-op here since that label was never applied (#1199 review).
+func (e *Engine) pauseForSliceLimit(item gh.ProjectItem, stage *stages.Stage, sliceCount, maxSliceRetries int) {
+	e.logf(item.Number, "slice-limit", "slice limit %d reached for stage %q — pausing (not a failure)\n", maxSliceRetries, stage.Name)
+
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — slice budget exceeded**\n\nStage **%s** has hit its turn cap %d time(s), which has reached the configured limit of %d "+
+			"(override with `--max-slice-retries` or `FABRIK_MAX_SLICE_RETRIES`).\n\n"+
+			"This is not a failure — each turn-cap exit resumes from where it left off, and the cost/turns-used trend rising across "+
+			"slices is exactly what accumulating progress looks like. The work is simply larger than its per-invocation turn budget "+
+			"allows within this many resumptions.\n\n"+
+			"Fabrik has paused this issue. To continue: add `fabrik:extend-turns` to grant larger per-invocation slices, or split the "+
+			"issue into smaller pieces, then remove the `fabrik:paused` and `fabrik:awaiting-input` labels to resume.",
+		stage.Name, sliceCount, maxSliceRetries,
+	)
+	e.pauseIssue(item, comment, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+}
+
 // clearFailedStage is called when the user removes fabrik:paused from an issue
-// that was paused by the engine due to max retries. It removes the stage:<name>:failed
-// label and resets the retry count so the stage can be attempted again.
+// that was paused by the engine — either due to max retries (stage:<name>:failed
+// present) or a turn-cap slice budget exceeded (no failed label, only
+// PausedByEngine set by pauseForSliceLimit; #1199). It removes the
+// stage:<name>:failed label (a harmless no-op when it was never applied) and
+// resets both the failure and slice counters so the stage can be attempted again.
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
 
