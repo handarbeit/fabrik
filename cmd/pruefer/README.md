@@ -109,7 +109,7 @@ The TUI is purely observational — it never changes which PRs get reviewed, whe
 
 ## Logging
 
-Pruefer writes every daemon log line — poll cycles, review outcomes, warnings, auth events — to a timestamped, mutex-serialized log file at `.pruefer/pruefer.log` by default, so an incident is diagnosable from the daemon's own durable record instead of requiring reconstruction from the GitHub API. Set `log_file` (or `--log-file` / `PRUEFER_LOG_FILE`) to write elsewhere, or to an empty value to disable file logging entirely and fall back to stderr-only, matching Pruefer's behavior before this feature existed.
+Pruefer writes every daemon log line — poll cycles, review outcomes, warnings, auth events — to a timestamped, mutex-serialized log file at `.pruefer/pruefer.log` by default, so an incident is diagnosable from the daemon's own durable record instead of requiring reconstruction from the GitHub API. Set `log_file` (or `--log-file` / `PRUEFER_LOG_FILE`) to write elsewhere, or to an empty value to disable file logging entirely.
 
 Each line looks like:
 
@@ -117,8 +117,8 @@ Each line looks like:
 2026-08-08T18:12:03Z [pr#103 warn] listing open PRs for verveguy/zusammen: context deadline exceeded — skipping this repo this cycle
 ```
 
-- **With the TUI running** (the default on a real terminal), stderr output would corrupt the bubbletea display, so the log file is the sole destination.
-- **In plain daemon mode** (`-notui`, or no TTY attached), logging is additive: every line is written to both stderr and the log file, so an operator watching the terminal keeps seeing exactly what they see today.
+- **With the TUI running** (the default on a real terminal), stderr output would corrupt the bubbletea display, so the log file is the sole destination. If `log_file` is disabled (or the log file can't be opened) while the TUI is running, log lines are discarded rather than written raw to stderr — the same corruption concern, just with no file to fall back to.
+- **In plain daemon mode** (`-notui`, or no TTY attached), logging is additive: every line is written to both stderr and the log file, so an operator watching the terminal keeps seeing exactly what they see today. With `log_file` disabled in plain mode, output stays on stderr only, matching Pruefer's behavior before this feature existed.
 
 The log file is append-only across restarts — it is never truncated on daemon startup, unlike Fabrik engine's own `fabrik.log` — so a restart doesn't erase the history an incident investigation needs. Growth is bounded by size-triggered rotation: once the file reaches 10 MB it's renamed to `pruefer.log.1` (existing numbered backups shift up, `pruefer.log.3` is dropped), and a fresh file is opened. Up to 3 rotated backups are retained.
 

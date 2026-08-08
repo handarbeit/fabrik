@@ -86,6 +86,68 @@ func TestNewDaemon_EmptyLogFileDisablesFileLogging(t *testing.T) {
 	}
 }
 
+func TestWireLogf_EmptyLogFileWithTUIDiscardsInsteadOfNil(t *testing.T) {
+	resetLogf(t)
+	Logf = nil
+
+	// tui=true is passed directly (rather than exercised via NewDaemon's own
+	// useTUI(cfg) call) because useTUI requires a real terminal, which a
+	// unit test doesn't have.
+	closeLog := wireLogf(Config{LogFile: ""}, true)
+	defer closeLog()
+
+	if Logf == nil {
+		t.Fatal("wireLogf(LogFile=\"\", tui=true) left Logf nil; want a discard function assigned so log.go's raw stderr fallback never corrupts the TUI")
+	}
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	Logf(103, "warn", "diff fetch failed: %v\n", "boom")
+
+	w.Close()
+	os.Stderr = origStderr
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	if n != 0 {
+		t.Errorf("expected no stderr output from the discard Logf in TUI mode, got %q", string(buf[:n]))
+	}
+}
+
+func TestWireLogf_LogFileOpenFailureWithTUIDiscardsInsteadOfNil(t *testing.T) {
+	resetLogf(t)
+	Logf = nil
+
+	// A path with a NUL byte is guaranteed to fail os.OpenFile on every
+	// platform, forcing newFileLogger's error branch without relying on
+	// filesystem permissions (which behave inconsistently across CI
+	// environments, e.g. root-owned runners bypassing 0000 dirs).
+	badPath := "bad\x00path.log"
+	closeLog := wireLogf(Config{LogFile: badPath}, true)
+	defer closeLog()
+
+	if Logf == nil {
+		t.Fatal("wireLogf with an unopenable LogFile and tui=true left Logf nil; want a discard function assigned so log.go's raw stderr fallback never corrupts the TUI")
+	}
+}
+
+func TestWireLogf_EmptyLogFileWithoutTUILeavesLogfNil(t *testing.T) {
+	resetLogf(t)
+	Logf = nil
+
+	closeLog := wireLogf(Config{LogFile: ""}, false)
+	defer closeLog()
+
+	if Logf != nil {
+		t.Error("wireLogf(LogFile=\"\", tui=false) assigned Logf; want it left nil (plain mode keeps the existing stderr-fallback behavior)")
+	}
+}
+
 func TestLogf_FallsBackToStderrWhenLogfIsNil(t *testing.T) {
 	// No Daemon/NewDaemon involved at all — this is AC5's "package used
 	// without a Daemon" scenario. Logf must be nil for this test to be

@@ -85,8 +85,13 @@ func (d *Daemon) emit(ev ptui.Event) {
 // logging is additive — lines are teed to both stderr and the file (R5).
 //
 // A log-file open failure is non-fatal: it's logged as a warning to stderr
-// and Logf is left nil (falling back to stderr for every line), mirroring
-// engine/poll.go's own non-fatal fabrik.log open-failure handling.
+// and, outside TUI mode, Logf is left nil (falling back to stderr for every
+// line), mirroring engine/poll.go's own non-fatal fabrik.log open-failure
+// handling. In TUI mode, an open failure or an explicitly empty cfg.LogFile
+// both leave nothing routing pruefer/log.go's raw fmt.Fprintf(os.Stderr, ...)
+// fallback out of the way of the bubbletea display, so Logf is instead
+// assigned a discard function — the same corruption R5 wires the file-only
+// path to avoid, just for the case where there is no file to write to.
 func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker, clone CloneFunc, botLogin string) (*Daemon, func() error) {
 	d := &Daemon{
 		Clients:  clients,
@@ -96,11 +101,27 @@ func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker
 		BotLogin: botLogin,
 	}
 
+	return d, wireLogf(cfg, useTUI(cfg))
+}
+
+// wireLogf assigns the package-level Logf hook according to cfg.LogFile and
+// tui (the caller's already-computed useTUI(cfg) result — split out as a
+// parameter purely so this decision table is unit-testable without a real
+// terminal, which useTUI itself requires). Returns the close function
+// NewDaemon should defer.
+func wireLogf(cfg Config, tui bool) func() error {
+	discardLog := func(int, string, string, ...any) {}
 	closeLog := func() error { return nil }
-	if cfg.LogFile != "" {
-		fl, err := newFileLogger(cfg.LogFile, logRotateMaxBytes, logRotateBackups, !useTUI(cfg))
+
+	switch {
+	case cfg.LogFile != "":
+		fl, err := newFileLogger(cfg.LogFile, logRotateMaxBytes, logRotateBackups, !tui)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pruefer: could not open log file %s: %v (falling back to stderr)\n", cfg.LogFile, err)
+			if tui {
+				Logf = discardLog
+				closeLog = func() error { Logf = nil; return nil }
+			}
 		} else {
 			Logf = fl.Logf
 			closeLog = func() error {
@@ -108,9 +129,13 @@ func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker
 				return fl.Close()
 			}
 		}
+	case tui:
+		// File logging explicitly disabled (log_file "") but TUI is active.
+		Logf = discardLog
+		closeLog = func() error { Logf = nil; return nil }
 	}
 
-	return d, closeLog
+	return closeLog
 }
 
 func (d *Daemon) lockPath() string {

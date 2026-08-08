@@ -49,7 +49,9 @@ func newFileLogger(path string, maxBytes int64, backups int, tee bool) (*fileLog
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		if cerr := f.Close(); cerr != nil {
+			return nil, fmt.Errorf("stat log file %s: %w (also failed to close: %v)", path, err, cerr)
+		}
 		return nil, fmt.Errorf("stat log file %s: %w", path, err)
 	}
 	return &fileLogger{
