@@ -126,14 +126,87 @@ introducing a new stderr-capture pattern this test file doesn't otherwise use, a
   required columns (never fewer), so `merge_train: on` startup behavior is unaffected by construction.
 
 **Negative / Trade-offs:**
-- An install that has added a `holding_stage: true` entry to `.fabrik/stages/` (e.g. by copying
-  `queued.yaml`) but has not yet added the matching board column will now fail startup even with
-  `merge_train` off — previously this booted clean. This is the intended behavior change (R1/R2 of the
-  issue), not a regression: such an install was always one config flip away from silent stranding, and
-  boot time is the only moment this is cheap to fix.
 - The returned `error`'s message is now considerably longer (a multi-line report rather than a one-line
   sentinel). This is deliberate per R3, but any caller that logs `err.Error()` inline (rather than
   treating it as an opaque failure signal) will see a larger message than before.
+- See the Addendum below: the original text of this bullet claimed a missing holding-stage column would
+  fail startup even with `merge_train` off. That was corrected before merge — see Addendum for why, and
+  for the actual (severity-split) behavior.
+
+## Addendum (2026-08-08): Severity Is Keyed to Reachability, Not to Configuration
+
+The initial cut of this fix (described above) removed the `merge_train`-conditional exemption entirely,
+making a missing holding-stage column **fatal unconditionally**, whenever the stage is configured — matching
+every other non-cleanup, non-unmanaged stage. PR review caught that this breaks a large class of installs
+that were working correctly before this change, and this addendum documents the correction, made in the same
+PR before merge.
+
+### The breaking case
+
+Three facts compose:
+
+1. `fabrik init` (`cmd/init.go`) extracts **every** embedded default stage unconditionally — including
+   `queued.yaml` — with no prompt and no `merge_train` conditional. This has been true independent of this
+   issue; it did not change here.
+2. `merge_train` defaults to **off** (`mergeTrainMode` in `cmd/root.go` normalizes an unset value to `"off"`).
+3. The initial cut of this fix made a configured holding stage's column fatal-if-missing unconditionally.
+
+Composing these: any operator who ran `fabrik init`, left `merge_train` at its default, and never created a
+`Queued` column — the default onboarding path, not an edge case — would hard-fail at startup after upgrading
+to this fix. The column is one they had no reason to create: nothing in their configuration could reach it
+(per ADR-1072, `advanceToQueued` is the only write path and it is itself gated on `merge_train: on`). Under
+`--auto-upgrade`, this converts a working, unattended daemon into a non-booting one with no operator present
+to notice.
+
+The mitigation that would have made this safe — `fabrik init` surfacing which board columns it requires
+before the operator finishes setup (#1359) — is milestoned separately and does not ship in the same release
+as this fix.
+
+### The correction: split severity from membership
+
+The holding-stage column remains part of the **required set** whenever the stage is configured — R1's
+"membership is derived from reachability, not from `merge_train` mode" still holds as a description of what's
+*required*. What changes is that **severity**, not membership, is what's actually keyed to reachability:
+
+- **`merge_train: on`** → a missing holding-stage column is **fatal**, exactly as the initial cut of this fix
+  implemented. The column is live (the only write path is armed) and the stranding risk described in the main
+  body of this ADR is real and immediate.
+- **`merge_train` off/unset** → a missing holding-stage column is **not fatal**. Fabrik boots and emits a
+  startup warning instead, naming the column, stating its terminal-only role (R4, unchanged), and stating
+  that it must exist before `merge_train` can be enabled.
+
+This preserves the entire safety argument the main body of this ADR makes: the risk being guarded against is
+"an operator flips `merge_train` on against a board that was never validated for it," and a warning emitted
+on every startup while off reaches that operator before they can do that — it does not require them to have
+already read the warning to be protected, since flipping the flag on is exactly the transition that converts
+the warning into the fatal check. Nothing about the stranding-prevention goal is weakened; what's removed is
+treating "the stage is configured" as sufficient justification for failing startup on its own, when the
+thing that actually determines whether the column can strand anything is whether the write path is armed.
+
+This is also the same severity model `checkStageColumnAlignment` already uses elsewhere in the function:
+a required-but-missing non-cleanup, non-unmanaged column is fatal; an extra column with no matching stage is
+a warning. A column that is required (by configuration) but not currently reachable (by mode) is a third,
+now-explicit case, and warn is its natural severity — it was previously conflated with the fatal case by
+the initial cut of this fix.
+
+### Does `fabrik upgrade` or `refresh-stages` also introduce `queued.yaml` into installs that never had it?
+
+No, confirmed by reading both:
+
+- `cmd/refresh_stages.go` (`refreshStagesWithReader`) only reads `entries, err := os.ReadDir(stagesDir)` —
+  it iterates **existing** files in `.fabrik/stages/` and matches each by its own `name:` field against the
+  embedded defaults (`idx, ok := defaultsByName[name]; if !ok { continue }` — an unmatched name is silently
+  skipped as a custom stage). It only ever adds missing top-level *keys* to a file that already exists by
+  that name; it never creates a new stage file. An install that never had `queued.yaml` cannot acquire one
+  via `refresh-stages`.
+- `cmd/upgrade.go` does not touch `.fabrik/stages/` at all — its only mention of stages is a printed
+  suggestion to run `fabrik refresh-stages --apply` manually.
+
+So the only path that introduces a holding stage into an install's configuration is `fabrik init` writing
+`queued.yaml` on first bootstrap (or `--force` re-extraction) — which is universal, since every install must
+run `init` at least once. This is why the breaking case above is the default onboarding path, not a narrow
+edge case, and why the severity split (rather than some upgrade-path-specific guard) is the correct fix: it
+has to hold for every install, because every install is affected by the same `fabrik init` behavior.
 
 ## Related Work
 

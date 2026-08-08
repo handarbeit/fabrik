@@ -67,20 +67,11 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	// Unmanaged stages (e.g. Backlog) are always excluded — they're parking
 	// columns Fabrik recognizes but never requires a matching board column for,
 	// regardless of merge_train.
-	// Holding stages (e.g. Queued) ARE required whenever configured, independent
-	// of the current merge_train mode. Membership in this set reflects
-	// reachability, not the mode flag's value at this particular startup:
-	// merge_train is an operator-togglable runtime setting that can flip from
-	// off to on across a restart without ever regenerating board columns, so a
-	// board validated while off can strand work the instant it's turned on (see
-	// #1082/#1421 and ADR-1421). This holds even though, per ADR-1072, the
-	// holding column is provably unreachable through any code path TODAY when
-	// merge_train is off (stages.NextStage unconditionally skips HoldingStage,
-	// so the only entry point is advanceToQueued, itself gated on
-	// merge_train: on) — that reachability finding is not license to exempt the
-	// column here; it only explains why the exemption existed. Every other
-	// non-cleanup, non-unmanaged stage is required unconditionally too, so this
-	// keeps holding stages on the same posture rather than a special case.
+	// Holding stages (e.g. Queued) are part of the required set whenever
+	// configured, independent of the current merge_train mode — but their
+	// SEVERITY when missing is keyed to reachability, not membership. See the
+	// fatal/deferred split below, where this is applied. Every other
+	// non-cleanup, non-unmanaged stage is required and fatal unconditionally.
 	var checkStages []*stageNameOrder
 	for _, s := range e.cfg.Stages {
 		if s.CleanupWorktree {
@@ -102,6 +93,32 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		if _, ok := sf.Options[s.name]; !ok {
 			missing = append(missing, s)
 		}
+	}
+
+	// Split missing stages by severity, not by membership in the required set.
+	// A holding stage's column is required whenever the stage is configured
+	// (R1) — but a missing one is fatal only when merge_train: on, the only
+	// mode with a live code path that writes to it (advanceToQueued, gated at
+	// its sole call site; stages.NextStage unconditionally skips HoldingStage
+	// per ADR-1072, so no other path can reach it). When merge_train is
+	// off/unset the column is unreachable *today*, but the flag is an
+	// operator-togglable runtime setting that never regenerates board
+	// columns — a later `--merge-train on` restart would strand work against
+	// an unvalidated board. So a missing holding column while off is not
+	// silently ignored (that was the original bug, #1082) and not fatal
+	// either (that was this fix's first cut, and it broke fresh installs:
+	// `fabrik init` extracts every embedded default stage — including
+	// queued.yaml — unconditionally, regardless of merge_train, so every
+	// non-merge-train install acquires a holding stage it never asked for and
+	// has no reason to have created a board column for). It is deferred to a
+	// startup warning instead. See ADR-1421 addendum.
+	var fatalMissing, deferredMissing []*stageNameOrder
+	for _, s := range missing {
+		if s.holdingStage && e.cfg.MergeTrain != "on" {
+			deferredMissing = append(deferredMissing, s)
+			continue
+		}
+		fatalMissing = append(fatalMissing, s)
 	}
 
 	// Find extra board columns: columns that no configured stage backs and that
@@ -158,7 +175,22 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		}
 	}
 
-	if len(missing) == 0 {
+	if len(fatalMissing) == 0 {
+		// Only deferred (holding-stage, merge_train off/unset) misses remain,
+		// if any. Not fatal — surfaced as a startup warning instead, so an
+		// install that has never touched merge_train (e.g. every fresh
+		// `fabrik init`, which extracts queued.yaml unconditionally) keeps
+		// booting, while an operator who is about to flip merge_train on
+		// gets advance notice that the board isn't ready for it.
+		for _, s := range deferredMissing {
+			e.logf(0, "startup", "warning: holding stage %q has no matching board column. "+
+				"Not required to boot while merge_train is off, but its column serves a "+
+				"terminal-only landing role for the merge train — never a column to move "+
+				"items into manually — and must exist on the board before enabling "+
+				"merge_train: on. Add a %q column to your GitHub Project board before "+
+				"flipping merge_train on. See docs/state-machine.md for setup steps.\n",
+				s.name, s.name)
+		}
 		return nil
 	}
 
@@ -171,7 +203,11 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 
 	// Build a unified, per-required-stage present/missing report — R3 asks for
 	// "every required option and which are present," not just the first
-	// missing one. checkStages is already sorted by Order.
+	// missing one. checkStages is already sorted by Order. This report always
+	// shows every configured stage's actual present/missing state, including
+	// any deferred-severity holding stage, even though it isn't itself the
+	// reason startup is failing this time — the report answers "which columns
+	// does my board have," not just "which column caused the failure."
 	var report strings.Builder
 	fmt.Fprintf(&report, "Fabrik startup check failed: stage/board column mismatch\n\n")
 	fmt.Fprintf(&report, "Required Status options (derived from configured non-cleanup, non-unmanaged stages):\n")

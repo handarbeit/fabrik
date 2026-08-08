@@ -614,19 +614,67 @@ func TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOn(t *testi
 	}
 }
 
-// TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOff verifies
-// that a missing Queued column is a fatal error even when merge_train is off
-// (default) — this is the exact configuration #1082 reported, and it must not
-// boot clean. Reverting the fix (restoring the
-// `HoldingStage && MergeTrain != "on"` exemption in checkStageColumnAlignment)
-// turns this test red (Acceptance #1/#2).
-func TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOff(t *testing.T) {
+// TestCheckStageColumnAlignment_HoldingStageMissingMergeTrainOffWarnsButBoots
+// verifies that a missing Queued column does NOT fail startup when
+// merge_train is off/unset (default) — instead Fabrik boots and emits a
+// startup warning naming the column and stating it must exist before
+// merge_train can be enabled. This is the exact configuration produced by
+// `fabrik init` (which extracts every embedded default stage, including
+// queued.yaml, unconditionally) plus the default config — the majority of
+// installs, not just ones that never intend to use the merge train — and it
+// must not fail startup (per the severity-split correction to R2: fatal
+// severity is keyed to reachability — merge_train: on — not to whether the
+// stage is configured). Restoring an unconditional hard-fail (treating a
+// missing holding-stage column as fatal regardless of merge_train's value)
+// turns this test red.
+func TestCheckStageColumnAlignment_HoldingStageMissingMergeTrainOffWarnsButBoots(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
-		// Board does NOT have a Queued column — this must now fail startup
-		// even though merge_train is off, since merge_train is a runtime
-		// toggle that doesn't regenerate board columns.
+		// Board does NOT have a Queued column — this must not fail startup
+		// while merge_train is off, since the column is unreachable by any
+		// code path today (ADR-1072) and `fabrik init` writes queued.yaml
+		// unconditionally, regardless of merge_train.
 		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	events := make(chan tui.Event, 16)
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	e.events = events
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("missing Queued column should not fail startup when merge_train: off, got: %v", err)
+	}
+	msgs := drainLogMessages(events)
+	if !anyContains(msgs, `"Queued"`) {
+		t.Errorf("expected a startup warning naming the missing Queued column, got: %v", msgs)
+	}
+	if !anyContains(msgs, "before enabling") {
+		t.Errorf("expected the warning to state the column is required before enabling merge_train, got: %v", msgs)
+	}
+}
+
+// TestCheckStageColumnAlignment_NonHoldingStageStillFatalWhenMergeTrainOff
+// verifies the severity split is scoped to holding stages only: a missing
+// non-holding, non-cleanup, non-unmanaged column (e.g. Plan) remains fatal
+// regardless of merge_train's value, exactly as before this issue.
+func TestCheckStageColumnAlignment_NonHoldingStageStillFatalWhenMergeTrainOff(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Plan is missing (non-holding) — fatal regardless of merge_train.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Implement", "Validate", "Queued"),
 	}
 	e := NewWithDeps(
 		Config{
@@ -645,7 +693,7 @@ func TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOff(t *test
 	)
 	err := e.checkStageColumnAlignment(context.Background())
 	if err == nil {
-		t.Fatal("expected error for missing Queued column even when merge_train: off, got nil")
+		t.Fatal("expected error for missing Plan column, got nil")
 	}
 	if !strings.Contains(err.Error(), "mismatch") {
 		t.Errorf("error should mention mismatch, got: %v", err)
@@ -755,6 +803,14 @@ func TestCheckStageColumnAlignment_ErrorListsEveryRequiredStage(t *testing.T) {
 // TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole verifies
 // that a missing holding-stage column's error text states its terminal-only
 // role and does not attribute the requirement to merge_train mode (R4).
+// TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole verifies
+// that a missing holding-stage column's FATAL error text states its
+// terminal-only role and does not attribute the requirement to merge_train
+// mode (R4). Uses merge_train: on, the only mode in which a missing Queued
+// column is fatal by itself under the severity split — the off/unset case is
+// covered by TestCheckStageColumnAlignment_HoldingStageMissingMergeTrainOffWarnsButBoots
+// below, which asserts the same R4 disambiguation appears in the deferred
+// warning text instead.
 func TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
@@ -769,7 +825,7 @@ func TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole(t *testi
 			Token:         "token",
 			MaxConcurrent: 5,
 			Stages:        testStagesWithQueued(),
-			MergeTrain:    "off",
+			MergeTrain:    "on",
 		},
 		client,
 		&mockClaudeInvoker{},
@@ -788,6 +844,46 @@ func TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole(t *testi
 	}
 	if strings.Contains(msg, "required by merge_train: on") {
 		t.Errorf("error should not attribute the requirement to merge_train mode, got: %v", msg)
+	}
+}
+
+// TestCheckStageColumnAlignment_DeferredWarningStatesHoldingColumnTerminalRole
+// verifies that the R4 disambiguation (terminal-only role, never a manual
+// intake target) also appears in the deferred WARNING text emitted when
+// merge_train is off/unset and the holding column is missing — not just in
+// the fatal error text covered above.
+func TestCheckStageColumnAlignment_DeferredWarningStatesHoldingColumnTerminalRole(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	events := make(chan tui.Event, 16)
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	e.events = events
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error (deferred, not fatal), got: %v", err)
+	}
+	msgs := drainLogMessages(events)
+	if !anyContains(msgs, "terminal-only") {
+		t.Errorf("warning should state the holding column's terminal-only role, got: %v", msgs)
+	}
+	if !anyContains(msgs, "never a column to move") {
+		t.Errorf("warning should disambiguate that the column is not a valid intake target, got: %v", msgs)
 	}
 }
 
