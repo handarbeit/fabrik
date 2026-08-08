@@ -460,6 +460,8 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			}
 			maxCycles := e.cfg.MaxCiFixCycles
 			if cycleCount >= maxCycles {
+				// escalated return value intentionally discarded — same reasoning as
+				// the identical call in handleMergeAndCIGates (catch_up_handlers.go).
 				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
 			} else {
 				e.logf(item.Number, "auto-merge", "PR #%d ejected with failing CI — dispatching ci-fix reinvoke\n", pr.Number)
