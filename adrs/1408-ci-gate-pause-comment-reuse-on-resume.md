@@ -147,10 +147,14 @@ new one. `hasCIGatePauseComment`'s matching logic itself is unchanged by this is
 
 ### R5 — `pauseForCIFixCycleLimit` gets the identical fix
 
-Unlike `pauseForCITimeout`, `pauseForCIFixCycleLimit`'s only call site
-(`handleMergeAndCIGates`'s cycle-limit callback) is always reached after a live `ciFailure`
-classification — there is no pre-live-check caller to gate, so it needs no caller-side change,
-only the identical internal reapply-without-repost fix.
+Unlike `pauseForCITimeout`, `pauseForCIFixCycleLimit` has two call sites — `handleMergeAndCIGates`'s
+cycle-limit callback (`engine/catch_up_handlers.go`) and `checkAutoMergeConvergence`'s queue-repo
+ejection-recovery path on `PRMergeBlocked` (`engine/merge_gate.go:465`) — and both are always reached
+only after a live CI classification this poll (`ciFailure` in the first case, `settle.Status ==
+PRMergeBlocked` in the second). Neither is a pre-live-check caller, so neither needs a caller-side
+change; the identical internal reapply-without-repost fix covers both. `autoMergeConvergence` and
+`mergeAndCIGates` are mutually-exclusive handlers in `catchUpPhase1Handlers`, so the two call sites
+can't double-fire for the same item in the same poll.
 
 The strand is independently reachable, not hypothetical: `clearFailedStage()` only resets
 `CIFixCycles` when `stage:<X>:failed` is present or `snap.PausedByEngine(stageName)` is true — a
@@ -159,12 +163,14 @@ CI-fix-cycle-limit pause sets neither (`pauseIssue` never applies `itemstate.Eng
 *before* `CIWaitTimeout` has separately elapsed lands back at `cycleCount >= maxCycles` with the old
 comment already present — hitting this exact defect shape independent of the backstop entirely.
 
-### Why `handleMergeAndCIGates` needed no changes
+### Why no caller needed changes
 
-Both of its calls into the pause functions (`ciTimedOut` branch, cycle-limit-reached callback) are
+`handleMergeAndCIGates`'s two calls into the pause functions (`ciTimedOut` branch, cycle-limit-reached
+callback) and `checkAutoMergeConvergence`'s single call (`PRMergeBlocked` cycle-limit branch) are all
 unconditional statements that ignore the return value. They already do the right thing — post fresh
 on a genuine new episode, reapply-without-repost on a resumed one — purely because the functions they
-call now do the right thing internally. No caller-side branching was needed or added.
+call now do the right thing internally. No caller-side branching was needed or added at any of the
+three sites.
 
 ## Consequences
 
