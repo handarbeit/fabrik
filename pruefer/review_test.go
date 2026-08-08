@@ -16,16 +16,19 @@ import (
 type fakeReviewer struct {
 	*fakeCommenter
 
-	diff       string
-	diffErr    error
-	reviews    []gh.PRReview
-	reviewsErr error
-	submitErr  error
-	token      string
+	diff        string
+	diffErr     error
+	filesResult []string
+	filesErr    error
+	reviews     []gh.PRReview
+	reviewsErr  error
+	submitErr   error
+	token       string
 
 	mu          sync.Mutex
 	submitCalls []submitCall
 	diffCalls   int
+	filesCalls  int
 }
 
 type submitCall struct {
@@ -45,6 +48,22 @@ func (f *fakeReviewer) FetchPRDiff(owner, repo string, prNumber int) (string, er
 		return "", f.diffErr
 	}
 	return f.diff, nil
+}
+
+func (f *fakeReviewer) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	f.mu.Lock()
+	f.filesCalls++
+	f.mu.Unlock()
+	if f.filesErr != nil {
+		return nil, f.filesErr
+	}
+	return f.filesResult, nil
+}
+
+func (f *fakeReviewer) filesCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.filesCalls
 }
 
 func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
@@ -439,6 +458,141 @@ func TestReviewPR_SubmitFailure_ReturnsError(t *testing.T) {
 	}
 	if outcome.Reviewed {
 		t.Error("Reviewed must be false when submission failed")
+	}
+}
+
+// TestReviewPR_DiffTooLarge_FallbackAlsoFails_SkippedNoErr pins acceptance
+// criterion 2: a 406 too_large diff whose files-API fallback also fails must
+// produce Skipped:true, Reason:SkipDiffTooLarge, Err:nil — the same terminal
+// disposition as the existing max_diff_bytes skip, not the Err-returning
+// path a pre-#1427 diff-fetch failure always took.
+func TestReviewPR_DiffTooLarge_FallbackAlsoFails_SkippedNoErr(t *testing.T) {
+	client := newFakeReviewer()
+	client.diffErr = fmt.Errorf("406 too_large: %w", gh.ErrDiffTooLarge)
+	client.filesErr = fmt.Errorf("files API also unavailable")
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped {
+		t.Errorf("outcome.Skipped = false, want true")
+	}
+	if outcome.Reason != SkipDiffTooLarge {
+		t.Errorf("outcome.Reason = %q, want %q", outcome.Reason, SkipDiffTooLarge)
+	}
+	if outcome.Err != nil {
+		t.Errorf("outcome.Err = %v, want nil", outcome.Err)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 || client.submitCallCount() != 0 {
+		t.Error("a terminal too-large skip must not clone, invoke claude, or submit a review")
+	}
+	if client.filesCallCount() != 1 {
+		t.Errorf("filesCallCount = %d, want 1 (fallback must be attempted)", client.filesCallCount())
+	}
+}
+
+// TestReviewPR_DiffTooLarge_FallbackAlsoFails_PostsNoticeOnce covers R4: the
+// terminal skip must post exactly one idempotent PR notice, even across
+// repeated ReviewPR calls for the same head SHA (e.g. repeated polls of a
+// permanently-406 PR).
+func TestReviewPR_DiffTooLarge_FallbackAlsoFails_PostsNoticeOnce(t *testing.T) {
+	client := newFakeReviewer()
+	client.diffErr = fmt.Errorf("406 too_large: %w", gh.ErrDiffTooLarge)
+	client.filesErr = fmt.Errorf("files API also unavailable")
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	for i := 0; i < 3; i++ {
+		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+		if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+			t.Fatalf("call %d: outcome = %+v, want Skipped with SkipDiffTooLarge", i, outcome)
+		}
+	}
+	if client.addCommentCount() != 1 {
+		t.Fatalf("addCommentCount = %d, want exactly 1 across 3 polls of the same head SHA", client.addCommentCount())
+	}
+}
+
+// TestReviewPR_DiffTooLarge_FallbackSucceeds_ReviewsUsingFallbackPaths pins
+// acceptance criterion 3: when the files-API fallback succeeds, ReviewPR
+// proceeds to invoke Claude and submit a review, and excluded_paths matching
+// uses the fallback's path list (not an empty/absent changed-path set).
+func TestReviewPR_DiffTooLarge_FallbackSucceeds_ReviewsUsingFallbackPaths(t *testing.T) {
+	client := newFakeReviewer()
+	client.diffErr = fmt.Errorf("406 too_large: %w", gh.ErrDiffTooLarge)
+	client.filesResult = []string{"engine/claude.go", "engine/poll.go"}
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed via clone; diff was unavailable."}, nil
+	}}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
+	}
+	if outcome.Err != nil {
+		t.Fatalf("outcome.Err = %v, want nil", outcome.Err)
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+		t.Error("a successful fallback must clone, invoke claude, and submit exactly one review")
+	}
+	if client.addCommentCount() != 0 {
+		t.Error("a successful fallback must not post the diff-unavailable notice")
+	}
+}
+
+// TestReviewPR_DiffTooLarge_FallbackSucceeds_ExcludedPathsSkip proves the
+// fallback's path list — not an empty/unknown set — feeds excluded_paths
+// matching: every fallback-reported path matching the exclusion glob must
+// still skip the PR, exactly as it would for a normally-fetched diff.
+func TestReviewPR_DiffTooLarge_FallbackSucceeds_ExcludedPathsSkip(t *testing.T) {
+	client := newFakeReviewer()
+	client.diffErr = fmt.Errorf("406 too_large: %w", gh.ErrDiffTooLarge)
+	client.filesResult = []string{"docs/readme.md", "docs/faq.md"}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"docs/*"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
+		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath", outcome)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("fully-excluded fallback paths must skip before cloning or invoking claude")
+	}
+	if client.addCommentCount() != 0 {
+		t.Error("an excluded-path skip is not a too-large terminal skip and must not post a notice")
+	}
+}
+
+// TestReviewPR_GenericDiffFetchError_StillReturnsErr proves the classifier
+// is narrow: a diff-fetch failure that is NOT gh.ErrDiffTooLarge (e.g. a
+// transient network error) must keep today's Err-returning, naturally-
+// retried-next-poll behavior — it must not be treated as a terminal skip.
+func TestReviewPR_GenericDiffFetchError_StillReturnsErr(t *testing.T) {
+	client := newFakeReviewer()
+	client.diffErr = fmt.Errorf("context deadline exceeded")
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if outcome.Err == nil {
+		t.Fatal("expected a non-nil Err for a generic (non-ErrDiffTooLarge) diff fetch failure")
+	}
+	if outcome.Skipped {
+		t.Error("a generic diff fetch failure must not be classified as Skipped")
+	}
+	if client.filesCallCount() != 0 {
+		t.Error("the files-API fallback must only be attempted for gh.ErrDiffTooLarge, not generic errors")
 	}
 }
 
