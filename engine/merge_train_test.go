@@ -2306,6 +2306,83 @@ func TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic(t *testing.T) {
 	}
 }
 
+// TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic covers the threading property
+// itself, not just that some diagnostic content arrives (Review feedback on PR #1426):
+// bisect's recursive call must forward halfDiag — the diagnostic of the half just found
+// red — not the diag it was entered with. Neutralizing that (recursing with the incoming
+// diag instead of halfDiag) leaves every existing diagnostic-content test passing, because
+// none of them distinguish diagnostics by recursion level; this test does, by keying the
+// seam's returned diagnostic on the exact membership set validated at each level. #3 poisons
+// a 5-member batch, forcing two full halving levels before isolation:
+//
+//	[1,2,3,4,5] (outer, red)  →  [3,4,5] (middle, red)  →  [3] (innermost, red, base case)
+//
+// The ejected member must carry only the innermost level's diagnostic — the run that
+// actually isolated it — never the middle or outer level's, which recursion passed through
+// but did not originate from.
+func TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	sameSet := func(present map[int]bool, want ...int) bool {
+		if len(present) != len(want) {
+			return false
+		}
+		for _, w := range want {
+			if !present[w] {
+				return false
+			}
+		}
+		return true
+	}
+	rv.diagFor = func(present map[int]bool) *trainCIDiagnostic {
+		switch {
+		case sameSet(present, 1, 2, 3, 4, 5):
+			return &trainCIDiagnostic{
+				FailedChecks: []gh.CheckRun{{Name: "ci/level-outer", Status: "completed", Conclusion: "failure", OutputText: "outer batch output"}},
+				PRNum:        900, TrialSHA: "sha-outer",
+			}
+		case sameSet(present, 3, 4, 5):
+			return &trainCIDiagnostic{
+				FailedChecks: []gh.CheckRun{{Name: "ci/level-middle", Status: "completed", Conclusion: "failure", OutputText: "middle batch output"}},
+				PRNum:        900, TrialSHA: "sha-middle",
+			}
+		case sameSet(present, 3):
+			return &trainCIDiagnostic{
+				FailedChecks: []gh.CheckRun{{Name: "ci/level-innermost", Status: "completed", Conclusion: "failure", OutputText: "innermost isolating output"}},
+				PRNum:        900, TrialSHA: "sha-innermost",
+			}
+		default:
+			t.Fatalf("unexpected membership validated red: %v", present)
+			return nil
+		}
+	}
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 3)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #3, got %d", len(comments))
+	}
+	body := comments[0]
+	if !strings.Contains(body, "ci/level-innermost") || !strings.Contains(body, "innermost isolating output") {
+		t.Errorf("expected the ejection comment to carry the innermost (isolating) run's diagnostic, got: %s", body)
+	}
+	if strings.Contains(body, "ci/level-outer") || strings.Contains(body, "outer batch output") {
+		t.Errorf("ejection comment must not carry the outer (initial full-batch) run's diagnostic, got: %s", body)
+	}
+	if strings.Contains(body, "ci/level-middle") || strings.Contains(body, "middle batch output") {
+		t.Errorf("ejection comment must not carry the middle-level run's diagnostic, got: %s", body)
+	}
+}
+
 // TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers covers #1420 R4/AC5: the
 // ejection comment must name the other members the isolated poisoner's batch was
 // combined against, so an operator knows the failure is combination-only before
