@@ -585,6 +585,20 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			return
 		}
 
+		// Hook 2: apply any pending review-finding ejects flagged externally while this
+		// trial was assembling/CI-polling (#1208) — mirrors Hook 1's "poll writes a
+		// signal, worker consumes it at a checkpoint" shape. A flagged member's trial
+		// is always discarded here, regardless of its own CI result: a green trial
+		// containing a flagged member must never reach landGreenBatch. An empty
+		// `remaining` falls through to continue and is caught by the top-of-loop
+		// zero-survivors return, so no special-casing is needed here.
+		if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
+			e.logf(0, "merge-train", "%d member(s) ejected for unresolved review findings mid-trial — discarding trial and re-forming for %s\n", ejectedCount, repoKey)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			current = remaining
+			continue
+		}
+
 		state.mu.Lock()
 		state.prNum = prNum
 		state.assembling = false
@@ -962,6 +976,17 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		if _, tripped := e.isRunawayTripped(repoKey); tripped {
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			return true
+		}
+
+		// Hook 2: apply any pending review-finding eject flagged externally while this
+		// singleton trial was assembling/CI-polling (#1208) — mirrors the re-form loop's
+		// identical checkpoint in runMergeTrainWorker. A flagged singleton's trial is
+		// discarded regardless of its own CI result — there is nothing left to land or
+		// eject via the normal green/red path this iteration, so move on to the next member.
+		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
+			e.logf(m.item.Number, "merge-train", "pending review-finding eject flagged for singleton #%d — discarding trial\n", m.item.Number)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			continue
 		}
 
 		switch result {

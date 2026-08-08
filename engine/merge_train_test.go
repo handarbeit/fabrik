@@ -1296,6 +1296,114 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	}
 }
 
+// TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms verifies
+// Hook 2 (#1208): a pending review-finding eject flagged for a member while its
+// batch's trial is assembling/CI-polling must cause the worker to discard that
+// trial — even though its CI result is green — and re-form with the reduced
+// membership, rather than landing the flagged member via landGreenBatch. This is
+// the "checkpoint-consumed-by-the-worker-itself" half of the coordination design;
+// settleQueuedReviewFindings (the settle-scan half) is exercised separately.
+func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately, every trial
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	// Flag #1 for a pending review-finding eject BEFORE the worker runs — simulates
+	// settleQueuedReviewFindings having observed an unresolved thread on #1 while a
+	// worker was already in flight for this repo.
+	eng.markPendingReviewEject("owner/repo", 1, 2)
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	// #1 must have been rerouted off Queued (the ejection), not landed.
+	if len(client.updateStatusCalls) == 0 {
+		t.Fatal("expected at least 1 status update call rerouting #1 off Queued")
+	}
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Errorf("expected a reroute-to-Implement status update among %+v", client.updateStatusCalls)
+	}
+
+	client.mu.Lock()
+	var ejectionComment string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 {
+			ejectionComment = c.body
+		}
+	}
+	client.mu.Unlock()
+	if !strings.Contains(ejectionComment, "has left the Queued column") {
+		t.Errorf("expected #1's ejection comment to use the leaves-Queued wording, got: %q", ejectionComment)
+	}
+
+	// The pending-eject signal must have been consumed (one-shot).
+	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
+		t.Error("expected the pending-eject signal for #1 to already be consumed")
+	}
+
+	// The worker must have re-formed and landed #2 normally — trainInFlight/store
+	// liveness clears only once the (re-formed) train actually finishes.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared once the re-formed train finishes")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness to be cleared once the re-formed train finishes")
+	}
+
+	// At least 2 draft PRs: the discarded 2-member trial, and the re-formed
+	// 1-member trial that actually lands #2.
+	mu.Lock()
+	prs := createdPRs
+	mu.Unlock()
+	if prs < 2 {
+		t.Errorf("expected at least 2 draft PR creations (discarded trial + re-formed trial), got %d", prs)
+	}
+}
+
 // TestMergeTrainWorker_UnresolvableConflict verifies ejection when Claude cannot
 // resolve a conflict (Task 11c).
 func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
@@ -3026,6 +3134,94 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 	client.mu.Unlock()
 	if singletonPRs != 4 {
 		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
+
+// TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead verifies Hook 2
+// (#1208) inside the one-at-a-time fallback: a pending review-finding eject flagged
+// for a member at the moment its own singleton trial validates must be honored
+// instead of that singleton's normal green/red outcome — the member is rerouted off
+// Queued and ejected with the distinct #1208 wording, not landed via landSingleton
+// (even though its singleton trial is green) and not ejected via the ordinary
+// fails-even-in-isolation red path.
+func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+
+	// Red iff both #1 and #2 are present (forces bisection -> non-isolable
+	// interaction -> the landOneAtATime fallback with the full original 2-member
+	// set). Marks #2's pending-eject signal at the exact moment its own singleton
+	// trial validates — simulating settleQueuedReviewFindings having flagged it
+	// mid-CI-wait, just before landOneAtATime's own checkpoint would otherwise
+	// decide its fate via the normal green/red switch.
+	eng.trainValidateFn = func(_ context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
+		present := make(map[int]bool, len(members))
+		for _, m := range members {
+			present[m.item.Number] = true
+		}
+		if len(members) == 1 && members[0].item.Number == 2 {
+			eng.markPendingReviewEject("owner/repo", 2, 5)
+		}
+		if present[1] && present[2] {
+			return TrainCIRed, &trainCIDiagnostic{Note: "interaction", PRNum: 900, TrialSHA: "seam-sha"}
+		}
+		return TrainCIGreen, nil
+	}
+
+	batch := makeSeamBatch(2)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Fatalf("expected the interaction to degrade to one-at-a-time; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	var singletonTitles []string
+	for _, c := range client.createPRCalls {
+		if strings.Contains(c.title, "singleton") {
+			singletonTitles = append(singletonTitles, c.title)
+		}
+	}
+	client.mu.Unlock()
+	if len(singletonTitles) != 1 {
+		t.Fatalf("expected exactly 1 singleton landing PR (#1 only — #2 must be ejected, not landed), got %d: %v", len(singletonTitles), singletonTitles)
+	}
+	if strings.Contains(singletonTitles[0], "#2") {
+		t.Errorf("expected #2 NOT to be landed as a singleton, got title: %s", singletonTitles[0])
+	}
+
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Errorf("expected #2 to be rerouted to Implement, got status updates: %+v", client.updateStatusCalls)
+	}
+
+	client.mu.Lock()
+	var ejectionComment string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 2 {
+			ejectionComment = c.body
+		}
+	}
+	client.mu.Unlock()
+	if !strings.Contains(ejectionComment, "has left the Queued column") {
+		t.Errorf("expected #2's ejection comment to use the leaves-Queued wording, got: %q", ejectionComment)
+	}
+
+	if _, ok := eng.takePendingReviewEject("owner/repo", 2); ok {
+		t.Error("expected the pending-eject signal for #2 to already be consumed")
 	}
 }
 
