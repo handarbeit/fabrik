@@ -196,15 +196,110 @@ If blocked, describe exactly what's wrong. Be specific enough that someone can a
 
 Before you emit `FABRIK_STAGE_COMPLETE`, you MUST complete this checklist. Do not skip it even if validation passed and tests are green.
 
-### Step 1 — Final rebase verification
+### Step 1 — Conditional final rebase
 
-Get the PR's actual target base branch, then rebase against it:
+A rebase pushes, and a push restarts CI. Rebasing unconditionally on every Validate invocation can livelock a repo whose required-check duration exceeds its merge interarrival time — each attempt rebases onto a newer base and restarts a check that can never finish before the base moves again — and it can eject a PR that is already sitting in a merge queue, burning a `MaxEnqueueCycles` cycle for nothing. So before rebasing, run three checks in order. Each either skips the rebase (recording why, for Step 3) or falls through to the next. If none apply, rebase exactly as before.
+
+First, resolve the PR's base branch and owner/repo, then fetch:
 
 ```bash
 base_branch=$(gh pr view --json baseRefName --jq .baseRefName)
+pr_number=$(gh pr view --json number --jq .number)
+owner_repo=$(gh repo view --json owner,name --jq '.owner.login + " " + .name')
+read -r owner repo <<< "$owner_repo"
 git fetch origin "$base_branch"
+```
+
+**Check A — merge-queue safety (skip if queued or unknown).** Query the PR's live queue membership via GraphQL — `gh pr view --json` has no field for this:
+
+```bash
+in_queue=$(gh api graphql -f query='
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){ isInMergeQueue }
+    }
+  }' -F owner="$owner" -F repo="$repo" -F number="$pr_number" \
+  --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null)
+```
+
+If `$in_queue` is `true`, **skip the rebase** — record outcome `skipped-in-queue`. If the query errors, or `$in_queue` is anything other than exactly `true`/`false` (empty, malformed, `null`), also **skip the rebase** — record outcome `skipped-detection-failed`. This is a deliberate asymmetry from Check C below: skipping a rebase that was actually needed is self-healing (the engine's own rebase-needed path catches a stale branch after Validate completes), but rebasing a PR that was actually queued ejects it, which nothing downstream can undo. When this check can't tell, treat "unknown" as "queued."
+
+(The internal merge-train's `Queued` column has no equivalent live check here: it is a holding stage the engine never dispatches Validate from, so the two states can't coexist in a running Validate session — there is nothing for this check to observe.)
+
+**Check B — already up to date (skip if nothing to gain).** Only reached if Check A did not skip:
+
+```bash
+behind_count=$(git rev-list --count HEAD..origin/"$base_branch")
+```
+
+If `$behind_count` is `0`, **skip the rebase** — record outcome `skipped-up-to-date`. Rebasing here would push nothing, so it can't restart CI or fix anything — this eliminates rebase cost whenever the branch happens to already be current. It does **not** by itself address the repeated-restart livelock in the Problem section: there, the base keeps moving faster than checks complete, so the branch is behind on every single attempt and `$behind_count` is never `0`. Check C below is what breaks that case. If you aborted a rebase earlier in this same invocation, that abort left the branch strictly behind `origin/$base_branch`, so `$behind_count` is never `0` here either — this check cannot mask an earlier abort, it can only skip when there is truly nothing to rebase.
+
+**Check C — CI has already run against the current base (skip if the last successful *required* check run is fresh enough).** Only reached if Checks A and B did not skip. This is the check that actually addresses the reported livelock: a branch protection `strict: false` setting only tells you GitHub won't *enforce* up-to-date-ness as a merge precondition — it says nothing about whether the last check run is stale. A repo can have `strict: false` and still merge a PR whose last green run tested a base-branch state from days ago. So freshness is measured directly, by comparing the base branch's own commit time against the *earliest* **start** time among all of the PR's currently-successful **required**-check runs — not the most recent one (see below for why).
+
+The plain REST-flavored `gh pr view --json statusCheckRollup` has no `isRequired` field — it cannot tell a required check from an incidental one (a CLA bot, a license scanner), and a fast non-required check completing after the base moves would wrongly read as "fresh" while the actual required check is still stale. Required-ness is only exposed via GraphQL's `isRequired(pullRequestNumber:)` on `CheckRun`/`StatusContext` (the two types implementing the `RequirableByPullRequest` interface), scoped to the PR itself — not the `branches/{b}/protection` REST endpoint, which is the exact call ADR-933 documented as 403-prone for tokens without admin-level repo access. Querying `isRequired` this way carries none of that risk, since it's PR-scoped like Check A's `isInMergeQueue`, not repo-admin-scoped.
+
+The comparison uses each check's **start** time, not its completion time. A long-running required check (the ADR's own livelock example cites 18 minutes) can be *in flight against a stale tree* when a new base commit lands, and still complete successfully afterward — completion order is not proof the tested tree contains that commit, only that the run finished after the wall clock passed it. A run's start time is a much tighter (though not perfect — GitHub's checkout can lag slightly behind the workflow's start event) bound on which base state it could have tested: a check that started before the current base commit landed cannot have tested a tree containing it, no matter when it finished.
+
+A repo can have more than one required check (this repo has two: `Analyze (go)` and `Verify llms-full.txt is up to date`). Freshness must hold for **all** of them, not just the one that happens to have started most recently — a single fresh required check does not make a *different* stale (or not-yet-rerun) required check any less stale. So the query takes the **minimum** start time across every required check, and only if every required check is currently successful; if any required check is missing, pending, or failed, there is no meaningful "fresh" verdict to compute and the check falls through to a rebase.
+
+```bash
+base_epoch=$(git log -1 --format=%ct "origin/$base_branch")
+ci_time=$(gh api graphql -f query='
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){
+        commits(last:1){
+          nodes{
+            commit{
+              statusCheckRollup{
+                contexts(first:100){
+                  pageInfo{ hasNextPage }
+                  nodes{
+                    __typename
+                    ... on CheckRun { conclusion startedAt isRequired(pullRequestNumber:$number) }
+                    ... on StatusContext { state createdAt isRequired(pullRequestNumber:$number) }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }' -F owner="$owner" -F repo="$repo" -F number="$pr_number" \
+  --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts as $ctx
+    | if $ctx.pageInfo.hasNextPage then empty else
+        ([$ctx.nodes[]? | select(.isRequired==true)]) as $required
+        | ($required | map(select((.conclusion=="SUCCESS") or (.state=="SUCCESS")))) as $ok
+        | if ($required | length) == 0 or ($ok | length) != ($required | length) then empty
+          else ($ok | map(.startedAt // .createdAt) | min) end
+      end' 2>/dev/null)
+ci_epoch=$(date -u -d "$ci_time" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ci_time" +%s 2>/dev/null)
+```
+
+(`date -u -d ...` covers GNU date on Linux runners; the `-j -f` fallback covers BSD date on macOS. `gh`'s `startedAt`/`createdAt` are always UTC `...Z`, so both branches parse it identically. Comparing epoch seconds avoids lexically comparing two ISO-8601 strings in different offset notations, which is not reliably sortable. `StatusContext` — GitHub's legacy commit-status API, as opposed to the modern Checks API's `CheckRun` — has no `startedAt` equivalent; `createdAt`, the timestamp of the status's first report, is the closest available proxy for "when this check began" and is used as the fallback via `//` for that type, not as a stand-in for `completedAt`. The jq filter binds `$required` to every required-check context regardless of outcome, and `$ok` to the subset that's currently successful; when those two counts don't match — a required check is pending, failed, or simply absent from the rollup — the filter emits nothing rather than a timestamp from a partial view, matching the read-failure fallback below. `contexts(first:100)` caps the page at 100 contexts; the query also reads `pageInfo.hasNextPage`, and the filter emits nothing at all if it's `true` — a rollup that doesn't fit in one page is read as incomplete, not silently truncated, since a required check pushed past the first 100 would otherwise be able to drop out of `$required` without changing the count-equality test, letting a truncated read pass as fresh. This falls through to the same rebase-on-read-failure default as everything else in this check.)
+
+If `$ci_epoch` is non-empty and greater than `$base_epoch`, **skip the rebase** — record outcome `skipped-ci-fresh`. Every required check is currently successful, and the *earliest* of their start times still started at or after the current base tip landed — so none of them can have been testing a stale tree, and rebasing would only restart checks that already covered the same ground. On any read failure, an empty `$ci_time`/`$ci_epoch`, a required check that isn't (yet) successful, or a minimum start time at or before the current base landed (`$ci_epoch` not greater than `$base_epoch`) — including one still in flight, testing a tree from before the current base tip — **do not skip** — fall through to the rebase. This keeps Check C's original fail-toward-rebase default: a redundant rebase only costs CI time, while wrongly skipping a genuinely required one risks a branch that can't merge with no downstream catch as clean as Check A's.
+
+**Otherwise — re-verify Check A, then rebase.** None of Checks A/B/C skipped as of their own read. But Checks B and C each cost real wall-clock time — additional `gh api`/`git` calls — during which the PR could newly enter the merge queue, making Check A's original read stale exactly when it matters most: immediately before the push a rebase implies. Re-run the same `isInMergeQueue` query one more time, right before rebasing:
+
+```bash
+in_queue=$(gh api graphql -f query='
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){ isInMergeQueue }
+    }
+  }' -F owner="$owner" -F repo="$repo" -F number="$pr_number" \
+  --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null)
+```
+
+Same verdict as the first read: `true` or anything unreadable → skip (`skipped-in-queue` / `skipped-detection-failed`), same fail-toward-skip default as Check A for the same reason — a second query's worth of latency is cheap, an ejected queued PR is not. Otherwise, rebase:
+
+```bash
 git rebase "origin/$base_branch"
 ```
+
+Record outcome `rebased` (or, if it fails, handle it below).
 
 If the rebase succeeds cleanly, continue to Step 2.
 
@@ -213,7 +308,7 @@ If the rebase produces conflicts:
 - Run the project's build and test commands (as specified in `CLAUDE.md`) to verify the resolution is correct
 - If you cannot confidently resolve the conflicts, run `git rebase --abort` and emit `FABRIK_BLOCKED_ON_INPUT` with a list of the conflicting files
 
-**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/<base_branch>`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers.
+**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/<base_branch>`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers. Conditionality doesn't reopen this hole: an earlier abort always leaves the branch behind, so Check B's up-to-date test is false and execution falls through to a real rebase attempt here, same as before this change.
 
 ### Step 2 — PR mergeability check
 
@@ -235,17 +330,17 @@ Both signals mean the PR has merge conflicts that must be resolved before merge.
 
 **Proceed (emit `FABRIK_STAGE_COMPLETE`) if** `mergeable` is `"MERGEABLE"` (or `"UNKNOWN"` after the wait) and `mergeStateStatus` is anything except `"DIRTY"`.
 
-### Step 3 — Include merge state in the summary
+### Step 3 — Include rebase outcome and merge state in the summary
 
-When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include the PR merge state:
+When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-ci-fresh`) alongside the PR merge state, so an operator reading the stage comment can tell a deliberate skip from a forgotten one:
 
 ```
 FABRIK_SUMMARY_BEGIN
-Validation passed. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. All N requirements verified, tests pass (M packages), no regressions.
+Validation passed. Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. All N requirements verified, tests pass (M packages), no regressions.
 FABRIK_SUMMARY_END
 ```
 
-If no linked PR exists, say so: `"No linked PR found."`.
+If no linked PR exists, say so: `"No linked PR found."` — and skip both the rebase outcome and merge-state fields, since neither check ran.
 
 This gives operators reading the issue comment a fast signal about merge readiness without opening the PR.
 
