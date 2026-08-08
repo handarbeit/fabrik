@@ -3653,6 +3653,84 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 	// defer, not by landGreenBatch/landMergeTrainBatch (ADR-067).
 }
 
+// TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding
+// closes the gap the outer re-form loop's and landOneAtATime's Hook 2 checkpoints
+// don't cover (#1208): landGreenBatch's own main-moved rebase-and-revalidate loop
+// can itself spend a full combined-Validate wait without ever returning control to
+// runMergeTrainWorker, where the primary Hook 2 lives. A review-finding eject
+// flagged for a member while that rebase re-validation is running must still stop
+// the batch from landing — it must not ride the freshly-green rebased trial to
+// landMergeTrainBatch just because this loop never re-checked the signal.
+func TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+
+	// Behind on the first landing-gate check (forces exactly one rebase cycle),
+	// up to date thereafter — same shape as TestLandGreenBatch_BehindOnceThenLands.
+	var mu sync.Mutex
+	behindCalls := 0
+	client.fetchCommitsBehindFn = func(_, _, _, _ string) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		behindCalls++
+		if behindCalls == 1 {
+			return 1, nil // main moved
+		}
+		return 0, nil // caught up after rebase
+	}
+
+	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
+
+	// Flag #1 for a pending review-finding eject — simulates settleQueuedReviewFindings
+	// observing an unresolved thread on #1 while the rebase re-validate is in flight.
+	eng.markPendingReviewEject("owner/repo", 1, 3)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.landGreenBatch(ctx, state, p, survivors)
+
+	// The rebased trial must NOT land: no merge, no member advanced to Done.
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+	if merges != 0 {
+		t.Errorf("expected the flagged trial to be discarded rather than landed, got %d merge(s)", merges)
+	}
+
+	// #1 must have been rerouted off Queued and carry the distinct ejection wording.
+	foundReroute := false
+	client.mu.Lock()
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	client.mu.Unlock()
+	if !foundReroute {
+		t.Error("expected #1 to be rerouted off Queued to Implement")
+	}
+	bodies := ejectionCommentBodies(client, 1)
+	if len(bodies) != 1 || !strings.Contains(bodies[0], "has left the Queued column") {
+		t.Errorf("expected #1's ejection comment to use the leaves-Queued wording, got: %v", bodies)
+	}
+
+	// The pending-eject signal must have been consumed (one-shot).
+	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
+		t.Error("expected the pending-eject signal for #1 to already be consumed")
+	}
+
+	// #2 (not flagged) must not have been touched — no comment, no reroute — it
+	// simply re-forms fresh on a future poll's dispatchMergeTrainWorker call.
+	if len(ejectionCommentBodies(client, 2)) != 0 {
+		t.Error("expected #2 to be left untouched, not ejected")
+	}
+}
+
 // TestLandGreenBatch_ExhaustionDissolves verifies FR-2/FR-5: when the trial keeps
 // falling behind past MaxTrainRebaseCycles, the batch is dissolved — members left
 // untouched in Queued (no advancement, no merge) and the in-flight marker cleared.

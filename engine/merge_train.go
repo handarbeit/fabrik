@@ -2458,6 +2458,26 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 				"the base branch advanced and the batch could not be re-assembled onto it")
 			return
 		}
+
+		// Hook 2 (landing loop): apply any pending review-finding ejects flagged
+		// while this rebase cycle's assemble/validate was running (#1208). This
+		// loop is the one place a green trial can spend a second full CI wait
+		// (up to CIWaitTimeout) without ever returning control to the outer
+		// re-form loop in runMergeTrainWorker, where the primary Hook 2 lives —
+		// so a finding arriving during a main-moved rebase would otherwise ride
+		// the newly-green trial straight to landMergeTrainBatch. Discard the
+		// whole trial and stop: the (non-flagged) remaining survivors are still
+		// sitting in Queued untouched, so they simply re-form fresh on the next
+		// poll's dispatchMergeTrainWorker — the same "checkpoint, not continuous
+		// preemption" granularity the runaway guard and the other Hook 2 already
+		// have, rather than threading a resume-with-reduced-membership path back
+		// into this loop.
+		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
+			e.logf(0, "merge-train", "%d member(s) ejected for unresolved review findings during main-moved rebase for %s/%s — discarding trial; remaining survivors will re-form on a future poll\n", ejectedCount, p.owner, p.repo)
+			e.cleanupTrialArtifacts(p.wm, newTrialName)
+			return
+		}
+
 		if result != TrainCIGreen {
 			// A red/pending re-validation after a rebase dissolves (disjoint from
 			// bisection); the next poll re-forms a fresh train that bisects cleanly.

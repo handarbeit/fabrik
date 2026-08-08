@@ -116,7 +116,7 @@ The settle scan therefore only ejects directly when `!mergeTrainWorkerActive(rep
 else is touching the member. When a worker IS in flight, it records a pending-eject signal instead
 (`markPendingReviewEject`/`takePendingReviewEject`, a mutex-guarded `map[string]map[int]int` on `Engine`
 keyed `owner/repo` → issue number → finding count, cleared on read for one-shot semantics) rather than
-mutating anything. The worker consumes the signal itself, from inside its own goroutine, at two
+mutating anything. The worker consumes the signal itself, from inside its own goroutine, at three
 checkpoints (`applyPendingReviewEjects`):
 
 - **`runMergeTrainWorker`'s re-form loop**, immediately after `assembleAndValidate` returns and the
@@ -125,12 +125,27 @@ checkpoints (`applyPendingReviewEjects`):
   a new coordination primitive.
 - **`landOneAtATime`'s per-singleton loop**, right before its green/red/pending outcome switch, using
   the natural 1-element slice.
+- **`landGreenBatch`'s own main-moved rebase-and-revalidate loop**, right after each rebase cycle's
+  `assembleAndValidate` returns. This third checkpoint was added after the first two were implemented and
+  tested: `landGreenBatch` is a *terminal* call from `runMergeTrainWorker` (`landGreenBatch(...); return`)
+  whose own internal loop can spend a second full combined-Validate wait (up to `CIWaitTimeout` per rebase
+  cycle, up to `MaxTrainRebaseCycles` cycles) rebuilding and re-validating off an advanced base — without
+  ever returning control to the re-form loop where the first checkpoint lives. A finding arriving during
+  that window would otherwise ride the newly-green rebased trial straight to `landMergeTrainBatch`
+  unchecked, reintroducing exactly the race this ADR exists to close, just in a narrower window (main
+  having moved under the batch, on top of a fresh finding landing mid-rebase).
 
-At both checkpoints, a flagged member's current trial is discarded regardless of its own CI result — a
-green trial containing a flagged member must never reach `landGreenBatch`, since "checkpoint-only,
+At all three checkpoints, a flagged member's current trial is discarded regardless of its own CI result —
+a green trial containing a flagged member must never reach `landMergeTrainBatch`, since "checkpoint-only,
 eventually consistent" is not acceptable for that one property even though it is acceptable for
-reaction latency (see Consequences). The loop re-forms with the reduced membership; an empty remainder
-falls through to the existing zero-survivors return, needing no special-casing.
+reaction latency (see Consequences). The first two checkpoints re-form with the reduced membership; an
+empty remainder falls through to the existing zero-survivors return, needing no special-casing. The third
+checkpoint deliberately does *not* try to resume landing the reduced membership in place — reusing the
+already-built rebase trial for a smaller member set would need a fresh `assembleAndValidate` cycle anyway,
+which is exactly what the re-form loop already does — so it discards the whole trial and returns outright;
+the (non-flagged) survivors are still untouched in `Queued` and simply re-form fresh via the next poll's
+`dispatchMergeTrainWorker` call, at the cost of one extra poll's latency rather than a control-flow path
+threaded back into `runMergeTrainWorker`.
 
 ### 7. Scope: mid-flight ejection only, no admission-time filtering
 
