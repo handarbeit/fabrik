@@ -1828,6 +1828,66 @@ func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.Pr
 	e.ejectMember(owner, repo, item, reason, nil, nil, false)
 }
 
+// markPendingReviewEject records that issueNumber (in repoKey) has count unresolved
+// review-thread findings and should be ejected at the worker's next checkpoint (#1208),
+// rather than immediately — used by settleQueuedReviewFindings when a merge-train
+// worker is currently in flight for repoKey, so the ejection is applied by the worker
+// goroutine itself (runMergeTrainWorker's re-form loop, landOneAtATime) rather than by
+// the settle scan racing that goroutine's own in-memory batch state. Mirrors the
+// existing isRunawayTripped/mergeTrainTrials "poll writes a signal, worker consumes it
+// at a checkpoint" shape.
+func (e *Engine) markPendingReviewEject(repoKey string, issueNumber, count int) {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	if e.queuedReviewEjects[repoKey] == nil {
+		e.queuedReviewEjects[repoKey] = make(map[int]int)
+	}
+	e.queuedReviewEjects[repoKey][issueNumber] = count
+}
+
+// takePendingReviewEject returns and clears the pending-eject finding count for
+// issueNumber in repoKey, if any. Clearing on read makes this a one-shot signal: once a
+// worker checkpoint consumes it, the same flag can't be double-applied by a later
+// checkpoint in the same or a subsequent worker run.
+func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, bool) {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	byIssue := e.queuedReviewEjects[repoKey]
+	if byIssue == nil {
+		return 0, false
+	}
+	count, ok := byIssue[issueNumber]
+	if !ok {
+		return 0, false
+	}
+	delete(byIssue, issueNumber)
+	if len(byIssue) == 0 {
+		delete(e.queuedReviewEjects, repoKey)
+	}
+	return count, true
+}
+
+// applyPendingReviewEjects checks every member in members for a pending review-finding
+// eject signal (#1208) and, for each flagged member, ejects it via
+// ejectQueuedMemberForReviewFindings and excludes it from the returned remaining slice.
+// Called from inside the merge-train worker goroutine at its natural checkpoints —
+// after assembleAndValidate returns in runMergeTrainWorker's re-form loop, and inside
+// landOneAtATime's per-singleton loop — so a flagged member can never ride a trial
+// (green or otherwise) to landing: the caller must discard the current trial whenever
+// ejectedCount > 0, regardless of that trial's own CI result.
+func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
+	for _, m := range members {
+		if count, ok := e.takePendingReviewEject(repoKey, m.item.Number); ok {
+			e.logf(m.item.Number, "merge-train", "applying pending review-finding eject flagged mid-trial (%d finding(s))\n", count)
+			e.ejectQueuedMemberForReviewFindings(projectID, m.item, count)
+			ejectedCount++
+			continue
+		}
+		remaining = append(remaining, m)
+	}
+	return remaining, ejectedCount
+}
+
 // effectiveTrialWindow returns the runaway-guard threshold (N) and rolling window (M),
 // applying zero-means-default semantics: N=20, M=60min (ADR-059 D8).
 func (e *Engine) effectiveTrialWindow() (int, time.Duration) {
