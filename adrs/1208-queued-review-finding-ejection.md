@@ -112,8 +112,11 @@ run concurrently with a worker blocked up to `CIWaitTimeout` inside `pollTrainCI
 goroutine's own in-memory batch slice from outside it would race the worker's own assemble/validate/land
 sequence.
 
-The settle scan therefore only ejects directly when `!mergeTrainWorkerActive(repoKey)` — safe, nothing
-else is touching the member. When a worker IS in flight, it records a pending-eject signal instead
+The settle scan therefore only ejects directly when the member's issue number is **not** in the in-flight
+worker's dispatched-batch set (`mergeTrainBatchMembers(repoKey)`, which also covers "no worker registered
+for the repo at all") — safe, nothing is or ever will be touching that specific member's state. When a
+worker IS in flight *and the member is inside its dispatched batch*, it records a pending-eject signal
+instead
 (`markPendingReviewEject`/`takePendingReviewEject`, a mutex-guarded `map[string]map[int]int` on `Engine`
 keyed `owner/repo` → issue number → finding count, cleared on read for one-shot semantics) rather than
 mutating anything. The worker consumes the signal itself, from inside its own goroutine, at three
@@ -146,6 +149,22 @@ which is exactly what the re-form loop already does — so it discards the whole
 the (non-flagged) survivors are still untouched in `Queued` and simply re-form fresh via the next poll's
 `dispatchMergeTrainWorker` call, at the cost of one extra poll's latency rather than a control-flow path
 threaded back into `runMergeTrainWorker`.
+
+**Why batch membership, not `mergeTrainWorkerActive` alone, gates the branch.** A worker is always
+dispatched with its batch already truncated to `effectiveMaxBatchSize` (default 5, `capBatch`/FR-4) — a
+Queued member beyond that cap is never part of any worker's in-memory batch for as long as that worker
+runs. The first implementation of this scan branched on `mergeTrainWorkerActive(repoKey)` alone: any
+worker active for the repo routed *every* Queued member with a finding, including ones outside the batch
+cap, to the pending-signal path. Found in review (Pruefer, PR #1455): none of the three checkpoints above
+ever iterate an issue number outside the dispatched batch, so an overflow member's pending-eject signal
+sat unconsumed for as long as that worker stayed in flight — silently reproducing this issue's own central
+bug (a whole batch cycle of unprocessed PR feedback) for members outside the front of the queue, and,
+worse, the eventually-applied signal (once the member happened to enter some future batch) could reflect a
+stale, possibly-already-resolved finding count. Fixed by snapshotting the dispatched batch's issue numbers
+onto `mergeTrainWorkerState.batchNumbers` once at dispatch (immutable afterward — worker membership only
+ever shrinks, never grows) and branching on membership in that set (`mergeTrainBatchMembers`) rather than
+on repo-level activity. An overflow member is now ejected immediately, exactly as safely as the no-worker
+case, since a worker never looks at, fetches, or mutates an item outside the batch it was dispatched with.
 
 ### 7. Scope: mid-flight ejection only, no admission-time filtering
 

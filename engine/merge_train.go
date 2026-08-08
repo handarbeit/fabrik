@@ -240,6 +240,18 @@ type mergeTrainWorkerState struct {
 	CIResult   TrainCIResult // final CI result (set by pollTrainCI on exit)
 	trialName  string        // trial name of the most recent trial (churns during bisection)
 	projectID  string        // board project ID for advanceToNextStage (immutable after dispatch)
+
+	// batchNumbers is the set of issue numbers this worker was dispatched with — the
+	// capBatch(trainItems, effectiveMaxBatchSize())-truncated batch, set once in
+	// dispatchMergeTrainWorker and never mutated afterward (like projectID). Worker
+	// membership only ever shrinks from here (ejection/landing), never grows, so this
+	// is a safe upper bound on "issue numbers this worker's checkpoints could ever
+	// touch." settleQueuedReviewFindings (#1208) reads it via mergeTrainBatchMembers
+	// to tell a Queued member genuinely inside the live batch (must use the
+	// pending-eject signal — the worker owns its state) apart from one merely Queued
+	// in the same repo but excluded by the batch cap (safe to eject directly — the
+	// worker never looks at it, exactly like the no-worker-in-flight case).
+	batchNumbers map[int]bool
 }
 
 // sanitizeBranchName replaces characters that are invalid in directory names
@@ -319,9 +331,14 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 	owner, repo := itemOwnerRepo(batch[0], e.defaultRepo())
 	repoKey := owner + "/" + repo
 
+	batchNumbers := make(map[int]bool, len(batch))
+	for _, item := range batch {
+		batchNumbers[item.Number] = true
+	}
+
 	// Use LoadOrStore so the check-and-register is atomic: two concurrent callers
 	// can never both pass the "not loaded" path and launch duplicate workers.
-	candidate := &mergeTrainWorkerState{assembling: true, projectID: projectID}
+	candidate := &mergeTrainWorkerState{assembling: true, projectID: projectID, batchNumbers: batchNumbers}
 	existing, loaded := e.mergeTrainInFlight.LoadOrStore(repoKey, candidate)
 	if loaded {
 		state := existing.(*mergeTrainWorkerState)
@@ -403,6 +420,24 @@ func (e *Engine) finishTrain(repoKey string) {
 // avoid racing a live batch member that was closed without merging.
 func (e *Engine) mergeTrainWorkerActive(repoKey string) bool {
 	return e.store.RepoWorkerActive(repoKey)
+}
+
+// mergeTrainBatchMembers returns the dispatched-batch issue-number set of the
+// in-flight worker for repoKey (its immutable batchNumbers, see
+// mergeTrainWorkerState's doc comment), or (nil, false) if no worker is currently
+// registered for repoKey in mergeTrainInFlight. Used by settleQueuedReviewFindings
+// (#1208) to distinguish a Queued member the live worker actually owns from one
+// merely Queued in the same repo but excluded by the batch cap (effectiveMaxBatchSize)
+// — the latter is safe to eject directly even while a worker is active for the repo,
+// since the worker never looks at it. A nil/false result (no worker registered, e.g.
+// a narrow race with the worker's own exit) is treated by the caller as "not owned by
+// any live batch," which is always safe to eject directly.
+func (e *Engine) mergeTrainBatchMembers(repoKey string) (map[int]bool, bool) {
+	v, ok := e.mergeTrainInFlight.Load(repoKey)
+	if !ok {
+		return nil, false
+	}
+	return v.(*mergeTrainWorkerState).batchNumbers, true
 }
 
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore

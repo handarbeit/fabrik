@@ -64,6 +64,13 @@ func TestSettleQueuedReviewFindings_PendingFlag_WorkerActive(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 	eng.store.EnterRepoWorker("owner/repo")
+	// #1 must be part of the live worker's dispatched batch — mergeTrainBatchMembers
+	// is what settleQueuedReviewFindings now consults to route to the pending-signal
+	// path, not repo-level activity alone (see the batch-cap overflow test below).
+	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{
+		projectID:    "PVT_1",
+		batchNumbers: map[int]bool{1: true},
+	})
 
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_1",
@@ -73,18 +80,84 @@ func TestSettleQueuedReviewFindings_PendingFlag_WorkerActive(t *testing.T) {
 	eng.settleQueuedReviewFindings(board)
 
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no status update while a worker is in flight, got %d", len(client.updateStatusCalls))
+		t.Errorf("expected no status update while #1 is owned by the live batch, got %d", len(client.updateStatusCalls))
 	}
 	client.mu.Lock()
 	commentCount := len(client.addCommentCalls)
 	client.mu.Unlock()
 	if commentCount != 0 {
-		t.Errorf("expected no ejection comment while a worker is in flight, got %d", commentCount)
+		t.Errorf("expected no ejection comment while #1 is owned by the live batch, got %d", commentCount)
 	}
 
 	count, ok := eng.takePendingReviewEject("owner/repo", 1)
 	if !ok || count != 1 {
 		t.Fatalf("expected a pending-eject signal with count=1, got (%d, %v)", count, ok)
+	}
+}
+
+// TestSettleQueuedReviewFindings_DirectEject_WorkerActiveButMemberBeyondBatchCap
+// closes the gap Pruefer flagged in review (#1208): a worker is dispatched with its
+// batch already truncated to effectiveMaxBatchSize (capBatch, FR-4), so a Queued
+// member beyond that cap is never part of any worker's in-memory batch. Gating
+// direct-eject vs. pending-signal on repo-level worker activity alone would leave
+// such a member's pending-eject signal permanently unconsumed for as long as the
+// worker stays in flight — reproducing the very blackout this settle scan exists to
+// close, just for members outside the front of the queue. #2 here is Queued, has an
+// unresolved finding, and a worker IS active for the repo, but #2 is not in that
+// worker's dispatched batch (only #1 is) — it must be ejected directly, immediately.
+func TestSettleQueuedReviewFindings_DirectEject_WorkerActiveButMemberBeyondBatchCap(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{
+		projectID:    "PVT_1",
+		batchNumbers: map[int]bool{1: true}, // #2 is excluded — beyond the batch cap
+	})
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items:     []gh.ProjectItem{unresolvedThreadItem(2)},
+	}
+
+	eng.settleQueuedReviewFindings(board)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected #2 (beyond the batch cap) to be rerouted immediately despite a worker being active for the repo, got %d status update(s)", len(client.updateStatusCalls))
+	}
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 || !strings.Contains(calls[0].body, "has left the Queued column") {
+		t.Fatalf("expected #2 to be directly ejected with the leaves-Queued wording, got: %+v", calls)
+	}
+
+	// No pending signal should have been recorded for #2 — it was ejected directly.
+	if _, ok := eng.takePendingReviewEject("owner/repo", 2); ok {
+		t.Error("expected no pending-eject signal for #2 — it was ejected directly, not flagged")
+	}
+}
+
+// TestSettleQueuedReviewFindings_DirectEject_NoWorkerRegisteredForRepo confirms the
+// pre-existing "no worker at all" direct-eject path still works now that the
+// worker-active check has been replaced by a batch-membership lookup: a repo with no
+// entry in mergeTrainInFlight (RepoWorkerActive also false) must still eject
+// directly, not treat the absent membership map as "excluded from a live batch that
+// doesn't actually exist" in some way that changes behavior.
+func TestSettleQueuedReviewFindings_DirectEject_NoWorkerRegisteredForRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items:     []gh.ProjectItem{unresolvedThreadItem(1)},
+	}
+
+	eng.settleQueuedReviewFindings(board)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected direct eject with no worker registered for the repo, got %d status update(s)", len(client.updateStatusCalls))
 	}
 }
 
