@@ -235,9 +235,10 @@ type LinkedPRState struct {
 	// (HEAD unchanged before/after processComments). While the head SHA
 	// stays at this value, handleMergeAndCIGates skips further CI-fix
 	// dispatch/cycle-increment for it — a repeated no-op reinvoke burns
-	// nothing further; CIWaitTimeout remains the backstop if CI never
-	// resolves. Cleared implicitly once HeadSHA advances past it. Empty
-	// means "no no-op recorded for the current SHA."
+	// nothing further; settleAwaitingCIScan's CIBackstopTimeout remains the
+	// backstop if CI never resolves (ADR-1410 — a confirmed CI failure never
+	// consults CIWaitTimeout). Cleared implicitly once HeadSHA advances past
+	// it. Empty means "no no-op recorded for the current SHA."
 	LastCIFixNoOpSHA string
 
 	// LastCIProgressAt records when CI was last observed to make progress: a

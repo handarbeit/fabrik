@@ -341,7 +341,10 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 				// The last CI-fix reinvoke for this exact head SHA pushed no new
 				// commit — dispatching again would just repeat the same no-op
 				// and burn cycle budget for nothing. Wait for the SHA to advance
-				// (a genuine fix) or for CIWaitTimeout to fire (#958 leg 2).
+				// (a genuine fix) or for settleAwaitingCIScan's CIBackstopTimeout
+				// backstop to fire (#958 leg 2; ADR-1410 — a confirmed CI failure
+				// never consults CIWaitTimeout, so that's no longer what unsticks
+				// this item).
 				e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — no-op already recorded for head %s\n",
 					lastNoOpSHA[:min(8, len(lastNoOpSHA))])
 				return true
