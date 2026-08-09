@@ -213,7 +213,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
 // existing fetchItemDetailsQuery fragment's ceiling) and comments per thread
 // at 20; neither is paginated. A PR with more threads than that silently
 // loses the excess at this layer — out of scope for the caller's own
-// prompt-level cap (a much smaller number).
+// prompt-level cap (a much smaller number). Per-thread comment truncation is
+// not silent, however: PRReviewThread.CommentsTruncated is set from the
+// comments connection's totalCount so a caller rendering thread content can
+// say so rather than presenting a partial history as complete.
 //
 // Returns an error (not an empty slice) when the query resolves with no
 // pullRequest node, matching FetchPRReviewDecision's convention.
@@ -231,6 +234,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           line
           originalLine
           comments(first: 20) {
+            totalCount
             nodes {
               author { login }
               body
@@ -260,7 +264,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
 							Line         *int   `json:"line"`
 							OriginalLine *int   `json:"originalLine"`
 							Comments     struct {
-								Nodes []struct {
+								TotalCount int `json:"totalCount"`
+								Nodes      []struct {
 									Author *struct {
 										Login string `json:"login"`
 									} `json:"author"`
@@ -290,11 +295,12 @@ query($owner: String!, $repo: String!, $number: Int!) {
 			line = *n.OriginalLine
 		}
 		t := PRReviewThread{
-			ID:         n.ID,
-			Path:       n.Path,
-			Line:       line,
-			IsResolved: n.IsResolved,
-			IsOutdated: n.IsOutdated,
+			ID:                n.ID,
+			Path:              n.Path,
+			Line:              line,
+			IsResolved:        n.IsResolved,
+			IsOutdated:        n.IsOutdated,
+			CommentsTruncated: n.Comments.TotalCount > len(n.Comments.Nodes),
 		}
 		for _, cm := range n.Comments.Nodes {
 			tc := PRReviewThreadComment{Body: cm.Body}

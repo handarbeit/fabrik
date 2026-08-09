@@ -176,6 +176,9 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread) {
 			}
 			fmt.Fprintf(b, "  - @%s: %s\n", author, c.Body)
 		}
+		if t.CommentsTruncated {
+			b.WriteString("  - (this thread has more replies than shown here — a later reply, possibly the one that resolved it, may be missing)\n")
+		}
 	}
 	if omitted > 0 {
 		fmt.Fprintf(b, "\n(%d additional thread(s) omitted to keep this prompt bounded; unresolved and current threads were prioritized over resolved and outdated ones.)\n", omitted)

@@ -321,6 +321,31 @@ func TestBuildReviewPrompt_RendersThreadFileLineBodyResolutionState(t *testing.T
 	}
 }
 
+// TestBuildReviewPrompt_TruncatedThreadCommentsNotedInPrompt pins the
+// per-thread comment-truncation signal (github.PRReviewThread.CommentsTruncated):
+// when a thread's fetched comments are only a partial history, the prompt
+// must say so rather than presenting it as complete.
+func TestBuildReviewPrompt_TruncatedThreadCommentsNotedInPrompt(t *testing.T) {
+	req := ReviewRequest{
+		ReviewThreads: []gh.PRReviewThread{
+			{Path: "a.go", Line: 1, CommentsTruncated: true, Comments: []gh.PRReviewThreadComment{
+				{Author: "x", Body: "finding"},
+			}},
+			{Path: "b.go", Line: 2, CommentsTruncated: false, Comments: []gh.PRReviewThreadComment{
+				{Author: "x", Body: "other finding"},
+			}},
+		},
+	}
+	prompt := buildReviewPrompt(req)
+
+	if !strings.Contains(prompt, "may be missing") {
+		t.Errorf("expected a truncation note in the prompt for the truncated thread, got:\n%s", prompt)
+	}
+	if strings.Count(prompt, "may be missing") != 1 {
+		t.Errorf("expected exactly 1 truncation note (only a.go's thread is truncated), got %d, prompt:\n%s", strings.Count(prompt, "may be missing"), prompt)
+	}
+}
+
 // TestBuildReviewPrompt_NoThreads_OmitsThreadSection proves the AC1 test
 // above is non-vacuous (AC6): with ReviewThreads empty/absent, none of the
 // thread markers appear.

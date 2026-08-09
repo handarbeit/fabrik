@@ -197,6 +197,13 @@ type PRReviewThread struct {
 	IsResolved bool
 	IsOutdated bool
 	Comments   []PRReviewThreadComment
+	// CommentsTruncated is true when the thread has more comments than
+	// FetchPRReviewThreads' per-thread page size (20) fetched — Comments
+	// holds only the oldest 20, so a later reply (e.g. the one that
+	// actually resolved the thread) may be missing. Callers rendering
+	// thread content should surface this rather than presenting Comments
+	// as the complete history.
+	CommentsTruncated bool
 }
 
 // PRReviewThreadComment is a single comment within a PRReviewThread, in

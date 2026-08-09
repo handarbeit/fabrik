@@ -626,6 +626,60 @@ func TestFetchPRReviewThreads_NullLineFallsBackToOriginalLine(t *testing.T) {
 	}
 }
 
+func TestFetchPRReviewThreads_CommentsTruncated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": map[string]interface{}{
+						"reviewThreads": map[string]interface{}{
+							"nodes": []map[string]interface{}{
+								{
+									"id": "thread1", "isResolved": false, "isOutdated": false,
+									"path": "foo.go", "line": 42, "originalLine": 40,
+									"comments": map[string]interface{}{
+										"totalCount": 21,
+										"nodes": []map[string]interface{}{
+											{"author": map[string]interface{}{"login": "reviewer"}, "body": "finding text", "createdAt": "2026-01-15T10:30:00Z"},
+										},
+									},
+								},
+								{
+									"id": "thread2", "isResolved": false, "isOutdated": false,
+									"path": "bar.go", "line": 1, "originalLine": 1,
+									"comments": map[string]interface{}{
+										"totalCount": 1,
+										"nodes": []map[string]interface{}{
+											{"author": map[string]interface{}{"login": "reviewer"}, "body": "single comment", "createdAt": "2026-01-15T10:30:00Z"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	threads, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewThreads: %v", err)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("expected 2 threads, got %d", len(threads))
+	}
+	if !threads[0].CommentsTruncated {
+		t.Errorf("thread1: CommentsTruncated = false, want true (totalCount 21 > 1 fetched)")
+	}
+	if threads[1].CommentsTruncated {
+		t.Errorf("thread2: CommentsTruncated = true, want false (totalCount matches fetched count)")
+	}
+}
+
 func TestFetchPRReviewThreads_NullPullRequest_ReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
