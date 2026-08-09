@@ -1579,6 +1579,7 @@ What differs from a Plan-stage spawn:
 - **Parsed from the stage's own output directly**, not from a stored comment — Review/Validate post to the linked PR, so there's no comment for the engine to re-read later the way it re-reads Plan's.
 - **Takes effect immediately**, not deferred to Implement — since Review/Validate run *after* Implement, there is no later dispatch step to defer to. The child is created, boarded, assigned, and linked as soon as the block is recognized.
 - **The receipt note is present-tense**: "Spawned 1 sub-issue: owner/repo#N. It has been registered, assigned, and linked as a blocker of this issue" — rather than Plan's "will be created when this issue advances to Implement."
+- **The raw declaration block is stripped from the posted comment**, unlike Plan's — Plan's comment intentionally keeps its block visible ("N sub-issues declared above"), but the mid-flight receipt note already says what was spawned, so the internal `FABRIK_SPAWN_CHILD_BEGIN`/`TITLE:`/`FABRIK_SPAWN_CHILD_END` syntax would only duplicate that information if left in.
 - **No separate idempotency label** — each stage dispatch's output is fresh and never replayed, so a block is only ever processed once.
 
 Once a mid-flight spawn is processed, the parent picks up `fabrik:blocked` on its next dispatch, exactly as any other dependency does — it will not proceed past the blocked stage until the newly spawned child closes.

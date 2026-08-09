@@ -171,6 +171,58 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 	return blocks
 }
 
+// stripSpawnBlocks removes every well-formed FABRIK_SPAWN_CHILD_BEGIN/END
+// block from body, using the identical line-scanning algorithm
+// ParseSpawnBlocks uses (spawnBeginRepo/isSpawnEndLine/parseTitleAndBody) —
+// so it strips exactly the set of blocks ParseSpawnBlocks would parse and
+// spawnChildren would act on, no more and no less. A malformed block (one
+// ParseSpawnBlocks itself skips, e.g. a missing TITLE: line) is left
+// visible rather than silently discarded, matching ParseSpawnBlocks's own
+// judgment that it was never really a block.
+//
+// Used by the Review/Validate mid-flight spawn hook (finalizeStageOutcome,
+// engine/item.go) so a successfully-processed declaration does not also leak
+// its raw BEGIN/END/TITLE: syntax into the posted PR/issue comment alongside
+// the receipt note — mirroring the stripMarkers call already made for
+// FABRIK_PR_CREATE/FABRIK_ISSUE_UPDATE in the same function. Not used by
+// Plan's own comment (preImplement reads a stored comment back later and
+// formatSpawnReceiptNote's "declared above" wording depends on the raw
+// blocks staying visible there — see that function's doc comment).
+func stripSpawnBlocks(body string) string {
+	lines := strings.Split(body, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		repo := spawnBeginRepo(lines[i])
+		if repo == "" {
+			out = append(out, lines[i])
+			continue
+		}
+
+		end := -1
+		for j := i + 1; j < len(lines); j++ {
+			if isSpawnEndLine(lines[j]) {
+				end = j
+				break
+			}
+		}
+		if end == -1 {
+			// No matching END — nothing further can be well-formed (mirrors
+			// ParseSpawnBlocks's own bail-out). Keep the remainder verbatim.
+			out = append(out, lines[i:]...)
+			break
+		}
+
+		if title, _, _, _, _ := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title == "" {
+			// Malformed block body — ParseSpawnBlocks would have skipped it
+			// too, so nothing was spawned for it. Leave it visible.
+			out = append(out, lines[i:end+1]...)
+		}
+		// Well-formed block: omit its lines (BEGIN through END) entirely.
+		i = end
+	}
+	return strings.Join(out, "\n")
+}
+
 // parseTitleAndBody extracts the title (from the "TITLE: ..." line), the
 // optional DEPENDS_ON: header, and the remaining body content from the
 // inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.

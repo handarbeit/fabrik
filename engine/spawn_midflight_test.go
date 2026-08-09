@@ -160,6 +160,19 @@ func TestFinalizeStageOutcome_ReviewSpawn_FullyWired(t *testing.T) {
 	if !strings.Contains(prComment, "owner/repo#201") {
 		t.Errorf("expected receipt note to name the spawned child, got: %s", prComment)
 	}
+	// The raw declaration block must not also leak into the posted comment —
+	// the receipt note already says what was spawned; leaving the internal
+	// BEGIN/TITLE/END marker syntax visible would duplicate that information
+	// verbatim (pruefer review finding on #1419's PR).
+	if strings.Contains(prComment, "FABRIK_SPAWN_CHILD_BEGIN") || strings.Contains(prComment, "FABRIK_SPAWN_CHILD_END") {
+		t.Errorf("expected raw FABRIK_SPAWN_CHILD markers to be stripped from the posted comment, got: %s", prComment)
+	}
+	if strings.Contains(prComment, "TITLE: Fix the underlying library first") {
+		t.Errorf("expected the raw TITLE: line to be stripped from the posted comment, got: %s", prComment)
+	}
+	if !strings.Contains(prComment, "Found a blocker while reviewing.") {
+		t.Errorf("expected the stage's own preceding narrative line to survive stripping (only the block itself is removed), got: %s", prComment)
+	}
 }
 
 // TestFinalizeStageOutcome_ValidateSpawn_FullyWired mirrors the Review test

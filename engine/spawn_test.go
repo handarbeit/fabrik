@@ -507,6 +507,94 @@ func TestFormatMidflightSpawnReceiptNote_MultipleChildren(t *testing.T) {
 	}
 }
 
+// ---- stripSpawnBlocks unit tests (#1419 review finding) ----
+
+func TestStripSpawnBlocks_NoBlock_Unchanged(t *testing.T) {
+	body := "Nothing to spawn this cycle.\nFABRIK_STAGE_COMPLETE\n"
+	if got := stripSpawnBlocks(body); got != body {
+		t.Errorf("expected unchanged output with no block, got %q", got)
+	}
+}
+
+func TestStripSpawnBlocks_SingleBlock_RemovedButSurroundingTextSurvives(t *testing.T) {
+	body := "Found a blocker while reviewing.\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN owner/repo\n" +
+		"TITLE: Fix the underlying library first\n" +
+		"\n" +
+		"Discovered mid-review; must land before this PR.\n" +
+		"FABRIK_SPAWN_CHILD_END\n" +
+		"FABRIK_STAGE_COMPLETE\n"
+
+	got := stripSpawnBlocks(body)
+
+	if strings.Contains(got, "FABRIK_SPAWN_CHILD_BEGIN") || strings.Contains(got, "FABRIK_SPAWN_CHILD_END") {
+		t.Errorf("expected BEGIN/END markers stripped, got %q", got)
+	}
+	if strings.Contains(got, "TITLE: Fix the underlying library first") {
+		t.Errorf("expected TITLE: line stripped, got %q", got)
+	}
+	if strings.Contains(got, "Discovered mid-review") {
+		t.Errorf("expected block body stripped, got %q", got)
+	}
+	if !strings.Contains(got, "Found a blocker while reviewing.") {
+		t.Errorf("expected text preceding the block to survive, got %q", got)
+	}
+	if !strings.Contains(got, "FABRIK_STAGE_COMPLETE") {
+		t.Errorf("expected text following the block to survive, got %q", got)
+	}
+}
+
+func TestStripSpawnBlocks_MultipleBlocks_AllRemoved(t *testing.T) {
+	body := "Two blockers found.\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN owner/repo-a\n" +
+		"TITLE: First blocker\n" +
+		"Body one.\n" +
+		"FABRIK_SPAWN_CHILD_END\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN owner/repo-b\n" +
+		"TITLE: Second blocker\n" +
+		"Body two.\n" +
+		"FABRIK_SPAWN_CHILD_END\n" +
+		"FABRIK_STAGE_COMPLETE\n"
+
+	got := stripSpawnBlocks(body)
+
+	if strings.Contains(got, "FABRIK_SPAWN_CHILD_BEGIN") || strings.Contains(got, "FABRIK_SPAWN_CHILD_END") {
+		t.Errorf("expected all BEGIN/END markers stripped, got %q", got)
+	}
+	if strings.Contains(got, "First blocker") || strings.Contains(got, "Body one") {
+		t.Errorf("expected first block content stripped, got %q", got)
+	}
+	if strings.Contains(got, "Second blocker") || strings.Contains(got, "Body two") {
+		t.Errorf("expected second block content stripped, got %q", got)
+	}
+	if !strings.Contains(got, "Two blockers found.") {
+		t.Errorf("expected leading text to survive, got %q", got)
+	}
+}
+
+func TestStripSpawnBlocks_MalformedBlock_LeftVisible(t *testing.T) {
+	// No TITLE: line — ParseSpawnBlocks would skip this as malformed, so
+	// nothing was ever spawned for it; stripSpawnBlocks must leave it alone
+	// rather than silently discarding content that was never processed.
+	body := "FABRIK_SPAWN_CHILD_BEGIN owner/repo\n" +
+		"Just prose, no TITLE: line.\n" +
+		"FABRIK_SPAWN_CHILD_END\n"
+
+	got := stripSpawnBlocks(body)
+	if got != body {
+		t.Errorf("expected malformed block left untouched, got %q, want %q", got, body)
+	}
+}
+
+func TestStripSpawnBlocks_ProseOnlyMention_Unchanged(t *testing.T) {
+	// #1263 own-line discipline: a marker merely mentioned in prose (not on
+	// its own line) must not be treated as a real block boundary.
+	body := "- [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN owner/repo` block if a blocker turns up\n"
+	if got := stripSpawnBlocks(body); got != body {
+		t.Errorf("expected prose-only mention left untouched, got %q", got)
+	}
+}
+
 // ---- resolveSpecifyOptionID unit tests ----
 
 func TestResolveSpecifyOptionID_Nil(t *testing.T) {

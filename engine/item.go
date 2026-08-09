@@ -1348,7 +1348,13 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 				releaseLock()
 				return
 			}
-			output = formatMidflightSpawnReceiptNote(spawnedIDs) + output
+			// Strip the raw BEGIN/TITLE/END block(s) before prepending the
+			// receipt note — unlike Plan's comment (whose "declared above"
+			// note depends on the raw block staying visible), this note is
+			// self-contained and already names what was spawned, so leaving
+			// the internal marker syntax in a human-facing PR/issue comment
+			// would only duplicate that information verbatim.
+			output = formatMidflightSpawnReceiptNote(spawnedIDs) + stripSpawnBlocks(output)
 		}
 	}
 
