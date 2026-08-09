@@ -5911,6 +5911,64 @@ limitation per ADR-1119 and ADR-1120. Cross-process coordination between multipl
 sharing one account is also out of scope: the suspension is per-process, so a fleet of instances will
 each discover the limit once.
 
+### 7.3a Transient `api_error` Exemption
+
+A Claude invocation that exits with `resp.TerminalReason == "api_error"` (the `apiErrorTerminalReason`
+constant) is, like §7.3's usage-limit exit, a condition where the stage never ran — but unlike a usage
+limit, it is per-invocation and self-resolving, not account-wide. Observed live on 2026-08-08 (#1458):
+eight such exits across two issues, each at 1 turn and `$0.0000`, with three consecutive hits on #1408
+incorrectly consuming its entire `MaxRetries` budget and pausing a PR that was otherwise mergeable and
+green.
+
+**Detection:** `classifyAPIErrorExit(resp claudeResponse, usage TokenUsage)` (`engine/claude.go`)
+mirrors `classifyUsageLimitExit` exactly — structural-only (`resp.TerminalReason == "api_error"`, never
+output prose), with the same conjunctive `usage.TurnsUsed > 0 && usage.CostUSD > 0` exclusion carried
+over unchanged (a real `api_error` sample's `CostUSD` could not be empirically captured during Research,
+so the guard is reused rather than dropped or re-derived — see ADR-1458). `interpretClaudeResult`
+checks this immediately after the `classifyUsageLimitExit` branch and before the diagnostic-only
+unmatched-`terminal_reason` log line, returning a `*claudeAPIErrorExit{TerminalReason, NumTurns,
+CostUSD}` sentinel in place of the generic error wrapper.
+
+**Handling — deliberately a distinct type, not a reuse of `claudeUsageLimitError`:** `claudeUsageLimitError`
+is the trigger, by Go type via `errors.As`, for two behaviors beyond `handleUsageLimitExit` itself:
+`activateClaudeSuspension` (account-wide, in both `runInvocationWithExtension` and
+`runCommentExtensionLoop`) and the comment-processing circuit breaker bypass (`processComments`). Both
+are correct only for a genuine account-wide usage limit — an `api_error` says nothing about the account
+as a whole, so `claudeAPIErrorExit` is a separate sentinel type that simply never matches either
+`errors.As(&claudeUsageLimitError{})` check, avoiding both behaviors by construction rather than by an
+added conditional. `finalizeStageOutcome()` detects it via its own `errors.As` branch (alongside the
+usage-limit and apiKeyHelper branches) and routes to `handleAPIErrorExit()`, which:
+
+1. Applies `itemstate.StageAttempted` — the normal dispatch cooldown (`PollSeconds * 10`) applies on the
+   stage-dispatch path, exactly as for a usage-limit exit. Deliberately does **not** call
+   `StageRetryIncremented` — the stage never ran, so this does not count against `MaxRetries`.
+2. Logs only. Unlike `handleUsageLimitExit`/`handleAPIKeyHelperDetected`, posts **no comment** and
+   applies **no label** — a fifth, more minimal "did not run" shape. The condition is per-invocation and
+   self-resolving on the next attempt; a durable label here would be indistinguishable from the
+   orphaned-durable-state leak ADR-1183's sweep exists to clean up, and a comment for a self-healing
+   event is noise (see #1414's "comment when a human must act, log when the engine self-heals").
+3. Releases the lock and returns — no `stage:<name>:failed`, no `fabrik:paused`, no account-wide
+   suspension.
+
+**The comment-triggered dispatch path (`engine/comments.go`) is deliberately unmodified.** That path has
+no `LastAttemptAt`-based cooldown at all (§7.3's cooldown only exists in `itemNeedsWork`'s stage-dispatch
+fallthrough); its only bound is the comment-processing circuit breaker (`checkCommentBreaker`, #1089,
+default 10 invocations/30 min). Because `claudeAPIErrorExit` is a distinct type from
+`claudeUsageLimitError`, it automatically falls through to the same `checkCommentBreaker(item, "")` call
+every other unclassified error already reaches — unlike a genuine usage-limit hit, which
+`processComments` deliberately exempts from the breaker. Counting an `api_error` toward the breaker is
+correct here: it says nothing account-wide that would justify exempting an issue's comment thread from
+"no forward progress" accounting, and the breaker is the only mechanism that bounds this path (the
+5-invocations-in-31-seconds burst observed on #1208 came from comment-triggered redispatch, not the
+5-minute-cadence stage-dispatch cooldown).
+
+**Regression guard:** an `api_error` exit followed by a genuine failure leaves the full `MaxRetries`
+budget available for the genuine failure, exactly as §7.3 describes for a usage-limit exit. A genuine
+stage failure with no matching `TerminalReason` is entirely unaffected by this section — it still counts
+against `MaxRetries` and still escalates via `escalateFailedStage()` (§7.2) at the limit.
+
+See ADR-1458 and #1458.
+
 ### 7.4 Multi-Instance Lock Protocol
 
 Per [ADR-007](../adrs/007-label-based-locking.md):

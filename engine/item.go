@@ -1230,6 +1230,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.handleAPIKeyHelperDetected(p, apiKeyErr)
 			return
 		}
+
+		// A transient Anthropic-side api_error exit is likewise not a stage
+		// failure — the stage never ran. See claudeAPIErrorExit in claude.go
+		// and #1458.
+		var apiErrExit *claudeAPIErrorExit
+		if errors.As(err, &apiErrExit) {
+			e.handleAPIErrorExit(p, apiErrExit)
+			return
+		}
 	}
 
 	// A Claude turn-limit exit (CLI subtype error_max_turns) is not a genuine
@@ -2618,6 +2627,39 @@ func (e *Engine) handleAPIKeyHelperDetected(p stageOutcomeParams, apiKeyErr *api
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:api-key-helper-detected")
 	}
+
+	p.release()
+}
+
+// handleAPIErrorExit is called by finalizeStageOutcome when a Claude
+// invocation exited on a transient Anthropic-side API error (see
+// claudeAPIErrorExit in claude.go, #1458), not because the stage genuinely
+// failed. Structurally the same "StageAttempted, never StageRetryIncremented"
+// split as handleUsageLimitExit/handleAPIKeyHelperDetected, but deliberately
+// a fifth, more minimal shape (#1458 R4): no durable label, no issue
+// comment. The condition is per-invocation and self-resolving on the next
+// attempt, so a label would be indistinguishable from the orphaned-durable-
+// state leak ADR-1183's sweep exists to clean up, and a comment for a
+// self-healing event is noise — log only. The dispatch cooldown that
+// StageAttempted activates (via LastAttemptAt) is the mechanism that bounds
+// the stage-dispatch retry loop (#1458 R6); see ADR-1458 for why the
+// comment-triggered dispatch path is bounded differently (the existing
+// comment-processing circuit breaker, not this handler).
+func (e *Engine) handleAPIErrorExit(p stageOutcomeParams, apiErr *claudeAPIErrorExit) {
+	item := p.item
+	stage := p.stage
+	repoStr := p.repoStr
+
+	e.logf(item.Number, "claude", "stage %q did not run — transient api_error (num_turns=%d, cost=$%.4f); not charged against max_retries\n", stage.Name, apiErr.NumTurns, apiErr.CostUSD)
+
+	// Record StageAttempted so the normal dispatch cooldown applies — the
+	// stage never ran, so StageRetryIncremented is deliberately never called.
+	e.store.Apply(itemstate.StageAttempted{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		At:        time.Now(),
+	})
 
 	p.release()
 }
