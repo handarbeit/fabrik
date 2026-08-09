@@ -1723,24 +1723,56 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 	})
 }
 
+// reviewCyclePauseFragment is the stable prose fragment identifying a
+// pauseForReviewCycleLimit pause comment, matched by hasPauseComment (#1460 R4).
+func reviewCyclePauseFragment(stage *stages.Stage) string {
+	return fmt.Sprintf("The stage **%s** has been re-invoked to address PR review feedback", stage.Name)
+}
+
 // pauseForReviewCycleLimit pauses the issue when the maximum review re-invocation
 // cycle count is reached. It applies fabrik:paused + fabrik:awaiting-input and
-// posts an explanatory comment.
-func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+// posts an explanatory comment — unless a pause comment for this episode
+// already exists (#1408/#1460 R4), in which case it reapplies the pause
+// labels only, reusing the existing comment rather than reposting.
+//
+// Applies itemstate.EnginePaused (#1460 R2) in both branches — the fresh
+// pause AND the reapply-existing-comment branch — so wasPaused becomes true
+// and the new handleEngineUnpause Phase 1 handler fires clearFailedStage on
+// resume, actually resetting ReviewCycles. Without this, removing
+// fabrik:paused was a no-op: ReviewCycles stayed pinned at the limit and the
+// item re-paused on its very next catch-up pass (confirmed live on #1208).
+// Re-applying on the reapply branch matters too: a resume clears
+// PausedByEngine, so if review feedback keeps arriving and the counter climbs
+// back to the limit a second time, this function runs again on the reapply
+// branch (the old comment still matches) and must re-arm PausedByEngine or
+// the next resume would be a no-op.
+//
+// Returns escalated: true when a fresh pause comment was posted, false when
+// an existing episode's pause was merely reapplied.
+func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if hasPauseComment(item, reviewCyclePauseFragment(stage)) {
+		e.logf(item.Number, "review-cycles", "review-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyPauseLabels(item)
+		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		return false
+	}
 	e.logf(item.Number, "review-cycles", "review cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
-		"🏭 **Fabrik — review cycle limit reached**\n\nThe stage **%s** has been re-invoked to address PR review feedback %d time(s), "+
+		"🏭 **Fabrik — review cycle limit reached**\n\n%s %d time(s), "+
 			"which has reached the maximum configured limit (`FABRIK_MAX_REVIEW_CYCLES=%d`).\n\n"+
 			"This usually means a reviewer (bot or human) is repeatedly requesting changes after each fix. "+
 			"Fabrik has paused this issue for human review. Once the review situation is resolved, "+
 			"remove the `fabrik:paused` label to resume.",
-		stage.Name, cycleCount, maxCycles,
+		reviewCyclePauseFragment(stage), cycleCount, maxCycles,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	return true
 }
 
 // botMentionHandle maps copilot-* logins to "copilot" — GitHub's canonical mention surface for the reviewer bot.

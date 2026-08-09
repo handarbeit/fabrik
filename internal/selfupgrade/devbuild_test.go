@@ -1,6 +1,7 @@
 package selfupgrade
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -284,6 +285,213 @@ func TestCheckAndRebuildDev_LocalAheadDoesNotPull(t *testing.T) {
 	}
 	if *execCalled {
 		t.Errorf("expected no re-exec when local is ahead of origin, logs: %v", *logs)
+	}
+}
+
+// initOriginAndClone creates a bare-ish origin source checkout and a clone of
+// it, both wired the way CompareDevBuild/CheckAndRebuildDev expect (git user
+// configured, ExpectedRemote resolvable to originDir). Returns both dirs.
+func initOriginAndClone(t *testing.T) (originDir, localDir string) {
+	t.Helper()
+	originDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(originDir, "go.mod"), []byte("module selfupgradetest\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(originDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, originDir, "init", "-b", "main")
+	runGit(t, originDir, "config", "user.email", "test@test.com")
+	runGit(t, originDir, "config", "user.name", "Test")
+	runGit(t, originDir, "add", "-A")
+	runGit(t, originDir, "commit", "-m", "initial")
+
+	localDir = t.TempDir()
+	runGit(t, localDir, "clone", originDir, ".")
+	runGit(t, localDir, "config", "user.email", "test@test.com")
+	runGit(t, localDir, "config", "user.name", "Test")
+	return originDir, localDir
+}
+
+// TestCompareDevBuild_NotSourceCheckout verifies that a directory that isn't
+// a git checkout of the expected remote reports Applicable=false and takes no
+// action.
+func TestCompareDevBuild_NotSourceCheckout(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir() // no git init at all
+
+	cfg, _, _, _ := testDevBuildConfig(t, dir, "dev(abc1234)", "handarbeit/fabrik")
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v", err)
+	}
+	if status.Applicable {
+		t.Error("expected Applicable=false for a non-source-checkout directory")
+	}
+	if status.NeedsRebuild {
+		t.Error("expected NeedsRebuild=false for a non-source-checkout directory")
+	}
+}
+
+// TestCompareDevBuild_ShaMismatchSkipsFetch verifies that when the running
+// binary's embedded SHA doesn't match local HEAD, CompareDevBuild reports
+// NeedsRebuild without ever calling `git fetch` against origin — origin is
+// deliberately unreachable, so RemoteRef staying empty is proof no fetch ran
+// (a fetch attempt would otherwise surface as an error here).
+func TestCompareDevBuild_ShaMismatchSkipsFetch(t *testing.T) {
+	skipIfNoGit(t)
+	dir := initDevSourceCheckout(t, "handarbeit/fabrik")
+
+	cfg, _, _, logs := testDevBuildConfig(t, dir, "dev(0000000)", "handarbeit/fabrik")
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if !status.Applicable {
+		t.Fatal("expected Applicable=true")
+	}
+	if !status.ShaMismatch {
+		t.Error("expected ShaMismatch=true")
+	}
+	if !status.NeedsRebuild {
+		t.Error("expected NeedsRebuild=true")
+	}
+	if status.RemoteRef != "" {
+		t.Errorf("expected no fetch to have run (RemoteRef empty), got %q", status.RemoteRef)
+	}
+	if status.CommitsBehind != 0 {
+		t.Errorf("expected CommitsBehind=0 when the SHA-mismatch shortcut fires, got %d", status.CommitsBehind)
+	}
+}
+
+// TestCompareDevBuild_RemoteAhead verifies the remote-ahead field values:
+// CommitsBehind, RemoteRef, and LocalCommitTime are all populated correctly
+// when origin has new commits.
+func TestCompareDevBuild_RemoteAhead(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+
+	runGit(t, originDir, "commit", "--allow-empty", "-m", "second")
+	runGit(t, originDir, "commit", "--allow-empty", "-m", "third")
+
+	// Version is not a "dev(...)" string, so extractBinarySHA returns "" and
+	// the SHA-mismatch shortcut never fires — forcing the remote-check path.
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if status.ShaMismatch {
+		t.Error("expected ShaMismatch=false")
+	}
+	if !status.RemoteAhead {
+		t.Error("expected RemoteAhead=true")
+	}
+	if !status.NeedsRebuild {
+		t.Error("expected NeedsRebuild=true")
+	}
+	if status.CommitsBehind != 2 {
+		t.Errorf("CommitsBehind = %d, want 2", status.CommitsBehind)
+	}
+	remoteHead, err := gitRevParse(originDir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RemoteRef != remoteHead {
+		t.Errorf("RemoteRef = %q, want %q", status.RemoteRef, remoteHead)
+	}
+	if status.LocalCommitTime.IsZero() {
+		t.Error("expected LocalCommitTime to be populated")
+	}
+}
+
+// TestCompareDevBuild_UpToDate verifies that a checkout whose local HEAD
+// matches origin/BaseBranch reports NeedsRebuild=false.
+func TestCompareDevBuild_UpToDate(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if !status.Applicable {
+		t.Error("expected Applicable=true")
+	}
+	if status.NeedsRebuild {
+		t.Error("expected NeedsRebuild=false when up to date")
+	}
+	if status.RemoteRef == "" {
+		t.Error("expected RemoteRef to be resolved by the fetch")
+	}
+}
+
+// TestCompareDevBuild_LocalAheadNoRebuild verifies that a checkout with
+// unpushed local commits (ahead of origin) reports NeedsRebuild=false — an
+// unpushed local commit must never be flagged for rebuild.
+func TestCompareDevBuild_LocalAheadNoRebuild(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+	runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if status.RemoteAhead {
+		t.Error("expected RemoteAhead=false when local is ahead of origin")
+	}
+	if status.NeedsRebuild {
+		t.Error("expected NeedsRebuild=false when local is ahead of origin")
+	}
+}
+
+// TestCompareDevBuild_NeverBuildsOrExecs is the AC6 assertion: run
+// CompareDevBuild against a fixture that is unambiguously rebuild-eligible
+// (remote ahead, NeedsRebuild=true — the exact condition that would make
+// CheckAndRebuildDev pull/build/exec) and confirm none of PostBuildHook,
+// execFn, or an on-disk binary rewrite happened. The executable's bytes are
+// compared before/after since `go build -o` would rewrite them; unchanged
+// bytes plus untriggered hooks together prove no build or exec occurred, not
+// just that this particular run happened not to need one.
+func TestCompareDevBuild_NeverBuildsOrExecs(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+	runGit(t, originDir, "commit", "--allow-empty", "-m", "second")
+
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", originDir)
+
+	exePath, err := executableFn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if !status.NeedsRebuild {
+		t.Fatal("fixture must be rebuild-eligible for this test to prove anything")
+	}
+
+	after, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("CompareDevBuild modified the executable on disk — it must never build")
+	}
+	if *postBuildCalled {
+		t.Error("CompareDevBuild called PostBuildHook — it must never build/exec")
+	}
+	if *execCalled {
+		t.Error("CompareDevBuild called execFn — it must never exec")
 	}
 }
 

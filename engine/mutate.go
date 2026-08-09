@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -293,4 +294,41 @@ func (e *Engine) pauseIssue(item gh.ProjectItem, comment string, opts pauseOpts)
 	if opts.removeAutoMerge {
 		e.applyLabelRemove(item, "fabrik:auto-merge-enabled", opts.labelEcho)
 	}
+}
+
+// hasPauseComment reports whether item already carries a comment matching any
+// of the given stable prose fragments — the shared primitive behind each
+// pause domain's own hasXPauseComment wrapper (CI gate, review cycle, rebase
+// cycle, enqueue cycle). The match is unscoped by time — it scans the issue's
+// entire comment history, not just "this poll" — so it identifies a single
+// pause *episode* rather than a single call. That's what lets a pauseFor*
+// function tell a genuine same-poll duplicate call apart from a later
+// re-escalation of the same unresolved episode after a human resumed the item
+// by removing fabrik:paused (issue #1408) — both hit this same check, but
+// only the caller-side context decides which one it is. Mirrors
+// hasSkippedComment's precedent (no_work_needed_settle.go): match on a stable
+// prose fragment rather than the full message, since counters/values embedded
+// in the message can differ between posts of the "same" episode.
+func hasPauseComment(item gh.ProjectItem, fragments ...string) bool {
+	for _, c := range item.Comments {
+		for _, frag := range fragments {
+			if strings.Contains(c.Body, frag) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reapplyPauseLabels re-applies fabrik:paused + fabrik:awaiting-input without
+// posting a new comment. Used by a pauseFor* function's reapply branch (issue
+// #1408) when hasPauseComment finds an existing pause comment for this
+// episode: a human resuming the item removes only fabrik:paused, never the
+// comment, so a still-blocked item must be re-escalated (labels reapplied)
+// without spamming a duplicate comment. applyLabelAdd's underlying
+// AddLabelToIssue call is idempotent, so this is safe to call even in the
+// (should-be-rare) case the labels are still present.
+func (e *Engine) reapplyPauseLabels(item gh.ProjectItem) {
+	e.applyLabelAdd(item, "fabrik:paused", false)
+	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
 }
