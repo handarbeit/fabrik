@@ -37,6 +37,20 @@ func (s *Sim) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 		return fmt.Errorf("simgh: issue %s#%d not found", targetRepo, targetNum)
 	}
 
+	// The blocker must exist too. GitHub's mutation fails on a node ID that
+	// resolves to nothing, and a dangling blocker is worse here than a plain
+	// no-op: resolveDependenciesLocked reports an unresolvable blocker as
+	// State "OPEN", so the dependent issue would read as permanently blocked
+	// with no diagnostic anywhere — a wrong ID silently accepted, which is the
+	// bug class this layer exists to catch.
+	br, ok := s.repos[blockerRepo]
+	if !ok {
+		return fmt.Errorf("simgh: blocker repo %s not seeded", blockerRepo)
+	}
+	if _, ok := br.issues[blockerNum]; !ok {
+		return fmt.Errorf("simgh: blocker issue %s#%d not found", blockerRepo, blockerNum)
+	}
+
 	// GitHub silently ignores a duplicate dependency rather than erroring.
 	for _, dep := range iss.blockedBy {
 		depRepo := dep.Repo

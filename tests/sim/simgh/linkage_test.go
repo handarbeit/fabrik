@@ -158,3 +158,75 @@ func TestAutoAssignedNumberSkipsSeededHoles(t *testing.T) {
 		t.Error("CreateIssue reused #1, which PR #1 already holds")
 	}
 }
+
+// TestAddProjectV2ItemByIdRejectsPRCard pins that the runtime board API refuses
+// a PR card for the same reason the seeding API does.
+//
+// The two must agree about what the model can represent. Board projections
+// resolve a card's content as an issue, so a PR card recorded here would be
+// dropped by every subsequent board read — a loud refusal at seed time and a
+// silent no-op at runtime is exactly the asymmetry that makes a fake untrustworthy.
+func TestAddProjectV2ItemByIdRejectsPRCard(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedProject("acme", 2, "Engineering", []string{"Backlog", "Done"}).
+		SeedCommit("acme/widgets", "feature", map[string]string{"a.txt": "a"}, "work").
+		SeedPR("acme/widgets", PRSeed{Number: 4, Title: "a PR", Head: "feature"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	_, projectID, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+	if err != nil {
+		t.Fatalf("ProbeProjectBoard: %v", err)
+	}
+
+	if _, err := s.AddProjectV2ItemById(projectID, "pr:acme/widgets#4"); err == nil {
+		t.Fatal("AddProjectV2ItemById accepted a PR content node ID; want a refusal, since no board read can project one")
+	}
+
+	// The refusal must also leave no half-added card behind.
+	board, err := s.FetchProjectBoard("acme", "widgets", 2, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 0 {
+		t.Fatalf("board has %d items after a refused add, want 0", len(board.Items))
+	}
+}
+
+// TestAddBlockedByIssueRejectsUnknownBlocker pins that a blocker node ID which
+// resolves to nothing is refused rather than recorded.
+//
+// A dangling blocker is worse than a plain no-op: resolveDependenciesLocked
+// reports an unresolvable blocker as OPEN, so the dependent issue would read as
+// permanently blocked with no diagnostic anywhere.
+func TestAddBlockedByIssueRejectsUnknownBlocker(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+
+	if err := s.AddBlockedByIssue("issue:acme/widgets#7", "issue:acme/widgets#999"); err == nil {
+		t.Fatal("AddBlockedByIssue accepted a blocker that does not exist; want a refusal")
+	}
+	if err := s.AddBlockedByIssue("issue:acme/widgets#7", "issue:nosuch/repo#1"); err == nil {
+		t.Fatal("AddBlockedByIssue accepted a blocker in an unseeded repo; want a refusal")
+	}
+
+	item, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if len(item.BlockedBy) != 0 {
+		t.Fatalf("issue reads as blocked by %+v after refused links, want no dependency", item.BlockedBy)
+	}
+}
+
+// TestSeedBlockedByRejectsUnknownBlocker pins the same guard on the seeding
+// path, so the two APIs cannot disagree about what a valid blocker is.
+func TestSeedBlockedByRejectsUnknownBlocker(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	s.SeedBlockedBy("acme/widgets", 7, "acme/widgets", 999)
+
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedBlockedBy accepted a blocker that does not exist; want a failure")
+	}
+}

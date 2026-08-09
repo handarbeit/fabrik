@@ -212,6 +212,18 @@ mutate "a PR card is accepted and silently dropped" \
   'TestSeedProjectItemRejectsPRCard' \
   'seed.go::s{\tif isPR \{}{\tif false \{}'
 
+mutate "the runtime board API accepts a PR card the seeding API refuses" \
+  'TestAddProjectV2ItemByIdRejectsPRCard' \
+  'board.go::s{return "", fmt\.Errorf\("simgh: PR cards on a project board are not modelled \(%s#%d\); see FIDELITY\.md", ownerRepo, number\)}{ }'
+
+mutate "a nonexistent blocker is accepted at runtime" \
+  'TestAddBlockedByIssueRejectsUnknownBlocker' \
+  'deps.go::s{if _, ok := br\.issues\[blockerNum\]; !ok \{}{if false {}'
+
+mutate "a nonexistent blocker is accepted at seed time" \
+  'TestSeedBlockedByRejectsUnknownBlocker' \
+  'seed.go::s{if _, ok := br\.issues\[blockerNumber\]; !ok \{}{if false {}'
+
 # --- precedence ordering ------------------------------------------------
 # The single-condition tests above prove each branch is reachable; only these
 # constrain the order they are tried in. Each mutation demotes one state below

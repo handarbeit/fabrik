@@ -487,9 +487,13 @@ func (s *Sim) LookupIssueProjectItem(projectID, repo string, issueNumber int) (s
 	return "", "", nil
 }
 
-// AddProjectV2ItemById puts an existing issue or PR on a board and returns the
-// new card's ID. Adding one already present returns the existing ID, as the
+// AddProjectV2ItemById puts an existing issue on a board and returns the new
+// card's ID. Adding one already present returns the existing ID, as the
 // GraphQL mutation does.
+//
+// A PR content node ID is rejected rather than accepted: real GitHub allows PR
+// cards, but this model cannot project one (see FIDELITY.md), so accepting it
+// would add a card that every board read then silently drops.
 func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -506,12 +510,18 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 	if !ok {
 		return "", fmt.Errorf("simgh: repo %s not seeded", ownerRepo)
 	}
-	isPR := false
 	if _, ok := r.issues[number]; !ok {
 		if _, ok := r.prs[number]; !ok {
 			return "", fmt.Errorf("simgh: no issue or PR %s#%d to add to project", ownerRepo, number)
 		}
-		isPR = true
+		// Board projections resolve a card's content as an issue
+		// (buildProjectItem, ProbeProjectBoard), so a PR card recorded here
+		// would be silently omitted from every subsequent board read. Refuse
+		// it, exactly as the seeding path does (placeOnProjectLocked): the
+		// seeding and runtime APIs must not disagree about what the model can
+		// represent, or a scenario would get a loud failure one way and a
+		// silent no-op the other. Recorded in FIDELITY.md as absent.
+		return "", fmt.Errorf("simgh: PR cards on a project board are not modelled (%s#%d); see FIDELITY.md", ownerRepo, number)
 	}
 
 	id := itemNodeID(p.owner, p.num, ownerRepo, number)
@@ -525,7 +535,7 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 		itemID:    id,
 		ownerRepo: ownerRepo,
 		number:    number,
-		isPR:      isPR,
+		isPR:      false,
 		status:    "",
 		updatedAt: s.now(),
 	}

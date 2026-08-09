@@ -600,6 +600,19 @@ func (s *Sim) SeedBlockedBy(ownerRepo string, issueNumber int, blockerOwnerRepo 
 		s.fail("simgh: issue %s#%d not found", ownerRepo, issueNumber)
 		return s
 	}
+	// Validate the blocker for the same reason AddBlockedByIssue does: an
+	// unresolvable blocker resolves to State "OPEN", leaving the dependent
+	// issue permanently blocked with no diagnostic. The seeding and runtime
+	// paths must agree about what is representable.
+	br, ok := s.repos[blockerOwnerRepo]
+	if !ok {
+		s.fail("simgh: blocker repo %s not seeded", blockerOwnerRepo)
+		return s
+	}
+	if _, ok := br.issues[blockerNumber]; !ok {
+		s.fail("simgh: blocker issue %s#%d not found", blockerOwnerRepo, blockerNumber)
+		return s
+	}
 	repoField := ""
 	if blockerOwnerRepo != ownerRepo {
 		repoField = blockerOwnerRepo
