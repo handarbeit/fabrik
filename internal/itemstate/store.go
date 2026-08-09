@@ -419,6 +419,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.ReviewCycles[v.StageName]++
 		return StageStateChanged
 
+	case ReviewCycleDecremented:
+		ensureStageStateMaps(item)
+		if item.StageState.ReviewCycles[v.StageName] > 0 {
+			item.StageState.ReviewCycles[v.StageName]--
+		}
+		return StageStateChanged
+
 	case CIFixCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.CIFixCycles[v.StageName]++

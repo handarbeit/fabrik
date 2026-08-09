@@ -428,6 +428,40 @@ func TestApplyReviewCycleIncremented(t *testing.T) {
 	}
 }
 
+// ---- ReviewCycleDecremented (#1045) ----
+
+func TestApplyReviewCycleDecremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 1 {
+		t.Errorf("ReviewCycles = %d, want 1", got)
+	}
+}
+
+func TestApplyReviewCycleDecremented_FlooredAtZero(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	// Decrementing an already-zero counter is a genuine no-op field-wise
+	// (the value stays 0), so the store correctly reports no Change here
+	// (invariant I6) — use raw Apply instead of applyExpect, which asserts a
+	// Change occurred.
+	if _, _, err := s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (floored)", got)
+	}
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if _, _, err := s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (floored, double decrement)", got)
+	}
+}
+
 // ---- CIFixCycleIncremented ----
 
 func TestApplyCIFixCycleIncremented(t *testing.T) {

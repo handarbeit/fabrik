@@ -1161,31 +1161,51 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 }
 
 // buildReviewBodyComments returns synthetic gh.Comments derived from the
-// top-level body of each unaddressed CHANGES_REQUESTED PR review (Finding 4,
-// #1375) — buildReviewThreadComments only ever looks at inline thread
-// comments, which GitHub does not require, and misses the guaranteed part of
-// a CHANGES_REQUESTED review: its body (see reviewGateAuthorityVerdict's doc
-// comment and GitHub's REST "Create a review for a pull request" contract,
-// which requires a body for REQUEST_CHANGES/COMMENT alike).
+// top-level body of each unaddressed, non-DISMISSED PR review (#1045,
+// superseding #1375's narrower CHANGES_REQUESTED-only scope) —
+// buildReviewThreadComments only ever looks at inline thread comments, which
+// GitHub does not require, and misses the guaranteed part of a
+// CHANGES_REQUESTED/COMMENTED review: its body (GitHub's REST "Create a
+// review for a pull request" contract requires a body for REQUEST_CHANGES
+// and COMMENT alike).
 //
 // A review is skipped when:
 //   - DatabaseID == 0 (not yet fetched/unavailable — no stable ID to key
 //     dedup on)
-//   - State != "CHANGES_REQUESTED" (Pruefer review finding, #1375: COMMENTED
-//     is deliberately excluded — despite GitHub also requiring a body for it —
-//     because automated reviewers (Copilot, Gemini) routinely submit a
-//     COMMENTED review whose body is a generic "Pull request overview"
-//     summary, not something to act on; treating it as actionable would
-//     trigger a reinvoke on every wait_for_reviews stage, advisory included,
-//     far beyond this issue's stated scope. APPROVED is likewise excluded — a
-//     body there is typically "LGTM". DISMISSED is excluded because it is no
-//     longer an active verdict, mirroring reviewGateOutstanding's hasReviews
-//     computation. reviewGateAuthorityVerdict draws the identical line: only
-//     CHANGES_REQUESTED blocks authoritative mode's own fallback verdict.
+//   - State == "DISMISSED" (no longer an active verdict, mirroring
+//     reviewGateOutstanding's hasReviews computation) or State == "PENDING"
+//     (not yet submitted)
 //   - Body == "" (nothing to act on)
 //   - already recorded via snap.CommentProcessed(reviewBodyCommentID(r)) — the
 //     only dedup mechanism available, since no GitHub reaction endpoint exists
 //     for a top-level review body (see reviewBodyIDPrefix's doc comment, R7)
+//
+// #1375 originally excluded COMMENTED and APPROVED bodies here: automated
+// reviewers (Copilot, Gemini) routinely submit a COMMENTED review whose body
+// is a generic "Pull request overview" summary, not something to act on, and
+// an APPROVED body is typically "LGTM". That rationale is still accurate for
+// those bots, but the exclusion's blast radius grew once a reviewer
+// (Pruefer, handarbeit-pruefer, #1251) started submitting its entire
+// substantive finding set as COMMENTED bodies exclusively (raise-only
+// REQUEST_CHANGES, undconfigured threshold) — the exclusion silently dropped
+// a real reviewer's findings, letting a PR merge unread (#1045, same failure
+// shape as #1207 through a different door). #1045 removes the state filter
+// rather than narrowing it by author (an `expected_reviewers`-based
+// discriminator was proposed and withdrawn — see adrs/1045-*.md — because it
+// makes correctness depend on operators declaring every substantive
+// reviewer, silently dropping an undeclared one's findings, #1407's failure
+// shape relocated into the gate). The cost of admitting a junk COMMENTED
+// overview is paid down by dispatchReviewReinvoke's no-op cycle exemption
+// (ReviewCycleDecremented, #1045) rather than by filtering it out here:
+// approve-with-nits and a substantive COMMENTED review are both real
+// feedback that this function can no longer distinguish from a generic
+// overview without inspecting content, so it doesn't try.
+//
+// reviewGateAuthorityVerdict (the separate merge/landing-decision function)
+// intentionally still only treats CHANGES_REQUESTED as blocking — this
+// function governs reinvoke/working, that one governs merging, and #1045
+// does not change that split (review_authority governs merging, never
+// working).
 //
 // The returned gh.Comment carries DatabaseID: 0 and no ReviewThreadID — the
 // pre-existing "synthetic comment" escape hatch in acknowledgeComments/
@@ -1261,18 +1281,11 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 		if r.DatabaseID == 0 {
 			continue
 		}
-		// Only CHANGES_REQUESTED is treated as actionable (Pruefer review
-		// finding, #1375). COMMENTED is deliberately excluded even though
-		// GitHub also requires a body for it: automated reviewers (Copilot,
-		// Gemini) routinely submit a COMMENTED review whose body is a generic
-		// "Pull request overview" summary with zero inline comments — treating
-		// that as actionable feedback would fire a full reinvoke/Claude
-		// invocation on every wait_for_reviews stage (advisory included, not
-		// just authoritative), a much larger cost/behavior change than this
-		// issue's stated problem. reviewGateAuthorityVerdict draws the same
-		// line — only CHANGES_REQUESTED blocks authoritative mode's own
-		// fallback verdict.
-		if r.State != "CHANGES_REQUESTED" {
+		// Any non-DISMISSED, non-PENDING review body is treated as
+		// actionable (#1045, superseding #1375's CHANGES_REQUESTED-only
+		// filter) — see buildReviewBodyComments' doc comment above for the
+		// full rationale and the no-op cycle exemption that pays for it.
+		if r.State == "DISMISSED" || r.State == "PENDING" {
 			continue
 		}
 		if r.Body == "" {
