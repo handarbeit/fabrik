@@ -298,6 +298,17 @@ type gitFactsResult struct {
 
 // gitFacts runs the real-git half of the derivation. Takes gitMu; must not be
 // called while holding mu.
+//
+// It runs unconditionally, including for a draft PR, and that is not an
+// oversight to optimise away. deriveMergeableState short-circuits a draft to
+// "draft" without reading `behind` or `headSHA`, but `conflict` is *not*
+// discarded — FetchPRMergeableFields turns it into the returned `mergeable`
+// flag, and GitHub reports mergeability for draft PRs too (a draft is
+// mergeable: true/false with mergeable_state: "draft"). Skipping the trial
+// merge for drafts would therefore change an answer, not just save work. The
+// only genuinely dead call for a draft is commitsBehind, a single rev-list
+// against the bare repo — cheap next to the worktree the trial merge needs,
+// and skipping it conditionally would add a branch no test could observe.
 func (s *Sim) gitFacts(r *repoState, base, head string) (gitFactsResult, error) {
 	r.gitMu.Lock()
 	defer r.gitMu.Unlock()
@@ -481,6 +492,11 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 	head, base, title := pr.head, pr.base, pr.title
 	s.mu.Unlock()
 
+	// This compares which refs the PR points at, not what they contain. A
+	// commit or check run landing on the same branches inside the window is
+	// not caught, so the gate's CI verdict can be stale here — deliberately,
+	// because production's own MergePR has the identical exposure (it sends no
+	// `sha` to GitHub's merge endpoint). See FIDELITY.md, "Merge commits".
 	if head != gatedHead || base != gatedBase {
 		// Retargeted underneath the gate. Refuse rather than merge against a
 		// base the gate never cleared — recording a merge the gate did not

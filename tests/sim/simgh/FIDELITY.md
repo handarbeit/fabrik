@@ -89,6 +89,39 @@ be opened by a scenario's *own* concurrent writer. An ABA retarget — away and
 back again within the window — is not detected, since the snapshot compares
 values rather than a version counter.
 
+**What the compare-and-swap does *not* cover: the branches' contents.** It
+compares which head and base the PR points at, not what they contain. A
+`SeedCommit` onto either branch, or a check run seeded against the new head SHA,
+lands inside the same window and is not caught — so the `mergeable_state` the
+gate cleared can be stale by the time the merge runs, even though the refs
+themselves never moved.
+
+Two consequences, and they differ in direction:
+
+- **The merge itself is safe.** The trial merge and the real merge run the same
+  `tryMerge` helper against the tree as it is at merge time, so a conflicting
+  commit landing in the window produces a reported conflict, never a merge that
+  silently did the wrong thing.
+- **The CI half of the gate is not re-validated, and here the sim is *laxer*
+  than reality.** A required check going red in the window leaves the sim
+  merging on the `clean`/`unstable` verdict the gate computed a moment earlier.
+  Real GitHub re-enforces branch protection server-side at merge time and would
+  refuse.
+
+**This mirrors production's own exposure, and deliberately stops short of
+fixing it.** `github.Client.MergePR` (`github/prs.go:1114`) reads `mergeable`,
+then `FetchPRMergeableFields`, then `PUT .../merge` with only a `merge_method`
+— GitHub's merge endpoint accepts an optional `sha` for exactly this
+compare-and-swap and production does not send one. So the engine's gate verdict
+is equally stale against real GitHub; what saves it there is GitHub's own
+server-side re-check, which the sim has no equivalent of. Making the sim stricter
+would model a guarantee production does not actually have.
+
+**Risk:** low, and bounded by construction — the window only exists for a
+scenario that mutates a repo concurrently with its own `MergePR` call. A
+scenario that wants to exercise "a required check went red mid-merge" cannot do
+it here; that needs the server-side re-check the sim does not model.
+
 ### Commits behind — **Modelled**
 
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
@@ -320,10 +353,13 @@ This is deliberate rather than overlooked. Closing it would mean holding `gitMu`
 and `mu` simultaneously, which the package's locking invariant forbids outright
 (see `sim.go`); that invariant is what makes the two-tier design deadlock-free
 everywhere else, and it is not worth trading for a window only a scenario's own
-concurrent seeding can open. Note that `MergePR` does **not** have this gap for
-the merge itself: its trial merge and its real merge run the same `tryMerge`
-helper, so if the tree changed underneath it the merge fails and the model
-reports the conflict rather than recording a merge that did not happen.
+concurrent seeding can open. `MergePR` does **not** have this gap for the merge
+itself: its trial merge and its real merge run the same `tryMerge` helper, so if
+the tree changed underneath it the merge fails and the model reports the
+conflict rather than recording a merge that did not happen. It *does* share the
+gap for its gate's CI verdict, which is a separate matter — see "A PR retargeted
+after the gate cleared it" under [Merge commits](#merge-commits) for what that
+covers and what it leaves open.
 
 Two risk ratings apply here, at different scopes — the narrower one sits inside
 the broader one, so they do not compete:
