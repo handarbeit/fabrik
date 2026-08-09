@@ -276,6 +276,17 @@ mutate_race "SeedRepo's creation lock is removed (concurrent callers race in git
   'sim.go::s|\tseedRepoMu sync\.Mutex|\tseedRepoMu noopSeedMutex|' \
   'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
 
+# The two halves of the re-add drift are neutralised separately, because each
+# path had been missing a different one and a single mutation could not show
+# that both are now covered.
+mutate "re-adding a card leaves it archived" \
+  'TestReAddingArchivedCardRevivesItOnBothPaths' \
+  'board.go::s|\texisting\.archived = false|\t_ = existing.archived|'
+
+mutate "re-adding a card does not advance the project updated-at" \
+  'TestReAddingArchivedCardRevivesItOnBothPaths' \
+  'board.go::s|\texisting\.updatedAt = now\n\tp\.updatedAt = now|\t_ = now|'
+
 mutate "timestamps come from wall time, not the injected clock" \
   'TestLabelAddRemoveIsObservable' \
   'sim.go::s{func \(s \*Sim\) now\(\) time\.Time \{ return s\.clock\.Now\(\) \}}{func (s *Sim) now() time.Time { return time.Now() }}'

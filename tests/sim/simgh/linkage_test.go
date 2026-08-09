@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -334,5 +335,90 @@ func TestSeedRepoRefusesDuplicateSeed(t *testing.T) {
 	}
 	if first != second {
 		t.Fatal("the refused reseed replaced the live repoState; its gitMu no longer guards the bare directory callers are using")
+	}
+}
+
+// TestReAddingArchivedCardRevivesItOnBothPaths pins that the seeding and
+// runtime re-add paths agree, in both directions of the drift they had.
+//
+// Each was doing a complementary half of the job: seeding reset status and the
+// timestamps but left the card archived, so moving an archived card to a new
+// column left it filtered out of every board read with no error; the runtime
+// API cleared archived but bumped neither timestamp, so a card reappearing did
+// not advance FetchProjectUpdatedAt, which the engine's poll reads to notice
+// the board changed.
+func TestReAddingArchivedCardRevivesItOnBothPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		readd func(t *testing.T, s *Sim, projectID string)
+	}{
+		{
+			name: "seeding path moves an archived card and revives it",
+			readd: func(t *testing.T, s *Sim, _ string) {
+				t.Helper()
+				s.SeedProjectItem("acme", 2, "acme/widgets", 7, false, "Review")
+				if err := s.Err(); err != nil {
+					t.Fatalf("SeedProjectItem: %v", err)
+				}
+			},
+		},
+		{
+			name: "runtime path revives an archived card",
+			readd: func(t *testing.T, s *Sim, projectID string) {
+				t.Helper()
+				if _, err := s.AddProjectV2ItemById(projectID, "issue:acme/widgets#7"); err != nil {
+					t.Fatalf("AddProjectV2ItemById: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, clk := seedBasicBoard(t)
+
+			_, projectID, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+			if err != nil {
+				t.Fatalf("ProbeProjectBoard: %v", err)
+			}
+			item, _, err := s.LookupIssueProjectItem(projectID, "acme/widgets", 7)
+			if err != nil {
+				t.Fatalf("LookupIssueProjectItem: %v", err)
+			}
+			if err := s.ArchiveProjectItem(projectID, item); err != nil {
+				t.Fatalf("ArchiveProjectItem: %v", err)
+			}
+
+			board, err := s.FetchProjectBoard("acme", "widgets", 2, "")
+			if err != nil {
+				t.Fatalf("FetchProjectBoard: %v", err)
+			}
+			if len(board.Items) != 0 {
+				t.Fatalf("archived card still on the board: %+v", board.Items)
+			}
+			beforeAt, err := s.FetchProjectUpdatedAt(projectID)
+			if err != nil {
+				t.Fatalf("FetchProjectUpdatedAt: %v", err)
+			}
+
+			// Time must move, or an unbumped updated-at is indistinguishable
+			// from a bumped one.
+			clk.Advance(time.Hour)
+			tc.readd(t, s, projectID)
+
+			board, err = s.FetchProjectBoard("acme", "widgets", 2, "")
+			if err != nil {
+				t.Fatalf("FetchProjectBoard after re-add: %v", err)
+			}
+			if len(board.Items) != 1 {
+				t.Fatalf("re-added card is still filtered out of the board (%d items); it was left archived", len(board.Items))
+			}
+
+			afterAt, err := s.FetchProjectUpdatedAt(projectID)
+			if err != nil {
+				t.Fatalf("FetchProjectUpdatedAt after re-add: %v", err)
+			}
+			if !afterAt.After(beforeAt) {
+				t.Fatalf("project updated-at did not advance on re-add (%v -> %v); the engine's poll would not notice the card reappear", beforeAt, afterAt)
+			}
+		})
 	}
 }

@@ -385,8 +385,7 @@ func (s *Sim) placeOnProjectLocked(p *projectState, ownerRepo string, number int
 	id := itemNodeID(p.owner, p.num, ownerRepo, number)
 	if existing, ok := p.items[id]; ok {
 		existing.status = status
-		existing.updatedAt = s.now()
-		p.updatedAt = s.now()
+		s.reviveCardLocked(p, existing)
 		return
 	}
 	p.items[id] = &itemState{

@@ -526,7 +526,9 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 
 	id := itemNodeID(p.owner, p.num, ownerRepo, number)
 	if existing, ok := p.items[id]; ok {
-		existing.archived = false
+		// Deliberately does not touch status: re-adding a card that is already
+		// on the board does not move it between columns.
+		s.reviveCardLocked(p, existing)
 		return existing.itemID, nil
 	}
 	// A card added by this mutation has no Status until one is set — GitHub
@@ -542,6 +544,27 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 	p.itemOrder = append(p.itemOrder, id)
 	p.updatedAt = s.now()
 	return id, nil
+}
+
+// reviveCardLocked brings an existing card back to a live, freshly-touched
+// state: un-archived, with both its own and the project's updated-at bumped.
+//
+// Both re-add paths funnel through here — SeedProjectItem via
+// placeOnProjectLocked, and AddProjectV2ItemById — because they had drifted
+// into doing complementary halves of the job. Seeding reset status and the
+// timestamps but left `archived` set, so moving an archived card to a new
+// column left it excluded from every board read with no error; the runtime API
+// cleared `archived` but bumped neither timestamp, so a card reappearing on the
+// board did not advance FetchProjectUpdatedAt and the engine's poll could miss
+// it. Keeping one helper is what stops the two APIs disagreeing again about
+// what re-adding a card means.
+//
+// Caller must hold mu.
+func (s *Sim) reviveCardLocked(p *projectState, existing *itemState) {
+	now := s.now()
+	existing.archived = false
+	existing.updatedAt = now
+	p.updatedAt = now
 }
 
 // parseContentNodeID splits an "issue:owner/repo#N" or "pr:owner/repo#N" ID.
