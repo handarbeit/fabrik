@@ -32,8 +32,8 @@ type Config struct {
 	PollSeconds               int
 	MaxConcurrent             int
 	MaxRetries                int
-	MaxSliceRetries           int // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures
-	MaxResumeFailures         int // Max consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting (default 2; #1414) — independent of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
+	MaxSliceRetries           int                 // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures
+	MaxResumeFailures         int                 // Max consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting (default 2; #1414) — independent of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
 	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)
@@ -91,53 +91,53 @@ type cloneCall struct {
 }
 
 type Engine struct {
-	cfg                         Config
-	client                      GitHubClient
-	releaseClient               GitHubClient          // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient                  *gh.Client            // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
-	readClient                  boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
-	claude                      ClaudeInvoker
-	statusField                 *gh.StatusField
-	worktreeManagers            map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	fabrikDir                   string                      // directory containing .fabrik/ (always os.Getwd() at startup)
-	mu                          sync.Mutex
-	store                       *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
-	totalTokens                 TokenUsage               // accumulated token usage since process start
-	lastReportedCost            float64                  // cost at last [stats] report; skip repeat prints when unchanged
-	mayNeedWork                 map[string]bool          // key: issueKey; items that have changed since the last poll cycle
-	mayNeedWorkMu               sync.Mutex               // guards mayNeedWork
-	seededRepos                 map[string]bool          // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
-	checkedAutoMergeRepos       map[string]bool          // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
-	repoAccess                  map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
-	idleCount                   int                      // consecutive idle polls; triggers self-upgrade at threshold
-	idleStart                   time.Time                // when consecutive idle polls began; zero value = not idle
-	pollsUntilStalenessCheck    int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
+	cfg                      Config
+	client                   GitHubClient
+	releaseClient            GitHubClient          // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
+	hostClient               *gh.Client            // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	readClient               boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
+	claude                   ClaudeInvoker
+	statusField              *gh.StatusField
+	worktreeManagers         map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	fabrikDir                string                      // directory containing .fabrik/ (always os.Getwd() at startup)
+	mu                       sync.Mutex
+	store                    *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
+	totalTokens              TokenUsage               // accumulated token usage since process start
+	lastReportedCost         float64                  // cost at last [stats] report; skip repeat prints when unchanged
+	mayNeedWork              map[string]bool          // key: issueKey; items that have changed since the last poll cycle
+	mayNeedWorkMu            sync.Mutex               // guards mayNeedWork
+	seededRepos              map[string]bool          // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
+	checkedAutoMergeRepos    map[string]bool          // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
+	repoAccess               map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
+	idleCount                int                      // consecutive idle polls; triggers self-upgrade at threshold
+	idleStart                time.Time                // when consecutive idle polls began; zero value = not idle
+	pollsUntilStalenessCheck int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
-	stalenessCompareFn func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
-	lastProjectUpdatedAt        time.Time                // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	wakeCh                      chan struct{}            // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh                      chan tui.StopRequest     // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                         chan struct{}            // semaphore bounding concurrent workers across poll cycles
-	wg                          sync.WaitGroup           // tracks in-flight workers for graceful shutdown
-	cloneInFlight               sync.Map                 // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
-	mergeTrainInFlight          sync.Map                 // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
-	mergeTrainEjectionsMu       sync.Mutex               // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts    map[string]int           // key: "owner/repo#N", ejection count per member
-	mergeTrainTrialsMu          sync.Mutex               // guards mergeTrainTrials
-	mergeTrainTrials            map[string][]time.Time   // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
-	queuedReviewEjectsMu        sync.Mutex               // guards queuedReviewEjects
-	queuedReviewEjects          map[string]map[int]int   // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
-	issueCtxs                   sync.Map                 // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
-	baseBranchWarnedSet         sync.Map                 // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
-	mergeTrainBatchSnapshotSeen sync.Map                 // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
-	claudeSuspendMu             sync.Mutex               // guards claudeSuspendedUntil
-	claudeSuspendedUntil        time.Time                // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
-	events                      chan tui.Event           // nil in tests / plain-text mode; TUI goroutine consumes
-	logFile                     *os.File                 // persistent log file at .fabrik/fabrik.log; nil if not opened
-	logMu                       sync.Mutex               // serializes concurrent writes to logFile
-	webhookMgr                  *webhookManager          // nil when webhooks are disabled
+	stalenessCompareFn          func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
+	lastProjectUpdatedAt        time.Time              // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	wakeCh                      chan struct{}          // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh                      chan tui.StopRequest   // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                         chan struct{}          // semaphore bounding concurrent workers across poll cycles
+	wg                          sync.WaitGroup         // tracks in-flight workers for graceful shutdown
+	cloneInFlight               sync.Map               // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	mergeTrainInFlight          sync.Map               // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
+	mergeTrainEjectionsMu       sync.Mutex             // guards mergeTrainEjectionCounts
+	mergeTrainEjectionCounts    map[string]int         // key: "owner/repo#N", ejection count per member
+	mergeTrainTrialsMu          sync.Mutex             // guards mergeTrainTrials
+	mergeTrainTrials            map[string][]time.Time // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
+	queuedReviewEjectsMu        sync.Mutex             // guards queuedReviewEjects
+	queuedReviewEjects          map[string]map[int]int // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
+	issueCtxs                   sync.Map               // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
+	baseBranchWarnedSet         sync.Map               // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
+	mergeTrainBatchSnapshotSeen sync.Map               // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
+	claudeSuspendMu             sync.Mutex             // guards claudeSuspendedUntil
+	claudeSuspendedUntil        time.Time              // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
+	events                      chan tui.Event         // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile                     *os.File               // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu                       sync.Mutex             // serializes concurrent writes to logFile
+	webhookMgr                  *webhookManager        // nil when webhooks are disabled
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
