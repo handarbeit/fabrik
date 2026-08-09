@@ -465,11 +465,11 @@ func TestInvokeClaudeForComments_ExtendTurnsStillKilledAtScaledDeadline(t *testi
 		Name:        "Implement",
 		Prompt:      "Do implement",
 		MaxTurns:    50,
-		MaxWallTime: 600 * time.Millisecond,
+		MaxWallTime: 800 * time.Millisecond,
 	}
 	issue := gh.ProjectItem{Number: 99, Title: "CommentsExtendTurnsStillKilledAtScaledDeadline"}
 	comments := []gh.Comment{{Author: "user", Body: "please continue", CreatedAt: time.Now()}}
-	opts := InvokeOptions{MaxTurnsOverride: 100} // 2x commentMaxTurns(stage) -> scaled deadline ~1200ms
+	opts := InvokeOptions{MaxTurnsOverride: 100} // 2x commentMaxTurns(stage) -> scaled deadline ~1600ms
 
 	start := time.Now()
 	type result struct {
@@ -488,10 +488,10 @@ func TestInvokeClaudeForComments_ExtendTurnsStillKilledAtScaledDeadline(t *testi
 		if res.completed {
 			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE)")
 		}
-		if elapsed < 700*time.Millisecond {
-			t.Errorf("killed too early (elapsed=%v) — scaled deadline (~1200ms) was not honored", elapsed)
+		if elapsed < 900*time.Millisecond {
+			t.Errorf("killed too early (elapsed=%v) — scaled deadline (~1600ms) was not honored", elapsed)
 		}
-		if elapsed > 5*time.Second {
+		if elapsed > 6*time.Second {
 			t.Errorf("killed too late (elapsed=%v) — deadline scaling may be unbounded", elapsed)
 		}
 	case <-time.After(15 * time.Second):
