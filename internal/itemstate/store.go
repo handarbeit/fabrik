@@ -420,10 +420,17 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return StageStateChanged
 
 	case ReviewCycleDecremented:
-		ensureStageStateMaps(item)
-		if item.StageState.ReviewCycles[v.StageName] > 0 {
-			item.StageState.ReviewCycles[v.StageName]--
+		// Check before ensureStageStateMaps, not after: a nil map reads as
+		// the zero value safely, but ensureStageStateMaps's nil->empty-map
+		// initialization is itself a state change under applySingleItem's
+		// reflect.DeepEqual no-op gate. Mutating unconditionally here would
+		// make a truly-fresh item (StageState.ReviewCycles == nil) emit a
+		// spurious Change even when the counter itself never left zero.
+		if item.StageState.ReviewCycles[v.StageName] == 0 {
+			return 0 // no-op: already floored at zero
 		}
+		ensureStageStateMaps(item)
+		item.StageState.ReviewCycles[v.StageName]--
 		return StageStateChanged
 
 	case CIFixCycleIncremented:
