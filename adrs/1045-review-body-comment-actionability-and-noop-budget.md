@@ -119,6 +119,24 @@ autonomously," not "this is a human's decision to interpret." The marker text
 deliberately does not claim "no formal review submitted," since that would be false for
 the second shape.
 
+`gh.IsBotLogin` only recognizes a self-submitting review bot whose login carries a
+`[bot]`/`-bot` suffix or matches one of a handful of literals — and GitHub's GraphQL API
+(`item.LinkedPRReviews`, the default ingestion path for a synthetic review-body comment)
+reports that suffix *differently* than its REST API does: REST's `user.login` includes it
+(`handarbeit-pruefer[bot]`), GraphQL's `Bot.login` omits it (`handarbeit-pruefer`) — see
+`stripBotSuffix`'s doc comment (`engine/reviews.go`), a distinction ADR-1283 already had
+to account for on the `expected_reviewers` side. Without correcting for this, the marker
+would silently fail to apply to a synthetic review-body comment sourced via the default
+GraphQL path (base:<branch> items are the only ones that hit the REST fallback,
+`FetchPRReviews`) whenever the bot's login has no other recognizable pattern — which is
+exactly Pruefer's shape, the reviewer this ADR's motivating scenario is about. `github/
+project.go`'s `applyLinkedPRs` therefore now queries `__typename` on a review's `author`
+(mirroring the pattern `reviewRequests` already used for the same purpose) and
+normalizes a `Bot`-typed author to the REST-shaped, suffix-carrying form at ingestion, so
+`PRReview.Author` is canonically `[bot]`-suffixed regardless of which API populated it —
+letting `gh.IsBotLogin` (and every other consumer of `PRReview.Author`, e.g.
+`reviewerIdentityMatches`) behave identically either way.
+
 `fabrik-review-comment/SKILL.md` gains an explicit carve-out: a `[Bot Review
 Finding]`-marked comment is evaluated and fixed on its merits, the same as an inline
 thread comment, rather than gated behind the skill's "act only on what was explicitly

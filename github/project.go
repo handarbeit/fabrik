@@ -697,7 +697,7 @@ query($id: ID!) {
           latestReviews(first: 10) {
             nodes {
               databaseId
-              author { login }
+              author { __typename login }
               state
               body
               submittedAt
@@ -828,7 +828,8 @@ type fetchItemDetailsNode struct {
 				Nodes []struct {
 					DatabaseID int `json:"databaseId"`
 					Author     *struct {
-						Login string `json:"login"`
+						Typename string `json:"__typename"`
+						Login    string `json:"login"`
 					} `json:"author"`
 					State       string `json:"state"`
 					Body        string `json:"body"`
@@ -1027,8 +1028,24 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 		}
 		for _, rev := range pr.LatestReviews.Nodes {
 			if rev.Author != nil && rev.Author.Login != "" {
+				author := rev.Author.Login
+				// GraphQL's Bot.login omits the "[bot]" suffix that REST's
+				// user.login includes for the same account (see
+				// stripBotSuffix's doc comment in engine/reviews.go) —
+				// normalize it in here so PRReview.Author is canonically
+				// REST-shaped regardless of ingestion path. Without this,
+				// gh.IsBotLogin(review.Author) silently returns false for
+				// every review fetched via the default GraphQL path (the
+				// common case — the REST fallback only applies to
+				// base:<branch> items), so a self-submitting review bot
+				// that has no other recognizable login pattern (e.g.
+				// handarbeit-pruefer, #1045) would never be recognized as
+				// a bot in a rendered comment prompt.
+				if rev.Author.Typename == "Bot" && !strings.HasSuffix(strings.ToLower(author), "[bot]") {
+					author += "[bot]"
+				}
 				review := PRReview{
-					Author:     rev.Author.Login,
+					Author:     author,
 					State:      rev.State,
 					Body:       rev.Body,
 					DatabaseID: rev.DatabaseID,
