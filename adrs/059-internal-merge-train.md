@@ -124,15 +124,15 @@ when the red batch has exactly one survivor, it calls `ejectRedSingleton` instea
   re-forming into an identical singleton trial on the very next poll — no separate backoff
   mechanism is needed.
 
-`handleRedBatch`, `bisect`, and `landOneAtATime` are unchanged and continue to govern every
-batch with two or more members exactly as before. `landOneAtATime`'s own red-singleton-ejection
-branch — reached only as its FR-5 fallback after bisection fails to isolate a poisoner within a
-genuinely multi-member batch's cost budget — is also unchanged: that is real train churn (a
-larger batch degraded down to singletons), not the self-inflicted case this amendment addresses,
-and it already used correctly-scoped wording for its `reason` argument (though, until this
-amendment, it still routed through `ejectMember`'s unconditional "different composition" trailer
-and shared counter — the bug traced back to `ejectMember` itself, not the caller's `reason`
-string).
+`handleRedBatch` and `bisect` are unchanged and continue to govern every batch with two or more
+members exactly as before — the arity guard sits ahead of `handleRedBatch`, so bisection itself
+never sees a true singleton. `landOneAtATime`'s own red-singleton-ejection branch — reached only
+as its FR-5 fallback after bisection fails to isolate a poisoner within a genuinely multi-member
+batch's cost budget — validates its member (`m`) completely alone, which is the same true-
+singleton scenario this amendment targets, just reached by a different path; it now also calls
+`ejectRedSingleton` rather than `ejectMember`, so it gets the identical disposition (no
+"different composition" promise, no shared-counter churn) instead of leaving the exact wording
+this amendment eliminates live in a second, still-reachable code path.
 
 ### D5 — Main moved during validation → serialize the train
 `strict` requires the integration PR to be up-to-date; if `main` advances while the trial branch

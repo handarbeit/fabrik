@@ -1043,13 +1043,14 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			e.landSingleton(ctx, state, p, m, trialName)
 		case TrainCIRed:
 			e.cleanupTrialArtifacts(p.wm, trialName)
-			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — ejecting\n", m.item.Number)
-			// otherMembers is nil: this is a genuine singleton validation (no batch at
-			// all), distinct from a bisection-isolated poisoner that had batch-mates —
-			// renderBatchContext's "no other members" sentence covers this case exactly.
-			e.ejectMember(p.owner, p.repo, m.item,
-				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number),
-				diag, nil, true)
+			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — disposing as a red singleton\n", m.item.Number)
+			// #1440: this validates m completely alone ([]trainMember{m}) — structurally
+			// the same true-singleton scenario the top-level arity guard targets, just
+			// reached via the one-at-a-time fallback instead. It gets the same
+			// disposition (no "different composition" promise, no shared-counter churn)
+			// rather than ejectMember's multi-member wording, which would be equally
+			// misleading here.
+			e.ejectRedSingleton(p.owner, p.repo, m, diag)
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)

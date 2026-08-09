@@ -3356,6 +3356,75 @@ func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
 	}
 }
 
+// TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition covers #1440's extension of the
+// red-singleton fix to landOneAtATime's own TrainCIRed branch: a member validated completely
+// alone ([]trainMember{m}) after bisection degrades to the one-at-a-time fallback is
+// structurally the same true-singleton scenario the top-level arity guard targets — it must
+// get the identical ejectRedSingleton disposition (no "different composition" promise, no
+// shared-counter churn, immediate pause), not the pre-#1440 ejectMember wording that would be
+// equally misleading here. Forces the cost cap to fire before bisection can isolate #3 as an
+// ordinary poisoner, so #3's red-singleton disposition is only reachable via landOneAtATime.
+func TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Only #3 is ever red, alone or combined with anyone else.
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] })
+	eng.cfg.MaxBisectValidations = 2 // force the cost cap before bisection isolates #3 itself
+
+	batch := makeSeamBatch(4)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Fatalf("expected the cost cap to force a one-at-a-time fallback; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 {
+			bodies = append(bodies, c.body)
+		}
+	}
+	client.mu.Unlock()
+	if len(bodies) != 1 {
+		t.Fatalf("expected exactly 1 comment posted for #3, got %d: %v", len(bodies), bodies)
+	}
+	body := bodies[0]
+
+	if strings.Contains(body, "different composition") {
+		t.Errorf("red-singleton comment reached via one-at-a-time must not promise retry in a different composition, got: %s", body)
+	}
+	if strings.Contains(body, "conflict") {
+		t.Errorf("red-singleton comment reached via one-at-a-time must not attribute the failure to a conflict, got: %s", body)
+	}
+	if !strings.Contains(body, "own combined Validate is failing") {
+		t.Errorf("expected the comment to state the PR's own validation failed, got: %s", body)
+	}
+
+	if count := eng.mergeTrainEjectionCounts["owner/repo#3"]; count != 0 {
+		t.Errorf("expected mergeTrainEjectionCounts to be untouched for a red singleton reached via one-at-a-time, got %d", count)
+	}
+
+	var sawPaused bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 3 && c.labelName == "fabrik:paused" {
+			sawPaused = true
+		}
+	}
+	client.mu.Unlock()
+	if !sawPaused {
+		t.Errorf("expected fabrik:paused applied to #3 on its first (and only) red-singleton disposition, got labels: %v", client.addLabelCalls)
+	}
+}
+
 // TestMergeTrainBisect_InteractionFallsBack verifies the interaction case (D-e): a non-
 // isolable cross-PR interaction (each half green alone, the union red) with ample budget
 // triggers the one-at-a-time fallback rather than falsely isolating/ejecting a single member.
