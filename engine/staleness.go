@@ -132,12 +132,21 @@ func stalenessWarningContent(status selfupgrade.DevBuildStatus, autoUpgrade bool
 
 	var behind string
 	switch {
-	case status.RemoteAhead:
+	case status.RemoteAhead && status.CommitsBehind > 0:
 		behind = fmt.Sprintf("%d commit", status.CommitsBehind)
 		if status.CommitsBehind != 1 {
 			behind += "s"
 		}
 		behind += " behind origin/main"
+	case status.RemoteAhead:
+		// RemoteAhead is only true when localRef is a proper ancestor of
+		// remoteRef, which always means at least one commit is behind — a
+		// CommitsBehind of 0 here can only mean gitRevListCount itself failed
+		// (left at its zero value; see the field's doc comment), not a
+		// genuine zero. Fall back to generic phrasing rather than rendering
+		// the self-contradictory "0 commits behind" alongside a warning that
+		// a rebuild is needed.
+		behind = "running an older commit than origin/main"
 	default:
 		// ShaMismatch: a local commit exists that the running binary predates.
 		// The SHA-mismatch shortcut skips the fetch, so there's no origin-relative

@@ -234,6 +234,33 @@ func TestCheckSourceStaleness_NonDevVersionSkipsEntirely(t *testing.T) {
 	}
 }
 
+// TestStalenessWarningContent_RemoteAheadZeroCommitsBehindFallsBack covers a
+// Pruefer review finding: RemoteAhead can only be true when localRef is a
+// proper ancestor of remoteRef, which always means at least one commit is
+// behind — so a CommitsBehind of 0 here can only mean gitRevListCount itself
+// failed (left at its zero value), not a genuine zero. The message must not
+// render the self-contradictory "0 commits behind origin/main" alongside a
+// warning that a rebuild is needed; it should fall back to generic phrasing
+// instead.
+func TestStalenessWarningContent_RemoteAheadZeroCommitsBehindFallsBack(t *testing.T) {
+	status := selfupgrade.DevBuildStatus{
+		Applicable:    true,
+		LocalRef:      "8a5ef0f1234567890abcdef1234567890abcdef",
+		RemoteAhead:   true,
+		CommitsBehind: 0, // gitRevListCount failed
+		NeedsRebuild:  true,
+	}
+
+	title, detail, _, _ := stalenessWarningContent(status, true)
+
+	if strings.Contains(title, "0 commit") || strings.Contains(detail, "0 commit") {
+		t.Errorf("title/detail must not claim 0 commits behind when the count is unknown; title=%q detail=%q", title, detail)
+	}
+	if !strings.Contains(title, "older commit than origin/main") {
+		t.Errorf("title = %q, want generic fallback phrasing", title)
+	}
+}
+
 // TestCheckSourceStaleness_RealCompareDevBuild drives checkSourceStaleness
 // through the real, un-stubbed selfupgrade.CompareDevBuild against an actual
 // git checkout that is genuinely two commits behind its origin — proving the
