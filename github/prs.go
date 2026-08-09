@@ -62,8 +62,14 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 // reviewDecision computation treats COMMENTED as informational, not a state
 // transition, so a reviewer who requests changes and later leaves a comment-only
 // follow-up (without re-approving or dismissing) still has an active
-// CHANGES_REQUESTED verdict. Only when an author's *first* submission is
-// COMMENTED (no verdict established yet) does it become their collapsed entry.
+// CHANGES_REQUESTED verdict. Only when an author's *stored* entry is itself
+// COMMENTED (no verdict established yet) does a later COMMENTED submission
+// supersede it — so a comment-only reviewer's collapsed entry tracks their
+// latest submission, not just their first. States outside COMMENTED and the
+// three formal verdicts (e.g. PENDING, which is visible only to the token
+// that created it and may reflect an incomplete submission) are enumerated
+// explicitly as never eligible to establish or overwrite a collapsed entry —
+// first-seen or not — rather than being treated as a verdict by omission.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
@@ -89,10 +95,17 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		if r.User == nil || r.User.Login == "" {
 			continue
 		}
-		_, seen := latestByAuthor[r.User.Login]
+		if !canEstablishOrSupersedeReview(r.State) {
+			// PENDING (or any other state outside COMMENTED and the three
+			// formal verdicts) never establishes or overwrites a collapsed
+			// entry — a private/incomplete submission must not pin an
+			// author's review, first-seen or not.
+			continue
+		}
+		stored, seen := latestByAuthor[r.User.Login]
 		if !seen {
 			order = append(order, r.User.Login)
-		} else if r.State == "COMMENTED" {
+		} else if r.State == "COMMENTED" && isFormalReviewVerdict(stored.State) {
 			// A comment-only follow-up does not overwrite the author's
 			// existing formal verdict.
 			continue
@@ -114,6 +127,27 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		out = append(out, latestByAuthor[author])
 	}
 	return out, nil
+}
+
+// isFormalReviewVerdict reports whether state is one of GitHub's three
+// formal review verdicts — the states a COMMENTED follow-up must never
+// overwrite.
+func isFormalReviewVerdict(state string) bool {
+	switch state {
+	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		return true
+	}
+	return false
+}
+
+// canEstablishOrSupersedeReview reports whether an incoming submission's
+// state is ever eligible to become or replace an author's collapsed entry.
+// Only COMMENTED and the three formal verdicts qualify; every other state
+// (PENDING, or any state GitHub introduces in the future) is excluded
+// unconditionally, so it can neither establish a first entry nor silently
+// pin an author's collapsed review at a later submission.
+func canEstablishOrSupersedeReview(state string) bool {
+	return state == "COMMENTED" || isFormalReviewVerdict(state)
 }
 
 // FetchPRReviewDecision returns GitHub's computed review-decision verdict for a
