@@ -476,6 +476,37 @@ FABRIK_SPAWN_CHILD_END`
 	}
 }
 
+// ---- formatMidflightSpawnReceiptNote unit tests (#1419) ----
+
+func TestFormatMidflightSpawnReceiptNote_Empty(t *testing.T) {
+	if note := formatMidflightSpawnReceiptNote(nil); note != "" {
+		t.Fatalf("expected empty note for zero spawned children, got %q", note)
+	}
+}
+
+func TestFormatMidflightSpawnReceiptNote_SingleChild(t *testing.T) {
+	note := formatMidflightSpawnReceiptNote([]string{"owner/child#101"})
+	if !strings.Contains(note, "1 sub-issue") {
+		t.Errorf("note should state the count of 1, got %q", note)
+	}
+	if !strings.Contains(note, "owner/child#101") {
+		t.Errorf("note should name the spawned child, got %q", note)
+	}
+	if !strings.Contains(note, "registered, assigned, and linked") {
+		t.Errorf("note should describe the wiring already performed (present tense), got %q", note)
+	}
+}
+
+func TestFormatMidflightSpawnReceiptNote_MultipleChildren(t *testing.T) {
+	note := formatMidflightSpawnReceiptNote([]string{"owner/child#101", "owner/child#102"})
+	if !strings.Contains(note, "2 sub-issues") {
+		t.Errorf("note should state the count of 2, got %q", note)
+	}
+	if !strings.Contains(note, "owner/child#101") || !strings.Contains(note, "owner/child#102") {
+		t.Errorf("note should name both spawned children, got %q", note)
+	}
+}
+
 // ---- resolveSpecifyOptionID unit tests ----
 
 func TestResolveSpecifyOptionID_Nil(t *testing.T) {

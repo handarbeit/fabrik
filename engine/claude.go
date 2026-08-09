@@ -1825,6 +1825,26 @@ func formatSpawnReceiptNote(output string) string {
 	return fmt.Sprintf("\n\n---\n%d sub-issues declared above. None exist yet — they will be created when this issue advances to the **Implement** stage.", n)
 }
 
+// formatMidflightSpawnReceiptNote returns a present-tense sibling of
+// formatSpawnReceiptNote for the Review/Validate mid-flight spawn path
+// (ADR-1419): unlike a Plan-stage declaration, these children already exist
+// by the time this note is rendered — spawnChildren has already run and
+// created, boarded, assigned, and linked them as blockers of this issue
+// before finalizeStageOutcome prepends this note to the stage's output.
+// spawned holds each child as "owner/repo#N" (spawnChildren's own format).
+// Returns "" for an empty list so a stage output with no spawn is
+// byte-identical to before this note existed.
+func formatMidflightSpawnReceiptNote(spawned []string) string {
+	n := len(spawned)
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return fmt.Sprintf("🏭 Spawned 1 sub-issue: %s. It has been registered, assigned, and linked as a blocker of this issue.\n\n---\n\n", spawned[0])
+	}
+	return fmt.Sprintf("🏭 Spawned %d sub-issues: %s. Each has been registered, assigned, and linked as a blocker of this issue.\n\n---\n\n", n, strings.Join(spawned, ", "))
+}
+
 // scaleTokens renders a token count as a human-readable, k/M-scaled string:
 // raw digits below 1,000; "Nk" below 1,000,000; "N.1M" at or above 1,000,000. No
 // billion-scale unit is provided: a single invocation's token counts realistically
