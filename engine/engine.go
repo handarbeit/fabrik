@@ -58,6 +58,7 @@ type Config struct {
 	CommentCycleWindow        time.Duration       // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
 	KillGraceSigInt           time.Duration       // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm          time.Duration       // Grace window after SIGTERM before SIGKILL (default 10s)
+	DrainDeadline             time.Duration       // Bound on a clean stop's worker drain, covering both the kill escalation and the shutdown pause-write phase (default 30s; ADR-1393). <= 0 falls back to the default in drainDeadline() — unlike kill_grace, a clean stop has no "0 = wait forever" mode.
 	ClaudeWaitDelay           time.Duration       // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
 	WorkerStaleTimeout        time.Duration       // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
 	DebugOutput               bool
@@ -120,7 +121,7 @@ type Engine struct {
 	wakeCh                      chan struct{}          // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	stopCh                      chan tui.StopRequest   // TUI sends on this to stop a specific in-flight issue; nil if no TUI
 	sem                         chan struct{}          // semaphore bounding concurrent workers across poll cycles
-	wg                          sync.WaitGroup         // tracks in-flight workers for graceful shutdown
+	wg                          sync.WaitGroup         // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
 	cloneInFlight               sync.Map               // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	mergeTrainInFlight          sync.Map               // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
 	mergeTrainEjectionsMu       sync.Mutex             // guards mergeTrainEjectionCounts

@@ -138,6 +138,38 @@ func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duratio
 		"and ADR-1410.\n", ciBackstopTimeout, ciWaitTimeout)
 }
 
+// warnDrainDeadlineOrdering is the ADR-1393/R4 startup check: the drain
+// deadline must exceed the worst-case kill escalation (sigIntGrace +
+// sigTermGrace elapses after cancel() fires, before SIGKILL lands) or the
+// drain will preempt the escalation mid-flight — Run() would return, and any
+// caller relying on process exit (e.g. a wrapping supervisor) would see the
+// process still alive past what the drain deadline implied. Mirrors
+// warnCIBackstopTimeoutOrdering: a warning, not a hard startup failure, since
+// both values remain valid, positive durations and only their relative
+// ordering is suboptimal.
+func warnDrainDeadlineOrdering(drainDeadline, sigIntGrace, sigTermGrace time.Duration, w io.Writer) {
+	killEscalation := sigIntGrace + sigTermGrace
+	if drainDeadline > killEscalation {
+		return
+	}
+	fmt.Fprintf(w, "[startup] warning: DrainDeadline (%s) is not greater than the kill escalation window "+
+		"KillGraceSigInt+KillGraceSigTerm (%s) — a clean stop's bounded wait (waitGroupTimeout) will fire before "+
+		"killProcGroupGraceful's SIGINT->SIGTERM->SIGKILL escalation has a chance to let a worker exit on its own, "+
+		"preempting the escalation and defeating its purpose. Set --drain-deadline/FABRIK_DRAIN_DEADLINE well above "+
+		"--kill-grace-sigint + --kill-grace-sigterm. See docs/USER_GUIDE.md and ADR-1393.\n", drainDeadline, killEscalation)
+}
+
+// drainDeadline returns the configured bound on a clean stop's worker drain,
+// defaulting to 30 seconds when unconfigured (ADR-1393). <= 0 is treated the
+// same as unconfigured — see Config.DrainDeadline's doc comment for why a
+// clean stop has no "0 = wait forever" sentinel, unlike kill_grace.
+func (e *Engine) drainDeadline() time.Duration {
+	if e.cfg.DrainDeadline > 0 {
+		return e.cfg.DrainDeadline
+	}
+	return 30 * time.Second
+}
+
 func (e *Engine) Run() error {
 	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
 	// processing the same project board concurrently. The lock file lives in
@@ -188,6 +220,7 @@ func (e *Engine) Run() error {
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
 		logCIWaitTimeoutSemantics(w)
 		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), w)
+		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
@@ -197,6 +230,7 @@ func (e *Engine) Run() error {
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
 		logCIWaitTimeoutSemantics(os.Stderr)
 		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), os.Stderr)
+		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -228,6 +262,17 @@ func (e *Engine) Run() error {
 				return true
 			})
 			cancel()
+			// R1/R2 (#1393, ADR-1393): durably pause every issue with a live
+			// worker — fabrik:paused + fabrik:awaiting-input, an audit comment,
+			// and a direct stage:<Name>:in_progress clear — rather than relying
+			// on each worker goroutine's own cancellation early-out to get there
+			// before the process exits. Tracked on e.wg so drainAndExit's single
+			// bounded wait covers both the worker drain and this write phase.
+			// Deliberately only reached from this SIGINT/SIGTERM path, never from
+			// registerSighupHandler — a SIGHUP restart-in-place must not pause
+			// every in-flight issue (see Scope note, ADR-1393).
+			e.wg.Add(1)
+			go e.runShutdownPause()
 		case <-ctx.Done():
 			return
 		}
@@ -626,6 +671,7 @@ func (e *Engine) Run() error {
 	if firstPollErr == nil {
 		e.runStartupCleanup()
 		e.runStartupOrphanedInProgressScan()
+		e.runStartupBareInProgressScan()
 		e.runStartupTransientLabelScan()
 		e.runStartupTerminalScan()
 		if e.cfg.JanitorIntervalHours > 0 {

@@ -332,3 +332,39 @@ func (e *Engine) reapplyPauseLabels(item gh.ProjectItem) {
 	e.applyLabelAdd(item, "fabrik:paused", false)
 	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
 }
+
+// pauseInterruptedIssue is the shared R3 primitive (#1393/ADR-1393) behind
+// both the TUI's single-issue stop (handleStopRequest, item.go) and the
+// daemon-wide clean-stop pause (runShutdownPause/pauseIssueForDaemonShutdown,
+// shutdown.go). Both callers cancel a per-issue context with their own kill
+// reason first, then converge on this one call so the label pair
+// (fabrik:paused + fabrik:awaiting-input), the write ordering, and the
+// idempotency guard can never drift between the two "an issue got
+// interrupted mid-stage" mechanisms.
+//
+// alreadyPaused is the AC2 idempotency guard: the caller consults the store
+// snapshot's live labels (cheap, already available) rather than
+// hasPauseComment's item.Comments scan — neither caller builds a full
+// gh.ProjectItem with populated Comments — to decide whether this issue's
+// pause episode has already been recorded. When true, only the label pair is
+// (idempotently) reapplied via reapplyPauseLabels; no second comment is
+// posted, satisfying "exactly one audit comment per pause episode" even if a
+// caller runs twice (e.g. a retried shutdown pause racing a worker's own
+// in-flight handleStopRequest for the same issue).
+//
+// labelFirst is set so labels land before the comment, matching
+// handleStopRequest's pre-existing ordering (Pattern C in pauseOpts' doc
+// comment) — this refactor changes who writes the labels/comment, not when.
+func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, alreadyPaused bool, comment string) {
+	if alreadyPaused {
+		e.reapplyPauseLabels(item)
+		return
+	}
+	e.pauseIssue(item, comment, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   false,
+		labelEcho:     true,
+		commentEcho:   true,
+		labelFirst:    true,
+	})
+}
