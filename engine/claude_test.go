@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -56,6 +57,38 @@ func TestIsDegenerateOutput_MultiLineNeverFlagged(t *testing.T) {
 	in2 := "@/tmp/x.md\nmore content"
 	if isDegenerateOutput(in2) {
 		t.Errorf("isDegenerateOutput(%q) = true, want false (multi-line body must never be flagged)", in2)
+	}
+}
+
+// TestScaledWallTime covers #1206: an extend-turns pre-grant that inflates the turn
+// budget for a single invocation must scale max_wall_time by the same proportion,
+// while ordinary invocations (and progress-based extension iterations, which reset
+// back to the base budget before their own fresh runClaude call) must see the
+// deadline unchanged.
+func TestScaledWallTime(t *testing.T) {
+	cases := []struct {
+		name            string
+		base            time.Duration
+		effectiveBudget int
+		baseBudget      int
+		want            time.Duration
+	}{
+		{"no cap configured", 0, 200, 100, 0},
+		{"negative base treated as no cap", -1, 200, 100, -1},
+		{"unlimited stage.MaxTurns (baseBudget zero)", 30 * time.Minute, 200, 0, 30 * time.Minute},
+		{"negative baseBudget", 30 * time.Minute, 200, -5, 30 * time.Minute},
+		{"ordinary 1x invocation, no override", 30 * time.Minute, 100, 100, 30 * time.Minute},
+		{"effectiveBudget below baseBudget (progress reset)", 30 * time.Minute, 50, 100, 30 * time.Minute},
+		{"extend-turns 2x pre-grant", 30 * time.Minute, 200, 100, 60 * time.Minute},
+		{"3x hypothetical multiple", 30 * time.Minute, 300, 100, 90 * time.Minute},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := scaledWallTime(c.base, c.effectiveBudget, c.baseBudget); got != c.want {
+				t.Errorf("scaledWallTime(%v, %d, %d) = %v, want %v", c.base, c.effectiveBudget, c.baseBudget, got, c.want)
+			}
+		})
 	}
 }
 

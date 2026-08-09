@@ -612,7 +612,8 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
+	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -637,7 +638,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	ld := logDirForItem(issue)
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
-	limit := commentMaxTurns(stage)
+	base := commentMaxTurns(stage)
+	limit := base
 	if opts.MaxTurnsOverride > 0 {
 		limit = opts.MaxTurnsOverride
 	}
@@ -647,7 +649,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
+	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -689,6 +692,22 @@ func commentMaxTurns(stage *stages.Stage) int {
 		return stage.MaxTurns
 	}
 	return 50
+}
+
+// scaledWallTime scales base proportionately to how far effectiveBudget exceeds
+// baseBudget, so a turn-budget pre-grant (e.g. fabrik:extend-turns' 2x first-invocation
+// grant) gets matching wall-clock headroom instead of being killed on a clock sized for
+// the un-extended case. Returns base unchanged (no scaling) when there is no cap
+// (base <= 0), no baseline to scale against (baseBudget <= 0, e.g. an unlimited
+// stage.MaxTurns), or no extension is in effect (effectiveBudget <= baseBudget) — which
+// covers every ordinary invocation and every progress-based extension iteration, since
+// those already reset back to the un-multiplied budget before their own fresh runClaude
+// call.
+func scaledWallTime(base time.Duration, effectiveBudget, baseBudget int) time.Duration {
+	if base <= 0 || baseBudget <= 0 || effectiveBudget <= baseBudget {
+		return base
+	}
+	return base * time.Duration(effectiveBudget) / time.Duration(baseBudget)
 }
 
 // buildClaudeEnv returns environment variable overrides to inject into the claude subprocess.
