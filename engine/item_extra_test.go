@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -1572,5 +1573,145 @@ func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
 	}
 	if time.Until(snap.CooldownAt("periodic-re-eval")) < -5*time.Second {
 		t.Error("CooldownAt[periodic-re-eval] was NOT refreshed by the deferred block; #488 behavior is broken")
+	}
+}
+
+// setupGitRepoWithDirtyChanges creates a minimal git repo with an initial
+// commit, then leaves an uncommitted change on disk — the shape R8/#1393
+// exercises: a worktree with real in-progress work that a shutdown-triggered
+// cancellation must not silently discard.
+func setupGitRepoWithDirtyChanges(t *testing.T, workDir string) {
+	t.Helper()
+	cmds := [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s: %v", args, out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "app.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+}
+
+// TestFinalizeStageOutcome_CancelledInvocation_CommitsAndPushesWIP_R8 verifies
+// R8's decision (#1393/ADR-1393): a cancelled invocation (ctx.Err() != nil —
+// the shape produced by a daemon clean-stop or a TUI stop) commits and
+// attempts to push any uncommitted worktree changes BEFORE releaseLock() is
+// called, rather than silently discarding them as it did before this issue.
+func TestFinalizeStageOutcome_CancelledInvocation_CommitsAndPushesWIP_R8(t *testing.T) {
+	skipIfNoGit(t)
+
+	rootDir := t.TempDir()
+	workDir := filepath.Join(rootDir, "issue-77")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	setupGitRepoWithDirtyChanges(t, workDir)
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	wm := NewWorktreeManagerWithRoot(rootDir, rootDir)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var released bool
+	stage := &stages.Stage{Name: "Implement", Order: 1, ReadOnly: false}
+	item := gh.ProjectItem{Number: 77, Repo: "owner/repo"}
+
+	eng.finalizeStageOutcome(stageOutcomeParams{
+		ctx:       ctx,
+		item:      item,
+		stage:     stage,
+		owner:     "owner",
+		repo:      "repo",
+		repoStr:   "owner/repo",
+		workDir:   workDir,
+		completed: false,
+		invokeErr: errors.New("killed: context cancelled"),
+		release:   func() { released = true },
+	})
+
+	if !released {
+		t.Error("expected releaseLock to be called on the cancellation early-out")
+	}
+
+	logCmd := exec.Command("git", "log", "-1", "--pretty=%s")
+	logCmd.Dir = workDir
+	logOut, err := logCmd.Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	subject := strings.TrimSpace(string(logOut))
+	if !strings.Contains(subject, "chore: partial") {
+		t.Errorf("expected a partial-progress commit to preserve the dirty change, got: %s", subject)
+	}
+
+	dirty, err := isWorkingTreeDirty(workDir)
+	if err != nil {
+		t.Fatalf("isWorkingTreeDirty: %v", err)
+	}
+	if dirty {
+		t.Error("expected the worktree to be clean after commitWIP ran on the cancellation path")
+	}
+}
+
+// TestFinalizeStageOutcome_CancelledInvocation_ReadOnlyStage_SkipsCommit_R8
+// verifies the R8 commit-before-cancel gate mirrors the ordinary
+// (non-cancelled) claudeRan && !completed && !stage.ReadOnly gate exactly —
+// a read-only stage's dirty state was already restored by the stash pop
+// earlier in finalizeStageOutcome, so committing it here would misattribute
+// the stash contents as this stage's own work product.
+func TestFinalizeStageOutcome_CancelledInvocation_ReadOnlyStage_SkipsCommit_R8(t *testing.T) {
+	skipIfNoGit(t)
+
+	rootDir := t.TempDir()
+	workDir := filepath.Join(rootDir, "issue-78")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	setupGitRepoWithDirtyChanges(t, workDir)
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	wm := NewWorktreeManagerWithRoot(rootDir, rootDir)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stage := &stages.Stage{Name: "Research", Order: 1, ReadOnly: true}
+	item := gh.ProjectItem{Number: 78, Repo: "owner/repo"}
+
+	eng.finalizeStageOutcome(stageOutcomeParams{
+		ctx:       ctx,
+		item:      item,
+		stage:     stage,
+		owner:     "owner",
+		repo:      "repo",
+		repoStr:   "owner/repo",
+		workDir:   workDir,
+		completed: false,
+		invokeErr: errors.New("killed: context cancelled"),
+		release:   func() {},
+	})
+
+	// No commit should have been made — the dirty change must remain uncommitted.
+	dirty, err := isWorkingTreeDirty(workDir)
+	if err != nil {
+		t.Fatalf("isWorkingTreeDirty: %v", err)
+	}
+	if !dirty {
+		t.Error("expected the worktree to remain dirty for a read-only stage — R8's commit gate must not fire")
 	}
 }

@@ -493,6 +493,40 @@ Custom stages (names not present in any embedded default) are silently skipped �
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 
+### Graceful Shutdown
+
+Pressing Ctrl-C (bare CLI) or quitting the TUI (`q` or Ctrl-C — both raise the same SIGTERM) triggers
+a **clean stop**, not a kill:
+
+1. **Stop admitting new work.** Fabrik stops dispatching new stage invocations immediately.
+2. **Pause every in-flight issue durably.** Every issue with a live worker gets `fabrik:paused` +
+   `fabrik:awaiting-input` applied on GitHub, plus a one-time audit comment naming the stage that was
+   interrupted and instructing you to remove `fabrik:paused` to resume. `stage:<Name>:in_progress` is
+   cleared at the same time — the board reflects "parked by a clean stop," not "still running."
+3. **Commit and push in-progress worktree changes.** Any uncommitted work in the worktree is
+   committed (`chore: partial <Stage> stage progress (incomplete)`) and pushed to the remote branch —
+   nothing is silently discarded.
+4. **Wind down Claude workers within a bounded deadline.** Each worker gets the existing
+   SIGINT→SIGTERM→SIGKILL escalation (`--kill-grace-sigint`/`--kill-grace-sigterm`), and the entire
+   drain — workers plus the pause-write phase above — is bounded by `--drain-deadline` (default
+   **30 seconds**, comfortably above the kill-grace escalation's ~20s worst case). If the deadline
+   passes with work still outstanding, Fabrik logs a warning and exits anyway rather than hanging
+   indefinitely.
+
+**Resuming** is exactly the same as resuming any other paused issue: remove `fabrik:paused` (and
+`fabrik:awaiting-input`, if you want to skip straight back into dispatch — it also self-clears on the
+stage's next entry). The stage picks back up from the pushed partial-progress commit.
+
+**Force-quit** is still available as an escape hatch if the clean stop itself gets stuck: press
+Ctrl-C (or send SIGINT/SIGTERM) a **second time** while "shutting down gracefully" is in progress.
+This exits immediately (`os.Exit(1)`) with no further label writes or worktree commits — use it only
+when the ordinary clean stop is visibly wedged.
+
+An idle daemon (no workers in flight) stops exactly as fast and quietly as it always did — the pause
+phase writes nothing when there is nothing to pause.
+
+See `--drain-deadline`/`FABRIK_DRAIN_DEADLINE` in [§2 Configuration Reference](#2-configuration-reference) to change the drain bound, and [ADR-1393](https://github.com/handarbeit/fabrik/blob/main/adrs/1393-clean-stop-shutdown.md) for the full design record.
+
 ### Worktree Janitor
 
 Fabrik's normal worktree cleanup runs only when the Done stage (`cleanup_worktree: true`) is dispatched for an issue. Several situations strand worktrees outside that path:
@@ -813,6 +847,7 @@ FABRIK_USER=my-personal-username
 | `--session-retention-days` | Delete `.fabrik/sessions/` `.session` files older than this many days; 0 disables age-based pruning; never deletes a session file for a stage currently in flight; also `FABRIK_SESSION_RETENTION_DAYS` | `14` |
 | `--kill-grace-sigint` | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGINT entirely; also `FABRIK_KILL_GRACE_SIGINT`) | `""` (10s) |
 | `--kill-grace-sigterm` | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGTERM entirely; also `FABRIK_KILL_GRACE_SIGTERM`) | `""` (10s) |
+| `--drain-deadline` | Bound on a clean stop's worker drain — how long `Run()` waits, after the first SIGINT/SIGTERM, for in-flight workers and the shutdown-pause write phase (see [Graceful Shutdown](#graceful-shutdown)) before returning anyway (Go duration: `30s`, `1m`; unlike `--kill-grace-*`, `"0s"` is **not** a "wait forever" sentinel — any non-positive value falls back to the default with a warning; also `FABRIK_DRAIN_DEADLINE`). Should stay comfortably above `--kill-grace-sigint` + `--kill-grace-sigterm`, or the drain will preempt the kill escalation before it can complete — a startup warning fires if it doesn't. | `""` (30s) |
 | `--archive-after` | Grace period since an item settled into Done (its `stage:<Done>:complete` label was applied) before it is auto-archived off the project board (Go duration: `168h`, `24h`; `"0s"` archives immediately once eligible; also `FABRIK_ARCHIVE_AFTER`) | `""` (168h = 1 week) |
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off`; also `FABRIK_ARCHIVE_DONE` | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
@@ -868,6 +903,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_SESSION_RETENTION_DAYS` | `session_retention_days` | Delete `.fabrik/sessions/` `.session` files older than this many days (non-negative integer; `0` disables age-based pruning; never deletes a session file for a stage currently in flight) | `14` |
 | `FABRIK_KILL_GRACE_SIGINT` | *(no config.yaml key)* | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGINT step entirely) | `""` (10s) |
 | `FABRIK_KILL_GRACE_SIGTERM` | *(no config.yaml key)* | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGTERM step, SIGKILL fires immediately after SIGINT) | `""` (10s) |
+| `FABRIK_DRAIN_DEADLINE` | *(no config.yaml key)* | Bound on a clean stop's worker drain (Go duration string: `"30s"`, `"1m"`; empty or unset = use default of 30s; unlike the `KILL_GRACE_*` variables, `"0s"` is not a "wait forever" sentinel — any non-positive or invalid value falls back to the default with a warning). See [Graceful Shutdown](#graceful-shutdown). | `""` (30s) |
 | `FABRIK_ARCHIVE_AFTER` | *(no config.yaml key)* | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration string: `"168h"`, `"24h"`; empty or unset = use default of 168h/1 week; `"0s"` archives immediately once eligible; invalid or negative values fall back to the default) | `""` (168h = 1 week) |
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
 | `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |

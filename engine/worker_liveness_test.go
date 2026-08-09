@@ -728,6 +728,114 @@ func TestRunStartupOrphanedInProgressScan_PreservesLockGatedSweep(t *testing.T) 
 	}
 }
 
+// TestRunStartupBareInProgressScan_RemovesBareLabel verifies the R7/#1393/
+// ADR-1393 AC7 shape: a stage:X:in_progress label with no fabrik:locked:*
+// label and no stage:X:complete/failed sibling is healed on next startup —
+// the case neither runStartupCleanup (lock-gated) nor
+// runStartupOrphanedInProgressScan (terminal-sibling-gated) matches.
+func TestRunStartupBareInProgressScan_RemovesBareLabel(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 40, []string{"stage:Implement:in_progress"})
+
+	e.runStartupBareInProgressScan()
+
+	removed := removeLabelsCalled(client, 40)
+	if !hasRemovedLabel(removed, "stage:Implement:in_progress") {
+		t.Errorf("expected bare stage:Implement:in_progress to be removed; got: %v", removed)
+	}
+}
+
+// TestRunStartupBareInProgressScan_SkipsWhenLockPresent verifies that a
+// stage:X:in_progress label co-occurring with any fabrik:locked:<user> label
+// is left alone — that shape belongs to runStartupCleanup's lock-gated pass,
+// not this one, so the two passes don't double-handle or race on it.
+func TestRunStartupBareInProgressScan_SkipsWhenLockPresent(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 41, []string{
+		"fabrik:locked:testuser",
+		"stage:Implement:in_progress",
+	})
+
+	e.runStartupBareInProgressScan()
+
+	removed := removeLabelsCalled(client, 41)
+	if len(removed) > 0 {
+		t.Errorf("expected no labels removed while a lock label is present (owned by runStartupCleanup instead); got: %v", removed)
+	}
+}
+
+// TestRunStartupBareInProgressScan_SkipsWhenTerminalSiblingPresent verifies
+// that a stage:X:in_progress label co-occurring with stage:X:complete or
+// stage:X:failed is left to runStartupOrphanedInProgressScan, not
+// double-removed by this pass too.
+func TestRunStartupBareInProgressScan_SkipsWhenTerminalSiblingPresent(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 42, []string{
+		"stage:Implement:complete",
+		"stage:Implement:in_progress",
+	})
+
+	e.runStartupBareInProgressScan()
+
+	removed := removeLabelsCalled(client, 42)
+	if len(removed) > 0 {
+		t.Errorf("expected no labels removed while a terminal sibling is present (owned by runStartupOrphanedInProgressScan instead); got: %v", removed)
+	}
+}
+
+// TestRunStartupBareInProgressScan_LeavesGenuineInFlightUntouched verifies
+// that a genuinely in-flight worker (Worker() != nil) is left untouched —
+// this scan is startup-only and, per its own doc comment, defensively skips
+// any item with an active Worker even though that should never occur this
+// early in startup.
+func TestRunStartupBareInProgressScan_LeavesGenuineInFlightUntouched(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 43, []string{"stage:Implement:in_progress"})
+	setWorker(e, 43, os.Getpid(), "Implement", time.Now())
+
+	e.runStartupBareInProgressScan()
+
+	removed := removeLabelsCalled(client, 43)
+	if len(removed) > 0 {
+		t.Errorf("expected no labels removed for an item with an active Worker; got: %v", removed)
+	}
+}
+
+// TestRunStartupBareInProgressScan_ComposesWithOtherPasses verifies the three
+// startup passes run in sequence (as poll.go does) without double-counting or
+// panicking: a lock-gated item, a terminal-sibling item, and a bare item are
+// each healed exactly once by their own owning pass.
+func TestRunStartupBareInProgressScan_ComposesWithOtherPasses(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 50, []string{"fabrik:locked:testuser", "stage:Plan:in_progress"})
+	bootstrapItem(t, e, 51, []string{"stage:Review:complete", "stage:Review:in_progress"})
+	bootstrapItem(t, e, 52, []string{"stage:Validate:in_progress"})
+
+	e.runStartupCleanup()
+	e.runStartupOrphanedInProgressScan()
+	e.runStartupBareInProgressScan()
+
+	if removed := removeLabelsCalled(client, 50); !hasRemovedLabel(removed, "stage:Plan:in_progress") {
+		t.Errorf("issue #50: expected stage:Plan:in_progress removed by the lock-gated pass; got: %v", removed)
+	}
+	if removed := removeLabelsCalled(client, 51); !hasRemovedLabel(removed, "stage:Review:in_progress") {
+		t.Errorf("issue #51: expected stage:Review:in_progress removed by the terminal-sibling pass; got: %v", removed)
+	}
+	if removed := removeLabelsCalled(client, 52); !hasRemovedLabel(removed, "stage:Validate:in_progress") {
+		t.Errorf("issue #52: expected stage:Validate:in_progress removed by the bare-in_progress pass; got: %v", removed)
+	}
+}
+
 // TestWorkerStaleTimeoutDefault verifies that workerStaleTimeout() returns 5 minutes
 // when Config.WorkerStaleTimeout is zero, and the configured value otherwise.
 func TestWorkerStaleTimeoutDefault(t *testing.T) {

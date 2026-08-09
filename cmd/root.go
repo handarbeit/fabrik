@@ -68,6 +68,7 @@ type Config struct {
 	PostPushDwell             int    // seconds; 0 means use default (90)
 	KillGraceSigInt           string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
 	KillGraceSigTerm          string // Go duration string; "" means use default (10s)
+	DrainDeadline             string // Go duration string; "" means use default (30s); bounds the clean-stop drain (ADR-1393)
 	DebugOutput               bool
 	SymlinkEnv                bool
 	WorktreeBoundaryAudit     bool
@@ -191,6 +192,7 @@ func Execute() error {
 	flag.IntVar(&cfg.SessionRetentionDays, "session-retention-days", 14, "Delete .session files older than this many days; 0 disables age-based pruning (also FABRIK_SESSION_RETENTION_DAYS)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
+	flag.StringVar(&cfg.DrainDeadline, "drain-deadline", "", "Bound on a clean stop's worker drain (SIGINT/SIGTERM): after this deadline elapses, Run() returns even if workers are still shutting down (Go duration: 30s, 1m; also FABRIK_DRAIN_DEADLINE; default 30s — must exceed kill-grace-sigint + kill-grace-sigterm, see ADR-1393)")
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
 	flag.StringVar(&cfg.GHESHost, "ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST; default: unset, meaning github.com)")
@@ -588,6 +590,9 @@ func Execute() error {
 	if !explicitFlags["kill-grace-sigterm"] {
 		cfg.KillGraceSigTerm = resolveDuration(cfg.KillGraceSigTerm, "FABRIK_KILL_GRACE_SIGTERM") // validated in killGraceSigTerm() helper
 	}
+	if !explicitFlags["drain-deadline"] {
+		cfg.DrainDeadline = resolveDuration(cfg.DrainDeadline, "FABRIK_DRAIN_DEADLINE") // validated in drainDeadline() helper
+	}
 	if !explicitFlags["archive-after"] {
 		cfg.ArchiveAfter = resolveDuration(cfg.ArchiveAfter, "FABRIK_ARCHIVE_AFTER") // validated in archiveAfter() helper
 	}
@@ -785,6 +790,7 @@ func Execute() error {
 		ClaudeWaitDelay:           claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:           killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:          killGraceSigTerm(cfg.KillGraceSigTerm),
+		DrainDeadline:             drainDeadline(cfg.DrainDeadline),
 		DebugOutput:               cfg.DebugOutput,
 		SymlinkEnv:                cfg.SymlinkEnv,
 		WorktreeBoundaryAudit:     cfg.WorktreeBoundaryAudit,
@@ -1154,6 +1160,29 @@ func killGraceSigTerm(s string) time.Duration {
 	if d < 0 {
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGTERM=%q is negative; using default 10s\n", s)
 		return 10 * time.Second
+	}
+	return d
+}
+
+// drainDeadline parses the drain-deadline string (Go duration syntax) into a
+// time.Duration. An empty string returns the default of 30 seconds. Unlike
+// kill_grace's "0s = skip this step" convention, a clean stop has no
+// unbounded-wait sentinel — that is the exact defect ADR-1393/#1393 fixes —
+// so a non-positive value (after parsing) falls back to the 30s default with
+// a warning rather than being honored as "wait forever". Negative values and
+// invalid syntax likewise log a warning and return the default.
+func drainDeadline(s string) time.Duration {
+	if s == "" {
+		return 30 * time.Second
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_DRAIN_DEADLINE=%q is invalid (Go duration syntax required, e.g. 30s, 1m); using default 30s\n", s)
+		return 30 * time.Second
+	}
+	if d <= 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_DRAIN_DEADLINE=%q is not positive — a clean stop has no unbounded-wait mode; using default 30s\n", s)
+		return 30 * time.Second
 	}
 	return d
 }
