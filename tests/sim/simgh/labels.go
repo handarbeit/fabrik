@@ -24,6 +24,10 @@ func (s *Sim) FetchLabels(owner, repo string, issueNumber int) ([]string, error)
 func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return err
+	}
 	iss, err := s.issueLocked(owner, repo, issueNumber)
 	if err != nil {
 		return err
@@ -34,8 +38,6 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	iss.labels = append(iss.labels, labelName)
 	iss.labelAppliedAt[labelName] = s.now()
 	iss.updatedAt = s.now()
-
-	r := s.repos[repoKey(owner, repo)]
 	r.labelVocab[labelName] = true
 	return nil
 }
