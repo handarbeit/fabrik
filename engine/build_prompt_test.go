@@ -323,6 +323,78 @@ func TestBuildCommentReviewPrompt_RegularComment_NoLocation(t *testing.T) {
 	if strings.Contains(prompt, "[Thread:") {
 		t.Error("regular comment should not include Thread: reference")
 	}
+	if strings.Contains(prompt, "[Bot Review Finding]") {
+		t.Error("a human-authored plain comment must not be marked as a bot review finding")
+	}
+}
+
+// TestBuildCommentReviewPrompt_BotPlainComment_GetsFindingMarker is #1045's
+// AC5 engine-testable slice: a bot-authored plain PR body/issue comment (no
+// **File:**/**Diff context:** headers, no formal review submission) must be
+// rendered with the [Bot Review Finding] marker so the comment-processing
+// skill can recognize it as content to evaluate and address autonomously —
+// the original report's failure mode was exactly this comment falling
+// through to "await user decision" indistinguishably from a human's.
+func TestBuildCommentReviewPrompt_BotPlainComment_GetsFindingMarker(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{
+		Number: 42,
+		Title:  "My PR",
+		IsPR:   true,
+	}
+	comments := []gh.Comment{
+		{
+			ID:        "IC_bot_1",
+			Author:    "copilot-pull-request-reviewer[bot]",
+			Body:      "Found three issues:\n1. Missing nil check\n2. Unused variable\n3. Typo in comment",
+			CreatedAt: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+			// No Path, Line, DiffHunk, and no review-body: ID prefix — a
+			// plain PR body comment, GitHub's /pulls/N/reviews and
+			// /pulls/N/comments both empty, exactly the original repro shape.
+		},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
+
+	if !strings.Contains(prompt, "[Bot Review Finding]") {
+		t.Error("expected [Bot Review Finding] marker for a bot-authored plain comment")
+	}
+	if !strings.Contains(prompt, "Found three issues") {
+		t.Error("expected the bot's finding body to still be included verbatim")
+	}
+	if !strings.Contains(prompt, "copilot-pull-request-reviewer[bot]") {
+		t.Error("expected the bot author to still be attributed")
+	}
+}
+
+// TestBuildCommentReviewPrompt_SyntheticReviewBodyComment_GetsFindingMarker
+// covers the second delivery shape: a synthetic review-body comment built by
+// buildReviewBodyCommentsFromReviews (reviews.go) for a COMMENTED/APPROVED
+// review's body (#1045 requirement 1). It has no Path (no inline thread)
+// either, so it must get the same [Bot Review Finding] marker — the marker
+// is deliberately worded without a "no formal review submitted" claim
+// because, unlike the plain-comment case above, this one did come from a
+// formal review submission.
+func TestBuildCommentReviewPrompt_SyntheticReviewBodyComment_GetsFindingMarker(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{Number: 42, Title: "My PR", IsPR: true}
+	comments := []gh.Comment{
+		{
+			ID: "review-body:603",
+			// GitHub's REST API reports a self-submitting bot's review author
+			// with the "[bot]" suffix (its GraphQL/@-mention surfaces omit
+			// it) — see stripBotSuffix's doc comment in reviews.go.
+			Author:    "handarbeit-pruefer[bot]",
+			Body:      "Missing nil check on line 42.",
+			CreatedAt: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+		},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
+
+	if !strings.Contains(prompt, "[Bot Review Finding]") {
+		t.Error("expected [Bot Review Finding] marker for a synthetic review-body comment")
+	}
 }
 
 func TestBuildCommentReviewPrompt_ReviewThreadComment_ZeroLine(t *testing.T) {
