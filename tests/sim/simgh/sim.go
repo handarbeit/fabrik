@@ -122,6 +122,21 @@ var _ engine.GitHubClient = (*Sim)(nil)
 // time-anchored gates (the review-gate timeout, the CI settle scan, the
 // Done-archive scan, all of which key off FetchLabelAppliedAt) without
 // wall-clock waiting.
+//
+// # An implementation must be safe for concurrent use
+//
+// Now is called from every engine worker goroutine, on every model read that
+// touches a timestamp, on every drain of a schedule (schedule.go), and on
+// every call intercepted by the instrumentation layer. Meanwhile the whole
+// point of a controllable clock is that the scenario *advances* it — and a
+// harness driving Engine.Run() advances it with workers in flight, because
+// there is no moment at which nothing is running.
+//
+// So an advanceable Clock must guard its own state. A plain time.Time field
+// written by Advance and read by Now is a data race that -race will report
+// from an arbitrary worker, far from the Advance that caused it. realClock is
+// trivially safe; the test clock in helpers_test.go carries a mutex for this
+// reason.
 type Clock interface {
 	Now() time.Time
 }

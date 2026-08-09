@@ -654,6 +654,13 @@ mutate "FetchItemDetails logs the composite owner/repo as the bare repo name" \
   'TestFetchItemDetailsSplitsTheCompositeRepo' \
   'instrumented.go::s{\t\tif owner, repo, err := splitOwnerRepo\(item\.Repo\); err == nil \{\n\t\t\targs\.Owner, args\.Repo = owner, repo\n\t\t\}\n}{}'
 
+# The instrumentation layer reads the clock on every intercepted call, so an
+# unguarded test clock races the moment a scenario advances it with anything in
+# flight — which is how a harness driving Engine.Run() necessarily uses it.
+mutate_race "the injected clock is unguarded (expects a data race on advance)" \
+  'TestAdvancingTheClockUnderTrafficIsRaceFree' \
+  'helpers_test.go::s{^\tmu sync\.Mutex$}{\tmu noopClockMutex}m' \
+  'helpers_test.go::s{^func newFakeClock\(\)}{type noopClockMutex struct{}\n\nfunc (noopClockMutex) Lock()   {}\nfunc (noopClockMutex) Unlock() {}\n\nvar _ = sync.Mutex{}\n\nfunc newFakeClock()}m'
 
 # --- R5: snapshot and restore (#1457) ---------------------------------------
 

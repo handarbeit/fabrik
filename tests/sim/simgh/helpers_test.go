@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os/exec"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,15 +33,33 @@ func skipIfNoGit(t *testing.T) {
 // produces reads from the injected clock, so a test can place label
 // applications at exact instants — which is what the engine's timeout-anchored
 // gates need.
-type fakeClock struct{ t time.Time }
+//
+// It is mutex-guarded because Clock's contract requires it (see sim.go): Now is
+// called from every worker goroutine — on every timestamped model read, on
+// every schedule drain, and on every call the instrumentation layer intercepts
+// — while Advance writes. An unguarded time.Time field would be a data race
+// the moment a scenario advanced the clock with anything in flight, which is
+// how a harness driving Engine.Run() necessarily uses it.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
 func newFakeClock() *fakeClock {
 	return &fakeClock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
 }
 
-func (c *fakeClock) Now() time.Time { return c.t }
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
 
-func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 // newSim builds a Sim with a fake clock over a temp base dir.
 func newSim(t *testing.T) (*Sim, *fakeClock) {

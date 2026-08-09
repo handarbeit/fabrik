@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // R6/AC8: the mutation log and the fault table are written from every engine
@@ -178,6 +181,65 @@ func TestOrderingWithinAGoroutineIsExactUnderContention(t *testing.T) {
 				i, seq, i-1, lastSeq)
 		}
 		lastSeq = seq
+	}
+}
+
+// Advancing the clock while workers are in flight must not race.
+//
+// This is how a harness driving Engine.Run() necessarily uses the clock: there
+// is no instant at which nothing is running, so "advance, then observe" is
+// always concurrent with somebody's read. The instrumentation layer widened the
+// exposure sharply — Now is read on every intercepted call, not only on the
+// model reads that stamp a timestamp — and a schedule drain reads it too, so an
+// unguarded clock would race from an arbitrary worker, far from the Advance
+// that caused it. Run under -race, which is what makes this test mean anything.
+func TestAdvancingTheClockUnderTrafficIsRaceFree(t *testing.T) {
+	const workers = 6
+
+	in, clk := newInstrumented(t)
+	// Check runs are keyed by SHA string alone, and a drain is repo-wide, so a
+	// literal key is enough here — this test is about the clock, not about git.
+	const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	// A scheduled step so the drain path — which reads the clock while holding
+	// mu — is exercised alongside the log's own read of it.
+	in.Sim().SeedCheckRunsAfter("acme/widgets", sha, 30*time.Minute,
+		gh.CheckRun{ID: 700, Name: "build", Status: "completed", Conclusion: "failure"})
+	if err := in.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = in.FetchCheckRuns("acme", "widgets", sha)
+				_ = in.AddLabelToIssue("acme", "widgets", 7, fmt.Sprintf("t-%d-%d", w, i))
+			}
+		}(w)
+	}
+
+	for i := 0; i < 20; i++ {
+		clk.Advance(5 * time.Minute)
+	}
+	close(stop)
+	wg.Wait()
+
+	// And the step still landed exactly once, rather than being applied
+	// repeatedly by the racing readers.
+	runs, err := in.FetchCheckRuns("acme", "widgets", sha)
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if len(runs) != 1 || checkVerdict(runs[0]) != "failure" {
+		t.Errorf("after the advance, check runs = %+v, want the single scheduled failure", runs)
 	}
 }
 
