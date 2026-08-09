@@ -3,6 +3,8 @@ package simgh
 import (
 	"errors"
 	"os/exec"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,15 +33,33 @@ func skipIfNoGit(t *testing.T) {
 // produces reads from the injected clock, so a test can place label
 // applications at exact instants — which is what the engine's timeout-anchored
 // gates need.
-type fakeClock struct{ t time.Time }
+//
+// It is mutex-guarded because Clock's contract requires it (see sim.go): Now is
+// called from every worker goroutine — on every timestamped model read, on
+// every schedule drain, and on every call the instrumentation layer intercepts
+// — while Advance writes. An unguarded time.Time field would be a data race
+// the moment a scenario advanced the clock with anything in flight, which is
+// how a harness driving Engine.Run() necessarily uses it.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
 func newFakeClock() *fakeClock {
 	return &fakeClock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
 }
 
-func (c *fakeClock) Now() time.Time { return c.t }
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
 
-func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 // newSim builds a Sim with a fake clock over a temp base dir.
 func newSim(t *testing.T) (*Sim, *fakeClock) {
@@ -68,6 +88,42 @@ func seedBasicBoard(t *testing.T) (*Sim, *fakeClock) {
 		t.Fatalf("seeding: %v", err)
 	}
 	return s, clk
+}
+
+// newInstrumented builds a Sim over the usual basic board and wraps it in the
+// instrumentation layer.
+func newInstrumented(t *testing.T) (*Instrumented, *fakeClock) {
+	t.Helper()
+	s, clk := seedBasicBoard(t)
+	return Instrument(s), clk
+}
+
+// callInterfaceMethod invokes the named engine.GitHubClient method on in with
+// zero-valued arguments, discarding whatever it returns.
+//
+// The reflection-driven completeness tests care only that the call was
+// intercepted, not that it succeeded — most of these fail inside the model
+// because nothing relevant is seeded, and that is fine: a failed call is still
+// an intercepted one, and the log records attempts rather than mutations.
+// Pointer parameters get a fresh zero value rather than nil, so a method that
+// rejects nil outright still reaches its wrapper the same way.
+func callInterfaceMethod(t *testing.T, in *Instrumented, name string) {
+	t.Helper()
+	m := reflect.ValueOf(in).MethodByName(name)
+	if !m.IsValid() {
+		t.Fatalf("*Instrumented has no method %q — every engine.GitHubClient method needs a wrapper", name)
+	}
+	mt := m.Type()
+	args := make([]reflect.Value, mt.NumIn())
+	for i := range args {
+		at := mt.In(i)
+		if at.Kind() == reflect.Pointer {
+			args[i] = reflect.New(at.Elem())
+			continue
+		}
+		args[i] = reflect.Zero(at)
+	}
+	m.Call(args)
 }
 
 // mustHeadSHA resolves a branch tip or fails the test.

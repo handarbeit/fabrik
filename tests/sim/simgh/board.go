@@ -142,6 +142,7 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 	linked := findPRByHeadLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
+		s.drainReviews(linked)
 		linkedHead = linked.head
 		item.LinkedPRNumber = linked.number
 		item.LinkedPRNumberShallow = linked.number
@@ -305,6 +306,12 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 	linked := findPRByHeadLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
+		// The probe reads only the PR's updatedAt, but a due review step bumps
+		// exactly that — and the probe's EffectiveUpdatedAt is how the engine
+		// decides an item is worth deep-fetching. Skipping the drain here
+		// would make a scheduled review invisible until some unrelated read
+		// happened to apply it.
+		s.drainReviews(linked)
 		linkedHead = linked.head
 		probe.LinkedPRNumber = linked.number
 		probe.LinkedPRUpdatedAt = linked.updatedAt

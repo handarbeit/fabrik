@@ -471,19 +471,185 @@ while enqueuing it from another.
 
 ## Rate limits and transport
 
-### Rate limiting — **Absent**
+### Rate limiting — **Injectable per call, static as a budget**
 
-`RateLimitStats` reports static budgets that never deplete. No method ever fails
-with a rate-limit or secondary-rate-limit error, and there is no retry-after
-behaviour. The engine's backoff and rate-limit-exhaustion paths
-(`engine/backoff.go`, `engine/terminal.go`) **cannot** be exercised through this
-layer.
+Two halves, and they behave differently.
+
+**Per-call rate-limit failures are injectable.** Wrap a `Sim` with
+`Instrument` and any interface method can be made to return a rate-limit,
+secondary-rate-limit or abuse-detection error — once, N times, always, on the
+Kth call, or only for calls matching a predicate. Use the `ghfault`
+constructors (re-exported as `ErrRateLimit`, `ErrSecondaryRateLimit`,
+`ErrAbuseDetection`, `ErrTooManyRequests`, …) rather than an ad-hoc
+`errors.New`: the engine classifies these by substring match against
+`err.Error()` (`engine/item.go`'s `rateLimitErrorPatterns`), so an unrecognised
+message exercises the *escalation* branch while the scenario believes it is
+exercising the *defer* branch. `engine/simgh_fault_classification_test.go` pins
+each constructor against the real, unexported classifier, so a rewording on
+either side fails loudly.
+
+**The budgets themselves remain static.** `RateLimitStats` reports whatever
+`WithRateLimits` or `SeedRateLimits` set, and the numbers never deplete as
+calls are made. Nothing counts requests. A scenario that wants the engine's
+budget-ratio thresholds (`engine/backoff.go` consumes remaining/limit as a
+ratio) must *script* the budget with `SeedRateLimits`, not expect it to fall on
+its own.
+
+**`RateLimitStats` is the one method fault injection cannot fail.** It has no
+`error` return (`engine/interfaces.go`), so there is no channel through which
+an injected failure could surface. Registering a fault against it **panics**
+rather than sitting inert — a silently-inert fault is a false-pass generator,
+and the whole point of this layer is to remove those. Scripting the budget is
+the controllability that surface actually has.
 
 Timestamps (`Reset`, `UpdatedAt`) still come from the injected clock, so a test
 controlling time sees coherent values.
 
-Fault injection generally — including rate-limit error kinds — is deferred to
-the follow-on instrumentation layer (#1457).
+**Risk — retry-after: absent.** No method returns a `Retry-After` header or its
+equivalent, because the model has no transport. Any engine behaviour keyed on a
+server-supplied backoff duration is unreachable here.
+
+### Scripted verdicts are unconstrained by the repository's real state — **Divergence, deliberate**
+
+Every scripted surface — check runs, commit statuses, reviews, review requests,
+required contexts, required approvals — is set directly, with no cross-checking
+against anything else in the model. That is the point, and it is also a way to
+write a test that passes against a world GitHub could never produce.
+
+Concretely, a scenario can construct all of these, and the model will report
+them without complaint:
+
+- A **required context that no check run or status ever posts**, or conversely a
+  passing check named for a context branch protection does not require.
+- A **review from an author who is not a collaborator**, or an `APPROVED`
+  review on a PR whose author is that same person — GitHub forbids self-approval.
+- `SeedRequiredApprovals(repo, branch, 5)` on a repo with **one** reviewer, so
+  `reviewDecision` reports `REVIEW_REQUIRED` forever.
+- A **`DISMISSED` review with no dismissing actor** and no corresponding
+  dismissal event.
+- Check runs on a **SHA that is not the head of any branch or PR**, which real
+  CI would have had no commit to run against.
+
+None of these are bugs in the model: refusing them would make large parts of
+the engine's own defensive handling untestable, which is the opposite of why
+this layer exists. But a green sim-backed test proves the engine behaves *given
+that input*, not that the input is one GitHub would ever hand it. When a
+scenario's setup starts to look exotic, check it against a real board before
+concluding the engine is correct.
+
+### Clock-driven schedules have no real-GitHub correlate — **Divergence, deliberate**
+
+The `Seed*At` / `Seed*After` methods enqueue a mutation for a future instant on
+the injected clock: "this SHA goes red at T", "the reviewer responds forty
+minutes in". Nothing on GitHub works this way — CI finishes when it finishes,
+and a reviewer responds when they respond. A schedule is a test instrument, not
+a model of anything.
+
+Two properties are worth stating because scenarios will rely on them:
+
+- **A step is a pending mutation applied on read, not a read filter.** When its
+  time arrives it *writes into the model*, permanently. So repeated reads at a
+  single clock instant are stable, and — the reason for the choice — engine
+  mutations to the same surface remain observable afterwards. A filter
+  overriding `reviewRequests` would mask `AddReviewRequest`, which is the bot
+  re-prompt ladder's own mutation (ADR-1283): the engine would make the call,
+  the model would accept it, and the next read would deny it had happened.
+- **Steps fire at `at <= now`, in time order, and in seeding order within one
+  instant.** Nothing else about their relative ordering is contractual.
+
+Because a step is a write, draining it is a side effect of *reading*. Every
+read path that touches a scheduled collection therefore calls `drainCI` or
+`drainReviews` first (`schedule.go`). A scenario that reads through a path
+which forgot to drain would see stale state — which is why
+`TestScheduleVisibleThroughEveryReadPath` builds a **fresh `Sim` per read
+path**, so one path's drain cannot cover for another's.
+
+### Sequencing is clock-driven; read-count sequencing survives in one place — **Modelled, with a caveat**
+
+The general mechanism is the injected clock, not a read counter, because **one
+poll is not one read**. `settleAwaitingCIScan` primes the store with a live
+check-run read (`RefreshCheckRunsLive`) and the handler chain it then runs
+reaches `checkCIGate`, which reads check-run state again: two reads of one SHA
+in a single poll, before `MaxConcurrent` workers are considered. Worse, the
+first of those reads is guarded on the engine having a `boardcache` wired,
+which is a harness configuration decision rather than an engine invariant. A
+read-count sequence would therefore not correspond to poll boundaries at all,
+and would shift under an edit to the handler chain — the thing under test.
+
+**The exception is `prRecord.mergeableRecomputeReads`** (see *`mergeable: null`
+— the recompute window* above), which is kept as a read counter because it
+models a genuine GitHub behaviour — a recompute that resolves after some reads
+— rather than a test's notion of elapsed time.
+
+**Risk — the single-reader caveat is live for that field.** A read-count
+sequence is only reproducible when exactly *one* call site reads the surface,
+and `FetchPRMergeableFields` has three: `FetchPRMergeable`,
+`FetchPRMergeableState`, and `MergePR`'s own gate (`prs.go`). A scenario that
+seeds `MergeableRecomputeReads: 2` and then calls `MergePR` will find the
+window drained by the gate's own read. Count the reads the code actually makes,
+not the polls you intend.
+
+### `reviewDecision` is derived, not scriptable — **Modelled, deliberately**
+
+There is no `SeedReviewDecision`. `FetchPRReviewDecision` computes its answer
+from `latestReviewsByAuthor` plus `requiredApprovals`, sharing the reduction
+with `FetchPRReviews` so the two reads cannot disagree (see *`reviewDecision`
+under branch protection* above). Exposing a direct setter would reintroduce
+exactly the bug that sharing exists to prevent: two reads of one model
+reporting two different verdicts. Script `SeedReview` (or `SeedReviewsAt`) and
+`SeedRequiredApprovals`; the decision follows.
+
+### The mutation log records attempts, and its ordering is exact only within a goroutine — **Modelled, with a stated contract**
+
+`MutationLog` (`mutationlog.go`) records **every intercepted call with its
+outcome** — reads as well as mutations, failures as well as successes,
+injected failures distinguished from model failures. Its name is narrower than
+its contract, deliberately: a log of mutations that happened could not show
+"N failed attempts followed by the success", which is the whole point of
+asserting against an injected fault. `Mutations()` is the narrower view.
+
+Entries are appended in two phases — a slot reserved *before* the underlying
+call, completed after it. That gives:
+
+- **Exact ordering within a goroutine.** Every real ordering assertion is of
+  this kind: ADR-060's "`fabrik:awaiting-done` is the very first mutation" is a
+  claim about one worker's sequential code.
+- **Reserve-order, best effort, across goroutines.** Two workers whose calls
+  interleave inside the model are ordered by which reserved its slot first.
+  That is as close to a happens-before as an out-of-band log can get.
+
+**Risk — do not write a cross-goroutine ordering assertion.** Two calls made
+concurrently from different workers have no contractual order in the log, and
+an assertion that happens to hold today is a flaky test. `Precedes` errors
+rather than answering `false` when either predicate matches nothing, so a query
+that has gone stale fails loudly instead of passing for the wrong reason — but
+nothing can rescue an assertion that was never well-defined.
+
+### Snapshot and restore — **Modelled, with quiescence assumed**
+
+`Sim.Snapshot(stagingDir)` / `Restore(snap, baseDir, opts...)` round-trip the
+whole model plus a directory copy of every backing bare repository;
+`Instrumented.Snapshot` / `RestoreInstrumented` additionally carry the fault
+schedule and the mutation log, so a restart scenario's GitHub does not quietly
+heal and an ordering assertion may span the restart. The `Clock` is *not*
+carried — it is never model-owned — and is re-supplied as an `Option`, matching
+`New`.
+
+**Simplified — snapshot assumes quiescence.** Git state and model state are
+copied in two phases, and no lock is held across both; the package's
+mu-before-gitMu invariant forbids it. Each half is internally consistent, but a
+snapshot taken while engine goroutines are running may catch a mutation in one
+half and not the other. Take one the way a restart scenario naturally would:
+between polls, with nothing in flight.
+
+**Risk — stale git worktree admin entries.** `git worktree add` runs with
+`cmd.Dir = bareDir`, so git's admin entries live inside the copied directory
+and hold *absolute* paths into throwaway checkouts under the **old** `baseDir`
+— which `t.TempDir()` guarantees differs on every run. `Snapshot` runs
+`git worktree prune` under `gitMu` before copying, which clears them.
+`snapshot_test.go` asserts a git-derived answer (commits-behind, mergeable
+state, and a real merge) recomputes correctly against the restored repository,
+because that is what would actually fail if a stale entry survived.
 
 ### HTTP / GraphQL / REST wire behaviour — **Absent**
 
@@ -1011,8 +1177,13 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 103 mutations, and
+   package cannot back up. The sweep currently catches all 146 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
+
+   The instrumentation layer's own mutations are in there too, and one of them
+   is the case this kind of code fails at most characteristically: **an
+   injector that silently succeeds**. A fault-injection test that passes
+   because nothing failed asserts something about a call that was never made.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
 GitHub* — only that the model does what this document says. For anything subtle

@@ -348,6 +348,10 @@ func (s *Sim) deriveMergeableState(r *repoState, base string, facts gitFactsResu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Any due CI step lands before the derivation reads the collections, so
+	// this read and FetchCheckRuns cannot disagree about the same SHA.
+	s.drainCI(r)
+
 	// GitHub reports "behind" only where branch protection requires the head
 	// to be up to date; without that setting a PR whose base has advanced is
 	// still "clean". Gating on the seeded requirement rather than on

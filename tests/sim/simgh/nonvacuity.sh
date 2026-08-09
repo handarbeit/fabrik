@@ -510,6 +510,203 @@ mutate "SeedBlockedBy does not stamp the issue" \
   'TestSeedBlockedByDedupesAndStamps' \
   'seed.go::s{iss\.blockedBy = append\(iss\.blockedBy, gh\.Dependency\{Number: blockerNumber, Repo: repoField\}\)\n\tiss\.updatedAt = s\.now\(\)}{iss.blockedBy = append(iss.blockedBy, gh.Dependency\{Number: blockerNumber, Repo: repoField\})}'
 
+# --- R2: clock-driven schedules (#1457) -------------------------------------
+#
+# The drain accessors are the whole sequencing mechanism, and each read path
+# calls one. TestScheduleVisibleThroughEveryReadPath builds a fresh Sim per
+# path precisely so a single deleted drain is catchable — draining is a write,
+# so a shared Sim would let one path's drain cover for another's.
+
+mutate "scheduled CI steps never drain" \
+  'TestScheduledCheckRunTransitionIsClockDriven|TestScheduleVisibleThroughEveryReadPath' \
+  'schedule.go::s{func \(s \*Sim\) drainCI\(r \*repoState\) \{ r\.ciSchedule\.drain\(s\.now\(\), r\) \}}{func (s *Sim) drainCI(r *repoState) \{ _ = r \}}'
+
+mutate "scheduled review steps never drain" \
+  'TestScheduledReviewArrivesOnTheClock|TestScheduleVisibleThroughEveryReadPath' \
+  'schedule.go::s{func \(s \*Sim\) drainReviews\(pr \*prRecord\) \{ pr\.reviewSchedule\.drain\(s\.now\(\), pr\) \}}{func (s *Sim) drainReviews(pr *prRecord) \{ _ = pr \}}'
+
+mutate "a step scheduled for exactly now does not fire" \
+  'TestScheduledCheckRunTransitionIsClockDriven' \
+  'schedule.go::s{if step\.at\.After\(now\) \{}{if !step.at.Before(now) \{}'
+
+mutate "steps apply in seeding order rather than time order" \
+  'TestStepsApplyInTimeThenSeedingOrder' \
+  'schedule.go::s{\tfor i > 0 && sc\.steps\[i-1\]\.at\.After\(at\) \{\n\t\ti--\n\t\}\n}{}'
+
+mutate "a fired step stays queued and re-applies on every read" \
+  'TestScheduledCommitStatusIsClockDriven' \
+  'schedule.go::s{\tremaining := make\(\[\]scheduleStep\[T\], len\(sc\.steps\)-applied\)\n\tcopy\(remaining, sc\.steps\[applied:\]\)\n\tsc\.steps = remaining\n}{}'
+
+mutate "FetchCheckRuns does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'ci.go::s{\ts\.drainCI\(r\)\n\truns := r\.checkRuns\[sha\]}{\truns := r.checkRuns[sha]}'
+
+mutate "FetchCombinedStatus does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'ci.go::s{\t\ts\.drainCI\(r\)\n\t\tif direct, ok := r\.commitStatuses\[ref\]; ok \{}{\t\tif direct, ok := r.commitStatuses[ref]; ok \{}'
+
+mutate "the mergeable derivation does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'prs.go::s{^\ts\.drainCI\(r\)$}{}m'
+
+mutate "the board projection does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'board.go::s{\t\ts\.drainReviews\(linked\)\n\t\tlinkedHead = linked\.head\n\t\titem\.LinkedPRNumber}{\t\tlinkedHead = linked.head\n\t\titem.LinkedPRNumber}'
+
+mutate "the probe path does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'board.go::s{\t\ts\.drainReviews\(linked\)\n\t\tlinkedHead = linked\.head\n\t\tprobe\.LinkedPRNumber}{\t\tlinkedHead = linked.head\n\t\tprobe.LinkedPRNumber}'
+
+mutate "FetchPRReviews does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'reviews.go::s{\ts\.drainReviews\(pr\)\n\treturn latestReviewsByAuthor}{\treturn latestReviewsByAuthor}'
+
+mutate "FetchPRReviewRequests does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'reviews.go::s{\ts\.drainReviews\(pr\)\n\tout := make\(\[\]gh\.ReviewRequest}{\tout := make([]gh.ReviewRequest}'
+
+mutate "FetchPRReviewDecision does not drain" \
+  'TestScheduleVisibleThroughEveryReadPath' \
+  'reviews.go::s{\ts\.drainReviews\(pr\)\n\trequired, ok := r\.requiredApprovals}{\trequired, ok := r.requiredApprovals}'
+
+mutate "a due step can undo an engine review withdrawal" \
+  'TestADueStepCannotUndoAnEngineWithdrawal' \
+  'reviews.go::s{\ts\.drainReviews\(pr\)\n\tkept := pr\.reviewRequests}{\tkept := pr.reviewRequests}'
+
+mutate "a scheduled check run appends instead of superseding by ID" \
+  'TestScheduledCheckRunTransitionIsClockDriven' \
+  'seed.go::s{\t\tif list\[i\]\.ID == run\.ID \{}{\t\tif false \&\& list[i].ID == run.ID \{}'
+
+mutate "an empty scheduled step is accepted" \
+  'TestAnEmptyScheduledStepIsASeedingError' \
+  'seed.go::s{\t\ts\.fail\("simgh: SeedCheckRunsAt\(%s, %s\): no check runs given; an empty step is unobservable", ownerRepo, sha\)\n\t\treturn s\n}{}'
+
+mutate "a scheduled review is not stamped with the step's instant" \
+  'TestScheduledReviewArrivesOnTheClock' \
+  'seed.go::s{\t\tif rev\.SubmittedAt\.IsZero\(\) \{\n\t\t\trev\.SubmittedAt = at\n\t\t\}\n}{}'
+
+mutate "SeedRateLimits accepts a remaining above the limit" \
+  'TestSeedRateLimits' \
+  'seed.go::s{if restRemaining > restLimit \|\| graphqlRemaining > graphqlLimit \{}{if false \{}'
+
+# --- R3: fault injection (#1457) --------------------------------------------
+#
+# The first of these is AC10's named case: an injector that silently succeeds
+# is the canonical false pass for fault-injection code, because every
+# assertion about "what happened when the call failed" is then made about a
+# call that did not fail.
+
+mutate "the fault injector silently succeeds" \
+  'TestFaultFailsNTimesThenSucceeds|TestAFaultedCallDoesNotReachTheModel|TestEveryInterfaceMethodIsFaultable' \
+  'instrumented.go::s{if err := in\.faults\.next\(method, args\); err != nil \{}{if err := in.faults.next(method, args); err != nil \&\& false \{}g'
+
+mutate "injected failures are not distinguished from model failures" \
+  'TestFaultFailsNTimesThenSucceeds|TestEveryInterfaceMethodIsFaultable' \
+  'instrumented.go::s{in\.log\.complete\(seq, err, true\)}{in.log.complete(seq, err, false)}g'
+
+mutate "FailNTimes never exhausts" \
+  'TestFaultFailsNTimesThenSucceeds|TestFailOnce' \
+  'fault.go::s{\t\tif r\.remaining > 0 \{\n\t\t\tr\.remaining--\n\t\t\}\n}{}'
+
+mutate "FailWhen ignores its match predicate" \
+  'TestFailWhenNarrowsByArguments' \
+  'fault.go::s{\t\tif r\.match != nil && !r\.match\(args\) \{\n\t\t\tcontinue\n\t\t\}\n}{}'
+
+mutate "FailOnCall fires on every call" \
+  'TestFailOnCallFiresOnlyOnTheKthCall' \
+  'fault.go::s{\t\t\tif n != r\.onCall \{}{\t\t\tif n != r.onCall \&\& false \{}'
+
+mutate "a fault on an unknown method is accepted" \
+  'TestRegisteringAFaultOnAnUnknownMethodPanics' \
+  'fault.go::s{if !interfaceMethodSet\[method\] \{}{if false \{}'
+
+mutate "a fault on RateLimitStats is accepted" \
+  'TestRegisteringAFaultOnRateLimitStatsPanics' \
+  'fault.go::s{if unfaultableMethods\[method\] \{}{if false \{}'
+
+mutate "a fault registered with a nil error is accepted" \
+  'TestRegisteringAFaultWithANilErrorPanics' \
+  'fault.go::s{\tif r\.err == nil \{}{\tif false \{}'
+
+# --- R4: mutation log (#1457) -----------------------------------------------
+
+mutate "the log records a model failure as a success" \
+  'TestLogRecordsModelErrors' \
+  'instrumented.go::s{\tv, err := fn\(\)\n\tin\.log\.complete\(seq, err, false\)}{\tv, err := fn()\n\tin.log.complete(seq, nil, false)}'
+
+mutate "log entries are not sequenced" \
+  'TestLogSequencesAreDenseAndMonotonic' \
+  'mutationlog.go::s{\t\tSeq:      seq,\n}{}'
+
+mutate "every intercepted call is recorded as a mutation" \
+  'TestLogRecordsReadsAndMutationsSeparately|TestMutationFlagMatchesTheInterfaceSemantics' \
+  'mutationlog.go::s{\t\tMutation: mutation,}{\t\tMutation: true,}'
+
+mutate "the log reads wall-clock time instead of the injected clock" \
+  'TestLogTimestampsComeFromTheInjectedClock' \
+  'instrumented.go::s{in\.sim\.now\(\)}{time.Now()}g'
+
+mutate "IndexOf answers -1 instead of erroring on an unmatched predicate" \
+  'TestPrecedesErrorsWhenAPredicateMatchesNothing' \
+  'mutationlog.go::s{return -1, fmt\.Errorf\("simgh: mutation log has no entry matching the predicate \(%d entries recorded\)", l\.Len\(\)\)}{return -1, nil}'
+
+mutate "FetchItemDetails logs the composite owner/repo as the bare repo name" \
+  'TestFetchItemDetailsSplitsTheCompositeRepo' \
+  'instrumented.go::s{\t\tif owner, repo, err := splitOwnerRepo\(item\.Repo\); err == nil \{\n\t\t\targs\.Owner, args\.Repo = owner, repo\n\t\t\}\n}{}'
+
+# The instrumentation layer reads the clock on every intercepted call, so an
+# unguarded test clock races the moment a scenario advances it with anything in
+# flight — which is how a harness driving Engine.Run() necessarily uses it.
+mutate_race "the injected clock is unguarded (expects a data race on advance)" \
+  'TestAdvancingTheClockUnderTrafficIsRaceFree' \
+  'helpers_test.go::s{^\tmu sync\.Mutex$}{\tmu noopClockMutex}m' \
+  'helpers_test.go::s{^func newFakeClock\(\)}{type noopClockMutex struct{}\n\nfunc (noopClockMutex) Lock()   {}\nfunc (noopClockMutex) Unlock() {}\n\nvar _ = sync.Mutex{}\n\nfunc newFakeClock()}m'
+
+# --- R5: snapshot and restore (#1457) ---------------------------------------
+
+mutate "labelAppliedAt is not carried across a restore" \
+  'TestSnapshotRestoreRoundTripsTheModel' \
+  'snapshot.go::s{\tfor k, v := range i\.labelAppliedAt \{\n\t\tout\.labelAppliedAt\[k\] = v\n\t\}\n}{}'
+
+mutate "the CI schedule is not carried across a restore" \
+  'TestRestoreResumesScheduledSequencesAtTheSamePosition' \
+  'snapshot.go::s{\t\tciSchedule:        r\.ciSchedule\.clone\(\),\n}{}'
+
+mutate "the review schedule is not carried across a restore" \
+  'TestRestoreResumesScheduledSequencesAtTheSamePosition' \
+  'snapshot.go::s{\t\treviewSchedule:          p\.reviewSchedule\.clone\(\),\n}{}'
+
+mutate "the recompute counter is not carried across a restore" \
+  'TestRestoreResumesTheRecomputeCounter' \
+  'snapshot.go::s{\t\tmergeableRecomputeReads: p\.mergeableRecomputeReads,\n}{}'
+
+mutate "restore does not repoint bareDir at the new baseDir" \
+  'TestRestoredModelIsIndependentOfTheOriginal' \
+  'snapshot.go::s{\t\trestored\.bareDir = s\.repoDir\(restored\.owner, restored\.repo\)\n\t\trestored\.worktreeRoot = restored\.bareDir \+ "\.worktrees"\n}{}'
+
+mutate "copyDir silently skips a non-regular file" \
+  'TestCopyDirRefusesNonRegularFiles' \
+  'snapshot.go::s{\t\t\treturn fmt\.Errorf\("simgh: copying %s: mode %v is neither a regular file nor a directory; "\+\n\t\t\t\t"a bare repository should contain only those", path, info\.Mode\(\)\)}{\t\t\treturn nil}'
+
+# Neutralised by pointing the remove at a path that never exists, rather than
+# by deleting the block: deleting it would leave the errors import unused, and
+# a mutation that does not compile is one the sweep never ran.
+mutate "copyFile cannot overwrite git's read-only objects" \
+  'TestSnapshotAndRestoreAreIdempotentOverAnExistingDirectory' \
+  'snapshot.go::s{\tif err := os\.Remove\(dst\); err != nil && !errors\.Is\(err, fs\.ErrNotExist\) \{}{\tif err := os.Remove(dst + ".nonexistent"); err != nil \&\& !errors.Is(err, fs.ErrNotExist) \{}'
+
+mutate "RestoreInstrumented accepts a snapshot carrying no instruments" \
+  'TestRestoreInstrumentedRefusesABareSnapshot' \
+  'snapshot.go::s{if !snap\.instrumented \{}{if false \{}'
+
+mutate "the fault schedule is not carried across a restore" \
+  'TestInstrumentedSnapshotCarriesFaultsAndLog' \
+  'snapshot.go::s{\tin\.faults\.restoreRules\(snap\.faultRules, snap\.faultCalls\)\n}{}'
+
+mutate "the mutation log is not carried across a restore" \
+  'TestInstrumentedSnapshotCarriesFaultsAndLog' \
+  'snapshot.go::s{\tin\.log\.restoreEntries\(snap\.logEntries\)\n}{}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
