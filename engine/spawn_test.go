@@ -1438,6 +1438,181 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// ---- board-servability scope-check tests (#1419, failure mode 1) ----
+
+// TestPreImplement_RepoScopedInstance_RefusesMismatchedTarget covers Instance
+// B's shape from the issue's reproduction 1: a repo:-scoped instance (cfg.Repo
+// != "") asked to spawn into a repo other than its own must refuse loudly —
+// zero CreateIssue calls, the parent paused, no silent registration onto this
+// instance's own (wrong) board.
+func TestPreImplement_RepoScopedInstance_RefusesMismatchedTarget(t *testing.T) {
+	client := &mockGitHubClient{}
+	// testEngine's default Config is repo:-scoped to "owner/repo" — do NOT
+	// widen it to multi-repo mode here, unlike spawnTestEngine.
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Cross-repo child this instance cannot serve
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected error when the spawn target is not served by this instance")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+	if len(client.createIssueCalls) != 0 {
+		t.Errorf("expected 0 CreateIssue calls (scope check runs before any mutation), got %d", len(client.createIssueCalls))
+	}
+	if len(client.addProjectV2ItemCalls) != 0 {
+		t.Errorf("expected 0 AddProjectV2ItemById calls, got %d", len(client.addProjectV2ItemCalls))
+	}
+
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("fabrik:paused not added when spawn target is not served by this instance")
+	}
+
+	var sawRefusalComment bool
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "not served by this Fabrik instance") {
+			sawRefusalComment = true
+		}
+	}
+	if !sawRefusalComment {
+		t.Error("expected a comment explaining the spawn target is not served by this instance")
+	}
+}
+
+// TestPreImplement_MultiRepoInstance_SpawnsCrossRepo pins the multi-repo shape
+// (cfg.Repo == "") explicitly: this instance already legitimately serves any
+// repo the org grants board access to (the issue's own "Instance A processes
+// multiple repos on board 5 without issue"), so the scope-check must not
+// interfere with it.
+func TestPreImplement_MultiRepoInstance_SpawnsCrossRepo(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			return 700, "I_multirepo", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.Repo = "" // multi-repo mode
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Cross-repo child a multi-repo instance may serve
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true for a multi-repo instance")
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+}
+
+// TestPreImplement_RepoScopedInstance_SameRepoSpawnUnaffected verifies the
+// scope-check does not interfere with the ordinary same-repo spawn shape: a
+// repo:-scoped instance spawning within its own configured repo.
+func TestPreImplement_RepoScopedInstance_SameRepoSpawnUnaffected(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			return 701, "I_samerepo", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{}) // cfg.Owner="owner", cfg.Repo="repo"
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Same-repo child
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true for a same-repo spawn")
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+}
+
+// TestPreImplement_EveryCreateIssueCallCarriesAssignee is requirement 4: every
+// spawned child must be assigned to the user: of the instance meant to
+// process it, regardless of same-repo or cross-repo spawning.
+func TestPreImplement_EveryCreateIssueCallCarriesAssignee(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 800 + childCounter, fmt.Sprintf("I_assignee%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := spawnTestEngine(t, client) // multi-repo mode; cfg.User == "testuser"
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child two
+Body two.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(client.createIssueCalls) != 2 {
+		t.Fatalf("expected 2 CreateIssue calls, got %d", len(client.createIssueCalls))
+	}
+	for i, c := range client.createIssueCalls {
+		if len(c.assignees) != 1 || c.assignees[0] != "testuser" {
+			t.Errorf("call %d: assignees = %v, want [testuser]", i, c.assignees)
+		}
+	}
+}
+
 // ---- status-set and label-inheritance tests ----
 
 func spawnTestEngineWithSpecify(t *testing.T, client *mockGitHubClient) *Engine {
