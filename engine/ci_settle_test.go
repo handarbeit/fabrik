@@ -623,7 +623,7 @@ func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateCommen
 	}
 }
 
-// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim is
+// TestSettleAwaitingCIScan_CIBackstopTimeout_PausesRegardlessOfGateClaim is
 // a regression test for #1303's requested unconditional backstop — now
 // CIBackstopTimeout (ADR-1410, R5), not CIWaitTimeout: checkCIGate's own
 // liveness guards only fire once checkCIGate is actually reached, but any
@@ -634,7 +634,7 @@ func TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateCommen
 // must pause the issue on its own once fabrik:awaiting-ci exceeds
 // CIBackstopTimeout, independent of what any gate would otherwise classify or
 // claim, and independent of CIWaitTimeout's own (much larger, here) value.
-func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim(t *testing.T) {
+func TestSettleAwaitingCIScan_CIBackstopTimeout_PausesRegardlessOfGateClaim(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 43, HeadSHA: "cafebabe", State: "open", Merged: false}, nil
@@ -698,11 +698,11 @@ func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim(
 	}
 }
 
-// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout verifies the
+// TestSettleAwaitingCIScan_CIBackstopTimeout_NoOpWithinTimeout verifies the
 // backstop added for #1303 does not fire — and does not disturb the normal
 // gate-driven path — for an item whose fabrik:awaiting-ci label was applied
-// recently (well within CIWaitTimeout).
-func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing.T) {
+// recently (well within CIBackstopTimeout).
+func TestSettleAwaitingCIScan_CIBackstopTimeout_NoOpWithinTimeout(t *testing.T) {
 	client := ciFailureSettleClient() // fetchLabelAppliedAtFn returns time.Now() — elapsed ≈ 0
 	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
 	eng.cfg.MaxCiFixCycles = 5
@@ -724,7 +724,7 @@ func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing
 	defer client.mu.Unlock()
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
-			t.Error("backstop must not fire for an item well within CIWaitTimeout")
+			t.Error("backstop must not fire for an item well within CIBackstopTimeout")
 		}
 	}
 	// The normal path (checkCIGate reached, CI failure classified) must still
@@ -740,7 +740,7 @@ func TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout(t *testing
 // minutes before an 18-minute-long, otherwise-healthy CI suite started (34
 // elapsed minutes by the time it would have finished) must not be paused.
 // mergeable_state is left permanently unresolved (mirroring #342's field
-// shape and TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_PausesRegardlessOfGateClaim)
+// shape and TestSettleAwaitingCIScan_CIBackstopTimeout_PausesRegardlessOfGateClaim)
 // so checkMergeabilityGate claims the item every poll and checkCIGate is
 // never reached — the ONLY thing that can pause this item is the
 // settleAwaitingCIScan backstop, which is exactly the mechanism #342 hit in
