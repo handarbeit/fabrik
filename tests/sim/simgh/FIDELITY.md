@@ -467,6 +467,23 @@ inside — outside the sandbox and outside the test framework's cleanup. Real
 GitHub owner and repo names cannot contain a separator either, so nothing valid
 is rejected.
 
+The same rule is enforced on the other door into the sandbox: the keys of a
+`SeedCommit` files map, which `commitFiles` joins onto the throwaway worktree
+path. A key like `../../outside.txt` wrote *above* the worktree, and did so
+without a trace — git only tracks what is inside the worktree, so the write
+never appeared in the commit and the seed reported success. Repository paths
+legitimately contain separators (`docs/USER_GUIDE.md`), so this is a different
+check from the owner/repo one: the *cleaned* path must stay at or below the repo
+root, and absolute paths are refused rather than silently relocated by
+`filepath.Join`'s cleaning. Validation runs before any git work, so a bad key
+refuses the whole commit and leaves the branch tip untouched rather than writing
+the map's other files first.
+
+**Risk (both checks): low.** Seed data is authored by test writers, not
+attacker-controlled input, so this is a sandbox-hygiene guarantee — everything
+this package creates stays inside the `baseDir` you gave it — rather than a
+security boundary. Do not treat `simgh` as safe against hostile input.
+
 ### `ownerType` — **Simplified**
 
 `FetchProjectBoard` accepts `ownerType` and echoes it back but does not use it.
@@ -556,7 +573,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 52 mutations, and
+   package cannot back up. The sweep currently catches all 53 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

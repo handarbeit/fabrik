@@ -3,6 +3,7 @@ package simgh
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -70,6 +71,30 @@ func validatePathSegment(kind, seg, ownerRepo string) error {
 	}
 	if strings.ContainsAny(seg, `/\`) || strings.ContainsRune(seg, os.PathSeparator) {
 		return fmt.Errorf("simgh: invalid owner/repo %q: %s %q contains a path separator", ownerRepo, kind, seg)
+	}
+	return nil
+}
+
+// validateRepoRelPath rejects a seeded file name that would be written outside
+// the throwaway worktree commitFiles joins it into.
+//
+// Unlike an owner or repo segment, a repository path legitimately contains
+// separators ("docs/USER_GUIDE.md"), so this cannot reuse validatePathSegment;
+// what it enforces instead is that the cleaned path stays at or below the
+// worktree root. Without it, a SeedCommit files map keyed "../../outside.txt"
+// wrote silently outside the sandbox the package's doc comment promises — the
+// same escape splitOwnerRepo already refuses for owner/repo, arriving through
+// the other door.
+func validateRepoRelPath(name string) error {
+	if name == "" {
+		return fmt.Errorf("simgh: invalid file path %q: empty", name)
+	}
+	if filepath.IsAbs(name) || strings.HasPrefix(name, `\`) {
+		return fmt.Errorf("simgh: invalid file path %q: must be relative to the repo root", name)
+	}
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("simgh: invalid file path %q: escapes the repo root", name)
 	}
 	return nil
 }

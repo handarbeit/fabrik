@@ -264,6 +264,12 @@ mutate "owner/repo path traversal is accepted" \
   'TestSeedRepoRejectsPathTraversal' \
   'util.go::s|func validatePathSegment\(kind, seg, ownerRepo string\) error \{|func validatePathSegment(kind, seg, ownerRepo string) error \{\n\treturn nil|'
 
+# Short-circuited for the same reason as validatePathSegment above: the guard's
+# own source contains backticks and backslashes that are awkward to match.
+mutate "a seeded file path may escape the worktree" \
+  'TestSeedCommitRejectsEscapingFilePath' \
+  'util.go::s|func validateRepoRelPath\(name string\) error \{|func validateRepoRelPath(name string) error \{\n\treturn nil|'
+
 # Both of SeedRepo's duplicate guards are neutralised together: single-threaded,
 # either one alone still refuses the reseed, so a mutation of just one could not
 # fail this test and would prove nothing.

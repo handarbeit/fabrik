@@ -310,6 +310,58 @@ func TestSeedRepoRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+// TestSeedCommitRejectsEscapingFilePath pins the other door into the sandbox
+// escape TestSeedRepoRejectsPathTraversal closes.
+//
+// commitFiles joins each key of a SeedCommit files map straight onto the
+// throwaway worktree path, so "../../outside.txt" was written above it — and
+// silently, because git only tracks what is inside the worktree, so the write
+// left no trace in the commit and the seed reported success.
+//
+// The branch tip is asserted unchanged as well as the refusal: a guard that
+// rejected the bad name only once it had already written the good ones, or
+// after committing, would still leave the model in a state the caller did not
+// ask for.
+func TestSeedCommitRejectsEscapingFilePath(t *testing.T) {
+	// "/etc/passwd" does not escape — filepath.Join cleans it back inside the
+	// worktree — but it silently relocates the file to <wt>/etc/passwd rather
+	// than the path the caller named, which is the same silent divergence.
+	for _, name := range []string{"../../outside.txt", "../sibling.txt", "docs/../../escape.txt", "/etc/passwd", ""} {
+		s, _ := newSim(t)
+		s.SeedRepo("acme/widgets")
+		if err := s.Err(); err != nil {
+			t.Fatalf("seeding repo: %v", err)
+		}
+		before := mustHeadSHA(t, s, "acme/widgets", "main")
+
+		// Paired with a legitimate file, so the refusal has something to leak.
+		s.SeedCommit("acme/widgets", "main", map[string]string{
+			name:        "pwned",
+			"README.md": "innocent",
+		}, "seed")
+
+		if err := s.Err(); err == nil {
+			t.Fatalf("SeedCommit accepted file path %q; want a refusal", name)
+		}
+		if after := mustHeadSHA(t, s, "acme/widgets", "main"); after != before {
+			t.Fatalf("SeedCommit(%q) was refused but still moved the branch tip %s -> %s", name, before, after)
+		}
+	}
+
+	// Ordinary paths, including nested ones and a "./" prefix, must still work —
+	// a guard that rejects valid repo layouts is no better than none.
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedCommit("acme/widgets", "main", map[string]string{
+			"README.md":                "hi",
+			"docs/guide/USER_GUIDE.md": "deep",
+			"./cmd/main.go":            "package main",
+		}, "seed")
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedCommit rejected valid repo paths: %v", err)
+	}
+}
+
 // TestSeedRepoRefusesDuplicateAfterInit pins that the second SeedRepo for one
 // key fails rather than clobbering the live repoState. Clobbering would swap
 // out the repo's gitMu while callers still hold the old one, leaving two

@@ -260,6 +260,16 @@ func (r *repoState) commitsBehind(base, head string) (int, error) {
 // from fromBranch if it does not yet exist. Returns the new commit SHA.
 // Caller must hold gitMu.
 func (r *repoState) commitFiles(branch, fromBranch string, files map[string]string, msg string) (string, error) {
+	// Validated up front, before any git work, so a bad name refuses the whole
+	// commit rather than leaving some files already written. Sorted so the
+	// error names the same key on every run despite map ordering.
+	names := sortedKeys(files)
+	for _, name := range names {
+		if err := validateRepoRelPath(name); err != nil {
+			return "", err
+		}
+	}
+
 	startRef := "refs/heads/" + branch
 	if !r.branchExists(branch) {
 		if fromBranch == "" {
@@ -273,7 +283,8 @@ func (r *repoState) commitFiles(branch, fromBranch string, files map[string]stri
 
 	var sha string
 	err := r.withWorktree(startRef, func(wt string) error {
-		for name, content := range files {
+		for _, name := range names {
+			content := files[name]
 			p := filepath.Join(wt, name)
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				return fmt.Errorf("simgh: creating dir for %s: %w", name, err)
