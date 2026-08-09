@@ -145,10 +145,27 @@ func (in *Instrumented) ProbeProjectBoard(owner, repo string, projectNum int, ow
 		})
 }
 
+// FetchItemDetails is the one wrapper whose owner and repo are not separate
+// parameters: gh.ProjectItem.Repo is the composite "owner/repo". They are split
+// here so Args.Repo carries the bare repository name, as it does in all
+// fifty-nine other wrappers.
+//
+// This matters rather than being tidiness. FetchItemDetails is the call the
+// settle scans retry — it is R3's motivating target — so it is the method a
+// scenario is most likely to narrow a FailWhen on. A predicate written
+// `a.Repo == "widgets"` against a composite would simply never match, and a
+// fault that never fires is a scenario that passes having tested nothing.
+//
+// A value that does not split (no separator) is left in Repo whole, matching
+// the model's own tolerance: the log is a debugging aid and must not lose
+// information it cannot parse.
 func (in *Instrumented) FetchItemDetails(item *gh.ProjectItem) error {
 	args := Args{}
 	if item != nil {
 		args = Args{Repo: item.Repo, Number: item.Number, ID: item.ItemID}
+		if owner, repo, err := splitOwnerRepo(item.Repo); err == nil {
+			args.Owner, args.Repo = owner, repo
+		}
 	}
 	return do0(in, "FetchItemDetails", false, args, func() error { return in.sim.FetchItemDetails(item) })
 }

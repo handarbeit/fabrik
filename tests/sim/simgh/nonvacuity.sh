@@ -650,6 +650,11 @@ mutate "IndexOf answers -1 instead of erroring on an unmatched predicate" \
   'TestPrecedesErrorsWhenAPredicateMatchesNothing' \
   'mutationlog.go::s{return -1, fmt\.Errorf\("simgh: mutation log has no entry matching the predicate \(%d entries recorded\)", l\.Len\(\)\)}{return -1, nil}'
 
+mutate "FetchItemDetails logs the composite owner/repo as the bare repo name" \
+  'TestFetchItemDetailsSplitsTheCompositeRepo' \
+  'instrumented.go::s{\t\tif owner, repo, err := splitOwnerRepo\(item\.Repo\); err == nil \{\n\t\t\targs\.Owner, args\.Repo = owner, repo\n\t\t\}\n}{}'
+
+
 # --- R5: snapshot and restore (#1457) ---------------------------------------
 
 mutate "labelAppliedAt is not carried across a restore" \

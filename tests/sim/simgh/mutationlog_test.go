@@ -171,6 +171,47 @@ func TestLogQueriesByIssueAndTail(t *testing.T) {
 	}
 }
 
+// Args.Repo must carry the bare repository name for *every* method, so one
+// FailWhen predicate or log query works across all of them.
+//
+// FetchItemDetails is the only wrapper that has to derive owner and repo rather
+// than being handed them, because gh.ProjectItem.Repo is the composite
+// "owner/repo" — and it is also the call the settle scans retry, so it is the
+// likeliest target of a narrowed fault. The reflection-driven completeness
+// tests invoke it with a zero-valued item and so cannot see this at all.
+func TestFetchItemDetailsSplitsTheCompositeRepo(t *testing.T) {
+	in, _ := newInstrumented(t)
+
+	item, err := in.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if item.Repo != "acme/widgets" {
+		t.Fatalf("ProjectItem.Repo = %q, want the composite form this test exists to split", item.Repo)
+	}
+	in.Log().Reset()
+
+	if err := in.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+	entries := in.Log().ByMethod("FetchItemDetails")
+	if len(entries) != 1 {
+		t.Fatalf("logged %d FetchItemDetails entries, want 1", len(entries))
+	}
+	if got := entries[0].Args; got.Owner != "acme" || got.Repo != "widgets" {
+		t.Errorf("Args = {Owner:%q Repo:%q}, want {acme widgets} — a composite here would make a "+
+			"FailWhen narrowed on Repo silently never match", got.Owner, got.Repo)
+	}
+
+	// And the narrowing a settle-scan scenario would actually write must fire.
+	in.Faults().FailWhen("FetchItemDetails",
+		func(a Args) bool { return a.Repo == "widgets" && a.Number == 7 },
+		Always, ErrRateLimit())
+	if err := in.FetchItemDetails(item); err == nil {
+		t.Error("a fault narrowed on the bare repo name did not fire on FetchItemDetails")
+	}
+}
+
 // Sequence numbers are the log's ordering, so they must be dense and
 // monotonic from zero — Precedes compares them directly.
 func TestLogSequencesAreDenseAndMonotonic(t *testing.T) {

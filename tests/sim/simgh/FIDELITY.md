@@ -1177,7 +1177,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 144 mutations, and
+   package cannot back up. The sweep currently catches all 145 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
    The instrumentation layer's own mutations are in there too, and one of them
