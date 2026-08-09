@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -201,20 +202,32 @@ func TestAdvancingTheClockUnderTrafficIsRaceFree(t *testing.T) {
 	// literal key is enough here — this test is about the clock, not about git.
 	const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	// A scheduled step so the drain path — which reads the clock while holding
-	// mu — is exercised alongside the log's own read of it.
-	in.Sim().SeedCheckRunsAfter("acme/widgets", sha, 30*time.Minute,
+	// mu — is exercised alongside the log's own read of it. Its instant sits
+	// inside the advance loop below, so it lands while the workers are running
+	// rather than after they stop.
+	in.Sim().SeedCheckRunsAfter("acme/widgets", sha, time.Minute,
 		gh.CheckRun{ID: 700, Name: "build", Status: "completed", Conclusion: "failure"})
 	if err := in.Sim().Err(); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
 
+	// The advances must genuinely overlap the reads. Without a barrier the main
+	// goroutine finishes its whole loop before the workers are scheduled, and
+	// nothing ever accesses the clock concurrently — the test then passes with
+	// an unguarded clock roughly half the time, which is worse than not having
+	// it. Every worker signals once it is in its loop, and the advances are
+	// spread with Gosched so they interleave rather than burst.
 	stop := make(chan struct{})
-	var wg sync.WaitGroup
+	var running, wg sync.WaitGroup
+	running.Add(workers)
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; ; i++ {
+				if i == 0 {
+					running.Done()
+				}
 				select {
 				case <-stop:
 					return
@@ -225,9 +238,11 @@ func TestAdvancingTheClockUnderTrafficIsRaceFree(t *testing.T) {
 			}
 		}(w)
 	}
+	running.Wait()
 
-	for i := 0; i < 20; i++ {
-		clk.Advance(5 * time.Minute)
+	for i := 0; i < 200; i++ {
+		clk.Advance(time.Second)
+		runtime.Gosched()
 	}
 	close(stop)
 	wg.Wait()
