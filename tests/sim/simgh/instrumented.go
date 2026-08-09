@@ -140,7 +140,9 @@ func (in *Instrumented) FetchProjectBoard(owner, repo string, projectNum int, ow
 
 func (in *Instrumented) ProbeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
 	return do2(in, "ProbeProjectBoard", false, Args{Owner: owner, Repo: repo, Values: []string{ownerType}},
-		func() ([]gh.BoardProbeItem, string, error) { return in.sim.ProbeProjectBoard(owner, repo, projectNum, ownerType) })
+		func() ([]gh.BoardProbeItem, string, error) {
+			return in.sim.ProbeProjectBoard(owner, repo, projectNum, ownerType)
+		})
 }
 
 func (in *Instrumented) FetchItemDetails(item *gh.ProjectItem) error {
