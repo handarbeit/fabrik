@@ -170,6 +170,18 @@ should self-resolve as a no-op (no commit, cycle counter unchanged) as long as t
 comment skill's no-op contract holds. Call this out in release notes for the version
 this ships in.
 
+**The blast radius is not limited to bots.** The state filter this ADR removes did not
+distinguish bot authors from human ones, and neither does its replacement — any
+non-`DISMISSED`/non-`PENDING` review's body is now actionable regardless of who
+submitted it. A **human** reviewer's `APPROVED` review carrying a note ("LGTM, minor
+nit: rename `foo` to `bar`") now also triggers a reinvoke dispatch, where before this
+ADR it did not (`APPROVED` was excluded outright by ADR-1375, for any author). This is
+intentional — Requirement 1 states "approve-with-nits is real feedback" explicitly, and
+the no-op exemption bounds its cost identically to the bot case — but it is a materially
+wider behavior change than "Copilot/Gemini `COMMENTED` overviews" alone, and should be
+described that way in release notes and to operators, not narrowed to the bot framing
+that motivated this ADR (Pruefer review finding, PR #1473).
+
 **`TestBuildReviewBodyComments_SkipsCommented` is inverted, not merely deleted.** The old
 test asserted `COMMENTED` produces zero comments; the new
 `TestBuildReviewBodyComments_CommentedIsActionable` asserts the opposite for the same
