@@ -382,6 +382,18 @@ mutate "board projections do not re-check archived after the snapshot" \
   'TestBoardProjectionReadsCardStateLive' \
   'board.go::s{if !ok \|\| live\.archived \{}{if !ok \{}'
 
+mutate "a board card may point at an issue that does not exist" \
+  'TestSeedProjectItemRefusesUnresolvableTarget' \
+  'seed.go::s{if _, ok := r\.issues\[number\]; !ok \{}{if false \{}'
+
+mutate "a board card may point at an unseeded repo" \
+  'TestSeedProjectItemRefusesUnresolvableTarget' \
+  'seed.go::s{\tr, ok := s\.repos\[ownerRepo\]\n\tif !ok \{}{\tr, ok := s.repos[ownerRepo]\n\tif ok \&\& false \{}'
+
+mutate "a zero approval requirement is accepted (APPROVED with no reviews)" \
+  'TestSeedRequiredApprovalsRefusesNonPositive' \
+  'seed.go::s{if n < 1 \{}{if false \{\n\t\t_ = n}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

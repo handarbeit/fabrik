@@ -304,6 +304,19 @@ reviews do not participate.
 **Simplified:** code-owner requirements, review dismissal on push, and stale-review
 invalidation are **absent**. `DISMISSED` is not a state the model produces.
 
+**A zero approval requirement is refused, not modelled.** `SeedRequiredApprovals`
+rejects a non-positive count. With zero, the approvals-satisfied branch is
+reached vacuously and a PR with no reviews at all reports `APPROVED` — not a
+reading real GitHub produces. The state that call would seem to express, "no
+review requirement", is already representable and is the *absence* of the call:
+an unseeded branch returns `""`, which is the case the engine's fallback above
+depends on. Refusing keeps the two from collapsing into one silently.
+
+GitHub's `required_approving_review_count` does accept `0` alongside "require a
+pull request before merging", and what `reviewDecision` reports in that
+configuration is **not verified here** — which is the second reason to refuse
+rather than guess a semantic for it.
+
 ### Review requests and self-submitting bots — **Modelled**
 
 `FetchPRReviewRequests` returns only reviewers actually requested. The model
@@ -625,6 +638,15 @@ either alone, because a scenario would conclude the card exists.
 A scenario that needs the engine's PR-card handling (which `itemMayNeedWork`
 skips) cannot be written on this layer.
 
+**A card must point at an issue that exists.** The same reasoning applies to the
+card's target, not just its kind: `buildProjectItem` resolves content through the
+repo's issues and returns nil when it finds nothing, so a card seeded for a
+mistyped or not-yet-seeded number was recorded and then omitted from every board
+read, with no error. `SeedProjectItem` now requires the repo to be seeded and the
+issue to exist, matching what `AddProjectV2ItemById` already enforced on the
+runtime path and what `SeedBlockedBy`/`AddBlockedByIssue` enforce for dependency
+targets. Seed the issue before the card.
+
 ### Dependency links — **Modelled, with existence enforced**
 
 `AddBlockedByIssue` and `SeedBlockedBy` both require the blocker to resolve to a
@@ -829,7 +851,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 71 mutations, and
+   package cannot back up. The sweep currently catches all 74 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

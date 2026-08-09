@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -632,5 +633,88 @@ func TestUpdateCommentBumpsParentPRUpdatedAt(t *testing.T) {
 
 	if got := firstItemFull(t, s).UpdatedAt; !got.After(before) {
 		t.Fatalf("item UpdatedAt = %v, want later than %v after editing a PR comment", got, before)
+	}
+}
+
+// TestSeedProjectItemRefusesUnresolvableTarget pins that a board card must
+// point at something that exists.
+//
+// buildProjectItem resolves a card's content through the repo's issues and
+// returns nil when it finds nothing, so a card seeded for a mistyped or
+// not-yet-seeded number was recorded and then silently omitted from every
+// board read — the scenario believes it built a board it did not. Every
+// sibling API in the package (SeedPR, SeedBlockedBy, AddBlockedByIssue,
+// AddProjectV2ItemById) already fails loudly on an unresolvable target; this
+// one was the gap.
+func TestSeedProjectItemRefusesUnresolvableTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ownerRepo string
+		number    int
+		wantErr   string
+	}{
+		{"missing issue", "acme/widgets", 999, "no issue acme/widgets#999"},
+		{"unseeded repo", "acme/other", 7, "repo acme/other not seeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := seedBasicBoard(t)
+			s.SeedProjectItem("acme", 2, tc.ownerRepo, tc.number, false, "Review")
+
+			err := s.Err()
+			if err == nil {
+				t.Fatal("SeedProjectItem reported success for an unresolvable target; " +
+					"the card would be silently absent from every board read")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to name %q", err, tc.wantErr)
+			}
+
+			// The refusal must not leave a half-built board behind: the only
+			// card is still the one seedBasicBoard placed.
+			board, boardErr := s.FetchProjectBoard("acme", "widgets", 2, "")
+			if boardErr != nil {
+				t.Fatalf("FetchProjectBoard: %v", boardErr)
+			}
+			if len(board.Items) != 1 {
+				t.Fatalf("board has %d items, want 1; the refused card was recorded anyway", len(board.Items))
+			}
+		})
+	}
+}
+
+// TestSeedRequiredApprovalsRefusesNonPositive pins that a zero approval
+// requirement is refused rather than modelled.
+//
+// With required = 0 the approvals-satisfied branch of FetchPRReviewDecision is
+// reached vacuously, so a PR with no reviews at all reports APPROVED — not a
+// reading real GitHub produces. "No review requirement" is already
+// representable as the absence of the call, and that absence returns ""
+// (GraphQL's null), the case whose engine-side fallback ADR-1250 makes
+// load-bearing. The two must not collapse into one silently.
+func TestSeedRequiredApprovalsRefusesNonPositive(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	s.SeedRequiredApprovals(repoName, "main", 0)
+	err := s.Err()
+	if err == nil {
+		t.Fatal("SeedRequiredApprovals accepted 0; a PR with no reviews would report APPROVED")
+	}
+	if !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("error = %v, want a 'must be positive' refusal", err)
+	}
+
+	// And the refusal must not have recorded the requirement anyway: an
+	// unseeded branch reports "" so the engine's own fallback stays exercised.
+	decision, decErr := s.FetchPRReviewDecision("acme", "widgets", 42)
+	if decErr != nil {
+		t.Fatalf("FetchPRReviewDecision: %v", decErr)
+	}
+	if decision != "" {
+		t.Fatalf("reviewDecision = %q, want \"\"; the refused requirement was recorded anyway", decision)
 	}
 }

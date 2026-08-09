@@ -385,6 +385,21 @@ func (s *Sim) placeOnProjectLocked(p *projectState, ownerRepo string, number int
 		s.fail("simgh: PR cards on a project board are not modelled (%s#%d); see FIDELITY.md", ownerRepo, number)
 		return
 	}
+	// The card must point at something that exists. buildProjectItem resolves a
+	// card's content through r.issues and returns nil when it finds nothing, so
+	// a card for a mistyped or not-yet-seeded number is recorded here and then
+	// silently omitted from every board read — the scenario believes it built a
+	// board it did not. Checked after the PR refusal above, which gives a
+	// clearer diagnosis for the one case a valid number can still fail.
+	r, ok := s.repos[ownerRepo]
+	if !ok {
+		s.fail("simgh: repo %s not seeded; cannot place %s#%d on project %s", ownerRepo, ownerRepo, number, p.id)
+		return
+	}
+	if _, ok := r.issues[number]; !ok {
+		s.fail("simgh: no issue %s#%d to place on project %s", ownerRepo, number, p.id)
+		return
+	}
 	id := itemNodeID(p.owner, p.num, ownerRepo, number)
 	if existing, ok := p.items[id]; ok {
 		existing.status = status
@@ -490,6 +505,14 @@ func (s *Sim) SeedRequireUpToDate(ownerRepo, branch string, required bool) *Sim 
 
 // SeedRequiredApprovals declares how many approving reviews branch protection
 // requires on a branch, backing FetchPRReviewDecision.
+//
+// n must be positive. Seeding zero would make FetchPRReviewDecision report
+// APPROVED on a PR with no reviews at all — the approvals-satisfied branch is
+// reached vacuously — which is not a reading real GitHub produces. "No review
+// requirement" is already representable, and is the *absence* of this call:
+// leaving the branch unseeded returns "" (GraphQL's null), the case whose
+// engine-side fallback ADR-1250 makes load-bearing. Refusing here keeps those
+// two states from collapsing into one silently.
 func (s *Sim) SeedRequiredApprovals(ownerRepo, branch string, n int) *Sim {
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
@@ -497,6 +520,11 @@ func (s *Sim) SeedRequiredApprovals(ownerRepo, branch string, n int) *Sim {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if n < 1 {
+		s.fail("simgh: SeedRequiredApprovals(%s, %q, %d): count must be positive; "+
+			"omit the call entirely to model a branch with no review requirement", ownerRepo, branch, n)
+		return s
+	}
 	r.requiredApprovals[branch] = n
 	return s
 }
