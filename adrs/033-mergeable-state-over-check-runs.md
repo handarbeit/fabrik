@@ -1,7 +1,23 @@
 # ADR 033: Trust `mergeable_state` Over Raw Check-Run Classification
 
-**Status**: Accepted  
+**Status**: Accepted (Prong 2 narrowed by ADR-1441 — see note below)
 **Date**: 2026-04-27
+
+> **2026-08-09 amendment (ADR-1441, #1441)**: Prong 2's shortcut ("Consult
+> `mergeable_state` before per-check classification... If the result is
+> `clean` or `unstable`... skipped entirely") is narrowed to `mergeable_state
+> == "clean"` only. `unstable` — which this ADR's own table above correctly
+> defines as "non-required checks have failed but all branch-protection-required
+> checks are satisfied" — no longer short-circuits the CI advance gate; it now
+> falls through to the per-check classification this ADR originally skipped for
+> it, so a confirmed failure on a non-required check is treated as a CI failure
+> rather than silently waved through. Prong 1 (`attemptMergeOnValidate` /
+> `MergePR`'s merge decision) is **unchanged** — see ADR-1441's R3 for why the
+> merge path deliberately continues to defer to `mergeable_state` alone, per
+> ADR-072's operator note. See `adrs/1441-unstable-requires-check-run-classification.md`
+> for the full decision record, including why this doesn't reopen the
+> Alternatives Considered section below (a branch-protection API read is still
+> rejected, for the same reasons).
 
 ## Context
 

@@ -23,7 +23,8 @@ import (
 // Returns (blocked, ciFailure, timedOut, terminated):
 //
 //   - (false, false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
-//     This includes: no PR, PR merged, all checks green, ADR-033 shortcut (clean/unstable).
+//     This includes: no PR, PR merged, all checks green, ADR-033/ADR-1441 shortcut
+//     (mergeable_state=="clean" only — "unstable" no longer short-circuits; see PRMergeReady below).
 //
 //   - (true, false, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
 //     Covers: checks still pending and progressing, transient/unsettled state, R3/mergeable-state
@@ -89,7 +90,11 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return false, false, false, true
 
 	case PRMergeReady:
-		// ADR-033 shortcut (clean/unstable) or all CI checks green — gate clears.
+		// ADR-033/ADR-1441 shortcut (mergeable_state=="clean") or all CI checks
+		// (and required contexts) passed — gate clears. "unstable" is no
+		// longer a shortcut into this case; settlePRMergeState only reaches
+		// PRMergeReady for "unstable" via the full per-check classification
+		// chain below finding nothing blocking.
 		e.logf(item.Number, "ci-gate", "CI gate clears (%s)\n", settle.Reason)
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false, false
@@ -104,6 +109,10 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		// fall-through) so the queue owns the merge decision while it waits.
 		return true, false, false, false
 	}
+
+	// R4 (ADR-1441): log once per repo/stage when this gate's coverage looks
+	// degenerate — informational only, never affects the classification below.
+	e.warnIfCIGateCoverageDegenerate(owner, repo, item, stage, settle)
 
 	// ADR-933: a confirmed required-context failure takes precedence over
 	// check-run/mergeable_state classification below — it can be driven
@@ -125,6 +134,71 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// for hadChecks/dwell/HeadSHA-empty cases so those always reach the generic
 	// Unsettled fallback without triggering R3 or timeout paths.
 	return e.classifyCIFromMergeableState(board, item, stage, owner, repo, prNum, settle.MergeableState)
+}
+
+// warnIfCIGateCoverageDegenerate logs a one-time-per-repo/stage warning (R4,
+// ADR-1441) when a stage configured with wait_for_ci: true is gating a PR
+// whose observed check runs the operator's opt-in RequiredStatusContexts
+// config (ADR-933) does not cover — either nothing is configured for the repo
+// at all, or none of the configured names match a check name actually
+// observed on this settle pass. This is Fabrik's only notion of "required
+// check": a live read of GitHub's own branch-protection required-checks list
+// is not viable (ADR-933 found it 403s for non-admin classic PATs), so this
+// is a config-vs-observed-checks comparison, not a live branch-protection
+// audit. A gate with no coverage still gates correctly post-ADR-1441 (any
+// confirmed check-run failure blocks, required or not — R5's strict policy),
+// but the operator loses the ability to tell "this failure is on a check I
+// consider load-bearing" from "this failure is on a check I don't" — worth
+// surfacing rather than passing silently.
+//
+// Gated on len(settle.CheckRuns) > 0 so it costs nothing beyond data already
+// fetched by settlePRMergeState for this poll — it never fires for a repo
+// whose CI is entirely classic-commit-status-based with zero check runs (a
+// known, accepted limitation rather than a false negative worth an
+// unconditional extra FetchCombinedStatus call to close — see ADR-1441).
+// Log-only, deduplicated per "owner/repo|stage" for the lifetime of the
+// process (mirrors baseBranchWarnedSet) — re-warns after a restart, which is
+// acceptable (arguably desirable: an operator who just restarted wants
+// visibility, not silence).
+func (e *Engine) warnIfCIGateCoverageDegenerate(owner, repo string, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
+	if len(settle.CheckRuns) == 0 {
+		return
+	}
+
+	required := e.requiredContextsForRepo(owner, repo)
+	covered := false
+	if len(required) > 0 {
+		observed := make(map[string]bool, len(settle.CheckRuns))
+		for _, cr := range settle.CheckRuns {
+			observed[cr.Name] = true
+		}
+		for _, name := range required {
+			if observed[name] {
+				covered = true
+				break
+			}
+		}
+	}
+	if covered {
+		return
+	}
+
+	warnKey := owner + "/" + repo + "|" + stage.Name
+	if _, already := e.ciGateCoverageWarnedSet.LoadOrStore(warnKey, true); already {
+		return
+	}
+
+	names := make([]string, 0, len(settle.CheckRuns))
+	for _, cr := range settle.CheckRuns {
+		names = append(names, cr.Name)
+	}
+	if len(required) == 0 {
+		e.logf(item.Number, "warn", "stage %q has wait_for_ci: true but no required_status_contexts are configured for %s/%s (ADR-933) — the CI gate cannot distinguish a required check from an optional one; observed checks: %s\n",
+			stage.Name, owner, repo, strings.Join(names, ", "))
+	} else {
+		e.logf(item.Number, "warn", "stage %q has wait_for_ci: true but none of the configured required_status_contexts %v for %s/%s match any check observed on this PR (%s) — the CI gate cannot confirm required-check coverage\n",
+			stage.Name, required, owner, repo, strings.Join(names, ", "))
+	}
 }
 
 // ciWaitTimeout returns the configured CI liveness-stall dwell, defaulting to
