@@ -384,7 +384,7 @@ mutate "board projections do not re-check archived after the snapshot" \
 
 mutate "a board card may point at an issue that does not exist" \
   'TestSeedProjectItemRefusesUnresolvableTarget' \
-  'seed.go::s{if _, ok := r\.issues\[number\]; !ok \{}{if false \{}'
+  'seed.go::s{if _, ok := r\.issues\[number\]; !ok \{}{if _, ok := r.issues[number]; !ok \&\& false \{}'
 
 mutate "a board card may point at an unseeded repo" \
   'TestSeedProjectItemRefusesUnresolvableTarget' \

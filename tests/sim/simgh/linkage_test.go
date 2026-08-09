@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -139,8 +140,17 @@ func TestSeedProjectItemRejectsPRCard(t *testing.T) {
 		SeedPR("acme/widgets", PRSeed{Number: 4, Title: "a PR", Head: "feature"}).
 		SeedProjectItem("acme", 2, "acme/widgets", 4, true, "Backlog")
 
-	if err := s.Err(); err == nil {
+	// Assert *which* refusal fired, not merely that something failed. #4 is a
+	// PR, so it is also absent from the repo's issues — the target-existence
+	// check would refuse it too, and a bare "an error occurred" assertion is
+	// satisfied by either. That would leave the PR-card refusal itself
+	// unpinned, which is how a guard quietly stops being tested.
+	err := s.Err()
+	if err == nil {
 		t.Fatal("seeding a PR card succeeded; want a failure, since board projections cannot represent one")
+	}
+	if !strings.Contains(err.Error(), "PR cards on a project board are not modelled") {
+		t.Fatalf("error = %v, want the PR-card refusal specifically", err)
 	}
 }
 
