@@ -1868,6 +1868,8 @@ Fabrik distinguishes CI that is *slow* from CI that is *dead*, and bounds only t
 - **CI checks still pending, with no progress observed for `FABRIK_CI_WAIT_TIMEOUT` minutes:** Fabrik pauses the issue with `fabrik:awaiting-input`. This is the genuine stall case — something stopped reporting.
 - **A required check that never starts, or a legacy Commit Status actively blocking merge with no check runs at all:** also governed by `FABRIK_CI_WAIT_TIMEOUT`, unchanged — there is no check-run signal in these cases to observe progress on, so a plain elapsed-time dwell remains the right instrument (see R3 above).
 
+> **Known gap — the pending-and-stalled case above is not currently reached via the normal catch-up loop.** The merge gate (`checkMergeabilityGate`) unconditionally claims any item with check runs still pending before the CI gate is ever evaluated, so `FABRIK_CI_WAIT_TIMEOUT` never actually fires for "checks pending but frozen" in practice — only `FABRIK_CI_BACKSTOP_TIMEOUT` (below, default 4h) escalates that case today. If you lower `FABRIK_CI_WAIT_TIMEOUT` expecting a stalled-but-pending PR to escalate sooner, it won't; lower `FABRIK_CI_BACKSTOP_TIMEOUT` instead. See ADR-1410's "Architectural discovery" section for the full detail.
+
 ```bash
 FABRIK_CI_WAIT_TIMEOUT=60  # Pause after 60 minutes of no observed CI progress (default: 30)
 # or equivalently:
