@@ -1059,9 +1059,17 @@ func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 	}
 }
 
-// TestCheckCIGate_MergeableStateUnstable_ClearsGate verifies that
-// mergeable_state=unstable (non-required checks failing) also clears the gate.
-// This is the "Cleanup artifacts failed but PR is otherwise mergeable" case.
+// TestCheckCIGate_MergeableStateUnstable_ClearsGate verifies checkCIGate
+// still clears the gate whenever it receives PRMergeReady, regardless of the
+// MergeableState value carried alongside it — checkCIGate's case PRMergeReady
+// dispatches purely on settle.Status, never re-inspecting MergeableState (see
+// checkCIGate's doc comment). Post-ADR-1441, settlePRMergeState no longer
+// produces this combination via the old shortcut — "unstable" now only
+// reaches PRMergeReady after the full per-check classification below finds
+// nothing blocking (e.g. all observed checks passed, or R5's
+// skipped/neutral/cancelled-only case). This test pins checkCIGate's own
+// contract at the unit level, independent of how settlePRMergeState arrived
+// at it.
 func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
@@ -1069,7 +1077,8 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	// mergeable_state=unstable → PRMergeReady shortcut
+	// PRMergeReady with MergeableState=unstable, e.g. because every observed
+	// check run passed for this unstable-but-not-failing PR.
 	settle := PRSettleResult{
 		Status:         PRMergeReady,
 		MergeableState: "unstable",
@@ -1078,6 +1087,47 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate clear for unstable, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+}
+
+// TestCheckCIGate_MergeableStateUnstable_FailedCheckRun_DoesNotClearGate is
+// the direct AC1 regression test: checkCIGate's tuple for the settle-result
+// shape settlePRMergeState now actually produces for an unstable PR carrying
+// a confirmed check-run failure (PRMergeBlocked, MergeableState="unstable",
+// a failed CheckRun) — the gate must not clear, ciFailure must be true, and
+// fabrik:awaiting-ci must be applied. This must fail against pre-ADR-1441
+// main's settlePRMergeState (which never produced PRMergeBlocked for an
+// accepted mergeable_state at all — see pr_settle_test.go's sibling
+// regression test for the settle-layer half of this).
+func TestCheckCIGate_MergeableStateUnstable_FailedCheckRun_DoesNotClearGate(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: nil}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status:         PRMergeBlocked,
+		Reason:         "CI checks failed",
+		MergeableState: "unstable",
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "shaB"},
+	}
+	blocked, ciFailure, timedOut, terminated := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked || !ciFailure || timedOut || terminated {
+		t.Errorf("expected blocked=true ciFailure=true timedOut=false terminated=false for unstable+failed check, got blocked=%v ciFailure=%v timedOut=%v terminated=%v",
+			blocked, ciFailure, timedOut, terminated)
+	}
+	found := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected fabrik:awaiting-ci to be applied on confirmed CI failure")
 	}
 }
 
@@ -1587,5 +1637,131 @@ func TestCheckCIGate_RequiredContextPending_FallsThroughToNormalHandling(t *test
 		if c.labelName == "fabrik:awaiting-ci" {
 			t.Error("fabrik:awaiting-ci must NOT be added for a merely-pending required context")
 		}
+	}
+}
+
+// ── R4: degenerate CI-gate coverage warning (ADR-1441) ───────────────────────
+//
+// warnIfCIGateCoverageDegenerate has no externally observable side effect
+// besides the log line itself and the ciGateCoverageWarnedSet dedup entry —
+// these tests are in-package so they can inspect that unexported sync.Map
+// directly as the proxy for "fired".
+
+func TestWarnIfCIGateCoverageDegenerate_FiresWhenUnconfigured(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client) // RequiredStatusContexts left unconfigured (nil)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected warning to fire (and be recorded) when no required_status_contexts are configured")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_FiresWhenNoIntersection(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"some-other-check"}}
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected warning to fire when configured required_status_contexts don't match any observed check")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_DoesNotFireWhenCovered(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"Test and vet"}}
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); warned {
+		t.Error("expected no warning when a configured required_status_context matches an observed check")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_DoesNotFireOnEmptyCheckRuns(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{} // no CheckRuns observed this pass
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); warned {
+		t.Error("expected no warning when settle.CheckRuns is empty (gated on data already fetched)")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_DedupesAcrossCalls(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	// LoadOrStore-based dedup: the key exists and further calls are no-ops.
+	// Not directly assertable beyond "still exactly one entry for this key"
+	// since sync.Map has no count; the load succeeding is the contract.
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected warned-set entry to persist across repeated calls")
+	}
+}
+
+// TestCheckCIGate_WiresCoverageWarning confirms checkCIGate itself calls
+// warnIfCIGateCoverageDegenerate on the fall-through path (not just that the
+// helper works in isolation) — a wiring-level check per the codebase's
+// "neutralize check" convention (#1422).
+func TestCheckCIGate_WiresCoverageWarning(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client) // RequiredStatusContexts unconfigured
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha-cov"},
+	}
+	eng.checkCIGate(nil, item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected checkCIGate to invoke warnIfCIGateCoverageDegenerate on the fall-through path")
 	}
 }
