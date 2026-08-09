@@ -1670,3 +1670,129 @@ func TestRebaseCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing
 		}
 	}
 }
+
+// ---- #1460 R2/AC1/AC2: pauseForEnqueueCycleLimit resumability ----
+
+// TestEnqueueCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles is the
+// AC1/AC2 regression for #1460's confirmed site #4: before this fix,
+// pauseForEnqueueCycleLimit never applied itemstate.EnginePaused (its own doc
+// comment falsely claimed the counter was already cleared by
+// clearFailedStage — #1460 also corrects that comment), so removing
+// fabrik:paused was a no-op — EnqueueCycles stayed pinned at the limit.
+//
+// Reaches pauseForEnqueueCycleLimit via the real leftQueue ejection-recovery
+// ladder: handleAutoMergeConvergence (chain handler) -> checkAutoMergeConvergence
+// -> reEnqueueOrPause -> pauseForEnqueueCycleLimit, driven through
+// runPhase1Chain exactly as poll.go/ci_settle.go do (priorInQueue:true on the
+// phase1Ctx simulates "in the merge queue last poll, ejected now" — the
+// leftQueue edge that TestCheckAutoMergeConvergence_LeftQueue_CleanAtCap_Pauses
+// exercises via a direct call; this test goes through the full chain instead
+// so handleEngineUnpause's reset is genuinely exercised).
+//
+// AC3: reverting pauseForEnqueueCycleLimit's two itemstate.EnginePaused apply
+// lines turns this test red at the Step 1 PausedByEngine assertion (verified
+// by hand).
+func TestEnqueueCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing.T) {
+	mergeableTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 88, State: "open", AutoMergeEnabled: false, HeadSHA: "cafe1234"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return &mergeableTrue, "clean", nil // PRMergeReady (ADR-033 shortcut)
+		},
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{{Name: "Validate", Order: 1, Prompt: "validate"}}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxEnqueueCycles = 2
+	stage := stgs[0]
+	board := &gh.ProjectBoard{}
+	const repo = "owner/repo"
+	const number = 50
+
+	// Step 1: drive a REAL pause. EnqueueCycles pre-set to the limit; the mock
+	// client makes settlePRMergeState classify PRMergeReady on every call, and
+	// priorInQueue:true simulates the leftQueue ejection edge every pass, so
+	// reEnqueueOrPause's cycle-limit check reaches the real
+	// pauseForEnqueueCycleLimit.
+	for i := 0; i < eng.cfg.MaxEnqueueCycles; i++ {
+		eng.store.Apply(itemstate.EnqueueCycleIncremented{Repo: repo, Number: number, StageName: "Validate"})
+	}
+	item := gh.ProjectItem{
+		Number: number, Repo: repo,
+		Labels:                      []string{"stage:Validate:complete", "fabrik:auto-merge-enabled"},
+		LinkedPRIsMergeQueueEnabled: true,
+	}
+	pctx := &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool), priorInQueue: true}
+	claimed := runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected the cycle-limit pause branch to claim the item")
+	}
+
+	client.mu.Lock()
+	pausedApplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedApplied = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedApplied {
+		t.Fatal("expected fabrik:paused to be applied by the real cycle-limit pause")
+	}
+	snap, _ := eng.store.Get(repo, number)
+	if !snap.PausedByEngine("Validate") {
+		t.Fatal("R2: pauseForEnqueueCycleLimit must apply itemstate.EnginePaused so wasPaused becomes true on resume — PausedByEngine(Validate) is false after the real pause")
+	}
+
+	// Step 2 (AC1): simulate the operator removing fabrik:paused and run
+	// another pass. As with the rebase site, the mock keeps returning
+	// "actionable" (leftQueue) state every call, so this same pass's own
+	// dispatch fires right after the reset — the counter reading 1 (not the
+	// still-stuck 2) is itself proof the reset landed.
+	item.Labels = []string{"stage:Validate:complete", "fabrik:auto-merge-enabled"}
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool), priorInQueue: true}
+	runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+
+	snap, _ = eng.store.Get(repo, number)
+	if snap.PausedByEngine("Validate") {
+		t.Error("PausedByEngine(Validate) must be cleared after the reset pass")
+	}
+	if got := snap.EnqueueCycles("Validate"); got != 1 {
+		t.Fatalf("AC1: EnqueueCycles(Validate) after unpause = %d; want 1 — the counter must have reset to 0 before this pass's own re-enqueue incremented it, not stayed pinned at the limit", got)
+	}
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected exactly 1 re-enqueue call after the reset, got %d", len(client.enqueuePullRequestCalls))
+	}
+
+	// Step 3 (AC2): confirm a further cycle proceeds without re-pausing
+	// (baseline excludes Step 1's legitimate pause).
+	client.mu.Lock()
+	baseline := len(client.addLabelCalls)
+	client.mu.Unlock()
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool), priorInQueue: true}
+	claimed = runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected a second re-enqueue to claim the item")
+	}
+	snap, _ = eng.store.Get(repo, number)
+	if got := snap.EnqueueCycles("Validate"); got != 2 {
+		t.Errorf("AC2: EnqueueCycles(Validate) = %d; want 2 — a genuinely reset counter must permit more than one further cycle before re-hitting the limit", got)
+	}
+	if len(client.enqueuePullRequestCalls) != 2 {
+		t.Errorf("expected a second re-enqueue call, got %d total", len(client.enqueuePullRequestCalls))
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls[baseline:] {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("AC2: fabrik:paused must not be re-added — EnqueueCycles(2) has not yet reached MaxEnqueueCycles(%d) again", eng.cfg.MaxEnqueueCycles)
+		}
+	}
+}
