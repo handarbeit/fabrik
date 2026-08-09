@@ -753,10 +753,14 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 
 // enqueueCyclePauseFragment is the stable prose fragment identifying a
 // pauseForEnqueueCycleLimit pause comment, matched by hasPauseComment (#1460
-// R4). Unlike the review/rebase fragments, this one deliberately omits the
-// stage name — the original message text puts it earlier in the sentence
-// ("The linked PR for stage **%s** has been re-enqueued...").
-const enqueueCyclePauseFragment = "has been re-enqueued into GitHub's merge queue"
+// R4). Scoped by stage name, matching reviewCyclePauseFragment/
+// rebaseCyclePauseFragment — a prior version of this fragment was a bare,
+// stage-unscoped const, which would have matched a comment from *any* stage
+// the item passed through, not just the current one, once this pause is ever
+// reached from more than one stage (review finding on #1460's own PR).
+func enqueueCyclePauseFragment(stage *stages.Stage) string {
+	return fmt.Sprintf("The linked PR for stage **%s** has been re-enqueued into GitHub's merge queue", stage.Name)
+}
 
 // pauseForEnqueueCycleLimit pauses the issue when merge-queue re-enqueue trips
 // have been attempted too many times — a queue-thrash loop (enqueue → eject →
@@ -785,7 +789,7 @@ const enqueueCyclePauseFragment = "has been re-enqueued into GitHub's merge queu
 // an existing episode's pause was merely reapplied.
 func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	if hasPauseComment(item, enqueueCyclePauseFragment) {
+	if hasPauseComment(item, enqueueCyclePauseFragment(stage)) {
 		e.logf(item.Number, "enqueue-cycles", "enqueue-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
 		e.reapplyPauseLabels(item)
 		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
@@ -794,12 +798,12 @@ func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectIt
 	e.logf(item.Number, "enqueue-cycles", "merge-queue re-enqueue limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
-		"🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\nThe linked PR for stage **%s** %s %d time(s), "+
+		"🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\n%s %d time(s), "+
 			"which has reached the configured limit of %d (override with `--max-enqueue-cycles` or `FABRIK_MAX_ENQUEUE_CYCLES`).\n\n"+
 			"The PR keeps being ejected from the merge queue and re-enqueued without merging. This usually means the merge group repeatedly fails to build or test "+
 			"against the current base — for example a flaky required check, a missing `merge_group` CI trigger, or a persistent semantic conflict with other queued PRs.\n\n"+
 			"Fabrik has paused this issue. Investigate the merge-queue failures, then remove the `fabrik:paused` label to resume.",
-		stage.Name, enqueueCyclePauseFragment, cycleCount, maxCycles,
+		enqueueCyclePauseFragment(stage), cycleCount, maxCycles,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
