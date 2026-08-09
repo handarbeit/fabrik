@@ -539,6 +539,40 @@ derived from a recorded real response — GitHub's `addProjectV2ItemById` agains
 an already-archived item has not been captured here. A scenario that turns on
 whether re-adding un-archives should verify the real response first.
 
+### Board projections read card state live — **Modelled**
+
+A board read snapshots its cards under one lock acquisition and builds each
+projection under later ones, so the snapshot is a set of *identities*, not a set
+of *values*. `buildProjectItem` re-reads the card's own Status, kind, and
+updated-at from the model at projection time, and drops a card that has been
+archived or removed since the snapshot. Projecting from the snapshot instead
+would report a stale column, or return an archived card on a board fetch, in
+precisely the situation this package exists to make trustworthy — and would
+contradict both the "never cached" guarantee at the top of `board.go` and R1.
+
+### Archived cards: board reads hide them, a direct ID read does not — **Simplified, unverified**
+
+The two are deliberately asymmetric, and the asymmetry follows production's two
+query shapes rather than an internal style rule:
+
+- `FetchProjectBoard`, `ProbeProjectBoard`, `FetchProjectItem`,
+  `LookupIssueProjectItem`, and `FetchProjectItemStatusBatch` all skip archived
+  cards.
+- `FetchProjectItemStatus` returns an archived card's last-known Status rather
+  than reporting it absent. Production issues this as a direct
+  `node(id:) { fieldValueByName }` query (`github/project.go:1299`), and an
+  archived `ProjectV2Item` is still a node with a field value, so answering is
+  the closer match.
+
+**Unverified, in both directions.** Neither behaviour is derived from a recorded
+real response. The batch side is the weaker claim of the two: production reads
+it as `items(first:100)` on the project (`github/project.go:1339`) with no
+archived filter, so real GitHub may well include archived items there — in which
+case the sim's skip is the divergence, not the single-item read. **Risk:** low
+for the single read (a scenario that has archived a card is not usually asking
+for its column), higher for the batch if a scenario ever depends on an archived
+card being *absent* from it. Capture a real response before relying on either.
+
 ### PR cards on a board — **Absent**
 
 A project board can hold pull-request cards as well as issue cards, but the
@@ -759,7 +793,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 69 mutations, and
+   package cannot back up. The sweep currently catches all 71 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

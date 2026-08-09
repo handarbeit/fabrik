@@ -374,6 +374,14 @@ mutate "a comment stamps created-at and its issue from two clock reads" \
   'TestOneMutationStampsOneTimestamp' \
   'comments.go::s|\t\tiss\.updatedAt = now\n\t\treturn id, nil|\t\tiss.updatedAt = s.now()\n\t\treturn id, nil|'
 
+mutate "board projections use the stale snapshot's status" \
+  'TestBoardProjectionReadsCardStateLive' \
+  'board.go::s|status, isPR, cardUpdatedAt := live\.status, live\.isPR, live\.updatedAt|status, isPR, cardUpdatedAt := ref.status, ref.isPR, ref.updatedAt\n\t_ = live|'
+
+mutate "board projections do not re-check archived after the snapshot" \
+  'TestBoardProjectionReadsCardStateLive' \
+  'board.go::s{if !ok \|\| live\.archived \{}{if !ok \{}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

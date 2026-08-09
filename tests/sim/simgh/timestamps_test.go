@@ -159,3 +159,70 @@ func mustLookupItem(t *testing.T, s *Sim) (projectID, itemID string) {
 	}
 	return board.ProjectID, itemID
 }
+
+// TestBoardProjectionReadsCardStateLive pins that a board projection reports
+// the card's state at projection time, not at snapshot time.
+//
+// Every board read snapshots its cards under one lock acquisition and then
+// builds each projection under a later one. A card that moves column or gets
+// archived in between must not be projected from the stale snapshot: reporting
+// an old Status, or putting an archived card back on a board fetch, would
+// contradict the package's "never cached" guarantee and R1's "a mutation is
+// observable by every subsequent read" in the one place a fake is least likely
+// to be caught doing it.
+//
+// The window is driven directly rather than raced: the mutation is applied to
+// the same snapshot the projection is about to be built from, which is exactly
+// the state a concurrent writer produces.
+func TestBoardProjectionReadsCardStateLive(t *testing.T) {
+	t.Run("a status move after the snapshot is reported", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		projectID, itemID := mustLookupItem(t, s)
+
+		s.mu.Lock()
+		p := s.projects[projectKey("acme", 2)]
+		ref := p.liveItemRefs()[0]
+		s.mu.Unlock()
+
+		field, err := s.FetchStatusField(projectID)
+		if err != nil {
+			t.Fatalf("FetchStatusField: %v", err)
+		}
+		if err := s.UpdateProjectItemStatus(projectID, itemID, field.FieldID, field.Options["Review"]); err != nil {
+			t.Fatalf("UpdateProjectItemStatus: %v", err)
+		}
+
+		item, err := s.buildProjectItem(p, ref)
+		if err != nil {
+			t.Fatalf("buildProjectItem: %v", err)
+		}
+		if item == nil {
+			t.Fatal("buildProjectItem dropped a live card")
+		}
+		if item.Status != "Review" {
+			t.Fatalf("projected Status = %q, want %q; the projection used the stale snapshot", item.Status, "Review")
+		}
+	})
+
+	t.Run("an archive after the snapshot removes the card", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		projectID, itemID := mustLookupItem(t, s)
+
+		s.mu.Lock()
+		p := s.projects[projectKey("acme", 2)]
+		ref := p.liveItemRefs()[0]
+		s.mu.Unlock()
+
+		if err := s.ArchiveProjectItem(projectID, itemID); err != nil {
+			t.Fatalf("ArchiveProjectItem: %v", err)
+		}
+
+		item, err := s.buildProjectItem(p, ref)
+		if err != nil {
+			t.Fatalf("buildProjectItem: %v", err)
+		}
+		if item != nil {
+			t.Fatalf("projected an archived card back onto the board: %+v", item)
+		}
+	})
+}

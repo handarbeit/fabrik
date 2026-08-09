@@ -80,7 +80,18 @@ func (p *projectState) liveItemRefs() []itemRef {
 
 // buildProjectItem assembles the full projection for one card, including its
 // linked PR's reviews, review requests, and unresolved review-thread comments.
-// Returns nil when the card's content no longer exists.
+// Returns nil when the card no longer belongs on the board — its content is
+// gone, or it has been archived or removed since the caller snapshotted it.
+//
+// The ref the caller passes identifies the card; it does not supply the card's
+// state. Every caller snapshots refs under one lock acquisition and then builds
+// projections under later ones, so a status move or an archive landing in
+// between would otherwise be projected from the stale snapshot — reporting an
+// old column, or putting an archived card back on a board fetch. That would
+// contradict both this file's "never cached" guarantee and R1's "a mutation is
+// observable by every subsequent read", in the one place a fake is least likely
+// to be caught doing it. So the card's own fields are re-read live here, under
+// the same lock the rest of the projection is built from.
 func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, error) {
 	owner, repoName, err := splitOwnerRepo(ref.ownerRepo)
 	if err != nil {
@@ -88,6 +99,13 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 	}
 
 	s.mu.Lock()
+	live, ok := p.items[ref.itemID]
+	if !ok || live.archived {
+		s.mu.Unlock()
+		return nil, nil
+	}
+	status, isPR, cardUpdatedAt := live.status, live.isPR, live.updatedAt
+
 	r, ok := s.repos[ref.ownerRepo]
 	if !ok {
 		s.mu.Unlock()
@@ -105,12 +123,12 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		Number:    iss.number,
 		Title:     iss.title,
 		Body:      iss.body,
-		Status:    ref.status,
+		Status:    status,
 		URL:       fmt.Sprintf("https://github.com/%s/issues/%d", ref.ownerRepo, iss.number),
 		Repo:      ref.ownerRepo,
-		IsPR:      ref.isPR,
-		IsClosed:  iss.state == "CLOSED" && !ref.isPR,
-		UpdatedAt: laterOf(iss.updatedAt, ref.updatedAt),
+		IsPR:      isPR,
+		IsClosed:  iss.state == "CLOSED" && !isPR,
+		UpdatedAt: laterOf(iss.updatedAt, cardUpdatedAt),
 		Labels:    cloneStrings(iss.labels),
 		Assignees: cloneStrings(iss.assignees),
 		Author:    iss.author,
@@ -444,7 +462,12 @@ func (s *Sim) ArchiveProjectItem(projectID, itemID string) error {
 	return nil
 }
 
-// FetchProjectItemStatus returns a single card's column.
+// FetchProjectItemStatus returns a single card's column, including an archived
+// card's — deliberately unlike the board-scoped reads, which all skip archived
+// cards. Production issues this as a direct node(id:) query, and an archived
+// ProjectV2Item is still a node with a field value. Neither side of that
+// asymmetry is verified against a recorded response; see FIDELITY.md,
+// "Archived cards: board reads hide them, a direct ID read does not".
 func (s *Sim) FetchProjectItemStatus(itemID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
