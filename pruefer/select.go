@@ -167,27 +167,35 @@ const dominantPathsLimit = 5
 // too-large notice (FR-3: "measured size, cap, dominant contributing
 // paths"). OmittedPaths is the config-excluded paths only — every path
 // removed via excluded_paths before MeasuredBytes was computed. TrimAttempted
-// is separate: it's the path(s) FR-5's trimToFit decided to drop when it was
+// is separate: it's the file(s) FR-5's trimToFit decided to drop when it was
 // actually attempted and still didn't bring the diff under cap, so the
 // notice can say Pruefer already tried auto-dropping the largest file(s)
-// rather than silently omitting that it was tried at all.
+// rather than silently omitting that it was tried at all. It carries sizes
+// (like DominantPaths) rather than bare paths: trimToFit's own contract
+// guarantees it drops every candidate file whenever it fails to fit (see
+// trimToFit's doc comment), so DominantPaths — computed from the survivors —
+// is always empty at this struct's one production call site; TrimAttempted
+// is therefore the only place FR-3's "dominant contributing paths" byte
+// sizes actually reach the posted notice.
 type DiffSizeDetail struct {
 	MeasuredBytes int64
 	MaxBytes      int64
 	DominantPaths []PathSize
 	OmittedPaths  []string
-	TrimAttempted []string
+	TrimAttempted []PathSize
 }
 
 // buildDiffSizeDetail computes a DiffSizeDetail from the files a size
 // decision was actually measured against (reviewFiles), the paths removed
 // via excluded_paths (omitted), and — only when FR-5's trim was actually
-// attempted and still insufficient — the paths trimToFit decided to drop
+// attempted and still insufficient — the files trimToFit decided to drop
 // (trimAttempted). DominantPaths is reviewFiles sorted by Bytes descending,
 // capped to dominantPathsLimit — a pure, deterministic computation from
 // already-parsed diff structure, never from Claude's prose (mirrors
 // decideEvent's same discipline; see adrs/1251-pruefer-severity-gated-request-changes.md).
-func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, omitted []string, trimAttempted []string) DiffSizeDetail {
+// TrimAttempted is sorted the same way, uncapped (the too-large notice
+// bounds its own rendering — see notice.go's noticePathListLimit).
+func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, omitted []string, trimAttempted []diffFile) DiffSizeDetail {
 	sorted := make([]diffFile, len(reviewFiles))
 	copy(sorted, reviewFiles)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Bytes > sorted[j].Bytes })
@@ -201,11 +209,19 @@ func buildDiffSizeDetail(measuredBytes, maxBytes int64, reviewFiles []diffFile, 
 		dominant[i] = PathSize{Path: sorted[i].Path, Bytes: sorted[i].Bytes}
 	}
 
+	sortedTrimmed := make([]diffFile, len(trimAttempted))
+	copy(sortedTrimmed, trimAttempted)
+	sort.SliceStable(sortedTrimmed, func(i, j int) bool { return sortedTrimmed[i].Bytes > sortedTrimmed[j].Bytes })
+	trimmed := make([]PathSize, len(sortedTrimmed))
+	for i, f := range sortedTrimmed {
+		trimmed[i] = PathSize{Path: f.Path, Bytes: f.Bytes}
+	}
+
 	return DiffSizeDetail{
 		MeasuredBytes: measuredBytes,
 		MaxBytes:      maxBytes,
 		DominantPaths: dominant,
 		OmittedPaths:  omitted,
-		TrimAttempted: trimAttempted,
+		TrimAttempted: trimmed,
 	}
 }

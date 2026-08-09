@@ -51,20 +51,49 @@ func humanBytes(n int64) string {
 }
 
 // noticePathListLimit caps how many paths any single path-list section of a
-// posted notice renders explicitly. OmittedPaths and TrimAttempted are, unlike
-// DominantPaths (already capped at dominantPathsLimit upstream), unbounded —
-// a diff whose excluded_paths glob matches a whole vendor/ or generated/ tree,
+// Pruefer-authored PR comment renders explicitly — the too-large notice's
+// OmittedPaths/TrimAttempted sections, the all-excluded notice, and (via
+// boundedPathList) the submitted review body's own "Omitted from this
+// review" section in findings.go. All of these are, unlike DominantPaths
+// (already capped at dominantPathsLimit upstream), otherwise unbounded — a
+// diff whose excluded_paths glob matches a whole vendor/ or generated/ tree,
 // or whose trim pass drops many small files, could otherwise grow past
 // GitHub's ~65536-character PR/issue comment limit. A silently-failed
-// AddComment leaves no marker on the PR, so alreadyNoticedTooLarge never
-// finds it and the same failure repeats every poll — reproducing the exact
-// silent, repeated-failure mode this notice mechanism exists to close.
+// AddComment/SubmitPRReview leaves no marker on the PR (for the notice) or
+// drops the review outright (for the submitted body), so the same failure
+// repeats every poll — reproducing the exact silent, repeated-failure mode
+// this notice mechanism exists to close.
 const noticePathListLimit = 20
 
-// writePathList renders paths as a Markdown bullet list, truncated to
-// noticePathListLimit with a summary line for the remainder — see
-// noticePathListLimit.
+// boundedPathList truncates paths to at most noticePathListLimit entries,
+// returning the entries to render and how many were left out — the shared
+// truncation rule every path-list section in a Pruefer-authored comment
+// applies, regardless of that section's own bullet formatting.
+func boundedPathList(paths []string) (shown []string, truncated int) {
+	if len(paths) > noticePathListLimit {
+		return paths[:noticePathListLimit], len(paths) - noticePathListLimit
+	}
+	return paths, 0
+}
+
+// writePathList renders paths as a Markdown bullet list, truncated per
+// boundedPathList with a summary line for the remainder.
 func writePathList(b *strings.Builder, paths []string) {
+	shown, truncated := boundedPathList(paths)
+	for _, p := range shown {
+		fmt.Fprintf(b, "- `%s`\n", p)
+	}
+	if truncated > 0 {
+		fmt.Fprintf(b, "- _(and %d more)_\n", truncated)
+	}
+}
+
+// writePathSizeList is writePathList's PathSize analog, rendering each
+// entry with its human-readable byte size — used for TrimAttempted and
+// DominantPaths, both of which (unlike OmittedPaths) carry sizes so the
+// notice can satisfy FR-3's "dominant contributing paths" promise wherever
+// it has size information to show.
+func writePathSizeList(b *strings.Builder, paths []PathSize) {
 	shown := paths
 	truncated := 0
 	if len(shown) > noticePathListLimit {
@@ -72,7 +101,7 @@ func writePathList(b *strings.Builder, paths []string) {
 		shown = shown[:noticePathListLimit]
 	}
 	for _, p := range shown {
-		fmt.Fprintf(b, "- `%s`\n", p)
+		fmt.Fprintf(b, "- `%s` (%s)\n", p.Path, humanBytes(p.Bytes))
 	}
 	if truncated > 0 {
 		fmt.Fprintf(b, "- _(and %d more)_\n", truncated)
@@ -96,14 +125,12 @@ func buildTooLargeNoticeBody(detail DiffSizeDetail, headSHA string) string {
 	}
 	if len(detail.TrimAttempted) > 0 {
 		b.WriteString("Pruefer also tried automatically dropping the largest remaining file(s), but the rest was still over the cap:\n\n")
-		writePathList(&b, detail.TrimAttempted)
+		writePathSizeList(&b, detail.TrimAttempted)
 		b.WriteString("\n")
 	}
 	if len(detail.DominantPaths) > 0 {
 		b.WriteString("Largest remaining contributors:\n\n")
-		for _, p := range detail.DominantPaths {
-			fmt.Fprintf(&b, "- `%s` (%s)\n", p.Path, humanBytes(p.Bytes))
-		}
+		writePathSizeList(&b, detail.DominantPaths)
 		b.WriteString("\n")
 	}
 	b.WriteString("To get this PR reviewed, add the path(s) above to `excluded_paths`, or split the PR so the reviewable code isn't bundled with the oversized file(s).\n\n")

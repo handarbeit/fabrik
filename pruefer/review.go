@@ -155,8 +155,11 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 				// trimToFit gives up entirely, trimmedKept is empty and
 				// trimmedDropped is all of kept — using kept here would make
 				// DominantPaths list the exact same paths TrimAttempted just
-				// listed, duplicating them in the rendered notice.
-				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, trimmedKept, pathsOf(excluded), pathsOf(trimmedDropped))
+				// listed, duplicating them in the rendered notice. TrimAttempted
+				// itself carries sizes (see DiffSizeDetail's doc comment), so
+				// the byte-size breakdown FR-3 promises still reaches the
+				// notice even though DominantPaths is always empty here.
+				detail := buildDiffSizeDetail(measured, cfg.MaxDiffBytes, trimmedKept, pathsOf(excluded), trimmedDropped)
 				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after exclusions, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, measured, cfg.MaxDiffBytes)
 				if noticeAlreadyExists {
 					// forceReview bypassed the pre-check above to get this

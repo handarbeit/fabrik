@@ -1,6 +1,7 @@
 package pruefer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -140,5 +141,26 @@ func TestBuildReviewBody_EmptyOmittedPaths_NoSection(t *testing.T) {
 	got := buildReviewBody("Summary.", nil, []string{})
 	if got != "Summary." {
 		t.Errorf("got %q, want unchanged summary for empty (non-nil) omittedPaths", got)
+	}
+}
+
+// TestBuildReviewBody_ManyOmittedPaths_ListIsBounded proves the submitted
+// review body's "Omitted from this review" section is bounded the same way
+// as the too-large notice's path lists (notice.go's noticePathListLimit): a
+// broad excluded_paths glob can match hundreds of files just as easily here
+// as it can there, and an unbounded list risks exceeding GitHub's PR review
+// body size limit, losing the whole review — including any real findings.
+func TestBuildReviewBody_ManyOmittedPaths_ListIsBounded(t *testing.T) {
+	paths := make([]string, 500)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("vendor/pkg%d/file.go", i)
+	}
+	got := buildReviewBody("Summary.", nil, paths)
+
+	if len(got) > 10_000 {
+		t.Errorf("body length = %d, want well under GitHub's review-body size limit for %d omitted paths", len(got), len(paths))
+	}
+	if !strings.Contains(got, "and 480 more") {
+		t.Errorf("got %q, want a truncation summary naming how many omitted paths were left off the list", got)
 	}
 }

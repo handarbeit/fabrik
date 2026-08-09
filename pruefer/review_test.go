@@ -796,12 +796,28 @@ func TestReviewPR_TrimExhausted_StillOverCap_NoticesAndSkips(t *testing.T) {
 	if len(outcome.SizeDetail.DominantPaths) != 0 {
 		t.Errorf("SizeDetail.DominantPaths = %+v, want empty — trimToFit dropped every file, so there are no remaining contributors left to list, and listing them again would just duplicate TrimAttempted", outcome.SizeDetail.DominantPaths)
 	}
+	// TrimAttempted must carry byte sizes: trimToFit's contract guarantees
+	// DominantPaths is always empty on this path (asserted above), so
+	// TrimAttempted is the only place FR-3's "dominant contributing paths"
+	// size breakdown can actually reach the posted notice.
+	for _, p := range outcome.SizeDetail.TrimAttempted {
+		if p.Bytes <= 0 {
+			t.Errorf("SizeDetail.TrimAttempted entry %+v has no byte size — FR-3 promises the dominant contributing paths' sizes, not just their names", p)
+		}
+	}
 	notice := client.addedCalls[0].body
 	if !strings.Contains(notice, "also tried automatically dropping") {
 		t.Errorf("notice = %q, want it to say Pruefer already tried auto-dropping the largest file(s)", notice)
 	}
 	if strings.Contains(notice, "Largest remaining contributors") {
 		t.Errorf("notice = %q, want no 'Largest remaining contributors' section — it would just repeat the paths already listed under the trim-attempted section", notice)
+	}
+	// The trim-attempted section itself must show sizes (e.g. "(9.8 KB)"),
+	// not just bare backtick-quoted paths — otherwise the notice still
+	// silently drops the byte breakdown even though DominantPaths is
+	// correctly empty.
+	if !strings.Contains(notice, "KB)") && !strings.Contains(notice, "B)") {
+		t.Errorf("notice = %q, want the trim-attempted path(s) rendered with a byte size", notice)
 	}
 }
 

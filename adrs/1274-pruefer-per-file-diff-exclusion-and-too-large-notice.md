@@ -95,11 +95,24 @@ every prior exact-string test assertion holds unchanged.
 When nothing fits — exclusion and trimming both fail to bring the diff under
 cap — `ReviewPR` posts a PR comment (`pruefer/notice.go`'s
 `buildTooLargeNoticeBody`) stating the measured size, the cap, which paths
-were already excluded by config (if any), and the largest remaining
-contributors (capped to the top 5 — `dominantPathsLimit` — so the notice
-stays actionable even when many small files, not one huge one, are the
-cause), plus concrete guidance: add the named path(s) to `excluded_paths`, or
-split the PR.
+were already excluded by config (if any), and the largest contributing paths
+with their byte sizes, plus concrete guidance: add the named path(s) to
+`excluded_paths`, or split the PR.
+
+The size breakdown comes from `TrimAttempted`, not `DominantPaths`, in every
+notice that actually posts: `trimToFit`'s contract guarantees it drops every
+candidate file whenever it fails to bring the diff under cap (that's what
+"still doesn't fit" means — see `trimToFit`'s doc comment in
+`pruefer/diffsplit.go`), so the survivors `DominantPaths` is computed from are
+always empty at this call site. `TrimAttempted` was consequently changed from
+a bare `[]string` to `[]PathSize` so it carries the sizes itself, capped the
+same way as any other path-list section (`noticePathListLimit` — 20 entries
+plus a "+N more" summary, not `dominantPathsLimit`'s 5, since this is now the
+list actually rendered). `DominantPaths`/`dominantPathsLimit` remain in place
+for a hypothetical future caller where trim only partially succeeds and real
+survivors exist to rank — not reachable today, but not worth deleting either,
+since `buildTooLargeNoticeBody` already renders it correctly whenever it's
+non-empty.
 
 **Idempotency follows the same convention as `alreadyReviewedAtHead`, and the
 codebase's one existing precedent for it: `engine/merge_train.go`'s
@@ -194,8 +207,8 @@ now satisfy.
   falls into `splitDiffFiles`'s `preamble`, which per its own contract can
   never be excluded via `excluded_paths` or auto-dropped by `trimToFit`: an
   operator who adds such a path to `excluded_paths` gets no protection from
-  it, and its bytes still count toward `MaxDiffBytes` under a `DominantPaths`
-  list that never names the actual file. This is the same silent-signal
+  it, and its bytes still count toward `MaxDiffBytes` under a too-large
+  notice whose path lists never name the actual file. This is the same silent-signal
   failure class this ADR exists to close, reached through a different diff
   shape — accepted as a follow-up rather than closed here (see
   `diffFileHeaderLineRE`'s doc comment and the "Known limitations" note in

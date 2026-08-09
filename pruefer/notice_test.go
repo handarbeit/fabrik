@@ -75,11 +75,14 @@ func TestBuildTooLargeNoticeBody_TrimAttemptedSection(t *testing.T) {
 	detail := DiffSizeDetail{
 		MeasuredBytes: 600_000,
 		MaxBytes:      500_000,
-		TrimAttempted: []string{"pkg/big/generated.go"},
+		TrimAttempted: []PathSize{{Path: "pkg/big/generated.go", Bytes: 400_000}},
 	}
 	body := buildTooLargeNoticeBody(detail, "sha1")
 	if !strings.Contains(body, "also tried automatically dropping") || !strings.Contains(body, "pkg/big/generated.go") {
 		t.Errorf("body = %q, want a section naming the auto-drop attempt and the path it tried to drop", body)
+	}
+	if !strings.Contains(body, "390.6 KB") {
+		t.Errorf("body = %q, want the trim-attempted path's byte size rendered — FR-3's size breakdown must reach the notice here too", body)
 	}
 }
 
@@ -118,9 +121,9 @@ func TestBuildTooLargeNoticeBody_ManyOmittedPaths_ListIsBounded(t *testing.T) {
 // ListIsBounded — a trim pass that drops many small files must not grow
 // the notice without limit either.
 func TestBuildTooLargeNoticeBody_ManyTrimAttemptedPaths_ListIsBounded(t *testing.T) {
-	paths := make([]string, 500)
+	paths := make([]PathSize, 500)
 	for i := range paths {
-		paths[i] = fmt.Sprintf("pkg/generated/file%d.go", i)
+		paths[i] = PathSize{Path: fmt.Sprintf("pkg/generated/file%d.go", i), Bytes: 100}
 	}
 	detail := DiffSizeDetail{MeasuredBytes: 600_000, MaxBytes: 500_000, TrimAttempted: paths}
 	body := buildTooLargeNoticeBody(detail, "sha1")

@@ -87,8 +87,18 @@ func buildReviewBody(summary string, demoted []ReviewFinding, omittedPaths []str
 	if len(omittedPaths) > 0 {
 		var omittedBlock strings.Builder
 		omittedBlock.WriteString("## Omitted from this review")
-		for _, p := range omittedPaths {
+		// Bounded the same way as the too-large notice's path lists (see
+		// notice.go's noticePathListLimit): a broad excluded_paths glob can
+		// match as many files here as it can there, and an unbounded list
+		// risks pushing the submitted review body past GitHub's comment size
+		// limit — losing the whole review, findings included, which is worse
+		// than the notice-comment failure mode this PR hardened elsewhere.
+		shown, truncated := boundedPathList(omittedPaths)
+		for _, p := range shown {
 			fmt.Fprintf(&omittedBlock, "\n- `%s`", p)
+		}
+		if truncated > 0 {
+			fmt.Fprintf(&omittedBlock, "\n- _(and %d more)_", truncated)
 		}
 		parts = append(parts, omittedBlock.String())
 	}
