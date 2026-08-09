@@ -363,6 +363,22 @@ projections; it is left open here because it is a behavioural change to the
 model rather than a documentation one, and belongs with the harness work that
 first depends on the distinction (#1457).
 
+### Comment edits bump the issue, not the PR — **Simplified**
+
+`UpdateComment` bumps the parent issue's `updatedAt`, as GitHub does when a
+comment is edited. This is not incidental: the engine rewrites an existing stage
+comment rather than posting a new one (`engine/comments.go`,
+`engine/dependencies.go`), so an unbumped timestamp would hide a real edit from
+any read that watches `updatedAt` to decide something changed.
+
+Editing a comment that belongs to a **PR** bumps nothing — `prRecord` has no
+`updatedAt`, and `ProjectItem.UpdatedAt` is derived from the issue. Adding a
+*reaction* deliberately bumps nothing either, matching GitHub, which does not
+treat a reaction as an update to the parent.
+
+**Risk:** low. The lax direction only — a PR-comment edit is invisible to
+timestamp-watching reads that would have seen it on real GitHub.
+
 ### Assignees — **Modelled**
 
 Stored per issue and surfaced on `ProjectItem.Assignees`. Settable from both
@@ -663,7 +679,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 59 mutations, and
+   package cannot back up. The sweep currently catches all 61 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
