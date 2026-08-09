@@ -377,9 +377,28 @@ model's board projections (`buildProjectItem`, `ProbeProjectBoard`) resolve a
 card's content as an issue. A PR card would therefore read back as nothing —
 silently omitted from every board fetch, with no error.
 
-`SeedProjectItem` rejects `isPR: true` rather than accepting it and dropping the
-card later. A scenario that needs the engine's PR-card handling (which
-`itemMayNeedWork` skips) cannot be written on this layer.
+**Both** entry points refuse a PR card rather than accepting one and dropping it
+later: `SeedProjectItem` rejects `isPR: true`, and `AddProjectV2ItemById` rejects
+a `pr:` content node ID. The seeding and runtime APIs deliberately agree here —
+a loud failure on one path and a silent no-op on the other would be worse than
+either alone, because a scenario would conclude the card exists.
+
+A scenario that needs the engine's PR-card handling (which `itemMayNeedWork`
+skips) cannot be written on this layer.
+
+### Dependency links — **Modelled, with existence enforced**
+
+`AddBlockedByIssue` and `SeedBlockedBy` both require the blocker to resolve to a
+seeded issue in a seeded repo, and refuse otherwise. This is stricter than a
+fake strictly needs to be, and deliberately so: `resolveDependenciesLocked`
+reports any blocker it cannot resolve as `State: "OPEN"`, so a dangling blocker
+would leave the dependent issue reading as permanently blocked with no
+diagnostic anywhere — a wrong ID accepted silently, which is the bug class this
+layer exists to catch. Cross-repo blockers are supported; the blocker's live
+state is resolved on every read, so closing it unblocks the dependent issue.
+
+**Absent:** being blocked *by a PR*, and GitHub's permission rules for creating
+a dependency across repos.
 
 ### `ownerType` — **Simplified**
 
@@ -470,7 +489,8 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 42 mutations.
+   package cannot back up. The sweep currently catches all 45 mutations, and
+   fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
 GitHub* — only that the model does what this document says. For anything subtle
