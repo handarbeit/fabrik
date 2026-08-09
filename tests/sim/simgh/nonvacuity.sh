@@ -201,8 +201,9 @@ mutate_race "model mutex is removed (expects a data race)" \
 
 mutate_race "per-repo git serialisation is removed" \
   'TestConcurrentTrialMergesOnOneRepo|TestConcurrentModelAccess' \
-  'model.go::s{^\tgitMu sync\.Mutex$}{\tgitMu noopGitMutex}m' \
-  'model.go::s{^type issueRecord struct \{$}{type noopGitMutex struct{}\n\nfunc (noopGitMutex) Lock()   {}\nfunc (noopGitMutex) Unlock() {}\n\nvar _ sync.Mutex\n\ntype issueRecord struct {}m'
+  'model.go::s|^\tgitMu sync\.Mutex$|\tgitMu noopGitMutex|m' \
+  'model.go::s|\z|\ntype noopGitMutex struct{}\n\nfunc (noopGitMutex) Lock() {}\nfunc (noopGitMutex) Unlock() {}\n\nvar _ sync.Mutex\n|'
+
 
 echo
 if [ ${#FAILED_TO_CATCH[@]} -eq 0 ]; then
