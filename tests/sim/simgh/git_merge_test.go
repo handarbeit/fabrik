@@ -1,6 +1,9 @@
 package simgh
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -329,5 +332,121 @@ func TestHeadSHATracksNewCommits(t *testing.T) {
 	}
 	if second.HeadSHA != mustHeadSHA(t, s, repoName, headBranch) {
 		t.Fatalf("head SHA %s does not match the branch tip", second.HeadSHA)
+	}
+}
+
+// TestMergePRRefusesWhenNothingToMerge pins that a merge which would write no
+// commit is refused rather than recorded.
+//
+// `git merge --no-ff` prints "Already up to date." and exits *zero* when the
+// head is already contained in the base, leaving the tip untouched. Publishing
+// that tip would flip merged=true having written no merge commit at all —
+// silently breaking the invariant this package and FIDELITY.md both state
+// unconditionally ("MergePR writes a real merge commit onto the base ref").
+//
+// The state is ordinary, not contrived: merging a branch and then merging it
+// again reaches it, which a scenario replaying a merge-train batch can do.
+func TestMergePRRefusesWhenNothingToMerge(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "first"}).
+		SeedPR(repoName, PRSeed{Number: 43, Head: headBranch, Base: "main", Title: "again"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	if err := s.MergePR("acme", "widgets", 42); err != nil {
+		t.Fatalf("first MergePR: %v", err)
+	}
+
+	// main now contains headBranch, so #43 has nothing left to merge.
+	tipBefore := mustHeadSHA(t, s, repoName, "main")
+
+	err := s.MergePR("acme", "widgets", 43)
+	if err == nil {
+		t.Fatal("MergePR succeeded with nothing to merge — it would have recorded a merge that wrote no commit")
+	}
+	if !isNotMergeable(err) {
+		t.Fatalf("MergePR error = %v, want it to wrap gh.ErrNotMergeable", err)
+	}
+
+	// The refusal must leave no trace: no moved ref, and no merged flag.
+	if tipAfter := mustHeadSHA(t, s, repoName, "main"); tipAfter != tipBefore {
+		t.Fatalf("main moved from %s to %s on a refused merge", tipBefore, tipAfter)
+	}
+	merged, ferr := s.FetchPRMerged("acme", "widgets", 43)
+	if ferr != nil {
+		t.Fatalf("FetchPRMerged: %v", ferr)
+	}
+	if merged {
+		t.Fatal("PR #43 reports merged after a refused merge")
+	}
+
+	// The read-only probe is deliberately unaffected: there is no conflict, so
+	// mergeability still reports true. Only the merge itself refuses, matching
+	// GitHub, where "nothing to merge" is not a conflict.
+	mergeable, perr := s.FetchPRMergeable("acme", "widgets", 43)
+	if perr != nil {
+		t.Fatalf("FetchPRMergeable: %v", perr)
+	}
+	if mergeable == nil || !*mergeable {
+		t.Fatalf("FetchPRMergeable = %v, want true — nothing-to-merge is not a conflict", mergeable)
+	}
+}
+
+// TestTrialWorktreeStaysInsideBaseDir pins that throwaway worktrees are created
+// under Sim.baseDir.
+//
+// The deferred cleanup in withWorktree covers every ordinary path, but a
+// process killed mid-merge (OOM, SIGKILL, a CI timeout) never runs it. Under
+// the OS temp dir that orphan outlives both the sandbox the package doc
+// promises and t.TempDir()'s cleanup; under baseDir the test framework is the
+// backstop.
+func TestTrialWorktreeStaysInsideBaseDir(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+
+	// Resolve inside the callback: the deferred cleanup deletes the directory
+	// before withWorktree returns, and EvalSymlinks cannot resolve a path that
+	// no longer exists.
+	var seen, got string
+	r.gitMu.Lock()
+	wtErr := r.withWorktree("refs/heads/main", func(wt string) error {
+		seen = wt
+		// The checkout must be real, not just a path: a directory that is not
+		// a worktree would make the containment assertion meaningless.
+		if _, statErr := os.Stat(filepath.Join(wt, ".git")); statErr != nil {
+			return fmt.Errorf("worktree has no .git entry: %w", statErr)
+		}
+		resolved, resErr := filepath.EvalSymlinks(wt)
+		if resErr != nil {
+			return fmt.Errorf("EvalSymlinks(worktree): %w", resErr)
+		}
+		got = resolved
+		return nil
+	})
+	r.gitMu.Unlock()
+	if wtErr != nil {
+		t.Fatalf("withWorktree: %v", wtErr)
+	}
+
+	base, err := filepath.EvalSymlinks(s.baseDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(baseDir): %v", err)
+	}
+	rel, err := filepath.Rel(base, got)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("worktree %s is outside baseDir %s (rel=%q, err=%v)", got, base, rel, err)
+	}
+
+	// And it must not survive the call.
+	if _, statErr := os.Stat(seen); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree %s still exists after withWorktree returned (stat err = %v)", seen, statErr)
 	}
 }

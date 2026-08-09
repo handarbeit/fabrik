@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,11 @@ const (
 	simGitName  = "simgh"
 	simGitEmail = "simgh@example.invalid"
 )
+
+// errNothingToMerge reports that a merge would produce no commit because the
+// head is already contained in the base. Callers wrap it in the sentinel the
+// engine tests against; see tryMerge and MergePR.
+var errNothingToMerge = errors.New("head is already contained in base, so there is no merge commit to write")
 
 // gitEnv returns a non-interactive environment for git subprocesses, mirroring
 // engine/worktree.go's nonInteractiveGitEnv. The sim never talks to a network
@@ -131,9 +137,19 @@ func runGitStdin(dir, stdin string, args ...string) (string, error) {
 // a shared checkout would also let one operation's leftover conflict state
 // leak into the next.
 //
+// The throwaway lives under the repo's worktreeRoot, inside Sim.baseDir, not in
+// the OS temp dir. The deferred cleanup below removes it on every ordinary
+// path, but a process killed mid-merge (OOM, SIGKILL, a CI timeout) cannot run
+// deferred code — and an orphan under the OS temp dir would outlive both the
+// sandbox this package's doc comment promises and t.TempDir()'s cleanup.
+// Keeping it inside baseDir makes the test framework the backstop.
+//
 // Caller must hold the repo's gitMu.
 func (r *repoState) withWorktree(ref string, fn func(wt string) error) (err error) {
-	tmp, err := os.MkdirTemp("", "simgh-wt-")
+	if err := os.MkdirAll(r.worktreeRoot, 0o755); err != nil {
+		return fmt.Errorf("simgh: creating worktree root: %w", err)
+	}
+	tmp, err := os.MkdirTemp(r.worktreeRoot, "wt-")
 	if err != nil {
 		return fmt.Errorf("simgh: creating worktree temp dir: %w", err)
 	}
@@ -191,6 +207,10 @@ func (r *repoState) tryMerge(base, head string, commit bool, msg string) (sha st
 	if err != nil {
 		return "", false, err
 	}
+	baseSHA, err := r.resolveRef("refs/heads/" + base)
+	if err != nil {
+		return "", false, err
+	}
 
 	err = r.withWorktree("refs/heads/"+base, func(wt string) error {
 		// --no-ff so a fast-forwardable head still produces a real merge
@@ -222,6 +242,25 @@ func (r *repoState) tryMerge(base, head string, commit bool, msg string) (sha st
 	}
 	if conflict {
 		return "", true, nil
+	}
+
+	// `git merge --no-ff` prints "Already up to date." and exits *zero* without
+	// creating a commit when head is already contained in base's history — the
+	// state a second merge of the same branch leaves behind. The tip is then
+	// unchanged, so publishing it would flip merged=true while writing no merge
+	// commit at all, silently breaking the invariant this package and
+	// FIDELITY.md both state unconditionally.
+	//
+	// The probe (commit=false) is untouched: there is genuinely no conflict, so
+	// it still reports mergeable. Only the merge itself refuses, which is also
+	// how GitHub behaves — a PR with nothing left to merge is not a conflict,
+	// but its merge endpoint will not manufacture an empty merge commit.
+	if sha == baseSHA {
+		if commit {
+			return "", false, fmt.Errorf("simgh: merging %s into %s in %s/%s: %w",
+				head, base, r.owner, r.repo, errNothingToMerge)
+		}
+		return sha, false, nil
 	}
 
 	if commit {

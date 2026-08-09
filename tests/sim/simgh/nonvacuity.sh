@@ -342,6 +342,14 @@ mutate "FetchItemDetails matches either ID, so the board is picked by map order"
   'TestFetchItemDetailsPrefersItemIDAcrossProjects' \
   'board.go::s|return it\.itemID == item\.ItemID \}\)|return it.contentNodeID() == item.ID \|\| it.itemID == item.ItemID })|'
 
+mutate "MergePR records a merge that wrote no commit" \
+  'TestMergePRRefusesWhenNothingToMerge' \
+  'git.go::s|if sha == baseSHA \{|if false \&\& sha == baseSHA {|'
+
+mutate "trial worktrees are created outside baseDir" \
+  'TestTrialWorktreeStaysInsideBaseDir' \
+  'git.go::s|os\.MkdirTemp\(r\.worktreeRoot, "wt-"\)|os.MkdirTemp("", "simgh-wt-")|'
+
 
 echo
 status=0

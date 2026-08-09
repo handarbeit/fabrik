@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -465,6 +466,14 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 	r.gitMu.Lock()
 	sha, conflict, err := r.tryMerge(base, head, true, fmt.Sprintf("Merge pull request #%d from %s\n\n%s", prNumber, head, title))
 	r.gitMu.Unlock()
+	if errors.Is(err, errNothingToMerge) {
+		// Nothing to merge: the head is already in the base, so git writes no
+		// commit. Refuse rather than record a merge that produced nothing —
+		// merged=true with no merge commit is the exact silent divergence this
+		// package exists to prevent. Reported as ErrNotMergeable so callers
+		// using errors.Is classify it the way they classify GitHub's refusal.
+		return fmt.Errorf("simgh: merging PR #%d: %v: %w", prNumber, err, gh.ErrNotMergeable)
+	}
 	if err != nil {
 		return err
 	}

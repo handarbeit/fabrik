@@ -48,7 +48,7 @@ func (s *Sim) AddComment(owner, repo string, issueNumber int, body string) (int,
 func (s *Sim) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, iss, err := s.findCommentWithOwnerLocked(owner, repo, commentDatabaseID)
+	c, iss, pr, err := s.findCommentWithOwnerLocked(owner, repo, commentDatabaseID)
 	if err != nil {
 		return err
 	}
@@ -60,11 +60,12 @@ func (s *Sim) UpdateComment(owner, repo string, commentDatabaseID int, body stri
 	// updatedAt to notice the board changed.
 	//
 	// Reactions deliberately do not bump it: GitHub does not treat a reaction as
-	// an update to the parent. A comment owned by a PR has nothing to bump — the
-	// model gives prRecord no updatedAt, and ProjectItem.UpdatedAt is derived
-	// from the issue. See FIDELITY.md.
-	if iss != nil {
+	// an update to the parent.
+	switch {
+	case iss != nil:
 		iss.updatedAt = s.now()
+	case pr != nil:
+		pr.updatedAt = s.now()
 	}
 	return nil
 }
@@ -127,36 +128,36 @@ func (s *Sim) ResolveReviewThread(threadID string) error {
 // findCommentLocked searches a repo's issue, PR, and review-thread comments.
 // Caller must hold mu.
 func (s *Sim) findCommentLocked(owner, repo string, databaseID int) (*commentRecord, error) {
-	c, _, err := s.findCommentWithOwnerLocked(owner, repo, databaseID)
+	c, _, _, err := s.findCommentWithOwnerLocked(owner, repo, databaseID)
 	return c, err
 }
 
-// findCommentWithOwnerLocked is findCommentLocked plus the issue that owns the
-// comment, so a mutation can bump the parent's updatedAt. The issue is nil when
-// the comment belongs to a PR. Caller must hold mu.
-func (s *Sim) findCommentWithOwnerLocked(owner, repo string, databaseID int) (*commentRecord, *issueRecord, error) {
+// findCommentWithOwnerLocked is findCommentLocked plus whichever record owns the
+// comment, so a mutation can bump the parent's updatedAt. Exactly one of the
+// issue and the PR is non-nil. Caller must hold mu.
+func (s *Sim) findCommentWithOwnerLocked(owner, repo string, databaseID int) (*commentRecord, *issueRecord, *prRecord, error) {
 	r, err := s.lookupRepo(owner, repo)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, iss := range r.issues {
 		for _, c := range iss.comments {
 			if c.databaseID == databaseID {
-				return c, iss, nil
+				return c, iss, nil, nil
 			}
 		}
 	}
 	for _, pr := range r.prs {
 		for _, c := range pr.comments {
 			if c.databaseID == databaseID {
-				return c, nil, nil
+				return c, nil, pr, nil
 			}
 		}
 		for _, c := range pr.reviewThreadComment {
 			if c.databaseID == databaseID {
-				return c, nil, nil
+				return c, nil, pr, nil
 			}
 		}
 	}
-	return nil, nil, fmt.Errorf("simgh: comment %d not found in %s", databaseID, repoKey(owner, repo))
+	return nil, nil, nil, fmt.Errorf("simgh: comment %d not found in %s", databaseID, repoKey(owner, repo))
 }

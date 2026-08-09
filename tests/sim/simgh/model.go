@@ -17,6 +17,11 @@ type repoState struct {
 	// bareDir is the on-disk bare repository acting as this repo's origin.
 	bareDir string
 
+	// worktreeRoot holds the throwaway worktrees trial merges check out into.
+	// It sits inside Sim.baseDir so a process killed mid-merge cannot strand a
+	// checkout outside the sandbox — see withWorktree.
+	worktreeRoot string
+
 	// defaultBranch is the repo's default base branch (the branch the initial
 	// commit lands on).
 	defaultBranch string

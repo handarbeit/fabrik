@@ -127,6 +127,7 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 		owner:             owner,
 		repo:              repo,
 		bareDir:           dir,
+		worktreeRoot:      dir + ".worktrees",
 		defaultBranch:     branch,
 		issues:            make(map[int]*issueRecord),
 		prs:               make(map[int]*prRecord),
