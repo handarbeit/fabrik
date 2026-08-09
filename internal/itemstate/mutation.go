@@ -433,6 +433,24 @@ type ReviewCycleIncremented struct {
 func (ReviewCycleIncremented) isMutation()       {}
 func (m ReviewCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// ReviewCycleDecremented compensates a prior ReviewCycleIncremented when a
+// review reinvoke lands no new commit (#1045) — a cycle that changed nothing
+// was not an attempt, so it must not count against MaxReviewCycles. Applied
+// post-hoc from dispatchReviewReinvoke's after hook, which runs synchronously
+// inside the reinvoke goroutine before the deferred WorkerExited fires, so
+// the decrement is always visible before any poll can next read the counter.
+// Floored at 0 by the store — never goes negative even if applied more than
+// once for the same increment (defensive; the call site is idempotency-safe
+// by construction, this is a second line of defense).
+type ReviewCycleDecremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (ReviewCycleDecremented) isMutation()       {}
+func (m ReviewCycleDecremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CIFixCycleIncremented increments the CI-fix cycle counter for a stage.
 type CIFixCycleIncremented struct {
 	Repo      string

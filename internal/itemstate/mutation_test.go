@@ -428,6 +428,48 @@ func TestApplyReviewCycleIncremented(t *testing.T) {
 	}
 }
 
+// ---- ReviewCycleDecremented (#1045) ----
+
+func TestApplyReviewCycleDecremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 1 {
+		t.Errorf("ReviewCycles = %d, want 1", got)
+	}
+}
+
+func TestApplyReviewCycleDecremented_FlooredAtZero(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	// Decrementing an already-zero counter is a genuine no-op field-wise
+	// (the value stays 0), so the store must report no Change (invariant
+	// I6 — no Observers notified) — assert the returned []Change is empty,
+	// not just discard it.
+	_, changes, err := s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(ReviewCycleDecremented) on zero counter: expected no Change (I6), got %v", changes)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (floored)", got)
+	}
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	_, changes, err = s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(ReviewCycleDecremented) double decrement at zero: expected no Change (I6), got %v", changes)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (floored, double decrement)", got)
+	}
+}
+
 // ---- CIFixCycleIncremented ----
 
 func TestApplyCIFixCycleIncremented(t *testing.T) {

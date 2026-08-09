@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -1161,31 +1162,51 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 }
 
 // buildReviewBodyComments returns synthetic gh.Comments derived from the
-// top-level body of each unaddressed CHANGES_REQUESTED PR review (Finding 4,
-// #1375) — buildReviewThreadComments only ever looks at inline thread
-// comments, which GitHub does not require, and misses the guaranteed part of
-// a CHANGES_REQUESTED review: its body (see reviewGateAuthorityVerdict's doc
-// comment and GitHub's REST "Create a review for a pull request" contract,
-// which requires a body for REQUEST_CHANGES/COMMENT alike).
+// top-level body of each unaddressed, non-DISMISSED PR review (#1045,
+// superseding #1375's narrower CHANGES_REQUESTED-only scope) —
+// buildReviewThreadComments only ever looks at inline thread comments, which
+// GitHub does not require, and misses the guaranteed part of a
+// CHANGES_REQUESTED/COMMENTED review: its body (GitHub's REST "Create a
+// review for a pull request" contract requires a body for REQUEST_CHANGES
+// and COMMENT alike).
 //
 // A review is skipped when:
 //   - DatabaseID == 0 (not yet fetched/unavailable — no stable ID to key
 //     dedup on)
-//   - State != "CHANGES_REQUESTED" (Pruefer review finding, #1375: COMMENTED
-//     is deliberately excluded — despite GitHub also requiring a body for it —
-//     because automated reviewers (Copilot, Gemini) routinely submit a
-//     COMMENTED review whose body is a generic "Pull request overview"
-//     summary, not something to act on; treating it as actionable would
-//     trigger a reinvoke on every wait_for_reviews stage, advisory included,
-//     far beyond this issue's stated scope. APPROVED is likewise excluded — a
-//     body there is typically "LGTM". DISMISSED is excluded because it is no
-//     longer an active verdict, mirroring reviewGateOutstanding's hasReviews
-//     computation. reviewGateAuthorityVerdict draws the identical line: only
-//     CHANGES_REQUESTED blocks authoritative mode's own fallback verdict.
+//   - State == "DISMISSED" (no longer an active verdict, mirroring
+//     reviewGateOutstanding's hasReviews computation) or State == "PENDING"
+//     (not yet submitted)
 //   - Body == "" (nothing to act on)
 //   - already recorded via snap.CommentProcessed(reviewBodyCommentID(r)) — the
 //     only dedup mechanism available, since no GitHub reaction endpoint exists
 //     for a top-level review body (see reviewBodyIDPrefix's doc comment, R7)
+//
+// #1375 originally excluded COMMENTED and APPROVED bodies here: automated
+// reviewers (Copilot, Gemini) routinely submit a COMMENTED review whose body
+// is a generic "Pull request overview" summary, not something to act on, and
+// an APPROVED body is typically "LGTM". That rationale is still accurate for
+// those bots, but the exclusion's blast radius grew once a reviewer
+// (Pruefer, handarbeit-pruefer, #1251) started submitting its entire
+// substantive finding set as COMMENTED bodies exclusively (raise-only
+// REQUEST_CHANGES, undconfigured threshold) — the exclusion silently dropped
+// a real reviewer's findings, letting a PR merge unread (#1045, same failure
+// shape as #1207 through a different door). #1045 removes the state filter
+// rather than narrowing it by author (an `expected_reviewers`-based
+// discriminator was proposed and withdrawn — see adrs/1045-*.md — because it
+// makes correctness depend on operators declaring every substantive
+// reviewer, silently dropping an undeclared one's findings, #1407's failure
+// shape relocated into the gate). The cost of admitting a junk COMMENTED
+// overview is paid down by dispatchReviewReinvoke's no-op cycle exemption
+// (ReviewCycleDecremented, #1045) rather than by filtering it out here:
+// approve-with-nits and a substantive COMMENTED review are both real
+// feedback that this function can no longer distinguish from a generic
+// overview without inspecting content, so it doesn't try.
+//
+// reviewGateAuthorityVerdict (the separate merge/landing-decision function)
+// intentionally still only treats CHANGES_REQUESTED as blocking — this
+// function governs reinvoke/working, that one governs merging, and #1045
+// does not change that split (review_authority governs merging, never
+// working).
 //
 // The returned gh.Comment carries DatabaseID: 0 and no ReviewThreadID — the
 // pre-existing "synthetic comment" escape hatch in acknowledgeComments/
@@ -1261,18 +1282,11 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 		if r.DatabaseID == 0 {
 			continue
 		}
-		// Only CHANGES_REQUESTED is treated as actionable (Pruefer review
-		// finding, #1375). COMMENTED is deliberately excluded even though
-		// GitHub also requires a body for it: automated reviewers (Copilot,
-		// Gemini) routinely submit a COMMENTED review whose body is a generic
-		// "Pull request overview" summary with zero inline comments — treating
-		// that as actionable feedback would fire a full reinvoke/Claude
-		// invocation on every wait_for_reviews stage (advisory included, not
-		// just authoritative), a much larger cost/behavior change than this
-		// issue's stated problem. reviewGateAuthorityVerdict draws the same
-		// line — only CHANGES_REQUESTED blocks authoritative mode's own
-		// fallback verdict.
-		if r.State != "CHANGES_REQUESTED" {
+		// Any non-DISMISSED, non-PENDING review body is treated as
+		// actionable (#1045, superseding #1375's CHANGES_REQUESTED-only
+		// filter) — see buildReviewBodyComments' doc comment above for the
+		// full rationale and the no-op cycle exemption that pays for it.
+		if r.State == "DISMISSED" || r.State == "PENDING" {
 			continue
 		}
 		if r.Body == "" {
@@ -1651,7 +1665,33 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // chain, so precheck reuses that result instead of re-deriving it — which,
 // for a base:<branch> item, would otherwise mean a second live FetchPRReviews
 // REST call for a value nothing async could have changed since the first.
+//
+// #1045: also snapshots HEAD before/after the reinvoke, mirroring
+// dispatchCIFixReinvoke's precedent (engine/ci.go), and applies
+// ReviewCycleDecremented in the after hook when no new commit landed. The
+// pre-dispatch ReviewCycleIncremented (handleReviewGate, catch_up_handlers.go)
+// always fires before this goroutine runs — that ordering is unchanged, this
+// only compensates it after the fact — so "a cycle that changed nothing was
+// not an attempt" (req 2) holds without restructuring dispatchWithCycleLimit,
+// which rebase/CI-fix cycle dispatch also depend on. Scoped to "no new
+// commit" only, matching CI-fix's existing definition exactly: a batch that
+// only resolves a review thread with no code change is still decremented
+// under this scoping (an accepted, documented trade-off — see the plan/ADR).
+//
+// This intentionally does NOT reach the #1221 "all comments were bot service
+// notices" chokepoint case: processComments's notice filter (engine/comments.go)
+// runs before wm.EnsureWorktree, so when every candidate comment is filtered
+// out before invocation, the worktree is never touched this cycle and
+// gitHeadSHA(workDir) fails identically before and after (headBefore == "" in
+// build, guarded off by `headBefore != ""` below) — there is no SHA to compare,
+// so no decrement fires. That is the correct, conservative behavior: this
+// mechanism only compensates a cycle it can positively prove made no PR-visible
+// change, never one it simply couldn't measure. #1221 remains its own,
+// separately-tracked, unfixed-by-design trade-off (docs/state-machine.md §6.2).
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, precomputed []gh.Comment) {
+	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+	var headBefore string
+
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
 		// precheck runs synchronously before WorkerEntered/goroutine dispatch,
@@ -1661,7 +1701,24 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 			return len(precomputed) > 0
 		},
 		build: func(workDir string) []gh.Comment {
+			headBefore, _ = gitHeadSHA(workDir)
 			return e.buildReviewFeedbackComments(item)
+		},
+		after: func(workDir string, err error) {
+			// Only record a no-op when the reinvoke actually completed — a
+			// failed processComments (transient network issue, rate limit,
+			// workspace lock) also leaves HEAD unchanged, but that's a
+			// dispatch that never got a chance to act, not evidence there
+			// was nothing to act on. Mirrors dispatchCIFixReinvoke's
+			// identical err != nil guard.
+			if err != nil {
+				return
+			}
+			if headAfter, hErr := gitHeadSHA(workDir); hErr == nil && headBefore != "" && headAfter == headBefore {
+				e.logf(item.Number, "review-reinvoke", "no new commit pushed (HEAD still %s) — decrementing review cycle counter (#1045)\n",
+					headAfter[:min(8, len(headAfter))])
+				e.store.Apply(itemstate.ReviewCycleDecremented{Repo: itemRepo, Number: item.Number, StageName: stage.Name})
+			}
 		},
 	})
 }

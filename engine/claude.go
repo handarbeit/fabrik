@@ -1592,6 +1592,27 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 				b.WriteString("\n```\n")
 			}
 			b.WriteString(c.Body + "\n\n")
+		} else if gh.IsBotLogin(c.Author) {
+			// #1045 requirement 4: a bot-authored comment with no inline
+			// thread context is structurally distinct from a human's
+			// comment: it's a finding to evaluate and address autonomously,
+			// not a decision awaiting the model's interpretation. This
+			// branch covers both delivery shapes the issue names — a plain
+			// PR body/issue comment with no formal review submission at all
+			// (the original report; c.ID has no reviewBodyIDPrefix) and a
+			// synthetic review-body comment from dispatchReviewReinvoke
+			// (c.ID does carry reviewBodyIDPrefix) — both render with
+			// c.Path == "" (no inline thread), and the marker's job is the
+			// same in either case: tell the skill "this is bot review
+			// content," not "this came from a formal review." Marking it
+			// here (rather than asking the model to pattern-match "@login"
+			// suffixes itself) makes the distinction a testable
+			// prompt-content assertion (AC1/AC5) — gh.IsBotLogin is the same
+			// structural helper isBotServiceNotice already uses, so this
+			// reuses an existing, if inherently incomplete
+			// (suffix/prefix/literal allow-list), detector rather than
+			// adding a new one.
+			b.WriteString(fmt.Sprintf("**@%s** (%s) [Bot Review Finding]:\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
 		} else {
 			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
 		}
