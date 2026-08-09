@@ -927,6 +927,112 @@ func TestSettleAwaitingCIScan_ResumedAtCycleLimit_StillFailing_ReEscalates(t *te
 	}
 }
 
+// ---- #1460 R2/AC1/AC2: pauseForCIFixCycleLimit resumability ----
+
+// TestCIFixCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles is the
+// AC1/AC2 regression for #1460's confirmed site #2: PR #1445/ADR-1408 fixed
+// only the comment-repost half (R4) of this site — it never applied
+// itemstate.EnginePaused, so removing fabrik:paused was (and, without this
+// fix, still would be) a no-op: CIFixCycles stayed pinned at the limit and
+// the very next catch-up pass re-paused immediately.
+//
+// Uses ciFailureSettleClient(), the same fixture
+// TestSettleAwaitingCIScan_ResumedAtCycleLimit_StillFailing_ReEscalates uses
+// for the "still failing, re-escalate without reposting" (R4) case — that
+// test's fixture never applies itemstate.EnginePaused itself (it seeds
+// CIFixCycles directly), so it remains a valid, unaffected regression test
+// for the case where the item was never actually paused through the real
+// code path. This test instead drives the pause itself through the real
+// handleMergeAndCIGates -> dispatchWithCycleLimit -> pauseForCIFixCycleLimit
+// path via runPhase1Chain, mirroring the review/rebase/enqueue-cycle-limit
+// tests.
+//
+// AC3: reverting pauseForCIFixCycleLimit's two itemstate.EnginePaused apply
+// lines turns this test red at the Step 1 PausedByEngine assertion (verified
+// by hand).
+func TestCIFixCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing.T) {
+	client := ciFailureSettleClient() // classifies ciFailure on every call — CI never resolves
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.MaxCiFixCycles = 2
+	stage := eng.cfg.Stages[0] // "Validate", WaitForCI: true
+	board := &gh.ProjectBoard{}
+	const repo = "owner/repo"
+	const number = 60
+
+	// Step 1: drive a REAL pause through the actual code path. CIFixCycles
+	// pre-set to exactly the limit; ciFailureSettleClient keeps CI classified
+	// as failing on every call, so handleMergeAndCIGates's dispatchWithCycleLimit
+	// reaches the pause branch and calls the real pauseForCIFixCycleLimit.
+	for i := 0; i < eng.cfg.MaxCiFixCycles; i++ {
+		eng.store.Apply(itemstate.CIFixCycleIncremented{Repo: repo, Number: number, StageName: "Validate"})
+	}
+	item := gh.ProjectItem{Number: number, Repo: repo, Labels: []string{"fabrik:awaiting-ci"}}
+	pctx := &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: false, advancedItems: make(map[string]bool)}
+	claimed := runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected the cycle-limit pause branch to claim the item")
+	}
+
+	client.mu.Lock()
+	pausedApplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedApplied = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedApplied {
+		t.Fatal("expected fabrik:paused to be applied by the real cycle-limit pause")
+	}
+	snap, _ := eng.store.Get(repo, number)
+	if !snap.PausedByEngine("Validate") {
+		t.Fatal("R2: pauseForCIFixCycleLimit must apply itemstate.EnginePaused so wasPaused becomes true on resume — PausedByEngine(Validate) is false after the real pause")
+	}
+
+	// Step 2 (AC1): simulate the operator removing fabrik:paused and run
+	// another pass. CI is still (perpetually, per this fixture) failing, so
+	// this same pass's own dispatch fires right after the reset — the
+	// counter reading 1 (not the still-stuck 2) is itself proof the reset
+	// landed.
+	item.Labels = []string{"fabrik:awaiting-ci"}
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: false, advancedItems: make(map[string]bool)}
+	runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+
+	snap, _ = eng.store.Get(repo, number)
+	if snap.PausedByEngine("Validate") {
+		t.Error("PausedByEngine(Validate) must be cleared after the reset pass")
+	}
+	if got := snap.CIFixCycles("Validate"); got != 1 {
+		t.Fatalf("AC1: CIFixCycles(Validate) after unpause = %d; want 1 — the counter must have reset to 0 before this pass's own dispatch incremented it, not stayed pinned at the limit", got)
+	}
+
+	// Step 3 (AC2): confirm a further cycle proceeds without re-pausing
+	// (baseline excludes Step 1's legitimate pause).
+	client.mu.Lock()
+	baseline := len(client.addLabelCalls)
+	client.mu.Unlock()
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: false, advancedItems: make(map[string]bool)}
+	claimed = runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected a second ci-fix reinvoke to claim the item")
+	}
+	snap, _ = eng.store.Get(repo, number)
+	if got := snap.CIFixCycles("Validate"); got != 2 {
+		t.Errorf("AC2: CIFixCycles(Validate) = %d; want 2 — a genuinely reset counter must permit more than one further cycle before re-hitting the limit", got)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls[baseline:] {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("AC2: fabrik:paused must not be re-added — CIFixCycles(2) has not yet reached MaxCiFixCycles(%d) again", eng.cfg.MaxCiFixCycles)
+		}
+	}
+}
+
 // TestSettleAwaitingCIScan_StaleCachedPendingCheckRuns_EndToEnd is the full
 // end-to-end regression test for #1303's confirmed root cause, reproducing the
 // exact field incident shape through the REAL boardcache.CacheImpl (not a mock
