@@ -18,6 +18,14 @@ import (
 // cycle's GitHub-adjacent traffic. Unlike idleUpgradeThreshold (consecutive
 // *idle* polls), this is a flat poll count with no idleness precondition —
 // that's what makes it reachable on a continuously busy board (R1).
+//
+// This is a poll count, not a wall-clock duration: the ≈15 minute figure
+// only holds at the default 30s --poll. An operator running with a much
+// shorter --poll gets a proportionally shorter wall-clock interval (and a
+// proportionally higher steady-state git-fetch frequency on a busy board);
+// a much longer --poll stretches it out. No behavior compensates for this —
+// the constant is poll-count-relative by design (see maybeCheckSourceStaleness),
+// matching idleUpgradeThreshold's own poll-count convention.
 const stalenessCheckPollInterval = 30
 
 // sourceStalenessWarningKey is the single fixed warnings/ key for the

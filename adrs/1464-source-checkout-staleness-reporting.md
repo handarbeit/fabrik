@@ -149,7 +149,12 @@ automating it is a follow-up once #1393 exists.
 **Negative / Trade-offs:**
 - A new `git fetch` every ~15 minutes on a source-checkout daemon, independent of idle state —
   bounded network/CPU cost, justified in the issue by the incident's own severity (a full working
-  day of silent staleness) against a fetch's low per-call cost.
+  day of silent staleness) against a fetch's low per-call cost. The ~15-minute figure is a poll
+  count (`stalenessCheckPollInterval` = 30), not a wall-clock duration — it only holds at the
+  default 30s `--poll`. An operator running a much shorter `--poll` gets a proportionally shorter
+  wall-clock interval and proportionally more frequent fetches; this is an accepted consequence of
+  reusing the same poll-count convention `idleUpgradeThreshold` already uses, not a separate
+  wall-clock ticker.
 - Two structurally similar "is the on-disk/remote code newer than what's running" checks now
   exist (`checkVersionSkew` for the local disk/process split, `checkSourceStaleness` for the
   local/origin split) with slightly different triggers and messaging — an operator needs to read
