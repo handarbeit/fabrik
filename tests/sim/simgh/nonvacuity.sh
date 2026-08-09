@@ -360,7 +360,7 @@ mutate "SeedBranch repoints an existing branch, discarding its commits" \
 
 mutate "MergePR merges a PR retargeted after the gate cleared it" \
   'TestMergePRRefusesRetargetBetweenGateAndMerge' \
-  'prs.go::s|if head != gatedHead \|\| base != gatedBase \{|if false {\n\t\t_, _ = gatedHead, gatedBase|'
+  'prs.go::s{if head != gatedHead \|\| base != gatedBase \{}{if false \{\n\t\t_, _ = gatedHead, gatedBase}'
 
 mutate "a status move stamps its card and project from two clock reads" \
   'TestOneMutationStampsOneTimestamp' \
