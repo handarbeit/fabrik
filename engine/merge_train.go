@@ -440,6 +440,25 @@ func (e *Engine) mergeTrainBatchMembers(repoKey string) (map[int]bool, bool) {
 	return v.(*mergeTrainWorkerState).batchNumbers, true
 }
 
+// mergeTrainMaxTurnsOverride computes the fabrik:extend-turns pre-grant for
+// resolveConflictWithClaude's conflict-resolution invocation, which routes through
+// InvokeForComments (InvokeClaudeForComments). That function's runClaude wall-time
+// scaling (scaledWallTime, engine/claude.go) divides by commentMaxTurns(stage), so the
+// override here must be based on the same commentMaxTurns(holdingStg) — not
+// holdingStg.MaxTurns — or the two bases disagree and scaledWallTime computes the wrong
+// multiplier (e.g. 4x instead of the intended 2x whenever comment_max_turns differs from
+// max_turns, as every stage in this repo's own config does). See #1472.
+func mergeTrainMaxTurnsOverride(holdingStg *stages.Stage, extendTurns bool) int {
+	if !extendTurns {
+		return 0
+	}
+	base := commentMaxTurns(holdingStg)
+	if base <= 0 {
+		return 0
+	}
+	return base * 2
+}
+
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
 // acquisition, repo readiness, base-branch resolution, holding-stage lookup,
 // extend-turns computation, trialParams construction, restart-time state
@@ -504,10 +523,7 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 			break
 		}
 	}
-	maxTurnsOverride := 0
-	if extendTurns && holdingStg.MaxTurns > 0 {
-		maxTurnsOverride = holdingStg.MaxTurns * 2
-	}
+	maxTurnsOverride := mergeTrainMaxTurnsOverride(holdingStg, extendTurns)
 
 	// Unique, monotonic trial-name generator (first call == base name). Every trial —
 	// main-loop re-forms and bisection sub-trials — gets a distinct name so their branches,

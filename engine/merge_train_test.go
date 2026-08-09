@@ -5688,3 +5688,51 @@ func TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember(t *testi
 		t.Fatalf("expected only member #1 to survive (member #2 ejected despite byte-identical content), got %+v", survivors)
 	}
 }
+
+// TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase covers #1472 (found by
+// handarbeit-pruefer[bot] reviewing #1206/PR #1467): the extend-turns pre-grant for
+// resolveConflictWithClaude's InvokeForComments call must be based on the same
+// commentMaxTurns(stage) that scaledWallTime (engine/claude.go) divides by when scaling
+// max_wall_time, not on stage.MaxTurns — otherwise the two bases disagree and the
+// effective wall-time multiplier silently diverges from the intended 2x.
+func TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase(t *testing.T) {
+	tests := []struct {
+		name        string
+		stage       *stages.Stage
+		extendTurns bool
+		want        int
+	}{
+		{
+			name:        "no extend-turns label -> no override",
+			stage:       &stages.Stage{MaxTurns: 100, CommentMaxTurns: 50},
+			extendTurns: false,
+			want:        0,
+		},
+		{
+			name:        "differing max_turns/comment_max_turns (this repo's own configs) -> scales off comment_max_turns, not max_turns",
+			stage:       &stages.Stage{MaxTurns: 100, CommentMaxTurns: 50},
+			extendTurns: true,
+			want:        100, // 2 * commentMaxTurns(50), NOT 2 * MaxTurns(100) = 200
+		},
+		{
+			name:        "no explicit comment_max_turns -> falls back to MaxTurns as the base",
+			stage:       &stages.Stage{MaxTurns: 100},
+			extendTurns: true,
+			want:        200, // commentMaxTurns falls back to stage.MaxTurns per commentMaxTurns()
+		},
+		{
+			name:        "unlimited stage (MaxTurns 0, no CommentMaxTurns) -> commentMaxTurns falls back to 50 default -> still scales",
+			stage:       &stages.Stage{},
+			extendTurns: true,
+			want:        100, // commentMaxTurns() defaults to 50 when both are 0
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeTrainMaxTurnsOverride(tt.stage, tt.extendTurns)
+			if got != tt.want {
+				t.Errorf("mergeTrainMaxTurnsOverride(%+v, extendTurns=%v) = %d, want %d", tt.stage, tt.extendTurns, got, tt.want)
+			}
+		})
+	}
+}
