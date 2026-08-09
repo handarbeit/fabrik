@@ -59,6 +59,63 @@ func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 	}
 }
 
+// TestAttemptMergeOnValidate_LiveBlockedByEdge_DefersMerge is the ADR-1419
+// regression guard for the merge-race this issue's dependency guard closes:
+// a Review/Validate mid-flight spawn can create a brand-new blockedBy edge
+// within the very dispatch that also emits FABRIK_STAGE_COMPLETE, before
+// fabrik:blocked has ever been applied to the passed-in item snapshot. The
+// live re-fetch inside attemptMergeOnValidate must catch that fresh edge and
+// refuse to merge — never calling EnablePullRequestAutoMerge or MergePR —
+// exactly as if the item had already been fabrik:blocked before this call.
+func TestAttemptMergeOnValidate_LiveBlockedByEdge_DefersMerge(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Simulates the blockedBy edge a mid-flight spawn just created
+			// this dispatch — absent from the stale snapshot passed into
+			// attemptMergeOnValidate, present on live re-read.
+			item.BlockedBy = []gh.Dependency{{Number: 999, State: "OPEN"}}
+			return nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{ID: "I_parent", Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Error("expected autoMergeEnabled=false when a live-read blockedBy edge is open")
+	}
+	if deferred {
+		t.Error("expected deferred=false — this is a dependency block, not a review-thread defer")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called, got %d call(s)", len(client.mergePRCalls))
+	}
+	var autoMergeLabeled, blockedLabeled bool
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:auto-merge-enabled":
+			autoMergeLabeled = true
+		case "fabrik:blocked":
+			blockedLabeled = true
+		}
+	}
+	if autoMergeLabeled {
+		t.Error("fabrik:auto-merge-enabled must not be applied")
+	}
+	if !blockedLabeled {
+		t.Error("expected fabrik:blocked to be applied via the live dependency re-check")
+	}
+}
+
 // TestAttemptMergeOnValidate_UnresolvedCurrentHeadThread_Defers verifies
 // guard 1 (#1207): a yolo item with an unresolved review thread on its
 // current head does not advance out of Validate or have auto-merge enabled

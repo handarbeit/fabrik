@@ -194,14 +194,23 @@ and should recognize.
   `fabrik:paused` + `fabrik:awaiting-input` and a "slice budget exceeded"
   comment. Cleared only when the user manually removes `fabrik:paused`
   (signaling they've intervened).
-- **`fabrik:sub-issue`** — Applied to a child issue created by Plan's
-  `FABRIK_SPAWN_CHILD_*` decomposition mechanism. Purely informational —
-  carries no gating semantics of its own.
+- **`fabrik:sub-issue`** — Applied to a child issue created by the
+  `FABRIK_SPAWN_CHILD_*` spawn mechanism — Plan's upfront decomposition,
+  or a mid-flight blocker declared by Review/Validate (ADR-1419); both
+  origins funnel through the same `spawnChildren`, so this label means
+  the same thing regardless of which stage spawned the child. Purely
+  informational — carries no gating semantics of its own.
 - **`fabrik:children-spawned`** — Applied to the *parent* issue once all
-  of its declared sub-issues have been created, board-placed, and linked
-  as `blockedBy` dependencies. Acts as an idempotency guard — while
-  present, the pre-Implement spawn step is a no-op. Remove manually (and
-  close any orphaned children) to force a fresh spawn.
+  of one batch's declared sub-issues have been created, board-placed
+  (or checked against this instance's own `repo:`/`project:` scope —
+  see below), assigned, and linked as `blockedBy` dependencies. For
+  Plan-declared spawns, this is also the idempotency guard consulted by
+  the pre-Implement spawn step — while present, that step is a no-op.
+  Remove manually (and close any orphaned children) to force a fresh
+  Plan-driven spawn. A mid-flight spawn from Review/Validate applies
+  this same label on success but needs no equivalent guard of its own —
+  each dispatch's output is fresh and parsed exactly once, never
+  replayed (ADR-1419).
 - **`fabrik:claude-limit`** — Set when a Claude invocation exits because
   the account's usage limit was hit (detected structurally from the CLI's
   own result payload, never from output text). The stage attempt still

@@ -911,3 +911,52 @@ func TestCheckDependencies_FirstTimeBlock_NoLiveReadAttempted(t *testing.T) {
 		t.Errorf("expected no live re-read on first-time block, got %d calls", fetchCalls)
 	}
 }
+
+// TestCheckDependencies_StaleEmptyCache_ReVerifiesOnResume is requirement 6's
+// regression guard (#1419): a fabrik:blocked item whose cached item.BlockedBy
+// is empty must still get the live re-read on resume, not an automatic
+// unblock. This is exactly the shape a bypassed engine spawn produces (a
+// stage agent calling `gh issue create` directly instead of emitting
+// FABRIK_SPAWN_CHILD never creates a blockedBy edge, so the cached snapshot
+// has always shown zero blockers) combined with fabrik:blocked present from
+// some other source — the len(item.BlockedBy)>0 condition that used to gate
+// this live read would skip it entirely and trust the (wrong) empty list,
+// silently clearing the label. Widening the gate to fire on alreadyBlocked
+// alone closes this: the live read discovers the real open dependency and the
+// item stays blocked.
+func TestCheckDependencies_StaleEmptyCache_ReVerifiesOnResume(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchCalls++
+			// The live re-read discovers a real, currently-open dependency that
+			// the stale-empty cached snapshot never carried.
+			item.BlockedBy = []gh.Dependency{
+				{Number: 965, State: "OPEN", Repo: "owner/repo"},
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 102,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+		// Stale cached edge list: empty, even though fabrik:blocked is present.
+		BlockedBy: nil,
+	}
+	stage := &stages.Stage{Name: "Review"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if !blocked {
+		t.Error("expected blocked: live re-read must discover the real open dependency the stale-empty cache missed")
+	}
+	if fetchCalls != 1 {
+		t.Errorf("expected exactly 1 live re-read on resume from fabrik:blocked with an empty cached list, got %d", fetchCalls)
+	}
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected fabrik:blocked NOT to be removed, got removeLabelCalls=%v", client.removeLabelCalls)
+	}
+}

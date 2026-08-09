@@ -143,12 +143,27 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	// BlockedBy came from a fresh deep-fetch (first population is always a
 	// cache miss), so only the recheck path needs the live read.
 	//
+	// Fires on alreadyBlocked alone — NOT additionally gated on a non-empty
+	// cached item.BlockedBy. A stale-EMPTY cache is exactly the shape a
+	// bypassed engine spawn produces (#1419): a stage agent calls `gh issue
+	// create` directly instead of emitting FABRIK_SPAWN_CHILD, so no
+	// blockedBy edge is ever created and the cached snapshot has always shown
+	// zero blockers — yet fabrik:blocked may still be present from a stale
+	// label state, or a genuine edge could be added out-of-band after the
+	// label was applied. The len(...)>0 guard used to skip the live read
+	// entirely in that shape, trusting the (wrong) empty list and never
+	// discovering a real edge. A parent resuming from fabrik:blocked must
+	// re-verify its dependency set is actually satisfied, not just that the
+	// cached count says so (requirement 6) — this is the load-bearing check
+	// that would have caught the observed regression (repo-b#102 resumed and
+	// reported green on a tree still pinned to its unmet dependency).
+	//
 	// This needs no new cooldown: an already-blocked item is only re-admitted
 	// to checkDependencies once its "dep-blocked" cooldown expires
 	// (engine/item.go's itemMayNeedWork), which already throttles how often
 	// this live read fires.
 	blockedByList := item.BlockedBy
-	if alreadyBlocked && len(item.BlockedBy) > 0 {
+	if alreadyBlocked {
 		fresh := item
 		if err := e.client.FetchItemDetails(&fresh); err != nil {
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)
