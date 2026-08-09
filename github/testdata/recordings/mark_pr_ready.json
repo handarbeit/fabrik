@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "operation": "mark_pr_ready",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-08-09T18:55:00Z",
+    "source_repo": "handarbeit/fabrik-test-alpha#4382 (disposable sandbox PR)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "markPullRequestReadyForReview": {
+        "pullRequest": {
+          "id": "PR_kwDOSmuv9s78tRDQ"
+        }
+      }
+    }
+  }
+}
