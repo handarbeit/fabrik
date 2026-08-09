@@ -418,8 +418,19 @@ func TestConcurrentSeedRepoDoesNotClobber(t *testing.T) {
 	start.Done()
 	done.Wait()
 
-	if err := s.Err(); err == nil {
+	// The error must be the refusal itself, not a git failure. That is the
+	// assertion that distinguishes a held lock from an unheld one: with the
+	// sequence serialised, the losers are turned away before they run git at
+	// all, so no caller can ever observe a git error. Without it, they all
+	// clear the check together and collide inside initBare against one
+	// directory — asserting merely that some error occurred would be satisfied
+	// by that collision and would prove nothing.
+	err := s.Err()
+	if err == nil {
 		t.Fatalf("%d concurrent SeedRepo calls for one key all succeeded; want every one after the first to be refused", callers)
+	}
+	if !strings.Contains(err.Error(), "already seeded") {
+		t.Fatalf("concurrent SeedRepo failed with %v; want the \"already seeded\" refusal — a git error here means the callers raced inside initBare instead of being serialised", err)
 	}
 
 	// Exactly one repo, and it must be usable — a clobbered state would leave
