@@ -80,19 +80,23 @@ func (r *repoState) numberTaken(num int) bool {
 	return issueExists || prExists
 }
 
-// allocNumber reserves the next free number in the repo's shared sequence.
+// allocNumber takes the next free number from the repo's shared sequence.
+//
+// INVARIANT: every number >= nextNumber is free. reserveNumber maintains it for
+// explicitly-seeded numbers, and this function for auto-assigned ones, so no
+// collision check is needed here. Guarding anyway would be dead code — it could
+// not fire, so the non-vacuity sweep could not prove it does anything.
+//
 // Caller must hold mu.
 func (r *repoState) allocNumber() int {
-	for r.numberTaken(r.nextNumber) {
-		r.nextNumber++
-	}
 	num := r.nextNumber
 	r.nextNumber++
 	return num
 }
 
-// reserveNumber records an explicitly-seeded number so the shared sequence
-// never hands it out again. Caller must hold mu.
+// reserveNumber records an explicitly-seeded number so the shared sequence never
+// hands it out again. This is what keeps allocNumber's invariant true across
+// seeds that pick their own numbers. Caller must hold mu.
 func (r *repoState) reserveNumber(num int) {
 	if num >= r.nextNumber {
 		r.nextNumber = num + 1

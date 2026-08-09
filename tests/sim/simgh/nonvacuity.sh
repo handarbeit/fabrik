@@ -200,9 +200,9 @@ mutate "issue and PR numbers come from independent sequences" \
   'seed.go::s{^\t\tnextNumber:        1,$}{\t\tnextNumber:        1,\n\t\tnextPRNumber:      1,}m' \
   'prs.go::s{^\tnum := r\.allocNumber\(\)$}{\tnum := r.nextPRNumber\n\tr.nextPRNumber++}m'
 
-mutate "auto-assigned numbers collide with explicitly seeded ones" \
+mutate "an explicitly seeded number is not reserved against auto-assignment" \
   'TestAutoAssignedNumberSkipsSeededHoles' \
-  'model.go::s{for r\.numberTaken\(r\.nextNumber\) \{}{for false \{}'
+  'model.go::s{^\tif num >= r\.nextNumber \{\n\t\tr\.nextNumber = num \+ 1\n\t\}$}{\t_ = num}m'
 
 mutate "seeding does not enforce the shared number space" \
   'TestSeedRejectsNumberHeldByOtherKind' \
