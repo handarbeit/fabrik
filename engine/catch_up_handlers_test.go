@@ -16,11 +16,15 @@ import (
 // TestCatchUpPhase1HandlersOrder asserts the handler precedence order by name.
 // A future reorder of catchUpPhase1Handlers is a test failure, not a silent
 // behavioral change — this directly implements the ADR-056 D3 "ordering as data"
-// invariant. ADR-028 requires merge gate before CI gate; both are inside
-// handleMergeAndCIGates (position 3), which follows handleAutoMergeConvergence
-// (position 2) so that auto-merge items bypass settlePRMergeState entirely.
+// invariant. engineUnpause (position 0, #1460 R2) must run first and
+// unconditionally so a just-reset cycle counter is what every other handler in
+// the same pass evaluates. ADR-028 requires merge gate before CI gate; both are
+// inside handleMergeAndCIGates (position 4), which follows
+// handleAutoMergeConvergence (position 3) so that auto-merge items bypass
+// settlePRMergeState entirely.
 func TestCatchUpPhase1HandlersOrder(t *testing.T) {
 	want := []string{
+		"engineUnpause",
 		"dependencies",
 		"reviewGate",
 		"autoMergeConvergence",
@@ -1505,5 +1509,99 @@ func TestDispatchRebaseReinvoke_BotNoticeInReviewThread_ExcludedFromInvocation(t
 	}
 	if seenComments[0].ID != "rebase-synthetic" {
 		t.Errorf("expected synthetic rebase comment to survive, got %q", seenComments[0].ID)
+	}
+}
+
+// ---- handleEngineUnpause tests (#1460 R2) ----
+
+// runPhase1Chain drives pctx through the full ordered catchUpPhase1Handlers
+// list, mirroring the exact loop poll.go's main catch-up loop and
+// settleAwaitingCIScan both run (ci_settle.go). AC1/AC2 tests for the four
+// confirmed cycle-limit sites must go through this — not call
+// clearFailedStage directly — since the defect (and the fix) lives in
+// whether the real chain reaches and resets the stuck counter, not in
+// clearFailedStage's own correctness (already covered by
+// TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage).
+func runPhase1Chain(eng *Engine, pctx *phase1Ctx) (claimed bool) {
+	for _, h := range catchUpPhase1Handlers {
+		if h.run(eng, pctx) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse verifies the
+// core reset behavior: when the store carries a stale EnginePaused record for
+// the stage (the item reached this handler chain — meaning fabrik:paused is
+// currently absent per poll.go's/ci_settle.go's admission filters — while
+// still marked paused-by-engine from before), handleEngineUnpause fires
+// clearFailedStage (zeroing ReviewCycles/CIFixCycles/RebaseCycles/
+// EnqueueCycles and clearing PausedByEngine) and always returns false so the
+// rest of the chain still runs this same pass.
+func TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}}
+	eng := testEngineWithStages(t, client, stgs)
+
+	item := gh.ProjectItem{Number: 20, Repo: "owner/repo", Labels: []string{"stage:Implement:complete"}}
+	stage := stgs[0]
+	pctx := &phase1Ctx{ctx: context.Background(), board: &gh.ProjectBoard{}, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+
+	eng.store.Apply(itemstate.EnginePaused{Repo: "owner/repo", Number: 20, StageName: "Implement"})
+	for i := 0; i < 3; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: 20, StageName: "Implement"})
+		eng.store.Apply(itemstate.CIFixCycleIncremented{Repo: "owner/repo", Number: 20, StageName: "Implement"})
+		eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 20, StageName: "Implement"})
+		eng.store.Apply(itemstate.EnqueueCycleIncremented{Repo: "owner/repo", Number: 20, StageName: "Implement"})
+	}
+
+	got := eng.handleEngineUnpause(pctx)
+
+	if got {
+		t.Error("handleEngineUnpause must always return false — it resets state but never claims the item")
+	}
+	snap, _ := eng.store.Get("owner/repo", 20)
+	if snap.PausedByEngine("Implement") {
+		t.Error("PausedByEngine(Implement) must be cleared after handleEngineUnpause")
+	}
+	if got := snap.ReviewCycles("Implement"); got != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0", got)
+	}
+	if got := snap.CIFixCycles("Implement"); got != 0 {
+		t.Errorf("CIFixCycles(Implement) = %d; want 0", got)
+	}
+	if got := snap.RebaseCycles("Implement"); got != 0 {
+		t.Errorf("RebaseCycles(Implement) = %d; want 0", got)
+	}
+	if got := snap.EnqueueCycles("Implement"); got != 0 {
+		t.Errorf("EnqueueCycles(Implement) = %d; want 0", got)
+	}
+}
+
+// TestHandleEngineUnpause_NotPaused_NoOp verifies the common steady-state
+// case (no store entry, or PausedByEngine false) is a true no-op: no store
+// mutation, no clearFailedStage side effects, always returns false.
+func TestHandleEngineUnpause_NotPaused_NoOp(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}}
+	eng := testEngineWithStages(t, client, stgs)
+
+	item := gh.ProjectItem{Number: 21, Repo: "owner/repo", Labels: []string{"stage:Implement:complete"}}
+	stage := stgs[0]
+	pctx := &phase1Ctx{ctx: context.Background(), board: &gh.ProjectBoard{}, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+
+	// No store entry at all for issue 21 — snap lookup errors, PausedByEngine
+	// defaults false either way.
+	got := eng.handleEngineUnpause(pctx)
+	if got {
+		t.Error("handleEngineUnpause must return false when the item was never engine-paused")
+	}
+
+	client.mu.Lock()
+	labelCalls := len(client.addLabelCalls) + len(client.removeLabelCalls)
+	client.mu.Unlock()
+	if labelCalls != 0 {
+		t.Errorf("expected no label mutations for a never-paused item, got %d", labelCalls)
 	}
 }
