@@ -405,6 +405,19 @@ func (s *Sim) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, e
 
 // worseVerdict returns the more severe of two verdicts, ordering
 // failure > pending > success.
+// worseVerdict returns the more blocking of two verdicts.
+//
+// Both arguments must already be normalised to exactly "success", "pending", or
+// "failure" — checkVerdict and statusVerdict are the only producers, and both
+// map onto those three literals. That invariant is what makes the tie-break
+// safe: equal rank means the two strings are *identical*, so returning either
+// is the same answer, and the caller's map-iteration order cannot affect the
+// result. Do not read this as "the first argument wins on a tie" — it preserves
+// the rank, not the identity of a particular source.
+//
+// The invariant also matters because an unrecognised string ranks 0 (a missing
+// map key), i.e. it would be silently treated as success. Feeding a raw check
+// conclusion in here rather than a normalised verdict would mask a red check.
 func worseVerdict(a, b string) string {
 	rank := map[string]int{"success": 0, "pending": 1, "failure": 2}
 	if rank[a] >= rank[b] {

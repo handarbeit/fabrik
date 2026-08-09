@@ -521,3 +521,81 @@ func TestAssigneesAreObservableFromBothPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateCommentBumpsParentIssueUpdatedAt pins that editing a comment marks
+// the parent issue as changed, the way GitHub's updated_at does.
+//
+// The engine takes this path for real: it rewrites an existing stage comment
+// rather than posting a new one (engine/comments.go, engine/dependencies.go).
+// An unbumped timestamp would make that edit invisible to any read that watches
+// updatedAt to decide something changed.
+func TestUpdateCommentBumpsParentIssueUpdatedAt(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+
+	commentID, err := s.AddComment("acme", "widgets", 7, "original")
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	before := firstItemFull(t, s).UpdatedAt
+
+	// Advance first, or a bumped timestamp is indistinguishable from a stale one.
+	clk.Advance(time.Hour)
+
+	if err := s.UpdateComment("acme", "widgets", commentID, "edited"); err != nil {
+		t.Fatalf("UpdateComment: %v", err)
+	}
+
+	item := firstItemFull(t, s)
+	if !item.UpdatedAt.After(before) {
+		t.Fatalf("issue UpdatedAt = %v, want later than %v after a comment edit", item.UpdatedAt, before)
+	}
+	// The edit itself must still be observable — a bump alone proves nothing.
+	if len(item.Comments) != 1 || item.Comments[0].Body != "edited" {
+		t.Fatalf("comment body = %+v, want the edited text", item.Comments)
+	}
+}
+
+// TestFetchItemDetailsPrefersItemIDAcrossProjects pins that the item ID decides
+// which card is backfilled when one issue sits on two boards.
+//
+// This is a supported arrangement, not a pathological one: Fabrik's own guidance
+// puts a report on a public triage board and the engine work on a private board
+// at the same time. Item IDs embed the project, content node IDs do not — so
+// matching either ID interchangeably let Go's randomised map order pick a board,
+// and FetchItemDetails could backfill the other board's Status.
+func TestFetchItemDetailsPrefersItemIDAcrossProjects(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo(repoName).
+		SeedProject("acme", 2, "Engineering", []string{"Backlog", "Implement", "Review", "Done"}).
+		SeedProject("acme", 3, "Triage", []string{"Backlog", "Implement", "Review", "Done"}).
+		SeedIssue(repoName, IssueSeed{Number: 7, Title: "on two boards", Status: "Implement"}).
+		SeedProjectItem("acme", 3, repoName, 7, false, "Review")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// Ask for the Triage board's card specifically, by its item ID.
+	triage, err := s.FetchProjectBoard("acme", "widgets", 3, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(triage.Items) != 1 {
+		t.Fatalf("triage board has %d items, want 1", len(triage.Items))
+	}
+	wantItemID := triage.Items[0].ItemID
+
+	// Repeat: the bug this pins is a randomised map order, so a single pass can
+	// pick the right board by luck.
+	for i := 0; i < 20; i++ {
+		probe := &gh.ProjectItem{ID: triage.Items[0].ID, ItemID: wantItemID}
+		if err := s.FetchItemDetails(probe); err != nil {
+			t.Fatalf("FetchItemDetails: %v", err)
+		}
+		if probe.ItemID != wantItemID {
+			t.Fatalf("run %d: ItemID = %q, want the Triage card %q", i, probe.ItemID, wantItemID)
+		}
+		if probe.Status != "Review" {
+			t.Fatalf("run %d: Status = %q, want Review (the Triage column), not the Engineering board's", i, probe.Status)
+		}
+	}
+}

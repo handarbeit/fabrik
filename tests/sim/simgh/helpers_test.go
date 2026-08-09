@@ -98,3 +98,17 @@ type itemProjection struct {
 	status    string
 	projectID string
 }
+
+// firstItemFull is firstItem's counterpart for tests that need the whole
+// projected item rather than just its identifiers.
+func firstItemFull(t *testing.T, s *Sim) *gh.ProjectItem {
+	t.Helper()
+	board, err := s.FetchProjectBoard("acme", "widgets", 2, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("board has %d items, want 1", len(board.Items))
+	}
+	return &board.Items[0]
+}

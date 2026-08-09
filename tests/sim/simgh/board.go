@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -279,31 +280,51 @@ func (s *Sim) FetchItemDetails(item *gh.ProjectItem) error {
 	}
 
 	s.mu.Lock()
-	var found itemRef
+	// Search projects in a stable order. s.projects is a map, so Go randomizes
+	// iteration; without this the search below could return a different card
+	// between two runs on identical state.
+	projectKeys := make([]string, 0, len(s.projects))
+	for k := range s.projects {
+		projectKeys = append(projectKeys, k)
+	}
+	sort.Strings(projectKeys)
+
+	search := func(pred func(*itemState) bool) (*projectState, itemRef) {
+		for _, k := range projectKeys {
+			p := s.projects[k]
+			for _, id := range p.itemOrder {
+				it, ok := p.items[id]
+				if !ok || !pred(it) {
+					continue
+				}
+				return p, itemRef{
+					itemID:    it.itemID,
+					ownerRepo: it.ownerRepo,
+					number:    it.number,
+					isPR:      it.isPR,
+					status:    it.status,
+					updatedAt: it.updatedAt,
+				}
+			}
+		}
+		return nil, itemRef{}
+	}
+
+	// The item ID identifies exactly one card: it embeds the project (see
+	// itemNodeID in model.go). A content node ID does not — the same issue can
+	// sit on two boards at once, which Fabrik explicitly supports (a private
+	// engine board alongside a public triage board). So when the caller has an
+	// item ID, it decides; matching either ID interchangeably would let the
+	// content ID pick the wrong board and backfill its Status.
 	var project *projectState
-	for _, p := range s.projects {
-		for _, id := range p.itemOrder {
-			it, ok := p.items[id]
-			if !ok {
-				continue
-			}
-			if it.contentNodeID() != item.ID && it.itemID != item.ItemID {
-				continue
-			}
-			project = p
-			found = itemRef{
-				itemID:    it.itemID,
-				ownerRepo: it.ownerRepo,
-				number:    it.number,
-				isPR:      it.isPR,
-				status:    it.status,
-				updatedAt: it.updatedAt,
-			}
-			break
-		}
-		if project != nil {
-			break
-		}
+	var found itemRef
+	if item.ItemID != "" {
+		project, found = search(func(it *itemState) bool { return it.itemID == item.ItemID })
+	}
+	if project == nil && item.ID != "" {
+		// Fall back to the content ID for the webhook case in the doc comment
+		// above, where the engine has a node ID and nothing else.
+		project, found = search(func(it *itemState) bool { return it.contentNodeID() == item.ID })
 	}
 	s.mu.Unlock()
 

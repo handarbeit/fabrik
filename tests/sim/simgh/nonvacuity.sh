@@ -334,6 +334,14 @@ mutate "SeedIssue drops its assignees" \
   'TestAssigneesAreObservableFromBothPaths' \
   'seed.go::s{\t\tassignees:      cloneStrings\(seed\.Assignees\),\n}{}'
 
+mutate "UpdateComment does not bump the parent issue's updatedAt" \
+  'TestUpdateCommentBumpsParentIssueUpdatedAt' \
+  'comments.go::s{\tif iss != nil \{\n\t\tiss\.updatedAt = s\.now\(\)\n\t\}}{\tif iss != nil \{\n\t\t_ = iss\n\t\}}'
+
+mutate "FetchItemDetails matches either ID, so the board is picked by map order" \
+  'TestFetchItemDetailsPrefersItemIDAcrossProjects' \
+  'board.go::s{return it\.itemID == item\.ItemID \}\)}{return it.contentNodeID() == item.ID || it.itemID == item.ItemID })}'
+
 
 echo
 status=0
