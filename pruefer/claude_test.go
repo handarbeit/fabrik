@@ -438,6 +438,35 @@ func TestBuildReviewPrompt_OverCap_BoundedWithOmissionStatement(t *testing.T) {
 	}
 }
 
+// TestBuildReviewPrompt_ThreadsTruncated_NotesFetchLayerOmission covers the
+// #1497 review finding: when the fetch layer itself couldn't return every
+// thread on the PR (ReviewThreadsTruncated), the prompt must say so —
+// distinct from selectPromptThreads' own prompt-level cap note — so a PR
+// that has grown past FetchPRReviewThreads' page size doesn't look complete.
+func TestBuildReviewPrompt_ThreadsTruncated_NotesFetchLayerOmission(t *testing.T) {
+	threads := []gh.PRReviewThread{
+		{Path: "a.go", Line: 1, Comments: []gh.PRReviewThreadComment{{Author: "x", Body: "finding"}}},
+	}
+	prompt := buildReviewPrompt(ReviewRequest{ReviewThreads: threads, ReviewThreadsTruncated: true})
+
+	if !strings.Contains(prompt, "more review threads than could be fetched") {
+		t.Errorf("expected a fetch-layer truncation note, prompt = %s", prompt)
+	}
+}
+
+// TestBuildReviewPrompt_ThreadsNotTruncated_NoFetchLayerNote is the negative
+// case: ReviewThreadsTruncated false must not produce the fetch-layer note.
+func TestBuildReviewPrompt_ThreadsNotTruncated_NoFetchLayerNote(t *testing.T) {
+	threads := []gh.PRReviewThread{
+		{Path: "a.go", Line: 1, Comments: []gh.PRReviewThreadComment{{Author: "x", Body: "finding"}}},
+	}
+	prompt := buildReviewPrompt(ReviewRequest{ReviewThreads: threads, ReviewThreadsTruncated: false})
+
+	if strings.Contains(prompt, "more review threads than could be fetched") {
+		t.Errorf("expected no fetch-layer truncation note, prompt = %s", prompt)
+	}
+}
+
 // TestSelectPromptThreads_PrioritizesUnresolvedThenNonOutdated pins the R4
 // ordering policy: under the cap, resolved threads are dropped before
 // unresolved ones, and outdated threads before current ones within a group.

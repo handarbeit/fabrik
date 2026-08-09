@@ -72,6 +72,13 @@ type ReviewRequest struct {
 	// (non-fatal degrade) or the PR genuinely has no threads yet —
 	// buildReviewPrompt renders no thread-context section in either case.
 	ReviewThreads []gh.PRReviewThread
+	// ReviewThreadsTruncated is true when the PR has more review threads
+	// than FetchPRReviewThreads' own fetch-layer page size returned (distinct
+	// from selectPromptThreads' smaller prompt-level cap, and from any
+	// individual thread's CommentsTruncated). Always false on a degraded
+	// (nil ReviewThreads) fetch. buildReviewPrompt notes this so a PR that
+	// has grown past the fetch ceiling doesn't silently look complete.
+	ReviewThreadsTruncated bool
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -173,7 +180,7 @@ func truncateCommentBody(body string) string {
 // `mode: replace` on the guidance half must not be able to silently drop
 // this context and reintroduce the duplicate findings this exists to
 // eliminate (see adrs/1497-pruefer-prior-review-thread-context.md).
-func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread) {
+func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, threadsTruncated bool) {
 	if len(threads) == 0 {
 		return
 	}
@@ -204,6 +211,9 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread) {
 	if omitted > 0 {
 		fmt.Fprintf(b, "\n(%d additional thread(s) omitted to keep this prompt bounded; unresolved and current threads were prioritized over resolved and outdated ones.)\n", omitted)
 	}
+	if threadsTruncated {
+		b.WriteString("\n(This PR has more review threads than could be fetched; the newest threads — disproportionately likely to be open — may be missing from the list above entirely.)\n")
+	}
 	b.WriteString("\n")
 
 	b.WriteString("Policy for the threads above: do not raise a finding that restates an [OPEN] thread — it is already tracked. Do not restate a [RESOLVED] thread unless the fix (or the current diff) introduces a new defect, in which case say so explicitly and reference the prior thread. Where a thread was answered with a reasoned reply, engage with that reasoning or drop the point — do not simply repeat the original observation.\n\n")
@@ -222,7 +232,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 		b.WriteString(req.Body)
 		b.WriteString("\n\n")
 	}
-	renderReviewThreads(&b, req.ReviewThreads)
+	renderReviewThreads(&b, req.ReviewThreads, req.ReviewThreadsTruncated)
 	b.WriteString("Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. On a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\n")
 	b.WriteString("You do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\n")
 	b.WriteString("Output has two parts, in this exact order:\n\n")

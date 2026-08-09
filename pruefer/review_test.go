@@ -16,16 +16,17 @@ import (
 type fakeReviewer struct {
 	*fakeCommenter
 
-	diff        string
-	diffErr     error
-	filesResult []string
-	filesErr    error
-	reviews     []gh.PRReview
-	reviewsErr  error
-	threads     []gh.PRReviewThread
-	threadsErr  error
-	submitErr   error
-	token       string
+	diff             string
+	diffErr          error
+	filesResult      []string
+	filesErr         error
+	reviews          []gh.PRReview
+	reviewsErr       error
+	threads          []gh.PRReviewThread
+	threadsTruncated bool
+	threadsErr       error
+	submitErr        error
+	token            string
 
 	mu          sync.Mutex
 	submitCalls []submitCall
@@ -75,11 +76,11 @@ func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PR
 	return f.reviews, nil
 }
 
-func (f *fakeReviewer) FetchPRReviewThreads(owner, repo string, prNumber int) ([]gh.PRReviewThread, error) {
+func (f *fakeReviewer) FetchPRReviewThreads(owner, repo string, prNumber int) ([]gh.PRReviewThread, bool, error) {
 	if f.threadsErr != nil {
-		return nil, f.threadsErr
+		return nil, false, f.threadsErr
 	}
-	return f.threads, nil
+	return f.threads, f.threadsTruncated, nil
 }
 
 func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error) {
@@ -631,6 +632,34 @@ func TestReviewPR_FetchedThreadsReachReviewRequest(t *testing.T) {
 	}
 }
 
+// TestReviewPR_ThreadsTruncatedReachesReviewRequest pins the #1497 review
+// finding's fix: FetchPRReviewThreads' fetch-layer truncation signal must
+// reach ReviewRequest.ReviewThreadsTruncated unchanged, alongside the
+// threads themselves, so buildReviewPrompt can note the incomplete fetch.
+func TestReviewPR_ThreadsTruncatedReachesReviewRequest(t *testing.T) {
+	client := newFakeReviewer()
+	client.threads = []gh.PRReviewThread{
+		{ID: "t1", Path: "a.go", Line: 10, Comments: []gh.PRReviewThreadComment{{Author: "reviewer", Body: "prior finding"}}},
+	}
+	client.threadsTruncated = true
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if !calls[0].ReviewThreadsTruncated {
+		t.Error("ReviewRequest.ReviewThreadsTruncated = false, want true")
+	}
+}
+
 // TestReviewPR_ThreadFetchError_DegradesWithoutFailingReview pins the
 // non-fatal degrade decision: a FetchPRReviewThreads error must not fail the
 // review — it proceeds with nil threads, mirroring today's cold-read
@@ -638,6 +667,7 @@ func TestReviewPR_FetchedThreadsReachReviewRequest(t *testing.T) {
 func TestReviewPR_ThreadFetchError_DegradesWithoutFailingReview(t *testing.T) {
 	client := newFakeReviewer()
 	client.threadsErr = fmt.Errorf("graphql timeout")
+	client.threadsTruncated = true // must not leak through despite the error
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
 
@@ -656,6 +686,9 @@ func TestReviewPR_ThreadFetchError_DegradesWithoutFailingReview(t *testing.T) {
 	}
 	if calls[0].ReviewThreads != nil {
 		t.Errorf("ReviewRequest.ReviewThreads = %+v, want nil on fetch error", calls[0].ReviewThreads)
+	}
+	if calls[0].ReviewThreadsTruncated {
+		t.Error("ReviewRequest.ReviewThreadsTruncated = true, want false on fetch error (must not leak the fake's stale value)")
 	}
 }
 

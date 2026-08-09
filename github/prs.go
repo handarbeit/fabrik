@@ -211,12 +211,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
 //
 // Threads are capped at 50 (GraphQL's reviewThreads(first: 50), matching the
 // existing fetchItemDetailsQuery fragment's ceiling) and comments per thread
-// at 20; neither is paginated. A PR with more threads than that silently
-// loses the excess at this layer — out of scope for the caller's own
-// prompt-level cap (a much smaller number). Per-thread comment truncation is
-// not silent, however: PRReviewThread.CommentsTruncated is set from the
-// comments connection's totalCount so a caller rendering thread content can
-// say so rather than presenting a partial history as complete.
+// at 20; neither is paginated. A PR with more threads than that loses the
+// excess at this layer — out of scope for the caller's own prompt-level cap
+// (a much smaller number) — but not silently: the second return value,
+// threadsTruncated, is set from the reviewThreads connection's totalCount so
+// a caller can say so rather than presenting a partial thread list as
+// complete, mirroring PRReviewThread.CommentsTruncated's per-thread signal
+// for the same "tell the reviewer/log rather than silently drop" pattern.
+// Nodes arrive in the connection's default (creation) order with no orderBy
+// argument to bias toward unresolved threads, so on a truncated fetch the
+// dropped threads are the newest — disproportionately likely to be OPEN.
 //
 // comments(first: 20) has no orderBy argument — GitHub's schema doesn't
 // expose one for PullRequestReviewThread.comments (confirmed via
@@ -229,12 +233,13 @@ query($owner: String!, $repo: String!, $number: Int!) {
 //
 // Returns an error (not an empty slice) when the query resolves with no
 // pullRequest node, matching FetchPRReviewDecision's convention.
-func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, error) {
+func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, bool, error) {
 	query := `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       reviewThreads(first: 50) {
+        totalCount
         nodes {
           id
           isResolved
@@ -265,7 +270,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
 			Repository struct {
 				PullRequest *struct {
 					ReviewThreads struct {
-						Nodes []struct {
+						TotalCount int `json:"totalCount"`
+						Nodes      []struct {
 							ID           string `json:"id"`
 							IsResolved   bool   `json:"isResolved"`
 							IsOutdated   bool   `json:"isOutdated"`
@@ -289,10 +295,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
 		} `json:"data"`
 	}
 	if err := c.graphqlRequest(query, vars, &result); err != nil {
-		return nil, fmt.Errorf("fetching PR #%d review threads: %w", prNumber, err)
+		return nil, false, fmt.Errorf("fetching PR #%d review threads: %w", prNumber, err)
 	}
 	if result.Data.Repository.PullRequest == nil {
-		return nil, fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+		return nil, false, fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
 	}
 
 	var threads []PRReviewThread
@@ -323,7 +329,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
 		}
 		threads = append(threads, t)
 	}
-	return threads, nil
+	rt := result.Data.Repository.PullRequest.ReviewThreads
+	threadsTruncated := rt.TotalCount > len(rt.Nodes)
+	return threads, threadsTruncated, nil
 }
 
 // FetchPRReviewRequests returns the outstanding requested reviewers for a pull

@@ -561,9 +561,12 @@ func TestFetchPRReviewThreads_NormalFetch(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("test-token", srv.URL)
-	threads, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	threads, truncated, err := c.FetchPRReviewThreads("owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("FetchPRReviewThreads: %v", err)
+	}
+	if truncated {
+		t.Errorf("threadsTruncated = true, want false (totalCount unset, defaults to 0 which is not > 1 node)")
 	}
 	if len(threads) != 1 {
 		t.Fatalf("expected 1 thread, got %d", len(threads))
@@ -611,7 +614,7 @@ func TestFetchPRReviewThreads_NullLineFallsBackToOriginalLine(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("test-token", srv.URL)
-	threads, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	threads, _, err := c.FetchPRReviewThreads("owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("FetchPRReviewThreads: %v", err)
 	}
@@ -665,7 +668,7 @@ func TestFetchPRReviewThreads_CommentsTruncated(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("test-token", srv.URL)
-	threads, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	threads, _, err := c.FetchPRReviewThreads("owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("FetchPRReviewThreads: %v", err)
 	}
@@ -694,7 +697,7 @@ func TestFetchPRReviewThreads_NullPullRequest_ReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("test-token", srv.URL)
-	threads, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	threads, truncated, err := c.FetchPRReviewThreads("owner", "repo", 42)
 	if err == nil {
 		t.Fatal("expected an error for a null pullRequest object, got nil")
 	}
@@ -703,6 +706,89 @@ func TestFetchPRReviewThreads_NullPullRequest_ReturnsError(t *testing.T) {
 	}
 	if threads != nil {
 		t.Errorf("expected nil threads alongside the error, got %+v", threads)
+	}
+	if truncated {
+		t.Errorf("expected threadsTruncated = false alongside the error, got true")
+	}
+}
+
+// TestFetchPRReviewThreads_FetchLayerTruncated covers the finding on #1497
+// (github/prs.go's FetchPRReviewThreads doc comment): when reviewThreads'
+// own totalCount exceeds the first-50-page node count, threadsTruncated
+// must be true — mirroring per-thread CommentsTruncated, but for the outer
+// connection — so a caller can tell the reviewer the thread list itself is
+// incomplete rather than presenting it as exhaustive.
+func TestFetchPRReviewThreads_FetchLayerTruncated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": map[string]interface{}{
+						"reviewThreads": map[string]interface{}{
+							"totalCount": 52,
+							"nodes": []map[string]interface{}{
+								{
+									"id": "thread1", "isResolved": false, "isOutdated": false,
+									"path": "foo.go", "line": 1, "originalLine": 1,
+									"comments": map[string]interface{}{"nodes": []map[string]interface{}{}},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	threads, truncated, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewThreads: %v", err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("expected 1 thread (only what the page returned), got %d", len(threads))
+	}
+	if !truncated {
+		t.Errorf("threadsTruncated = false, want true (totalCount 52 > 1 node fetched)")
+	}
+}
+
+// TestFetchPRReviewThreads_NotTruncatedWhenTotalCountMatches covers the
+// negative case: totalCount equal to the returned node count must not be
+// flagged as truncated.
+func TestFetchPRReviewThreads_NotTruncatedWhenTotalCountMatches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": map[string]interface{}{
+						"reviewThreads": map[string]interface{}{
+							"totalCount": 1,
+							"nodes": []map[string]interface{}{
+								{
+									"id": "thread1", "isResolved": false, "isOutdated": false,
+									"path": "foo.go", "line": 1, "originalLine": 1,
+									"comments": map[string]interface{}{"nodes": []map[string]interface{}{}},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	_, truncated, err := c.FetchPRReviewThreads("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewThreads: %v", err)
+	}
+	if truncated {
+		t.Errorf("threadsTruncated = true, want false (totalCount matches fetched count)")
 	}
 }
 
