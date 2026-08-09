@@ -370,6 +370,30 @@ Projects are keyed by `(owner, number)`, because Projects v2 is owner-scoped, no
 repo-scoped. The `repo` argument on a board fetch is a query input, not part of
 the project's identity.
 
+### Archiving and re-adding a card — **Modelled**
+
+`ArchiveProjectItem` sets a flag; archived cards are filtered out of every board
+read (`liveItemRefs`, `ProbeProjectBoard`, the status batch) while the
+underlying issue is untouched.
+
+Re-adding a card that is already on the board **revives** it: un-archived, with
+both the card's and the project's updated-at bumped. Both entry points route
+through one helper (`reviveCardLocked`), because they had drifted into doing
+complementary halves of it — seeding reset status and the timestamps but left
+the card archived, so moving an archived card to a new column left it invisible
+to every board read with no error; the runtime API cleared the flag but bumped
+neither timestamp, so a card reappearing did not advance
+`FetchProjectUpdatedAt`, which the engine's poll reads to notice the board
+changed. The two differ in exactly one respect, deliberately:
+`SeedProjectItem` moves the card to the named column, while
+`AddProjectV2ItemById` leaves status alone, since re-adding a card already on a
+board does not move it between columns.
+
+**Risk:** low, but note this is the sim's own choice rather than a behaviour
+derived from a recorded real response — GitHub's `addProjectV2ItemById` against
+an already-archived item has not been captured here. A scenario that turns on
+whether re-adding un-archives should verify the real response first.
+
 ### PR cards on a board — **Absent**
 
 A project board can hold pull-request cards as well as issue cards, but the
@@ -532,7 +556,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 50 mutations, and
+   package cannot back up. The sweep currently catches all 52 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
