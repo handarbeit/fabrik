@@ -129,6 +129,16 @@ func TestExecute_EnvMaxSliceRetries_Valid(t *testing.T) {
 	executeAndStop(t)
 }
 
+func TestExecute_EnvMaxResumeFailures_Valid(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_MAX_RESUME_FAILURES", "5")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	executeAndStop(t)
+}
+
 func TestExecute_EnvPluginDir(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
 	chdirTest(t, dir)
