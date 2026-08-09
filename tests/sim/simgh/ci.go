@@ -91,15 +91,6 @@ func (s *Sim) resolveRefSHA(owner, repo, ref string) (string, error) {
 	return r.headSHA(ref), nil
 }
 
-// contextState is a check run or commit status reduced to the two things the
-// mergeable-state derivation cares about: its name, and whether it is green,
-// red, or still running.
-type contextState struct {
-	name string
-	// verdict is one of "success", "failure", or "pending".
-	verdict string
-}
-
 // checkVerdict maps a check run's status/conclusion pair onto a verdict.
 // "neutral" and "skipped" are treated as success, matching GitHub's own
 // treatment of them as non-blocking.
@@ -129,15 +120,47 @@ func statusVerdict(st gh.CommitStatus) string {
 	}
 }
 
-// contextsForSHA collects both collections for a SHA into one verdict list.
-// Caller must hold mu.
-func (r *repoState) contextsForSHA(sha string) []contextState {
-	out := make([]contextState, 0, len(r.checkRuns[sha])+len(r.commitStatuses[sha]))
+// contextsForSHA reduces both collections for a SHA to one verdict per context
+// name. Caller must hold mu.
+//
+// Within a collection the *latest* entry wins, not the worst. Check runs reduce
+// by highest ID, matching production's latestCheckRunsByName (github/checkruns.go)
+// and real branch protection, which clears a required check once its newest run
+// passes. Commit statuses reduce to the last one posted for a context, because
+// the classic Statuses API supersedes rather than accumulates.
+//
+// Reducing by worst verdict instead would classify "check failed, rerun passed"
+// off the failed run and report a PR blocked that GitHub calls clean — defeating
+// the check-run ID machinery in seed.go, which exists precisely so that flow is
+// representable, and contradicting production's own classifier.
+//
+// Across the two collections, a name appearing in both keeps the worse verdict.
+// That is a conservative choice of the model's own, not an observed GitHub rule;
+// see FIDELITY.md.
+func (r *repoState) contextsForSHA(sha string) map[string]string {
+	out := make(map[string]string, len(r.checkRuns[sha])+len(r.commitStatuses[sha]))
+
+	latest := make(map[string]gh.CheckRun, len(r.checkRuns[sha]))
 	for _, run := range r.checkRuns[sha] {
-		out = append(out, contextState{name: run.Name, verdict: checkVerdict(run)})
+		if prev, ok := latest[run.Name]; ok && run.ID <= prev.ID {
+			continue
+		}
+		latest[run.Name] = run
 	}
+	for name, run := range latest {
+		out[name] = checkVerdict(run)
+	}
+
+	statuses := make(map[string]string, len(r.commitStatuses[sha]))
 	for _, st := range r.commitStatuses[sha] {
-		out = append(out, contextState{name: st.Context, verdict: statusVerdict(st)})
+		statuses[st.Context] = statusVerdict(st)
+	}
+	for name, v := range statuses {
+		if prev, ok := out[name]; ok {
+			out[name] = worseVerdict(prev, v)
+			continue
+		}
+		out[name] = v
 	}
 	return out
 }

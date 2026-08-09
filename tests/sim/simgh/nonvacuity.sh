@@ -167,7 +167,26 @@ mutate "non-required failures never surface as unstable" \
 
 mutate "commit statuses are ignored by the derivation" \
   'TestMergeableStateBlockedViaClassicCommitStatus|TestMergeableStateCleanViaClassicCommitStatus|TestMergeableStateUnstableViaNonRequiredCommitStatus' \
-  'ci.go::s{out = append\(out, contextState\{name: st\.Context, verdict: statusVerdict\(st\)\}\)}{_ = st}'
+  'ci.go::s{statuses\[st\.Context\] = statusVerdict\(st\)}{_ = st}'
+
+# The reduction rule is the whole point of reserving check-run IDs, so each half
+# is mutated separately: a check run reduced by worst-of, and a commit status
+# accumulated rather than superseded.
+mutate "same-named check runs reduce by worst verdict instead of latest ID" \
+  'TestMergeableStateRerunSupersedesFailedRun|TestMergeableStateRerunOrderFollowsIDNotSeedOrder' \
+  'ci.go::s{\t\tif prev, ok := latest\[run\.Name\]; ok && run\.ID <= prev\.ID \{\n\t\t\tcontinue\n\t\t\}}{\t\tif prev, ok := latest[run.Name]; ok \&\& checkVerdict(prev) != "success" \{\n\t\t\tcontinue\n\t\t\}}m'
+
+mutate "an earlier commit status is not superseded by a later one" \
+  'TestMergeableStateLatestCommitStatusSupersedes' \
+  'ci.go::s{\tfor _, st := range r\.commitStatuses\[sha\] \{\n\t\tstatuses\[st\.Context\] = statusVerdict\(st\)\n\t\}}{\tfor _, st := range r.commitStatuses[sha] \{\n\t\tstatuses[st.Context] = worseVerdict(statuses[st.Context], statusVerdict(st))\n\t\}}m'
+
+mutate "a name in both collections does not keep the worse verdict" \
+  'TestMergeableStateCrossCollectionKeepsWorstVerdict' \
+  'ci.go::s{\t\t\tout\[name\] = worseVerdict\(prev, v\)}{\t\t\tout[name] = prev}'
+
+mutate "FetchPRDetails reports no mergeable_state" \
+  'TestFetchPRDetailsReportsDerivedMergeableState' \
+  'prs.go::s{\t\tMergeableState:   state,}{\t\tMergeableState:   "",}'
 
 mutate "behind is reported without branch protection" \
   'TestMergeableStateBehindRequiresBranchProtection' \

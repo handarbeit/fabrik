@@ -375,3 +375,128 @@ func assertState(t *testing.T, s *Sim, want string) {
 		t.Fatalf("mergeable state = %q, want %q", got, want)
 	}
 }
+
+// TestMergeableStateRerunSupersedesFailedRun pins that a required context is
+// classified off its *latest* run, not the worst of its runs.
+//
+// Reducing same-named runs by worst verdict left a rerun-then-pass flow blocked
+// forever: GitHub clears a required check once its newest run passes, and
+// production's own classifier (latestCheckRunsByName, github/checkruns.go) keeps
+// the highest ID for exactly that reason. The seed layer reserves explicit
+// check-run IDs specifically so this flow is representable, so a derivation that
+// ignored them made that machinery pointless.
+func TestMergeableStateRerunSupersedesFailedRun(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"ci/build"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 100, Name: "ci/build", Status: "completed", Conclusion: "failure"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 200, Name: "ci/build", Status: "completed", Conclusion: "success"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateClean)
+}
+
+// TestMergeableStateFailedRerunSupersedesPassedRun is the same rule in the
+// direction that must not be mistaken for conservatism: latest-wins has to
+// re-block a check whose rerun failed, or the fix would just be "green always
+// wins" wearing a different name.
+func TestMergeableStateFailedRerunSupersedesPassedRun(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"ci/build"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 100, Name: "ci/build", Status: "completed", Conclusion: "success"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 200, Name: "ci/build", Status: "completed", Conclusion: "failure"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateBlocked)
+}
+
+// TestMergeableStateRerunOrderFollowsIDNotSeedOrder pins that the rule is
+// highest-ID, not last-seeded. Seeding the passing rerun first would still make
+// the previous test green under a "last one wins" reduction, which is not what
+// production does — check-run IDs are the ordering, and a scenario is free to
+// seed them out of order.
+func TestMergeableStateRerunOrderFollowsIDNotSeedOrder(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"ci/build"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 200, Name: "ci/build", Status: "completed", Conclusion: "success"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 100, Name: "ci/build", Status: "completed", Conclusion: "failure"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateClean)
+}
+
+// TestMergeableStateLatestCommitStatusSupersedes pins the classic Statuses API
+// half of the same rule: a context's latest posted status supersedes its
+// earlier ones rather than accumulating with them.
+func TestMergeableStateLatestCommitStatusSupersedes(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"local-ci"}).
+		SeedCommitStatus(repoName, sha, gh.CommitStatus{Context: "local-ci", State: "failure"}).
+		SeedCommitStatus(repoName, sha, gh.CommitStatus{Context: "local-ci", State: "success"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateClean)
+}
+
+// TestMergeableStateCrossCollectionKeepsWorstVerdict pins the one place worst-of
+// survives: a name reported by *both* a check run and a commit status. That is
+// the model's own conservative choice rather than an observed GitHub rule, so it
+// is pinned here and recorded in FIDELITY.md — if it is ever verified against a
+// recorded real response, this is the test that should change.
+func TestMergeableStateCrossCollectionKeepsWorstVerdict(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"ci/build"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 300, Name: "ci/build", Status: "completed", Conclusion: "success"}).
+		SeedCommitStatus(repoName, sha, gh.CommitStatus{Context: "ci/build", State: "failure"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateBlocked)
+}
+
+// TestFetchPRDetailsReportsDerivedMergeableState pins the split between the two
+// PR read paths. The single-PR endpoint reports mergeable_state; the pulls list
+// endpoint behind FetchLinkedPR does not, and production only parses it from the
+// former. A model that answered both the same way would let a test pass on a
+// signal the engine never receives from that call.
+func TestFetchPRDetailsReportsDerivedMergeableState(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"ci/build"}).
+		SeedCheckRun(repoName, sha, gh.CheckRun{ID: 400, Name: "ci/build", Status: "completed", Conclusion: "failure"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	details, err := s.FetchPRDetails("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRDetails: %v", err)
+	}
+	if details.MergeableState != stateBlocked {
+		t.Fatalf("FetchPRDetails mergeable_state = %q, want %q", details.MergeableState, stateBlocked)
+	}
+	if details.HeadSHA != sha {
+		t.Fatalf("FetchPRDetails HeadSHA = %q, want %q", details.HeadSHA, sha)
+	}
+
+	linked, err := s.FetchLinkedPR("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchLinkedPR: %v", err)
+	}
+	if linked.MergeableState != "" {
+		t.Fatalf("FetchLinkedPR mergeable_state = %q, want \"\" — the list endpoint omits it", linked.MergeableState)
+	}
+}

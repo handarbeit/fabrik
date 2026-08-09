@@ -169,9 +169,45 @@ required", which the list answers.
 ### Verdict mapping — **Simplified**
 
 A check run's `neutral` and `skipped` conclusions are treated as success,
-matching GitHub's treatment of them as non-blocking. A context reported more
-than once for a SHA takes its worst verdict. A non-required context that is
-merely *pending* yields `unstable`, not `clean`.
+matching GitHub's treatment of them as non-blocking. A non-required context that
+is merely *pending* yields `unstable`, not `clean`.
+
+### Repeated contexts reduce latest-wins, not worst-of — **Modelled**
+
+A context reported more than once for a SHA is reduced to **one** verdict before
+the derivation looks at it, and the rule is *latest wins within each collection*:
+
+- **Check runs** reduce by **highest ID**, matching production's
+  `latestCheckRunsByName` (`github/checkruns.go`) and real branch protection,
+  which clears a required check once its newest run passes. IDs are the
+  ordering, not seed order — a scenario may seed a rerun before the run it
+  supersedes.
+- **Commit statuses** reduce to the **last one posted** for a context, because
+  the classic Statuses API supersedes rather than accumulates.
+
+This was originally worst-of, and that was wrong rather than merely
+conservative: it classified a `check failed → rerun passed` flow off the failed
+run, reporting a PR permanently `blocked` that GitHub calls `clean`. It also
+defeated the check-run ID reservation machinery in `seed.go`, which exists
+precisely so that flow is representable, and contradicted production's own
+classifier — the two doc comments disagreed about how GitHub behaves.
+
+**Risk: low.** The rule now matches production's classifier and the endpoint
+semantics it was derived from.
+
+### A context in *both* collections keeps the worse verdict — **Simplified**
+
+Worst-of survives in exactly one place: a name reported both as a check run and
+as a classic commit status. Real GitHub matches required contexts by name across
+both spaces, and what it does when the two disagree has **not** been verified
+against a recorded response here — the model takes the worse verdict as a
+conservative choice of its own.
+
+**Risk: low, but unverified.** Confirm against a recorded real response before
+building a scenario that depends on it;
+`TestMergeableStateCrossCollectionKeepsWorstVerdict` is the test to change if it
+turns out otherwise. Simplest avoidance: do not seed one context name into both
+collections at one SHA.
 
 ---
 
@@ -343,6 +379,20 @@ GitHub — it reports `merged: false` for several seconds after a merge, which i
 why `FetchPRMerged` exists as a separate single-PR call. The sim reports `merged`
 truthfully from `FetchLinkedPR`. A regression that depends on that lag would not
 be caught here.
+
+### `FetchPRDetails` reports `mergeable_state`; `FetchLinkedPR` does not — **Modelled**
+
+`FetchPRDetails` reads the *single-PR* endpoint, which does return
+`mergeable_state`, so it reports the same derivation `FetchPRMergeableState`
+does — recompute window included: a read here drains one, because on real GitHub
+this is exactly the read that would.
+
+It leaves `HeadRefName`, `BaseRef`, `Author`, and `Labels` zero, because
+production's implementation does not parse them from that endpoint. `FetchLinkedPR`
+is *not* consistent with that stance — it populates those fields even though the
+list endpoint omits them. That inconsistency is known and deliberately left for
+the harness follow-on (#1457), which may need them; nothing in the engine reads
+them off a `FetchLinkedPR` result today.
 
 ### Closing keywords — **Simplified**
 
@@ -573,7 +623,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 53 mutations, and
+   package cannot back up. The sweep currently catches all 58 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

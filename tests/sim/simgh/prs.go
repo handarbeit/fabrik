@@ -338,15 +338,9 @@ func (s *Sim) deriveMergeableState(r *repoState, base string, facts gitFactsResu
 	}
 
 	required := r.requiredContexts[base]
-	byName := make(map[string]string, 8)
-	for _, c := range r.contextsForSHA(facts.headSHA) {
-		// A context reported twice takes its worst verdict, matching
-		// GitHub's rollup of repeated contexts.
-		if prev, ok := byName[c.name]; ok && worseVerdict(prev, c.verdict) == prev {
-			continue
-		}
-		byName[c.name] = c.verdict
-	}
+	// One verdict per context name; contextsForSHA owns the reduction rule
+	// (latest-wins within a collection), which is load-bearing for reruns.
+	byName := r.contextsForSHA(facts.headSHA)
 
 	for _, name := range required {
 		v, ok := byName[name]
@@ -363,6 +357,50 @@ func (s *Sim) deriveMergeableState(r *repoState, base string, facts gitFactsResu
 		}
 	}
 	return stateClean
+}
+
+// FetchPRDetails reads the single-PR endpoint, which — unlike the pulls *list*
+// endpoint behind FetchLinkedPR — does report mergeable_state. The state is the
+// same derivation FetchPRMergeableState returns, recompute window included: a
+// read here drains one, because on real GitHub this is exactly the read that
+// would.
+//
+// The fields production's implementation does not parse from that endpoint
+// (HeadRefName, BaseRef, Author, Labels) are deliberately left zero. Populating
+// them would let a test pass on a signal the engine never actually receives —
+// the same reasoning FetchLinkedPR applies to mergeable_state, in reverse.
+func (s *Sim) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+	// Taken before the mergeability derivation, which takes mu and gitMu itself.
+	s.mu.Lock()
+	_, pr, err := s.prLocked(owner, repo, prNumber)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	snap := *pr
+	s.mu.Unlock()
+
+	state, err := s.FetchPRMergeableState(owner, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	headSHA, err := s.resolveRefSHA(owner, repo, snap.head)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gh.PRDetails{
+		Number:           snap.number,
+		Title:            snap.title,
+		State:            snap.state,
+		Merged:           snap.merged,
+		Draft:            snap.draft,
+		Body:             snap.body,
+		HeadSHA:          headSHA,
+		MergeableState:   state,
+		AutoMergeEnabled: snap.autoMergeEnabled,
+	}, nil
 }
 
 // worseVerdict returns the more severe of two verdicts, ordering
