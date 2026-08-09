@@ -228,18 +228,15 @@ func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType
 	})
 }
 
-// fetchProjectBoardOnce performs one full pagination pass and returns the
-// resulting board, the raw GraphQL node count (before Fabrik's drafts/repo
-// filtering), and the maximum totalCount observed across pages. Callers
-// compare rawNodeCount to totalCount to detect indexer-degraded responses
-// and decide whether to retry.
-func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, int, int, error) {
-	query := fmt.Sprintf(`
+// fetchProjectBoardQueryTemplate is the GraphQL query used by fetchProjectBoardOnce
+// to fetch one page of project board items. The %s placeholder is filled with
+// "organization" or "user" depending on ownerType.
+const fetchProjectBoardQueryTemplate = `
 query($owner: String!, $projectNum: Int!, $cursor: String) {
   %s(login: $owner) {
     projectV2(number: $projectNum) {
       id
-      title`, ownerType) + `
+      title
       items(first: 100, after: $cursor) {
         totalCount
         pageInfo {
@@ -305,6 +302,14 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
     }
   }
 }`
+
+// fetchProjectBoardOnce performs one full pagination pass and returns the
+// resulting board, the raw GraphQL node count (before Fabrik's drafts/repo
+// filtering), and the maximum totalCount observed across pages. Callers
+// compare rawNodeCount to totalCount to detect indexer-degraded responses
+// and decide whether to retry.
+func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, int, int, error) {
+	query := fmt.Sprintf(fetchProjectBoardQueryTemplate, ownerType)
 
 	var projectID string
 	var projectTitle string
@@ -486,8 +491,9 @@ func (c *Client) probeProjectBoard(owner, repo string, projectNum int, ownerType
 	return result.Items, result.ProjectID, nil
 }
 
-func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, int, int, error) {
-	query := fmt.Sprintf(`
+// probeProjectBoardQueryTemplate is the GraphQL query used by probeProjectBoardOnce.
+// The %s placeholder is filled with "organization" or "user" depending on ownerType.
+const probeProjectBoardQueryTemplate = `
 query($owner: String!, $projectNum: Int!, $cursor: String) {
   %s(login: $owner) {
     projectV2(number: $projectNum) {
@@ -544,7 +550,10 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
       }
     }
   }
-}`, ownerType)
+}`
+
+func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, int, int, error) {
+	query := fmt.Sprintf(probeProjectBoardQueryTemplate, ownerType)
 
 	var projectID string
 
@@ -1106,10 +1115,8 @@ func toComment(cm commentNodeData, fromPR int) Comment {
 	return c
 }
 
-// fetchNodeComments fetches all remaining comments for an issue or PR node,
-// starting from the given cursor.
-func (c *Client) fetchNodeComments(nodeID, startCursor string) ([]commentNodeData, error) {
-	query := `
+// fetchNodeCommentsQuery is the GraphQL query used by fetchNodeComments.
+const fetchNodeCommentsQuery = `
 query($id: ID!, $cursor: String) {
   node(id: $id) {
     ... on Issue {
@@ -1132,6 +1139,11 @@ query($id: ID!, $cursor: String) {
     }
   }
 }`
+
+// fetchNodeComments fetches all remaining comments for an issue or PR node,
+// starting from the given cursor.
+func (c *Client) fetchNodeComments(nodeID, startCursor string) ([]commentNodeData, error) {
+	query := fetchNodeCommentsQuery
 
 	var allNodes []commentNodeData
 	cursor := startCursor
@@ -1175,10 +1187,8 @@ query($id: ID!, $cursor: String) {
 	return allNodes, nil
 }
 
-// fetchNodeLabels fetches all remaining labels for an issue or PR node,
-// starting from the given cursor.
-func (c *Client) fetchNodeLabels(nodeID, startCursor string) ([]string, error) {
-	query := `
+// fetchNodeLabelsQuery is the GraphQL query used by fetchNodeLabels.
+const fetchNodeLabelsQuery = `
 query($id: ID!, $cursor: String) {
   node(id: $id) {
     ... on Issue {
@@ -1205,6 +1215,11 @@ query($id: ID!, $cursor: String) {
     }
   }
 }`
+
+// fetchNodeLabels fetches all remaining labels for an issue or PR node,
+// starting from the given cursor.
+func (c *Client) fetchNodeLabels(nodeID, startCursor string) ([]string, error) {
+	query := fetchNodeLabelsQuery
 
 	var allLabels []string
 	cursor := startCursor
@@ -1256,11 +1271,8 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
-// FetchProjectUpdatedAt returns the updatedAt timestamp for the given project node ID.
-// Used as a cheap gate in the poll loop to skip the full status batch when the project
-// hasn't changed since the last cycle.
-func (c *Client) FetchProjectUpdatedAt(projectID string) (time.Time, error) {
-	query := `
+// fetchProjectUpdatedAtQuery is the GraphQL query used by FetchProjectUpdatedAt.
+const fetchProjectUpdatedAtQuery = `
 query($id: ID!) {
   node(id: $id) {
     ... on ProjectV2 {
@@ -1268,6 +1280,12 @@ query($id: ID!) {
     }
   }
 }`
+
+// FetchProjectUpdatedAt returns the updatedAt timestamp for the given project node ID.
+// Used as a cheap gate in the poll loop to skip the full status batch when the project
+// hasn't changed since the last cycle.
+func (c *Client) FetchProjectUpdatedAt(projectID string) (time.Time, error) {
+	query := fetchProjectUpdatedAtQuery
 	vars := map[string]interface{}{"id": projectID}
 
 	var result struct {
@@ -1294,10 +1312,8 @@ query($id: ID!) {
 	return t, nil
 }
 
-// FetchProjectItemStatus fetches only the Status field value for a single project
-// item identified by its node ID (PVTI_...). Returns "" when no status is set.
-func (c *Client) FetchProjectItemStatus(itemID string) (string, error) {
-	query := `
+// fetchProjectItemStatusQuery is the GraphQL query used by FetchProjectItemStatus.
+const fetchProjectItemStatusQuery = `
 query($id: ID!) {
   node(id: $id) {
     ... on ProjectV2Item {
@@ -1309,6 +1325,11 @@ query($id: ID!) {
     }
   }
 }`
+
+// FetchProjectItemStatus fetches only the Status field value for a single project
+// item identified by its node ID (PVTI_...). Returns "" when no status is set.
+func (c *Client) FetchProjectItemStatus(itemID string) (string, error) {
+	query := fetchProjectItemStatusQuery
 	vars := map[string]interface{}{"id": itemID}
 
 	var result struct {
@@ -1333,11 +1354,8 @@ query($id: ID!) {
 	return result.Data.Node.FieldValueByName.Name, nil
 }
 
-// FetchProjectItemStatusBatch fetches a map of projectItemNodeID → statusName for
-// every item in the project. Dramatically cheaper than FetchProjectBoard because it
-// fetches no nested fields. Paginates identically to fetchProjectBoardOnce.
-func (c *Client) FetchProjectItemStatusBatch(projectID string) (map[string]string, error) {
-	query := `
+// fetchProjectItemStatusBatchQuery is the GraphQL query used by FetchProjectItemStatusBatch.
+const fetchProjectItemStatusBatchQuery = `
 query($id: ID!, $cursor: String) {
   node(id: $id) {
     ... on ProjectV2 {
@@ -1358,6 +1376,12 @@ query($id: ID!, $cursor: String) {
     }
   }
 }`
+
+// FetchProjectItemStatusBatch fetches a map of projectItemNodeID → statusName for
+// every item in the project. Dramatically cheaper than FetchProjectBoard because it
+// fetches no nested fields. Paginates identically to fetchProjectBoardOnce.
+func (c *Client) FetchProjectItemStatusBatch(projectID string) (map[string]string, error) {
+	query := fetchProjectItemStatusBatchQuery
 
 	type statusNode struct {
 		ID               string `json:"id"`
@@ -1454,23 +1478,8 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 	return pi, nil
 }
 
-// LookupIssueProjectItem fetches the project-item node ID and current Status for
-// a given issue, filtered to the specified projectID. It queries
-// repository.issue.projectItems (first: 20), iterating nodes until one whose
-// project.id matches projectID is found. Returns ("", "", nil) when the issue is
-// not in the specified project. Returns an error on any GraphQL failure.
-//
-// Note: first:20 covers issues in up to 20 GitHub Projects. Issues belonging to
-// more than 20 projects are not supported (vanishingly rare in practice).
-func (c *Client) LookupIssueProjectItem(projectID, repo string, issueNumber int) (itemID string, status string, err error) {
-	slash := strings.LastIndex(repo, "/")
-	if slash < 0 {
-		return "", "", fmt.Errorf("LookupIssueProjectItem: invalid repo %q (expected owner/name)", repo)
-	}
-	owner := repo[:slash]
-	repoName := repo[slash+1:]
-
-	query := `
+// lookupIssueProjectItemQuery is the GraphQL query used by LookupIssueProjectItem.
+const lookupIssueProjectItemQuery = `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     issue(number: $number) {
@@ -1490,6 +1499,24 @@ query($owner: String!, $repo: String!, $number: Int!) {
     }
   }
 }`
+
+// LookupIssueProjectItem fetches the project-item node ID and current Status for
+// a given issue, filtered to the specified projectID. It queries
+// repository.issue.projectItems (first: 20), iterating nodes until one whose
+// project.id matches projectID is found. Returns ("", "", nil) when the issue is
+// not in the specified project. Returns an error on any GraphQL failure.
+//
+// Note: first:20 covers issues in up to 20 GitHub Projects. Issues belonging to
+// more than 20 projects are not supported (vanishingly rare in practice).
+func (c *Client) LookupIssueProjectItem(projectID, repo string, issueNumber int) (itemID string, status string, err error) {
+	slash := strings.LastIndex(repo, "/")
+	if slash < 0 {
+		return "", "", fmt.Errorf("LookupIssueProjectItem: invalid repo %q (expected owner/name)", repo)
+	}
+	owner := repo[:slash]
+	repoName := repo[slash+1:]
+
+	query := lookupIssueProjectItemQuery
 
 	vars := map[string]interface{}{
 		"owner":  owner,
@@ -1535,10 +1562,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	return "", "", nil
 }
 
-// AddProjectV2ItemById adds an issue or PR (identified by its GraphQL node ID)
-// to a GitHub Projects v2 board. Returns the new project item's node ID.
-func (c *Client) AddProjectV2ItemById(projectID, contentNodeID string) (string, error) {
-	query := `
+// addProjectV2ItemByIdMutation is the GraphQL mutation used by AddProjectV2ItemById.
+const addProjectV2ItemByIdMutation = `
 mutation($projectId: ID!, $contentId: ID!) {
   addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
     item {
@@ -1546,6 +1571,11 @@ mutation($projectId: ID!, $contentId: ID!) {
     }
   }
 }`
+
+// AddProjectV2ItemById adds an issue or PR (identified by its GraphQL node ID)
+// to a GitHub Projects v2 board. Returns the new project item's node ID.
+func (c *Client) AddProjectV2ItemById(projectID, contentNodeID string) (string, error) {
+	query := addProjectV2ItemByIdMutation
 	vars := map[string]interface{}{
 		"projectId": projectID,
 		"contentId": contentNodeID,
@@ -1566,21 +1596,25 @@ mutation($projectId: ID!, $contentId: ID!) {
 	return result.Data.AddProjectV2ItemById.Item.ID, nil
 }
 
-// AddBlockedByIssue creates a "blocked by" dependency edge: issueNodeID is
-// blocked by blockerNodeID. After this call, blockerNodeID will appear in
-// issueNodeID's blockedBy(first: N) GraphQL field.
+// addBlockedByMutation is the GraphQL mutation used by AddBlockedByIssue.
 //
 // NOTE: GitHub's API is asymmetrically named: the read field is Issue.blockedBy
 // but the write mutation is addBlockedBy (not addBlockedByIssue). The input
 // field is blockingIssueId (not blockedById). Verified via schema introspection
-// against api.github.com/graphql on 2026-05-24.
-func (c *Client) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
-	query := `
+// against api.github.com/graphql on 2026-05-24, and independently confirmed by
+// github/wire_contract_test.go against the vendored schema (see #1453).
+const addBlockedByMutation = `
 mutation($issueId: ID!, $blockingIssueId: ID!) {
   addBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) {
     issue { id }
   }
 }`
+
+// AddBlockedByIssue creates a "blocked by" dependency edge: issueNodeID is
+// blocked by blockerNodeID. After this call, blockerNodeID will appear in
+// issueNodeID's blockedBy(first: N) GraphQL field.
+func (c *Client) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	query := addBlockedByMutation
 	vars := map[string]interface{}{
 		"issueId":         issueNodeID,
 		"blockingIssueId": blockerNodeID,
