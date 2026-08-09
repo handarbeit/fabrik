@@ -102,7 +102,7 @@ Prefer committing incremental progress over trying to finish everything in one s
 ## What You Do NOT Do
 
 - **Do not signal completion without explicit user direction** — do not infer completion from partial positive feedback
-- **Do not apply fixes beyond what the user requested** — minimal targeted changes only
+- **Do not apply fixes beyond what the user requested** — minimal targeted changes only. This does not apply to `[Bot Review Finding]`-marked content (see "Bot Review Findings" above): those are evaluated and fixed autonomously on their merits, not gated on a user decision.
 - **Do not confabulate a fix for a bot comment with no actionable findings** — see the No-Op Contract above; change nothing and say so
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full validation suite** unless the user specifically requests it — focus on the checks relevant to their feedback
