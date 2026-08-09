@@ -105,6 +105,12 @@ type Sim struct {
 	nextCommentDatabaseID int
 	nextCheckRunID        int64
 
+	// seededCheckRunIDs is every check run ID handed out or explicitly seeded,
+	// so SeedCheckRun can refuse a duplicate. GitHub's check run IDs are unique
+	// across the instance, and production relies on their ordering to pick the
+	// latest rerun of a check name.
+	seededCheckRunIDs map[int64]bool
+
 	// restRate and graphqlRate back RateLimitStats. Modelled as static
 	// budgets that never deplete; see FIDELITY.md.
 	restRate    rateBudget
@@ -150,6 +156,7 @@ func New(baseDir string, opts ...Option) *Sim {
 		projects:              make(map[string]*projectState),
 		nextCommentDatabaseID: 1000,
 		nextCheckRunID:        5000,
+		seededCheckRunIDs:     make(map[int64]bool),
 		restRate:              rateBudget{limit: 5000, remaining: 5000, resetIn: time.Hour},
 		graphqlRate:           rateBudget{limit: 5000, remaining: 5000, resetIn: time.Hour},
 	}

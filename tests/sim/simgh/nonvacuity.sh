@@ -248,6 +248,30 @@ mutate "behind no longer outranks blocked" \
   'TestPrecedenceBehindOverBlocked' \
   'prs.go::s{if facts\.behind > 0 && r\.requireUpToDate\[base\] \{}{if false \{}'
 
+mutate "an explicitly seeded check run ID is not reserved against auto-assignment" \
+  'TestSeedCheckRunReservesExplicitIDs' \
+  'seed.go::s|\t\} else if run\.ID >= s\.nextCheckRunID \{|\t\} else if false \{|'
+
+mutate "a duplicate check run ID is accepted" \
+  'TestSeedCheckRunRejectsDuplicateID' \
+  'seed.go::s|\t\} else if s\.seededCheckRunIDs\[run\.ID\] \{|\t\} else if false \&\& s.seededCheckRunIDs[run.ID] \{|'
+
+mutate "owner/repo path traversal is accepted" \
+  'TestSeedRepoRejectsPathTraversal' \
+  'util.go::s|\tif seg == "\." \|\| seg == "\.\." \{|\tif false \&\& (seg == "." \|\| seg == "..") \{|' \
+  'util.go::s|\tif strings\.ContainsAny\(seg, `/\\\\`\) \|\| strings\.ContainsRune\(seg, os\.PathSeparator\) \{|\tif false \&\& (strings.ContainsAny(seg, `/`) \|\| strings.ContainsRune(seg, os.PathSeparator)) \{|'
+
+# Both of SeedRepo's duplicate guards are neutralised together: single-threaded,
+# either one alone still refuses the reseed, so a mutation of just one could not
+# fail this test and would prove nothing.
+mutate "a duplicate SeedRepo is accepted" \
+  'TestSeedRepoRefusesDuplicateSeed' \
+  'seed.go::s|if _, exists := s\.repos\[ownerRepo\]; exists \{|if false \{|g'
+
+mutate_race "a concurrent second SeedRepo clobbers the live repoState" \
+  'TestConcurrentSeedRepoDoesNotClobber' \
+  'seed.go::s|\tif _, exists := s\.repos\[ownerRepo\]; exists \{\n\t\ts\.fail\("simgh: repo %s already seeded", ownerRepo\)\n\t\ts\.mu\.Unlock\(\)\n\t\treturn s\n\t\}\n\ts\.repos\[ownerRepo\] = &repoState\{|\tif false \{\n\t\ts.fail("simgh: repo %s already seeded", ownerRepo)\n\t\ts.mu.Unlock()\n\t\treturn s\n\t\}\n\ts.repos[ownerRepo] = \&repoState\{|'
+
 mutate "timestamps come from wall time, not the injected clock" \
   'TestLabelAddRemoveIsObservable' \
   'sim.go::s{func \(s \*Sim\) now\(\) time\.Time \{ return s\.clock\.Now\(\) \}}{func (s *Sim) now() time.Time { return time.Now() }}'

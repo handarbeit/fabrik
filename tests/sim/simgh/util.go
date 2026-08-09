@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 )
@@ -39,12 +40,38 @@ func removeString(list []string, s string) ([]string, bool) {
 }
 
 // splitOwnerRepo splits "owner/repo" into its parts.
+//
+// Both segments are validated as single path-safe names, because repoDir turns
+// them straight into a directory under baseDir: without this, "../evil/pwned"
+// splits into owner "../evil" and lands the bare repo outside the t.TempDir()
+// the package's doc comment promises to keep everything inside. Real GitHub
+// owner and repo names cannot contain a separator either, so nothing valid is
+// rejected here.
 func splitOwnerRepo(ownerRepo string) (owner, repo string, err error) {
 	i := strings.LastIndex(ownerRepo, "/")
 	if i <= 0 || i == len(ownerRepo)-1 {
 		return "", "", fmt.Errorf("simgh: invalid owner/repo %q", ownerRepo)
 	}
-	return ownerRepo[:i], ownerRepo[i+1:], nil
+	owner, repo = ownerRepo[:i], ownerRepo[i+1:]
+	if err := validatePathSegment("owner", owner, ownerRepo); err != nil {
+		return "", "", err
+	}
+	if err := validatePathSegment("repo", repo, ownerRepo); err != nil {
+		return "", "", err
+	}
+	return owner, repo, nil
+}
+
+// validatePathSegment rejects a name that would escape or restructure the
+// baseDir sandbox once joined into a directory path.
+func validatePathSegment(kind, seg, ownerRepo string) error {
+	if seg == "." || seg == ".." {
+		return fmt.Errorf("simgh: invalid owner/repo %q: %s %q is a path-traversal segment", ownerRepo, kind, seg)
+	}
+	if strings.ContainsAny(seg, `/\`) || strings.ContainsRune(seg, os.PathSeparator) {
+		return fmt.Errorf("simgh: invalid owner/repo %q: %s %q contains a path separator", ownerRepo, kind, seg)
+	}
+	return nil
 }
 
 // cloneStrings returns a defensive copy, so a caller mutating a returned slice

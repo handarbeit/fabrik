@@ -389,3 +389,49 @@ func TestConcurrentReviewMutations(t *testing.T) {
 		}
 	}
 }
+
+// TestConcurrentSeedRepoDoesNotClobber drives the window SeedRepo's re-check
+// closes. The "already seeded" guard runs under mu, mu is then released for the
+// git init, and mu is retaken to publish — so concurrent callers for one key
+// all clear the guard before any of them publishes.
+//
+// Without the re-check the last writer replaces a live repoState, swapping out
+// the repo's gitMu while earlier callers still hold the old one: two mutexes
+// guarding one bare directory, which silently voids the per-repo git
+// serialisation every other test depends on. A start barrier makes all the
+// callers reach the guard together, so the window is entered rather than
+// hoped for.
+func TestConcurrentSeedRepoDoesNotClobber(t *testing.T) {
+	s, _ := newSim(t)
+
+	const callers = 4
+	var start, done sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < callers; i++ {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			start.Wait()
+			s.SeedRepo("acme/widgets")
+		}()
+	}
+	start.Done()
+	done.Wait()
+
+	if err := s.Err(); err == nil {
+		t.Fatalf("%d concurrent SeedRepo calls for one key all succeeded; want every one after the first to be refused", callers)
+	}
+
+	// Exactly one repo, and it must be usable — a clobbered state would leave
+	// the map pointing at a repoState whose gitMu nobody else is holding.
+	r, err := s.repoByKey("acme/widgets")
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	r.gitMu.Lock()
+	ok := r.branchExists("main")
+	r.gitMu.Unlock()
+	if !ok {
+		t.Fatal("the surviving repoState does not have its default branch; seeding raced")
+	}
+}

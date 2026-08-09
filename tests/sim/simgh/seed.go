@@ -108,6 +108,17 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 	}
 
 	s.mu.Lock()
+	// Re-check under mu rather than writing unconditionally: the guard above
+	// was checked before mu was released for the git init, so two concurrent
+	// SeedRepo calls for one key can both reach here. Clobbering would replace
+	// a live repoState — and its gitMu — while the winner's callers still hold
+	// the old one, leaving two mutexes guarding one bare directory and
+	// silently voiding the per-repo git serialisation the package rests on.
+	if _, exists := s.repos[ownerRepo]; exists {
+		s.fail("simgh: repo %s already seeded", ownerRepo)
+		s.mu.Unlock()
+		return s
+	}
 	s.repos[ownerRepo] = &repoState{
 		owner:             owner,
 		repo:              repo,
@@ -389,6 +400,15 @@ func (s *Sim) placeOnProjectLocked(p *projectState, ownerRepo string, number int
 
 // SeedCheckRun attaches a check run to a commit SHA. Name and Conclusion are
 // what the mergeable-state derivation reads; an empty ID is auto-assigned.
+//
+// IDs are unique across the whole sim, as GitHub's are, and an explicitly
+// seeded ID is reserved against later auto-assignment — the same rule
+// reserveNumber enforces for the shared issue-and-PR sequence. This is
+// load-bearing, not tidiness: production's latestCheckRunsByName
+// (github/checkruns.go) reduces same-named runs by keeping the highest ID as
+// the most recent rerun, so two runs sharing an ID make it keep whichever it
+// saw first. A scenario seeding "check failed, then the rerun passed" would
+// then be classified off the failed run, with nothing to indicate why.
 func (s *Sim) SeedCheckRun(ownerRepo, sha string, run gh.CheckRun) *Sim {
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
@@ -399,7 +419,15 @@ func (s *Sim) SeedCheckRun(ownerRepo, sha string, run gh.CheckRun) *Sim {
 	if run.ID == 0 {
 		run.ID = s.nextCheckRunID
 		s.nextCheckRunID++
+	} else if s.seededCheckRunIDs[run.ID] {
+		s.fail("simgh: check run ID %d already used in %s; IDs are unique across the sim", run.ID, ownerRepo)
+		return s
+	} else if run.ID >= s.nextCheckRunID {
+		// Keep the auto-assign counter ahead of every explicit ID, so a later
+		// ID: 0 seed can never collide with one already handed out by hand.
+		s.nextCheckRunID = run.ID + 1
 	}
+	s.seededCheckRunIDs[run.ID] = true
 	if run.Status == "" {
 		if run.Conclusion == "" {
 			run.Status = "in_progress"

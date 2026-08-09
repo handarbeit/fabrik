@@ -1,6 +1,10 @@
 package simgh
 
-import "testing"
+import (
+	"testing"
+
+	gh "github.com/handarbeit/fabrik/github"
+)
 
 // The model's identity rules — which PR a branch resolves to, and how issue and
 // PR numbers are allocated — are places where a plausible-looking simplification
@@ -228,5 +232,107 @@ func TestSeedBlockedByRejectsUnknownBlocker(t *testing.T) {
 
 	if err := s.Err(); err == nil {
 		t.Fatal("SeedBlockedBy accepted a blocker that does not exist; want a failure")
+	}
+}
+
+// TestSeedCheckRunReservesExplicitIDs pins that an explicitly-seeded check run
+// ID is reserved against later auto-assignment, the way reserveNumber reserves
+// an explicitly-seeded issue/PR number.
+//
+// The collision this prevents is not cosmetic. Production's
+// latestCheckRunsByName (github/checkruns.go) reduces same-named runs by
+// keeping the highest ID, treating it as the most recent rerun; on a tie it
+// keeps whichever it saw first. Two runs sharing an ID therefore let a
+// "failed, then the rerun passed" scenario be classified off the failed run.
+func TestSeedCheckRunReservesExplicitIDs(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets")
+
+	// 5000 is the auto-assign counter's starting value, so an explicit seed of
+	// it collides with the very next ID: 0 seed unless it is reserved.
+	s.SeedCheckRun("acme/widgets", "sha1", gh.CheckRun{ID: 5000, Name: "build", Conclusion: "failure"})
+	s.SeedCheckRun("acme/widgets", "sha1", gh.CheckRun{Name: "build", Conclusion: "success"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	runs, err := s.FetchCheckRuns("acme", "widgets", "sha1")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d check runs, want 2", len(runs))
+	}
+	if runs[0].ID == runs[1].ID {
+		t.Fatalf("both check runs share ID %d; an explicit ID was not reserved against auto-assignment", runs[0].ID)
+	}
+
+	// The consequence the reservation protects: production must resolve the
+	// rerun (the higher ID) as the current verdict for the name.
+	if _, _, failed := gh.ClassifyCheckRuns(runs); len(failed) != 0 {
+		t.Fatalf("ClassifyCheckRuns resolved the stale failed run as current (%+v); the ID tiebreak was defeated by a collision", failed)
+	}
+}
+
+// TestSeedCheckRunRejectsDuplicateID pins the loud refusal for the case the
+// caller writes one ID twice by hand — unrepresentable, since GitHub's check
+// run IDs are unique across the instance.
+func TestSeedCheckRunRejectsDuplicateID(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedCheckRun("acme/widgets", "sha1", gh.CheckRun{ID: 77, Name: "build", Conclusion: "success"}).
+		SeedCheckRun("acme/widgets", "sha2", gh.CheckRun{ID: 77, Name: "vet", Conclusion: "success"})
+
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedCheckRun accepted a duplicate check run ID; want a failure")
+	}
+}
+
+// TestSeedRepoRejectsPathTraversal pins that owner/repo cannot escape baseDir.
+// repoDir joins the segments straight into a directory name, so without this
+// guard "../evil/pwned" creates the bare repo as a sibling of the t.TempDir()
+// the package promises to keep everything inside.
+func TestSeedRepoRejectsPathTraversal(t *testing.T) {
+	for _, name := range []string{"../evil/pwned", "acme/../../pwned", "..//pwned"} {
+		s, _ := newSim(t)
+		s.SeedRepo(name)
+		if err := s.Err(); err == nil {
+			t.Fatalf("SeedRepo(%q) was accepted; want a refusal", name)
+		}
+	}
+
+	// An ordinary name still works — the guard must not reject anything valid.
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets")
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedRepo rejected a valid owner/repo: %v", err)
+	}
+}
+
+// TestSeedRepoRefusesDuplicateAfterInit pins that the second SeedRepo for one
+// key fails rather than clobbering the live repoState. Clobbering would swap
+// out the repo's gitMu while callers still hold the old one, leaving two
+// mutexes guarding one bare directory.
+func TestSeedRepoRefusesDuplicateSeed(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets")
+	if err := s.Err(); err != nil {
+		t.Fatalf("first SeedRepo: %v", err)
+	}
+	first, err := s.repoByKey("acme/widgets")
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+
+	s.SeedRepo("acme/widgets")
+	if err := s.Err(); err == nil {
+		t.Fatal("second SeedRepo for the same key was accepted; want a failure")
+	}
+	second, err := s.repoByKey("acme/widgets")
+	if err != nil {
+		t.Fatalf("repoByKey after refused reseed: %v", err)
+	}
+	if first != second {
+		t.Fatal("the refused reseed replaced the live repoState; its gitMu no longer guards the bare directory callers are using")
 	}
 }
