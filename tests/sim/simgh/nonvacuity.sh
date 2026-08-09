@@ -256,10 +256,13 @@ mutate "a duplicate check run ID is accepted" \
   'TestSeedCheckRunRejectsDuplicateID' \
   'seed.go::s|\t\} else if s\.seededCheckRunIDs\[run\.ID\] \{|\t\} else if false \&\& s.seededCheckRunIDs[run.ID] \{|'
 
+# Neutralised by short-circuiting the whole validator rather than editing its
+# two conditions in place: the guard's own source contains backticks and
+# backslashes that are awkward to match reliably, and a perl expression that
+# silently fails to apply proves nothing (which is why SKIP now fails the sweep).
 mutate "owner/repo path traversal is accepted" \
   'TestSeedRepoRejectsPathTraversal' \
-  'util.go::s|\tif seg == "\." \|\| seg == "\.\." \{|\tif false \&\& (seg == "." \|\| seg == "..") \{|' \
-  'util.go::s|\tif strings\.ContainsAny\(seg, `/\\\\`\) \|\| strings\.ContainsRune\(seg, os\.PathSeparator\) \{|\tif false \&\& (strings.ContainsAny(seg, `/`) \|\| strings.ContainsRune(seg, os.PathSeparator)) \{|'
+  'util.go::s|func validatePathSegment\(kind, seg, ownerRepo string\) error \{|func validatePathSegment(kind, seg, ownerRepo string) error \{\n\treturn nil|'
 
 # Both of SeedRepo's duplicate guards are neutralised together: single-threaded,
 # either one alone still refuses the reseed, so a mutation of just one could not
@@ -268,9 +271,10 @@ mutate "a duplicate SeedRepo is accepted" \
   'TestSeedRepoRefusesDuplicateSeed' \
   'seed.go::s|if _, exists := s\.repos\[ownerRepo\]; exists \{|if false \{|g'
 
-mutate_race "a concurrent second SeedRepo clobbers the live repoState" \
+mutate_race "SeedRepo's creation lock is removed (concurrent callers race in git and clobber)" \
   'TestConcurrentSeedRepoDoesNotClobber' \
-  'seed.go::s|\tif _, exists := s\.repos\[ownerRepo\]; exists \{\n\t\ts\.fail\("simgh: repo %s already seeded", ownerRepo\)\n\t\ts\.mu\.Unlock\(\)\n\t\treturn s\n\t\}\n\ts\.repos\[ownerRepo\] = &repoState\{|\tif false \{\n\t\ts.fail("simgh: repo %s already seeded", ownerRepo)\n\t\ts.mu.Unlock()\n\t\treturn s\n\t\}\n\ts.repos[ownerRepo] = \&repoState\{|'
+  'sim.go::s|\tseedRepoMu sync\.Mutex|\tseedRepoMu noopSeedMutex|' \
+  'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
 
 mutate "timestamps come from wall time, not the injected clock" \
   'TestLabelAddRemoveIsObservable' \

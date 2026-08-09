@@ -83,6 +83,20 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 		return s
 	}
 
+	// Serialise repo creation end to end. Checking "already seeded" under mu,
+	// releasing mu for the git init, then publishing is not enough on its own:
+	// concurrent callers for one key all clear the check before any publishes,
+	// and they then race inside initBare against one directory with no gitMu in
+	// existence yet to serialise them. This is the one seeding call that does
+	// I/O before publishing state, so it takes its own lock for the whole
+	// sequence — cheap, since seeding is setup, not a hot path.
+	//
+	// Ordering: seedRepoMu is only ever taken here, at the outermost level, and
+	// mu is taken and released inside it. Nothing acquires it while holding mu
+	// or gitMu, so it cannot participate in a cycle.
+	s.seedRepoMu.Lock()
+	defer s.seedRepoMu.Unlock()
+
 	s.mu.Lock()
 	if _, exists := s.repos[ownerRepo]; exists {
 		s.fail("simgh: repo %s already seeded", ownerRepo)
@@ -108,17 +122,6 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 	}
 
 	s.mu.Lock()
-	// Re-check under mu rather than writing unconditionally: the guard above
-	// was checked before mu was released for the git init, so two concurrent
-	// SeedRepo calls for one key can both reach here. Clobbering would replace
-	// a live repoState — and its gitMu — while the winner's callers still hold
-	// the old one, leaving two mutexes guarding one bare directory and
-	// silently voiding the per-repo git serialisation the package rests on.
-	if _, exists := s.repos[ownerRepo]; exists {
-		s.fail("simgh: repo %s already seeded", ownerRepo)
-		s.mu.Unlock()
-		return s
-	}
 	s.repos[ownerRepo] = &repoState{
 		owner:             owner,
 		repo:              repo,

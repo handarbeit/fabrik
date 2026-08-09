@@ -92,6 +92,14 @@ type Sim struct {
 
 	clock Clock
 
+	// seedRepoMu serialises SeedRepo end to end. It is the only seeding call
+	// that runs git before publishing its state, so the check-then-publish
+	// sequence needs to be atomic against a concurrent caller for the same key
+	// — there is no repoState, and so no gitMu, in existence yet to serialise
+	// the git init. Taken at the outermost level only; never acquired while
+	// holding mu or gitMu.
+	seedRepoMu sync.Mutex
+
 	// mu guards every field below it. See the package doc's locking invariant.
 	mu sync.Mutex
 
