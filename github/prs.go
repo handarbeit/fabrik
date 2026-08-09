@@ -218,6 +218,15 @@ query($owner: String!, $repo: String!, $number: Int!) {
 // comments connection's totalCount so a caller rendering thread content can
 // say so rather than presenting a partial history as complete.
 //
+// comments(first: 20) has no orderBy argument — GitHub's schema doesn't
+// expose one for PullRequestReviewThread.comments (confirmed via
+// introspection), so which 20 of a longer thread are returned relies on the
+// connection's own default order, not something this query can pin
+// explicitly. Observed behavior returns them oldest-first (thread creation
+// order), which is what CommentsTruncated's doc comment and callers'
+// omission notes assume; if GitHub ever changes that default, the "oldest
+// 20" framing here would need revisiting.
+//
 // Returns an error (not an empty slice) when the query resolves with no
 // pullRequest node, matching FetchPRReviewDecision's convention.
 func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, error) {
