@@ -336,7 +336,7 @@ mutate "SeedIssue drops its assignees" \
 
 mutate "UpdateComment does not bump the parent issue's updatedAt" \
   'TestUpdateCommentBumpsParentIssueUpdatedAt' \
-  'comments.go::s{\tif iss != nil \{\n\t\tiss\.updatedAt = s\.now\(\)\n\t\}}{\tif iss != nil \{\n\t\t_ = iss\n\t\}}'
+  'comments.go::s|case iss != nil:\n\t\tiss\.updatedAt = s\.now\(\)|case iss != nil:\n\t\t_ = iss|'
 
 mutate "FetchItemDetails matches either ID, so the board is picked by map order" \
   'TestFetchItemDetailsPrefersItemIDAcrossProjects' \
@@ -349,6 +349,10 @@ mutate "MergePR records a merge that wrote no commit" \
 mutate "trial worktrees are created outside baseDir" \
   'TestTrialWorktreeStaysInsideBaseDir' \
   'git.go::s|os\.MkdirTemp\(r\.worktreeRoot, "wt-"\)|os.MkdirTemp("", "simgh-wt-")|'
+
+mutate "UpdateComment does not bump the parent PR's updatedAt" \
+  'TestUpdateCommentBumpsParentPRUpdatedAt' \
+  'comments.go::s|case pr != nil:\n\t\tpr\.updatedAt = s\.now\(\)|case pr != nil:\n\t\t_ = pr|'
 
 
 echo

@@ -599,3 +599,38 @@ func TestFetchItemDetailsPrefersItemIDAcrossProjects(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateCommentBumpsParentPRUpdatedAt is the PR half of the comment-edit
+// timestamp rule. It is pinned separately because the two branches are
+// separate code paths, and a single test could not show that both work.
+//
+// The PR's timestamp is observable: buildProjectItem folds a linked PR's
+// updatedAt into the board item's UpdatedAt, and ProbeProjectBoard surfaces it
+// as LinkedPRUpdatedAt.
+func TestUpdateCommentBumpsParentPRUpdatedAt(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+	s.SeedCommit(repoName, "main", map[string]string{"README.md": "hello\n"}, "seed main").
+		SeedCommit(repoName, headBranch, map[string]string{"feature.go": "package feature\n"}, "work").
+		SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "a PR"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// #42 is a PR, so this comment lands on the PR, not the issue.
+	commentID, err := s.AddComment("acme", "widgets", 42, "original")
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	before := firstItemFull(t, s).UpdatedAt
+
+	// Advance first, or a bumped timestamp is indistinguishable from a stale one.
+	clk.Advance(time.Hour)
+
+	if err := s.UpdateComment("acme", "widgets", commentID, "edited"); err != nil {
+		t.Fatalf("UpdateComment: %v", err)
+	}
+
+	if got := firstItemFull(t, s).UpdatedAt; !got.After(before) {
+		t.Fatalf("item UpdatedAt = %v, want later than %v after editing a PR comment", got, before)
+	}
+}
