@@ -131,6 +131,39 @@ func TestMergeableStateBlockedViaClassicCommitStatus(t *testing.T) {
 	}
 }
 
+// TestMergeableStateCleanViaClassicCommitStatus is the discriminating half of
+// the ADR-933 pair. Blocking on a *failing* commit status proves nothing on its
+// own: a derivation that ignored commit statuses entirely would also report
+// "blocked", because the required context would simply be missing. Only a
+// *passing* commit status can distinguish "read and green" from "not read at
+// all".
+func TestMergeableStateCleanViaClassicCommitStatus(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedRequiredContexts(repoName, "main", []string{"local-ci"}).
+		SeedCommitStatus(repoName, sha, gh.CommitStatus{Context: "local-ci", State: "success"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateClean)
+}
+
+// TestMergeableStateUnstableViaNonRequiredCommitStatus is the same
+// discrimination for the unstable branch: a red commit status that is not
+// required must make the PR unstable, which is only reachable if commit
+// statuses reach the derivation at all.
+func TestMergeableStateUnstableViaNonRequiredCommitStatus(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	sha := seedPRForState(t, s, false)
+	s.SeedCommitStatus(repoName, sha, gh.CommitStatus{Context: "optional-lint", State: "failure"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	assertState(t, s, stateUnstable)
+}
+
 func TestMergeableStateDraftTakesPrecedence(t *testing.T) {
 	s, _ := seedBasicBoard(t)
 	seedPRForState(t, s, true)

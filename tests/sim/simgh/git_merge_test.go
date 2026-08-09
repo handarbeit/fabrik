@@ -182,6 +182,61 @@ func TestMergePRProducesRealMergeCommit(t *testing.T) {
 	}
 }
 
+// TestMergePRCreatesMergeCommitEvenWhenFastForwardable pins GitHub's default
+// "Create a merge commit" strategy: when the head is a strict descendant of the
+// base, git would happily fast-forward, but GitHub still writes a two-parent
+// merge commit. Without this case the divergent-branch test above cannot tell
+// --no-ff from --ff, since divergent branches force a merge commit either way.
+func TestMergePRCreatesMergeCommitEvenWhenFastForwardable(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	// The head branch descends directly from main, which does not move.
+	s.SeedCommit(repoName, "main", map[string]string{"base.txt": "base\n"}, "base").
+		SeedCommit(repoName, headBranch, map[string]string{"feature.txt": "feature\n"}, "feature").
+		SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	baseBefore := mustHeadSHA(t, s, repoName, "main")
+	headSHA := mustHeadSHA(t, s, repoName, headBranch)
+
+	// Precondition: this merge really is fast-forwardable.
+	behind, err := s.FetchCommitsBehind("acme", "widgets", "main", headBranch)
+	if err != nil {
+		t.Fatalf("FetchCommitsBehind: %v", err)
+	}
+	if behind != 0 {
+		t.Fatalf("precondition: head is %d commits behind main, want 0", behind)
+	}
+
+	if err := s.MergePR("acme", "widgets", 42); err != nil {
+		t.Fatalf("MergePR: %v", err)
+	}
+
+	after := mustHeadSHA(t, s, repoName, "main")
+	if after == headSHA {
+		t.Fatal("MergePR fast-forwarded main onto the head commit; GitHub's merge-commit strategy writes a merge commit")
+	}
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	r.gitMu.Lock()
+	parents, gitErr := runGit(r.bareDir, "rev-list", "--parents", "-n", "1", "refs/heads/main")
+	r.gitMu.Unlock()
+	if gitErr != nil {
+		t.Fatalf("rev-list --parents: %v", gitErr)
+	}
+	fields := strings.Fields(parents)
+	if len(fields) != 3 {
+		t.Fatalf("main tip has %d parents (%q), want a two-parent merge commit", len(fields)-1, parents)
+	}
+	if fields[1] != baseBefore || fields[2] != headSHA {
+		t.Fatalf("merge commit parents = %v, want [%s %s]", fields[1:], baseBefore, headSHA)
+	}
+}
+
 // TestMergePRRefusesRealConflict proves the merge path and the probe agree: a
 // PR the probe reports unmergeable cannot be merged, and the refusal carries
 // the error kind production uses for a conflict.
