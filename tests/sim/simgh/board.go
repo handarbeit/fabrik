@@ -160,12 +160,20 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 	return item, nil
 }
 
-// findPRByHeadLocked returns the lowest-numbered PR with the given head
+// findPRByHeadLocked returns the most recently created PR with the given head
 // branch, or nil. Caller must hold mu.
+//
+// Newest-wins, not lowest-numbered: Fabrik reuses the branch fabrik/issue-<N>,
+// so a branch can carry a stale closed PR alongside the live one, and
+// production resolves that to the newest (see FetchLinkedPR). The board
+// projection must agree with FetchLinkedPR on which PR is "the" linked PR —
+// were they to disagree, two reads of the same model would report two different
+// PR numbers, a bug the sim itself would be introducing.
 func findPRByHeadLocked(r *repoState, head string) *prRecord {
-	for _, n := range sortedPRNumbers(r) {
-		if r.prs[n].head == head {
-			return r.prs[n]
+	nums := sortedPRNumbers(r)
+	for i := len(nums) - 1; i >= 0; i-- {
+		if r.prs[nums[i]].head == head {
+			return r.prs[nums[i]]
 		}
 	}
 	return nil

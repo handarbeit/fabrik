@@ -46,6 +46,14 @@ func (s *Sim) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
 // FetchLinkedPR returns the PR linked to an issue by head-branch convention,
 // or nil when there is none.
 //
+// When more than one PR shares the head branch, the most recently created one
+// wins. Production queries `pulls?head=owner:branch&state=all&per_page=1`, and
+// that endpoint defaults to created-descending, so GitHub returns the newest.
+// The case is not hypothetical: Fabrik reuses fabrik/issue-<N>, so a PR closed
+// without merging leaves a stale record on the branch the next PR reuses.
+// Picking the oldest would hand the engine a closed PR that production would
+// never have shown it.
+//
 // It deliberately reports MergeableState as "" and populates no mergeable
 // flag. Production reaches this through the pulls *list* endpoint, which omits
 // mergeable_state entirely — returning a computed value here would let a test
@@ -61,13 +69,7 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 		s.mu.Unlock()
 		return nil, err
 	}
-	var found *prRecord
-	for _, num := range sortedPRNumbers(r) {
-		if r.prs[num].head == branch {
-			found = r.prs[num]
-			break
-		}
-	}
+	found := findPRByHeadLocked(r, branch)
 	if found == nil {
 		s.mu.Unlock()
 		return nil, nil
@@ -171,8 +173,7 @@ func (s *Sim) createPR(owner, repo, title, head, base, body string, issueNumber 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	num := r.nextPRNumber
-	r.nextPRNumber++
+	num := r.allocNumber()
 	now := s.now()
 	r.prs[num] = &prRecord{
 		number:      num,
