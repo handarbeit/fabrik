@@ -354,6 +354,25 @@ mutate "UpdateComment does not bump the parent PR's updatedAt" \
   'TestUpdateCommentBumpsParentPRUpdatedAt' \
   'comments.go::s|case pr != nil:\n\t\tpr\.updatedAt = s\.now\(\)|case pr != nil:\n\t\t_ = pr|'
 
+mutate "SeedBranch repoints an existing branch, discarding its commits" \
+  'TestSeedBranchRefusesExistingBranch' \
+  'git.go::s|if r\.branchExists\(branch\) \{\n\t\treturn fmt\.Errorf|if false \&\& r.branchExists(branch) {\n\t\treturn fmt.Errorf|'
+
+mutate "MergePR merges a PR retargeted after the gate cleared it" \
+  'TestMergePRRefusesRetargetBetweenGateAndMerge' \
+  'prs.go::s|if head != gatedHead \|\| base != gatedBase \{|if false {\n\t\t_, _ = gatedHead, gatedBase|'
+
+mutate "a status move stamps its card and project from two clock reads" \
+  'TestOneMutationStampsOneTimestamp' \
+  'board.go::s|\t\tnow := s\.now\(\)\n\t\tit\.status = name\n\t\tit\.updatedAt = now\n\t\tp\.updatedAt = now|\t\tit.status = name\n\t\tit.updatedAt = s.now()\n\t\tp.updatedAt = s.now()|'
+
+mutate "a label application stamps applied-at and the issue from two clock reads" \
+  'TestOneMutationStampsOneTimestamp' \
+  'labels.go::s|\tnow := s\.now\(\)\n\tiss\.labels = append\(iss\.labels, labelName\)\n\tiss\.labelAppliedAt\[labelName\] = now\n\tiss\.updatedAt = now|\tiss.labels = append(iss.labels, labelName)\n\tiss.labelAppliedAt[labelName] = s.now()\n\tiss.updatedAt = s.now()|'
+
+mutate "a comment stamps created-at and its issue from two clock reads" \
+  'TestOneMutationStampsOneTimestamp' \
+  'comments.go::s|\t\tiss\.updatedAt = now\n\t\treturn id, nil|\t\tiss.updatedAt = s.now()\n\t\treturn id, nil|'
 
 echo
 status=0

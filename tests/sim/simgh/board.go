@@ -415,9 +415,10 @@ func (s *Sim) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOp
 		if optID != statusOptionID {
 			continue
 		}
+		now := s.now()
 		it.status = name
-		it.updatedAt = s.now()
-		p.updatedAt = s.now()
+		it.updatedAt = now
+		p.updatedAt = now
 		return nil
 	}
 	return fmt.Errorf("simgh: no status option %q in project %q", statusOptionID, projectID)
@@ -436,9 +437,10 @@ func (s *Sim) ArchiveProjectItem(projectID, itemID string) error {
 	if !ok {
 		return fmt.Errorf("simgh: project item %q not found in %q", itemID, projectID)
 	}
+	now := s.now()
 	it.archived = true
-	it.updatedAt = s.now()
-	p.updatedAt = s.now()
+	it.updatedAt = now
+	p.updatedAt = now
 	return nil
 }
 
@@ -554,16 +556,17 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 	}
 	// A card added by this mutation has no Status until one is set — GitHub
 	// leaves the field empty rather than defaulting to the first column.
+	now := s.now()
 	p.items[id] = &itemState{
 		itemID:    id,
 		ownerRepo: ownerRepo,
 		number:    number,
 		isPR:      false,
 		status:    "",
-		updatedAt: s.now(),
+		updatedAt: now,
 	}
 	p.itemOrder = append(p.itemOrder, id)
-	p.updatedAt = s.now()
+	p.updatedAt = now
 	return id, nil
 }
 

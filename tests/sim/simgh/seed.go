@@ -391,16 +391,17 @@ func (s *Sim) placeOnProjectLocked(p *projectState, ownerRepo string, number int
 		s.reviveCardLocked(p, existing)
 		return
 	}
+	now := s.now()
 	p.items[id] = &itemState{
 		itemID:    id,
 		ownerRepo: ownerRepo,
 		number:    number,
 		isPR:      isPR,
 		status:    status,
-		updatedAt: s.now(),
+		updatedAt: now,
 	}
 	p.itemOrder = append(p.itemOrder, id)
-	p.updatedAt = s.now()
+	p.updatedAt = now
 }
 
 // SeedCheckRun attaches a check run to a commit SHA. Name and Conclusion are
@@ -607,14 +608,15 @@ func (s *Sim) SeedComment(ownerRepo string, issueNumber int, author, body string
 	}
 	id := s.nextCommentDatabaseID
 	s.nextCommentDatabaseID++
+	now := s.now()
 	iss.comments = append(iss.comments, &commentRecord{
 		databaseID: id,
 		author:     author,
 		body:       body,
-		createdAt:  s.now(),
+		createdAt:  now,
 		reactions:  make(map[string]int),
 	})
-	iss.updatedAt = s.now()
+	iss.updatedAt = now
 	return s
 }
 

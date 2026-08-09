@@ -443,6 +443,24 @@ func worseVerdict(a, b string) string {
 // Without this gate a scenario could merge a PR in a blocked state, which is
 // exactly the class of bug ADR-072 records.
 func (s *Sim) MergePR(owner, repo string, prNumber int) error {
+	// Snapshot the refs the gate is about to be computed against, so the merge
+	// below can confirm it is merging the same thing that was cleared. The gate
+	// necessarily drops both locks (it takes mu and gitMu in turn, which the
+	// package's lock-ordering rule requires), so a concurrent UpdatePRBase can
+	// land in the window and retarget the PR at a base whose required contexts
+	// and mergeability were never evaluated. GitHub has no such window — its
+	// merge endpoint re-checks server-side, atomically. The model closes it
+	// with a compare-and-swap instead, which needs neither lock held across the
+	// gate and so keeps the ordering invariant intact.
+	s.mu.Lock()
+	_, pr, err := s.prLocked(owner, repo, prNumber)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	gatedHead, gatedBase := pr.head, pr.base
+	s.mu.Unlock()
+
 	mergeable, state, err := s.FetchPRMergeableFields(owner, repo, prNumber)
 	if err != nil {
 		return err
@@ -462,6 +480,18 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 	}
 	head, base, title := pr.head, pr.base, pr.title
 	s.mu.Unlock()
+
+	if head != gatedHead || base != gatedBase {
+		// Retargeted underneath the gate. Refuse rather than merge against a
+		// base the gate never cleared — recording a merge the gate did not
+		// authorise is the same silent divergence the gate itself exists to
+		// prevent. ErrNotMergeable (not ErrNotMergeableCI) because the caller's
+		// correct response is to re-read and retry, exactly as for a state
+		// that has moved on.
+		return fmt.Errorf("simgh: merging PR #%d: retargeted from %s->%s to %s->%s "+
+			"between the mergeability gate and the merge: %w",
+			prNumber, gatedHead, gatedBase, head, base, gh.ErrNotMergeable)
+	}
 
 	r.gitMu.Lock()
 	sha, conflict, err := r.tryMerge(base, head, true, fmt.Sprintf("Merge pull request #%d from %s\n\n%s", prNumber, head, title))
@@ -487,9 +517,14 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// One timestamp for the whole merge: the PR and every issue it auto-closes
+	// are one event on GitHub, and reading the clock per field would let them
+	// disagree under any clock that advances between reads — which the default
+	// realClock does.
+	now := s.now()
 	pr.merged = true
 	pr.state = "closed"
-	pr.updatedAt = s.now()
+	pr.updatedAt = now
 
 	// GitHub auto-closes issues a merged PR references with a closing keyword,
 	// but only when the merge lands on the default branch. The engine relies
@@ -501,7 +536,7 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 		for _, n := range closingIssueNumbers(pr) {
 			if iss, ok := r.issues[n]; ok && iss.state != "CLOSED" {
 				iss.state = "CLOSED"
-				iss.updatedAt = s.now()
+				iss.updatedAt = now
 			}
 		}
 	}

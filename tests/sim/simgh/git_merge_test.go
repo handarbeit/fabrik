@@ -450,3 +450,36 @@ func TestTrialWorktreeStaysInsideBaseDir(t *testing.T) {
 		t.Fatalf("worktree %s still exists after withWorktree returned (stat err = %v)", seen, statErr)
 	}
 }
+
+// TestSeedBranchRefusesExistingBranch pins that SeedBranch creates a branch
+// rather than repointing one.
+//
+// The raw `update-ref` underneath would happily move an existing branch, so
+// seeding a branch that already carries commits would discard them and still
+// report success — a scenario author would only notice by wondering where
+// their commits went. GitHub's create-ref endpoint refuses the same case
+// (422 "Reference already exists"), so refusing is both the faithful answer
+// and the safe one. Growing a branch is SeedCommit's job.
+func TestSeedBranchRefusesExistingBranch(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	s.SeedCommit(repoName, headBranch, map[string]string{"feature.txt": "work\n"}, "seeded work")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	before := mustHeadSHA(t, s, repoName, headBranch)
+
+	s.SeedBranch(repoName, headBranch, "main")
+
+	err := s.Err()
+	if err == nil {
+		t.Fatal("SeedBranch onto an existing branch reported success; it silently discarded the seeded commits")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("SeedBranch error = %v, want an 'already exists' refusal", err)
+	}
+	// The refusal must leave the branch alone. An error raised only after the
+	// ref had already moved would still have lost the commits.
+	if after := mustHeadSHA(t, s, repoName, headBranch); after != before {
+		t.Fatalf("refused SeedBranch still moved %s from %s to %s", headBranch, before, after)
+	}
+}

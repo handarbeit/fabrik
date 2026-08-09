@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -498,5 +499,100 @@ func TestFetchPRDetailsReportsDerivedMergeableState(t *testing.T) {
 	}
 	if linked.MergeableState != "" {
 		t.Fatalf("FetchLinkedPR mergeable_state = %q, want \"\" — the list endpoint omits it", linked.MergeableState)
+	}
+}
+
+// TestMergePRRefusesRetargetBetweenGateAndMerge pins the compare-and-swap that
+// makes MergePR's ADR-072 gate mean something under concurrency.
+//
+// The gate necessarily drops both locks — it takes mu, then gitMu, in turn,
+// because the package's lock-ordering rule forbids holding one across the
+// other — so a concurrent retarget can land between the state the gate cleared
+// and the merge that follows. Without the CAS the merge proceeds against a
+// base whose required contexts and mergeability were never evaluated, which is
+// the gate's whole purpose defeated silently. GitHub has no such window: its
+// merge endpoint re-checks server-side, atomically.
+//
+// The window is opened deterministically by parking the gate on gitMu. The
+// retarget is written straight into the model rather than going through
+// UpdatePRBase, because UpdatePRBase itself takes gitMu to validate the new
+// base and would simply queue behind the parked gate; the CAS guards the
+// field changing, whichever writer changed it.
+func TestMergePRRefusesRetargetBetweenGateAndMerge(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	// A second, equally mergeable base to retarget onto, so a merge that
+	// wrongly proceeds succeeds rather than failing for an unrelated reason —
+	// the test must distinguish "the CAS refused" from "the merge broke".
+	s.SeedBranch(repoName, "release", "main").
+		SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "clean"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	mainBefore := mustHeadSHA(t, s, repoName, "main")
+	releaseBefore := mustHeadSHA(t, s, repoName, "release")
+
+	// Park the gate: MergePR snapshots head/base under mu, then blocks in the
+	// gate's git work on gitMu.
+	r.gitMu.Lock()
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		result <- s.MergePR("acme", "widgets", 42)
+	}()
+	<-started
+
+	// Give the goroutine time to clear the snapshot and reach the parked gate.
+	// It only has to take an uncontended mutex and read three fields, so this
+	// is generous. The failure direction is safe: if it were too short the
+	// retarget would land before the snapshot, the merge would succeed, and
+	// the assertions below would fail loudly rather than pass vacuously.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-result:
+		t.Fatalf("MergePR returned %v before the gate was reached; the test never opened the window", err)
+	default:
+	}
+
+	s.mu.Lock()
+	_, pr, err := s.prLocked("acme", "widgets", 42)
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatalf("prLocked: %v", err)
+	}
+	pr.base = "release"
+	s.mu.Unlock()
+
+	r.gitMu.Unlock()
+
+	mergeErr := <-result
+	if mergeErr == nil {
+		t.Fatal("MergePR merged a PR that was retargeted after the gate cleared it; " +
+			"the merge landed on a base the gate never evaluated")
+	}
+	if !isNotMergeable(mergeErr) {
+		t.Fatalf("MergePR error = %v, want ErrNotMergeable so the caller re-reads and retries", mergeErr)
+	}
+
+	// The refusal must leave no trace: neither base moved, and the PR is not
+	// recorded as merged.
+	if after := mustHeadSHA(t, s, repoName, "main"); after != mainBefore {
+		t.Fatalf("refused merge still moved main from %s to %s", mainBefore, after)
+	}
+	if after := mustHeadSHA(t, s, repoName, "release"); after != releaseBefore {
+		t.Fatalf("refused merge still moved release from %s to %s", releaseBefore, after)
+	}
+	merged, err := s.FetchPRMerged("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRMerged: %v", err)
+	}
+	if merged {
+		t.Fatal("PR reports merged after a refused merge")
 	}
 }

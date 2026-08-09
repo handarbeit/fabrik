@@ -20,23 +20,24 @@ func (s *Sim) AddComment(owner, repo string, issueNumber int, body string) (int,
 
 	id := s.nextCommentDatabaseID
 	s.nextCommentDatabaseID++
+	now := s.now()
 	c := &commentRecord{
 		databaseID: id,
 		author:     simActor,
 		body:       body,
-		createdAt:  s.now(),
+		createdAt:  now,
 		reactions:  make(map[string]int),
 	}
 
 	if iss, ok := r.issues[issueNumber]; ok {
 		iss.comments = append(iss.comments, c)
-		iss.updatedAt = s.now()
+		iss.updatedAt = now
 		return id, nil
 	}
 	if pr, ok := r.prs[issueNumber]; ok {
 		c.fromPR = issueNumber
 		pr.comments = append(pr.comments, c)
-		pr.updatedAt = s.now()
+		pr.updatedAt = now
 		return id, nil
 	}
 	return 0, fmt.Errorf("simgh: no issue or PR %s#%d to comment on", repoKey(owner, repo), issueNumber)

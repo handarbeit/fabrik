@@ -354,8 +354,22 @@ func (r *repoState) commitFiles(branch, fromBranch string, files map[string]stri
 	return sha, nil
 }
 
-// createBranch points a new branch at fromBranch's tip. Caller must hold gitMu.
+// createBranch points a *new* branch at fromBranch's tip. Caller must hold
+// gitMu.
+//
+// An existing branch is refused rather than repointed. GitHub's create-ref
+// endpoint behaves the same way (422 "Reference already exists") — moving a
+// branch is a separate, explicit operation there, not something ref creation
+// does silently. The refusal matters more here than the API parity: the raw
+// `update-ref` this wraps would happily discard whatever the branch already
+// pointed at, so SeedBranch after a SeedCommit on the same branch would throw
+// the seeded commits away and still report success. Growing a branch is
+// commitFiles' job, and it already forks-or-appends deliberately.
 func (r *repoState) createBranch(branch, fromBranch string) error {
+	if r.branchExists(branch) {
+		return fmt.Errorf("simgh: branch %q already exists in %s/%s; "+
+			"use SeedCommit to add commits to an existing branch", branch, r.owner, r.repo)
+	}
 	if fromBranch == "" {
 		fromBranch = r.defaultBranch
 	}

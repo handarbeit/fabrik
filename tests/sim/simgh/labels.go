@@ -35,9 +35,10 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	if contains(iss.labels, labelName) {
 		return nil
 	}
+	now := s.now()
 	iss.labels = append(iss.labels, labelName)
-	iss.labelAppliedAt[labelName] = s.now()
-	iss.updatedAt = s.now()
+	iss.labelAppliedAt[labelName] = now
+	iss.updatedAt = now
 	r.labelVocab[labelName] = true
 	return nil
 }
