@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -1664,7 +1665,33 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // chain, so precheck reuses that result instead of re-deriving it — which,
 // for a base:<branch> item, would otherwise mean a second live FetchPRReviews
 // REST call for a value nothing async could have changed since the first.
+//
+// #1045: also snapshots HEAD before/after the reinvoke, mirroring
+// dispatchCIFixReinvoke's precedent (engine/ci.go), and applies
+// ReviewCycleDecremented in the after hook when no new commit landed. The
+// pre-dispatch ReviewCycleIncremented (handleReviewGate, catch_up_handlers.go)
+// always fires before this goroutine runs — that ordering is unchanged, this
+// only compensates it after the fact — so "a cycle that changed nothing was
+// not an attempt" (req 2) holds without restructuring dispatchWithCycleLimit,
+// which rebase/CI-fix cycle dispatch also depend on. Scoped to "no new
+// commit" only, matching CI-fix's existing definition exactly: a batch that
+// only resolves a review thread with no code change is still decremented
+// under this scoping (an accepted, documented trade-off — see the plan/ADR).
+//
+// This intentionally does NOT reach the #1221 "all comments were bot service
+// notices" chokepoint case: processComments's notice filter (engine/comments.go)
+// runs before wm.EnsureWorktree, so when every candidate comment is filtered
+// out before invocation, the worktree is never touched this cycle and
+// gitHeadSHA(workDir) fails identically before and after (headBefore == "" in
+// build, guarded off by `headBefore != ""` below) — there is no SHA to compare,
+// so no decrement fires. That is the correct, conservative behavior: this
+// mechanism only compensates a cycle it can positively prove made no PR-visible
+// change, never one it simply couldn't measure. #1221 remains its own,
+// separately-tracked, unfixed-by-design trade-off (docs/state-machine.md §6.2).
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, precomputed []gh.Comment) {
+	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+	var headBefore string
+
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
 		// precheck runs synchronously before WorkerEntered/goroutine dispatch,
@@ -1674,7 +1701,24 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 			return len(precomputed) > 0
 		},
 		build: func(workDir string) []gh.Comment {
+			headBefore, _ = gitHeadSHA(workDir)
 			return e.buildReviewFeedbackComments(item)
+		},
+		after: func(workDir string, err error) {
+			// Only record a no-op when the reinvoke actually completed — a
+			// failed processComments (transient network issue, rate limit,
+			// workspace lock) also leaves HEAD unchanged, but that's a
+			// dispatch that never got a chance to act, not evidence there
+			// was nothing to act on. Mirrors dispatchCIFixReinvoke's
+			// identical err != nil guard.
+			if err != nil {
+				return
+			}
+			if headAfter, hErr := gitHeadSHA(workDir); hErr == nil && headBefore != "" && headAfter == headBefore {
+				e.logf(item.Number, "review-reinvoke", "no new commit pushed (HEAD still %s) — decrementing review cycle counter (#1045)\n",
+					headAfter[:min(8, len(headAfter))])
+				e.store.Apply(itemstate.ReviewCycleDecremented{Repo: itemRepo, Number: item.Number, StageName: stage.Name})
+			}
 		},
 	})
 }
