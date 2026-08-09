@@ -1886,6 +1886,8 @@ fabrik --ci-backstop-timeout=480
 
 Tune this down only if you want a hard ceiling on how long any single PR can occupy `fabrik:awaiting-ci`, independent of whether it's making progress.
 
+**Keep `FABRIK_CI_BACKSTOP_TIMEOUT` well above `FABRIK_CI_WAIT_TIMEOUT`.** Nothing enforces this ordering structurally — if the backstop is set at or below the liveness dwell, `settleAwaitingCIScan`'s unconditional backstop fires before the CI-gate liveness dwell ever gets a chance to distinguish a stalled CI run from one that's actively progressing, silently reintroducing the #342 spurious-pause behavior this redesign fixed. Fabrik logs a `[startup] warning` (not a hard failure) if the resolved values are misordered — watch for it after changing either setting.
+
 #### Restart Persistence
 
 The R3/legacy-Commit-Status elapsed dwells and the `CIBackstopTimeout` backstop are measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making them durable across engine restarts. The check-run-pending liveness dwell instead tracks progress in memory; a restart resets it to "no progress observed yet," which is the safe default — it never escalates blind on a cold cache, only re-observes on the next poll. The CI-fix cycle count is also in-memory and resets on restart.

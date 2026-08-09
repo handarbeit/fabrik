@@ -3649,3 +3649,44 @@ func TestLogCIWaitTimeoutSemantics_WritesOneUnconditionalNotice(t *testing.T) {
 		}
 	}
 }
+
+// TestWarnCIBackstopTimeoutOrdering_FiresWhenBackstopNotGreater pins the PR
+// review finding (pruefer, #1410): nothing enforces CIBackstopTimeout >
+// CIWaitTimeout, so an operator who sets the backstop at or below the
+// liveness dwell silently reintroduces #342's spurious-pause behavior —
+// settleAwaitingCIScan's unconditional backstop fires before
+// classifyCIFromCheckRuns' liveness dwell ever gets a chance to distinguish
+// stalled from progressing. Covers both the equal and inverted cases.
+func TestWarnCIBackstopTimeoutOrdering_FiresWhenBackstopNotGreater(t *testing.T) {
+	cases := []struct {
+		name              string
+		ciWaitTimeout     time.Duration
+		ciBackstopTimeout time.Duration
+		wantWarn          bool
+	}{
+		{"backstop much larger (healthy default shape)", 30 * time.Minute, 4 * time.Hour, false},
+		{"backstop strictly greater by a small margin", 30 * time.Minute, 31 * time.Minute, false},
+		{"backstop equal to wait timeout", 30 * time.Minute, 30 * time.Minute, true},
+		{"backstop below wait timeout", 30 * time.Minute, 15 * time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf strings.Builder
+			warnCIBackstopTimeoutOrdering(tc.ciWaitTimeout, tc.ciBackstopTimeout, &buf)
+
+			out := buf.String()
+			gotWarn := out != ""
+			if gotWarn != tc.wantWarn {
+				t.Fatalf("warnCIBackstopTimeoutOrdering(%s, %s): got warning=%v, want %v (output: %q)",
+					tc.ciWaitTimeout, tc.ciBackstopTimeout, gotWarn, tc.wantWarn, out)
+			}
+			if tc.wantWarn {
+				for _, want := range []string{"CIBackstopTimeout", "CIWaitTimeout", "[startup] warning"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("expected output to mention %q, got: %q", want, out)
+					}
+				}
+			}
+		})
+	}
+}
