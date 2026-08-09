@@ -165,7 +165,7 @@ func TestScheduledCommitStatusIsClockDriven(t *testing.T) {
 		t.Fatalf("seeding: %v", err)
 	}
 
-	latest := func() string {
+	read := func() []gh.CommitStatus {
 		t.Helper()
 		sts, err := s.FetchCombinedStatus("acme", "widgets", sha)
 		if err != nil {
@@ -174,6 +174,11 @@ func TestScheduledCommitStatusIsClockDriven(t *testing.T) {
 		if len(sts) == 0 {
 			t.Fatal("no statuses")
 		}
+		return sts
+	}
+	latest := func() string {
+		t.Helper()
+		sts := read()
 		return statusVerdict(sts[len(sts)-1])
 	}
 
@@ -183,6 +188,17 @@ func TestScheduledCommitStatusIsClockDriven(t *testing.T) {
 	clk.Advance(15 * time.Minute)
 	if got := latest(); got != "failure" {
 		t.Fatalf("at the scheduled instant = %q, want failure", got)
+	}
+
+	// The step must apply exactly once, however many times the surface is read
+	// afterwards. Statuses accumulate rather than superseding by ID, so a step
+	// that stayed queued after firing would append a duplicate on every read —
+	// which is what "one poll is not one read" would turn into an ever-growing
+	// collection. This is AC2's stability requirement in its most direct form.
+	for i := 0; i < 4; i++ {
+		if got := len(read()); got != 2 {
+			t.Fatalf("read %d returned %d statuses, want 2 — the step re-applied", i+1, got)
+		}
 	}
 }
 
@@ -352,48 +368,107 @@ func TestADueStepCannotUndoAnEngineWithdrawal(t *testing.T) {
 // one layer up ("two reads of one model reporting two verdicts is a bug the
 // sim would be introducing"); a schedule multiplies the number of places it
 // can happen.
+//
+// **Every case builds its own Sim.** That is not tidiness — it is what makes
+// the test able to fail. Draining is a *write*, so if these cases shared one
+// Sim the first read would apply the step and every later case would see it
+// whether or not its own path drains. Deleting a drain would leave the test
+// green, and the guard would be guarding nothing. One Sim per case makes the
+// path under test the first read of the scheduled surface, so a nonvacuity
+// mutation per drain site is individually catchable.
 func TestScheduleVisibleThroughEveryReadPath(t *testing.T) {
-	t.Run("CI paths", func(t *testing.T) {
+	// seedCI builds a repo whose one required check passes now and fails an
+	// hour in, plus a classic status doing the same, with the clock already
+	// advanced past both.
+	seedCI := func(t *testing.T) (*Sim, string) {
+		t.Helper()
 		s, clk, sha := seedPRForScheduling(t)
 		s.SeedRequiredContexts("acme/widgets", "main", []string{"build"}).
 			SeedCheckRun("acme/widgets", sha, gh.CheckRun{ID: 900, Name: "build", Conclusion: "success"}).
 			SeedCheckRunsAfter("acme/widgets", sha, time.Hour,
-				gh.CheckRun{ID: 900, Name: "build", Status: "completed", Conclusion: "failure"})
+				gh.CheckRun{ID: 900, Name: "build", Status: "completed", Conclusion: "failure"}).
+			SeedCommitStatusesAfter("acme/widgets", sha, time.Hour,
+				gh.CommitStatus{Context: "legacy", State: "failure"})
 		if err := s.Err(); err != nil {
 			t.Fatalf("seeding: %v", err)
 		}
-
 		clk.Advance(time.Hour)
+		return s, sha
+	}
 
-		// FetchCheckRuns — the direct read.
-		runs, err := s.FetchCheckRuns("acme", "widgets", sha)
-		if err != nil {
-			t.Fatalf("FetchCheckRuns: %v", err)
-		}
-		if len(runs) != 1 || checkVerdict(runs[0]) != "failure" {
-			t.Errorf("FetchCheckRuns = %+v, want one failing run", runs)
-		}
-
+	ciPaths := map[string]func(t *testing.T, s *Sim, sha string){
+		// The direct read.
+		"FetchCheckRuns": func(t *testing.T, s *Sim, sha string) {
+			runs, err := s.FetchCheckRuns("acme", "widgets", sha)
+			if err != nil {
+				t.Fatalf("FetchCheckRuns: %v", err)
+			}
+			if len(runs) != 1 || checkVerdict(runs[0]) != "failure" {
+				t.Errorf("FetchCheckRuns = %+v, want one failing run", runs)
+			}
+		},
+		// The classic Statuses API, addressed by SHA — the first of
+		// FetchCombinedStatus's two read sections.
+		"FetchCombinedStatus by SHA": func(t *testing.T, s *Sim, sha string) {
+			sts, err := s.FetchCombinedStatus("acme", "widgets", sha)
+			if err != nil {
+				t.Fatalf("FetchCombinedStatus: %v", err)
+			}
+			if len(sts) != 1 || statusVerdict(sts[0]) != "failure" {
+				t.Errorf("FetchCombinedStatus(sha) = %+v, want one failing status", sts)
+			}
+		},
+		// The same endpoint addressed by branch, which falls through to the
+		// second section after resolving the ref.
+		"FetchCombinedStatus by branch": func(t *testing.T, s *Sim, _ string) {
+			sts, err := s.FetchCombinedStatus("acme", "widgets", "fabrik/issue-7")
+			if err != nil {
+				t.Fatalf("FetchCombinedStatus: %v", err)
+			}
+			if len(sts) != 1 || statusVerdict(sts[0]) != "failure" {
+				t.Errorf("FetchCombinedStatus(branch) = %+v, want one failing status", sts)
+			}
+		},
 		// deriveMergeableState via contextsForSHA — the derived read.
-		state, err := s.FetchPRMergeableState("acme", "widgets", 8)
-		if err != nil {
-			t.Fatalf("FetchPRMergeableState: %v", err)
-		}
-		if state != "blocked" {
-			t.Errorf("mergeable state = %q, want blocked — the derivation did not see the step", state)
-		}
+		"FetchPRMergeableState": func(t *testing.T, s *Sim, _ string) {
+			state, err := s.FetchPRMergeableState("acme", "widgets", 8)
+			if err != nil {
+				t.Fatalf("FetchPRMergeableState: %v", err)
+			}
+			if state != "blocked" {
+				t.Errorf("mergeable state = %q, want blocked — the derivation did not see the step", state)
+			}
+		},
+		"FetchPRMergeableFields": func(t *testing.T, s *Sim, _ string) {
+			_, state, err := s.FetchPRMergeableFields("acme", "widgets", 8)
+			if err != nil {
+				t.Fatalf("FetchPRMergeableFields: %v", err)
+			}
+			if state != "blocked" {
+				t.Errorf("mergeable state = %q, want blocked", state)
+			}
+		},
+		"FetchPRDetails": func(t *testing.T, s *Sim, _ string) {
+			details, err := s.FetchPRDetails("acme", "widgets", 8)
+			if err != nil {
+				t.Fatalf("FetchPRDetails: %v", err)
+			}
+			if details.MergeableState != "blocked" {
+				t.Errorf("FetchPRDetails MergeableState = %q, want blocked", details.MergeableState)
+			}
+		},
+	}
+	for name, check := range ciPaths {
+		t.Run("CI/"+name, func(t *testing.T) {
+			s, sha := seedCI(t)
+			check(t, s, sha)
+		})
+	}
 
-		// FetchPRDetails reaches the same derivation through a different entry.
-		details, err := s.FetchPRDetails("acme", "widgets", 8)
-		if err != nil {
-			t.Fatalf("FetchPRDetails: %v", err)
-		}
-		if details.MergeableState != "blocked" {
-			t.Errorf("FetchPRDetails MergeableState = %q, want blocked", details.MergeableState)
-		}
-	})
-
-	t.Run("review paths", func(t *testing.T) {
+	// seedReviews schedules both a review and a reviewer request an hour out,
+	// with the clock already advanced past them.
+	seedReviews := func(t *testing.T) (*Sim, time.Time) {
+		t.Helper()
 		s, clk, _ := seedPRForScheduling(t)
 		s.SeedRequiredApprovals("acme/widgets", "main", 1).
 			SeedReviewsAfter("acme/widgets", 8, time.Hour, gh.PRReview{Author: "human", State: "CHANGES_REQUESTED"}).
@@ -401,57 +476,80 @@ func TestScheduleVisibleThroughEveryReadPath(t *testing.T) {
 		if err := s.Err(); err != nil {
 			t.Fatalf("seeding: %v", err)
 		}
-
 		clk.Advance(time.Hour)
+		return s, clk.Now()
+	}
 
-		reviews, err := s.FetchPRReviews("acme", "widgets", 8)
-		if err != nil {
-			t.Fatalf("FetchPRReviews: %v", err)
-		}
-		if len(reviews) != 1 {
-			t.Errorf("FetchPRReviews returned %d reviews, want 1", len(reviews))
-		}
-
-		decision, err := s.FetchPRReviewDecision("acme", "widgets", 8)
-		if err != nil {
-			t.Fatalf("FetchPRReviewDecision: %v", err)
-		}
-		if decision != "CHANGES_REQUESTED" {
-			t.Errorf("FetchPRReviewDecision = %q, want CHANGES_REQUESTED", decision)
-		}
-
-		reqs, err := s.FetchPRReviewRequests("acme", "widgets", 8)
-		if err != nil {
-			t.Fatalf("FetchPRReviewRequests: %v", err)
-		}
-		if len(reqs) != 1 {
-			t.Errorf("FetchPRReviewRequests returned %d, want 1", len(reqs))
-		}
-
+	reviewPaths := map[string]func(t *testing.T, s *Sim, now time.Time){
+		"FetchPRReviews": func(t *testing.T, s *Sim, _ time.Time) {
+			reviews, err := s.FetchPRReviews("acme", "widgets", 8)
+			if err != nil {
+				t.Fatalf("FetchPRReviews: %v", err)
+			}
+			if len(reviews) != 1 {
+				t.Errorf("FetchPRReviews returned %d reviews, want 1", len(reviews))
+			}
+		},
+		"FetchPRReviewDecision": func(t *testing.T, s *Sim, _ time.Time) {
+			decision, err := s.FetchPRReviewDecision("acme", "widgets", 8)
+			if err != nil {
+				t.Fatalf("FetchPRReviewDecision: %v", err)
+			}
+			if decision != "CHANGES_REQUESTED" {
+				t.Errorf("FetchPRReviewDecision = %q, want CHANGES_REQUESTED", decision)
+			}
+		},
+		"FetchPRReviewRequests": func(t *testing.T, s *Sim, _ time.Time) {
+			reqs, err := s.FetchPRReviewRequests("acme", "widgets", 8)
+			if err != nil {
+				t.Fatalf("FetchPRReviewRequests: %v", err)
+			}
+			if len(reqs) != 1 {
+				t.Errorf("FetchPRReviewRequests returned %d, want 1", len(reqs))
+			}
+		},
 		// The board projection — the path the engine actually consumes most.
-		item := firstItemFull(t, s)
-		if len(item.LinkedPRReviews) != 1 {
-			t.Errorf("board projection LinkedPRReviews = %+v, want the scheduled review", item.LinkedPRReviews)
-		}
-		if len(item.LinkedPRReviewRequests) != 1 {
-			t.Errorf("board projection LinkedPRReviewRequests = %+v, want the scheduled request", item.LinkedPRReviewRequests)
-		}
-
+		"FetchProjectBoard": func(t *testing.T, s *Sim, _ time.Time) {
+			item := firstItemFull(t, s)
+			if len(item.LinkedPRReviews) != 1 {
+				t.Errorf("board projection LinkedPRReviews = %+v, want the scheduled review", item.LinkedPRReviews)
+			}
+			if len(item.LinkedPRReviewRequests) != 1 {
+				t.Errorf("board projection LinkedPRReviewRequests = %+v, want the scheduled request", item.LinkedPRReviewRequests)
+			}
+		},
+		"FetchProjectItem": func(t *testing.T, s *Sim, _ time.Time) {
+			item, err := s.FetchProjectItem("acme", "widgets", 7)
+			if err != nil {
+				t.Fatalf("FetchProjectItem: %v", err)
+			}
+			if len(item.LinkedPRReviews) != 1 {
+				t.Errorf("FetchProjectItem LinkedPRReviews = %+v, want the scheduled review", item.LinkedPRReviews)
+			}
+		},
 		// The probe path reads only updatedAt, but a due step bumps exactly
 		// that — and EffectiveUpdatedAt is how the engine decides an item is
 		// worth deep-fetching.
-		probes, _, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
-		if err != nil {
-			t.Fatalf("ProbeProjectBoard: %v", err)
-		}
-		if len(probes) != 1 {
-			t.Fatalf("probe returned %d items, want 1", len(probes))
-		}
-		if probes[0].EffectiveUpdatedAt.Before(clk.Now()) {
-			t.Errorf("probe EffectiveUpdatedAt = %v, want it bumped to the step's instant %v",
-				probes[0].EffectiveUpdatedAt, clk.Now())
-		}
-	})
+		"ProbeProjectBoard": func(t *testing.T, s *Sim, now time.Time) {
+			probes, _, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+			if err != nil {
+				t.Fatalf("ProbeProjectBoard: %v", err)
+			}
+			if len(probes) != 1 {
+				t.Fatalf("probe returned %d items, want 1", len(probes))
+			}
+			if probes[0].EffectiveUpdatedAt.Before(now) {
+				t.Errorf("probe EffectiveUpdatedAt = %v, want it bumped to the step's instant %v",
+					probes[0].EffectiveUpdatedAt, now)
+			}
+		},
+	}
+	for name, check := range reviewPaths {
+		t.Run("reviews/"+name, func(t *testing.T) {
+			s, now := seedReviews(t)
+			check(t, s, now)
+		})
+	}
 }
 
 // Steps scheduled for the same instant apply in seeding order — the only

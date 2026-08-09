@@ -337,6 +337,23 @@ func TestRestoredModelIsIndependentOfTheOriginal(t *testing.T) {
 	if contains(restLabels, "only-in-original") {
 		t.Error("a mutation on the original Sim was visible on the restored one")
 	}
+
+	// Git state must be independent too, not merely the in-memory model. A
+	// restore that carried bareDir forward verbatim instead of repointing it
+	// at the new baseDir would leave both Sims driving one physical
+	// repository — and every in-memory assertion above would still pass,
+	// because those paths are the only thing shared.
+	mainBefore := mustHeadSHA(t, s, "acme/widgets", "main")
+	restored.SeedRequireUpToDate("acme/widgets", "main", false)
+	if err := restored.Err(); err != nil {
+		t.Fatalf("SeedRequireUpToDate on the restored Sim: %v", err)
+	}
+	if err := restored.MergePR("acme", "widgets", 8); err != nil {
+		t.Fatalf("MergePR on the restored Sim: %v", err)
+	}
+	if got := mustHeadSHA(t, s, "acme/widgets", "main"); got != mainBefore {
+		t.Error("merging on the restored Sim moved the original's main — both point at one repository")
+	}
 }
 
 // One snapshot must seed several restores — a scenario may want to branch off
