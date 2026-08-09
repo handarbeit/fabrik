@@ -24,6 +24,12 @@ import (
 // It also handles subprocess mode: when invoked by TestKillProcGroupGraceful_SIGINTGraceWindow
 // as the fake claude binary, it drains stdin, waits for SIGINT, writes the sentinel file, and
 // exits — verifying that a process can complete cleanup within the SIGINT grace window.
+//
+// A second subprocess mode (FABRIK_TEST_FORCE_QUIT_HELPER, #1393/ADR-1393
+// AC4) runs a full Engine.Run() with a permanently in-flight worker and
+// exits via the real force-quit os.Exit(1) path when sent two SIGINT/SIGTERM
+// signals — see TestForceQuit_DuringCleanStop_AC4, which cannot exercise
+// this path in-process because it terminates the test binary itself.
 func TestMain(m *testing.M) {
 	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
 		go io.Copy(io.Discard, os.Stdin)
@@ -32,6 +38,10 @@ func TestMain(m *testing.M) {
 		<-ch
 		os.WriteFile(sentinel, []byte{}, 0644) //nolint:errcheck
 		os.Exit(0)
+	}
+	if os.Getenv("FABRIK_TEST_FORCE_QUIT_HELPER") == "1" {
+		runForceQuitHelperProcess()
+		os.Exit(4) // runForceQuitHelperProcess always exits itself; unreachable in practice
 	}
 	lockVerifyDelay = 0
 	os.Exit(m.Run())

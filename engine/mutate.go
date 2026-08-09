@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -331,4 +332,62 @@ func hasPauseComment(item gh.ProjectItem, fragments ...string) bool {
 func (e *Engine) reapplyPauseLabels(item gh.ProjectItem) {
 	e.applyLabelAdd(item, "fabrik:paused", false)
 	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
+}
+
+// pauseIssueMutex returns (creating on first use) a per-issue mutex used to
+// serialize concurrent pauseInterruptedIssue calls for the same issue. See
+// pauseInterruptedIssue's doc comment for why this exists.
+func (e *Engine) pauseIssueMutex(item gh.ProjectItem) *sync.Mutex {
+	key := issueKey(item, e.defaultRepo())
+	actual, _ := e.pauseIssueMu.LoadOrStore(key, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
+// pauseInterruptedIssue is the shared R3 primitive (#1393/ADR-1393) behind
+// both the TUI's single-issue stop (handleStopRequest, item.go) and the
+// daemon-wide clean-stop pause (runShutdownPause/pauseIssueForDaemonShutdown,
+// shutdown.go). Both callers cancel a per-issue context with their own kill
+// reason first, then converge on this one call so the label pair
+// (fabrik:paused + fabrik:awaiting-input), the write ordering, and the
+// idempotency guard can never drift between the two "an issue got
+// interrupted mid-stage" mechanisms.
+//
+// The AC2 idempotency guard (skip the comment if this pause episode is
+// already recorded) is computed *inside* this function, under a per-issue
+// mutex (pauseIssueMutex) — not from a caller-supplied snapshot taken before
+// the call. A caller-supplied bool was found in review to be racy: if a TUI
+// stop (handleStopRequest) and a daemon-wide shutdown pause
+// (pauseIssueForDaemonShutdown) land on the same in-flight issue at nearly
+// the same moment, both would read "not yet paused" from their own
+// pre-call snapshot and both proceed to post a comment — two audit comments
+// for one pause episode. Locking here and re-reading e.store live under the
+// lock closes that window: applyLabelAdd writes through to the store
+// synchronously, so whichever caller's goroutine acquires the mutex second
+// always observes the first caller's already-applied fabrik:paused label and
+// takes the reapply-only branch instead.
+//
+// labelFirst is set so labels land before the comment, matching
+// handleStopRequest's pre-existing ordering (Pattern C in pauseOpts' doc
+// comment) — this refactor changes who writes the labels/comment, not when.
+func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, comment string) {
+	mu := e.pauseIssueMutex(item)
+	mu.Lock()
+	defer mu.Unlock()
+
+	alreadyPaused := false
+	if snap, err := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); err == nil {
+		alreadyPaused = hasLabel(snap.Labels(), "fabrik:paused")
+	}
+
+	if alreadyPaused {
+		e.reapplyPauseLabels(item)
+		return
+	}
+	e.pauseIssue(item, comment, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   false,
+		labelEcho:     true,
+		commentEcho:   true,
+		labelFirst:    true,
+	})
 }

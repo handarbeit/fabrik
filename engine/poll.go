@@ -138,6 +138,38 @@ func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duratio
 		"and ADR-1410.\n", ciBackstopTimeout, ciWaitTimeout)
 }
 
+// warnDrainDeadlineOrdering is the ADR-1393/R4 startup check: the drain
+// deadline must exceed the worst-case kill escalation (sigIntGrace +
+// sigTermGrace elapses after cancel() fires, before SIGKILL lands) or the
+// drain will preempt the escalation mid-flight — Run() would return, and any
+// caller relying on process exit (e.g. a wrapping supervisor) would see the
+// process still alive past what the drain deadline implied. Mirrors
+// warnCIBackstopTimeoutOrdering: a warning, not a hard startup failure, since
+// both values remain valid, positive durations and only their relative
+// ordering is suboptimal.
+func warnDrainDeadlineOrdering(drainDeadline, sigIntGrace, sigTermGrace time.Duration, w io.Writer) {
+	killEscalation := sigIntGrace + sigTermGrace
+	if drainDeadline > killEscalation {
+		return
+	}
+	fmt.Fprintf(w, "[startup] warning: DrainDeadline (%s) is not greater than the kill escalation window "+
+		"KillGraceSigInt+KillGraceSigTerm (%s) — a clean stop's bounded wait (waitGroupTimeout) will fire before "+
+		"killProcGroupGraceful's SIGINT->SIGTERM->SIGKILL escalation has a chance to let a worker exit on its own, "+
+		"preempting the escalation and defeating its purpose. Set --drain-deadline/FABRIK_DRAIN_DEADLINE well above "+
+		"--kill-grace-sigint + --kill-grace-sigterm. See docs/USER_GUIDE.md and ADR-1393.\n", drainDeadline, killEscalation)
+}
+
+// drainDeadline returns the configured bound on a clean stop's worker drain,
+// defaulting to 30 seconds when unconfigured (ADR-1393). <= 0 is treated the
+// same as unconfigured — see Config.DrainDeadline's doc comment for why a
+// clean stop has no "0 = wait forever" sentinel, unlike kill_grace.
+func (e *Engine) drainDeadline() time.Duration {
+	if e.cfg.DrainDeadline > 0 {
+		return e.cfg.DrainDeadline
+	}
+	return 30 * time.Second
+}
+
 func (e *Engine) Run() error {
 	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
 	// processing the same project board concurrently. The lock file lives in
@@ -188,6 +220,7 @@ func (e *Engine) Run() error {
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
 		logCIWaitTimeoutSemantics(w)
 		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), w)
+		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
@@ -197,10 +230,26 @@ func (e *Engine) Run() error {
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
 		logCIWaitTimeoutSemantics(os.Stderr)
 		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), os.Stderr)
+		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// drainComplete is closed when Run() is about to return, for any reason —
+	// distinct from ctx.Done(), which closes the instant the first
+	// SIGINT/SIGTERM's cancel() fires. #1393/ADR-1393 R5/AC4 fix: the
+	// second-signal (force-quit) listener below used to race against
+	// ctx.Done() instead of this channel, and since ctx.Done() is already
+	// closed by the time that listener starts (this same goroutine just
+	// called cancel()), select would immediately take the already-ready
+	// ctx.Done() case and return — the listener exited before a human could
+	// physically press Ctrl-C a second time, so force-quit was practically
+	// unreachable. Waiting on drainComplete instead means the listener stays
+	// parked on sigCh for the entire drain and only gives up once Run() is
+	// actually exiting on its own.
+	drainComplete := make(chan struct{})
+	defer close(drainComplete)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -221,13 +270,11 @@ func (e *Engine) Run() error {
 		select {
 		case sig := <-sigCh:
 			fmt.Fprintf(os.Stderr, "\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
-			// Annotate all in-flight per-issue contexts with the shutdown reason so
-			// the kill log emits "daemon_shutdown" rather than "context_cancel".
-			e.issueCtxs.Range(func(_, val any) bool {
-				val.(issueCtxEntry).holder.val.Store("daemon_shutdown")
-				return true
-			})
-			cancel()
+			// R1/R2 (#1393, ADR-1393): annotate in-flight contexts, register and
+			// launch the durable clean-stop pause, then cancel — see
+			// beginShutdownPause's doc comment for why the internal ordering is
+			// load-bearing and must not be reordered inline here.
+			e.beginShutdownPause(cancel)
 		case <-ctx.Done():
 			return
 		}
@@ -241,7 +288,7 @@ func (e *Engine) Run() error {
 				fn()
 			}
 			os.Exit(1)
-		case <-ctx.Done():
+		case <-drainComplete:
 		}
 	}()
 
@@ -626,6 +673,7 @@ func (e *Engine) Run() error {
 	if firstPollErr == nil {
 		e.runStartupCleanup()
 		e.runStartupOrphanedInProgressScan()
+		e.runStartupBareInProgressScan()
 		e.runStartupTransientLabelScan()
 		e.runStartupTerminalScan()
 		if e.cfg.JanitorIntervalHours > 0 {
@@ -663,22 +711,10 @@ func (e *Engine) Run() error {
 		if e.wakeCh != nil {
 			select {
 			case <-ctx.Done():
-				e.cleanupLockedIssues()
-				e.wg.Wait()
-				if e.sighupRequested.Load() {
-					performSighupRestart(e, lockFile)
-					close(restartDone) // reached only on exec failure
-				}
-				return nil
+				return e.drainAndExit(lockFile, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					e.cleanupLockedIssues()
-					e.wg.Wait()
-					if e.sighupRequested.Load() {
-						performSighupRestart(e, lockFile)
-						close(restartDone) // reached only on exec failure
-					}
-					return nil
+					return e.drainAndExit(lockFile, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -696,22 +732,10 @@ func (e *Engine) Run() error {
 		} else {
 			select {
 			case <-ctx.Done():
-				e.cleanupLockedIssues()
-				e.wg.Wait()
-				if e.sighupRequested.Load() {
-					performSighupRestart(e, lockFile)
-					close(restartDone) // reached only on exec failure
-				}
-				return nil
+				return e.drainAndExit(lockFile, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					e.cleanupLockedIssues()
-					e.wg.Wait()
-					if e.sighupRequested.Load() {
-						performSighupRestart(e, lockFile)
-						close(restartDone) // reached only on exec failure
-					}
-					return nil
+					return e.drainAndExit(lockFile, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
