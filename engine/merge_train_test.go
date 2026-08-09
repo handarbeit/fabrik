@@ -543,6 +543,60 @@ func TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse(t *tes
 	}
 }
 
+// TestPollForMergeable_FetchCheckRunsError_DoesNotTreatAsGreen is the
+// regression test for a review finding on this PR: a FetchCheckRuns error
+// means the PR's real check-run state is unknown, not "confirmed zero check
+// runs." classifyLandingCI's zero-check-runs fallback treats an accepted
+// mergeable_state (clean/unstable) as sufficient for green — reachable this
+// way if a fetch error were (incorrectly) passed through as an empty
+// checkRuns slice, which would let an unobserved, possibly-failing check run
+// through as green on a transient API error. mergeable_state=unstable here
+// means a real check-run failure may be sitting unobserved; the fetch error
+// must never be treated as evidence there's nothing to see. Mirrors
+// pollTrainCI's if/else-if/else shape, which already gets this right (an
+// error takes neither the "has checks" nor the "zero checks" branch).
+func TestPollForMergeable_FetchCheckRunsError_DoesNotTreatAsGreen(t *testing.T) {
+	var commentPosted bool
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			time.Sleep(10 * time.Millisecond)
+			return &gh.PRDetails{Number: prNumber, MergeableState: "unstable", HeadSHA: "sha-fetch-error"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, fmt.Errorf("transient API error")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			CIBackstopTimeout:      1 * time.Millisecond,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false when FetchCheckRuns errors — a fetch failure must not be treated as confirmed zero check runs")
+	}
+	if !commentPosted {
+		t.Error("expected a landing-timeout comment once CIBackstopTimeout elapses while FetchCheckRuns keeps erroring")
+	}
+}
+
 // TestPollTrainCI_AllSkippedRequiredContext_NotGreen covers the #933
 // regression for the merge-train path: an all-skipped/neutral check-run set
 // on the trial head must NOT read as TrainCIGreen when a required context is

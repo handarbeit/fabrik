@@ -2387,23 +2387,31 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 			return false
 		} else {
 			var checkRuns []gh.CheckRun
+			var checkRunsErr error
 			if pr.HeadSHA != "" {
-				checkRuns, err = e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
-				if err != nil {
-					e.logf(0, "merge-train", "warn: FetchCheckRuns failed for integration PR #%d: %v\n", prNum, err)
-					checkRuns = nil
-				}
+				checkRuns, checkRunsErr = e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
 			}
-
-			switch verdict, detail := e.classifyLandingCI(owner, repo, pr.MergeableState, pr.HeadSHA, checkRuns); verdict {
-			case TrainCIGreen:
-				e.logf(0, "merge-train", "integration PR #%d ready to land — %s\n", prNum, detail)
-				return true
-			case TrainCIRed:
-				e.logf(0, "merge-train", "integration PR #%d not mergeable — %s\n", prNum, detail)
-				return false
-			default: // TrainCIPending — keep polling
-				e.logf(0, "merge-train", "integration PR #%d not yet ready — %s\n", prNum, detail)
+			if checkRunsErr != nil {
+				// A fetch failure is "unknown," not "confirmed zero check
+				// runs" — passing checkRuns=nil into classifyLandingCI here
+				// would hit its zero-check-runs fallback and could let an
+				// accepted mergeable_state (unstable) through as green while
+				// a real, unobserved check-run failure sits on the head SHA.
+				// Skip classification for this iteration instead (mirrors
+				// pollTrainCI's identical if/else-if/else shape) and retry
+				// next poll.
+				e.logf(0, "merge-train", "warn: FetchCheckRuns failed for integration PR #%d: %v\n", prNum, checkRunsErr)
+			} else {
+				switch verdict, detail := e.classifyLandingCI(owner, repo, pr.MergeableState, pr.HeadSHA, checkRuns); verdict {
+				case TrainCIGreen:
+					e.logf(0, "merge-train", "integration PR #%d ready to land — %s\n", prNum, detail)
+					return true
+				case TrainCIRed:
+					e.logf(0, "merge-train", "integration PR #%d not mergeable — %s\n", prNum, detail)
+					return false
+				default: // TrainCIPending — keep polling
+					e.logf(0, "merge-train", "integration PR #%d not yet ready — %s\n", prNum, detail)
+				}
 			}
 		}
 
