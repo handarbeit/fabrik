@@ -67,6 +67,28 @@ refusal rather than a false success. What is *not* verified against a recorded
 response is GitHub's exact status code and message in this corner; only the
 shape (refuse, do not fabricate) is modelled.
 
+**A PR retargeted after the gate cleared it is refused, not merged.** `MergePR`
+self-gates on the derived `mergeable_state` before touching git (see
+[`mergeable_state`](#mergeable_state) below), and that gate necessarily drops
+both locks: it takes `mu`, then `gitMu`, in turn, because the package's
+lock-ordering rule forbids holding one across the other. A concurrent
+`UpdatePRBase` can therefore land between the state the gate cleared and the
+merge that follows, retargeting the PR at a base whose required contexts and
+mergeability were never evaluated — the gate's whole purpose defeated silently.
+`MergePR` snapshots head and base before the gate, re-reads them after, and
+refuses with `gh.ErrNotMergeable` if they moved.
+
+**Divergence:** GitHub has no such window — its merge endpoint re-checks
+server-side, atomically, so a retarget is either fully before or fully after the
+merge and never produces a refusal of this kind. The sim's compare-and-swap is
+an approximation chosen because it needs neither lock held across the gate, and
+so keeps the lock-ordering invariant that makes the two-tier design deadlock
+free everywhere else. **Risk:** low. It is conservative (a refusal a scenario
+retries, never a merge onto an unvetted base), and the window it guards can only
+be opened by a scenario's *own* concurrent writer. An ABA retarget — away and
+back again within the window — is not detected, since the snapshot compares
+values rather than a version counter.
+
 ### Commits behind — **Modelled**
 
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
@@ -580,6 +602,21 @@ seeded" refusal and never reach git.
 **Not a licence to seed concurrently.** This makes `SeedRepo` safe; it does not
 make the rest of the builder chain a concurrent API. Seed on one goroutine.
 
+### `SeedBranch` creates, it does not repoint — **Modelled**
+
+`SeedBranch` refuses a branch that already exists, matching GitHub's create-ref
+endpoint (422 *"Reference already exists"*). The refusal matters more here than
+the API parity: the `update-ref` underneath would happily move the branch, so
+`SeedBranch` after a `SeedCommit` on the same branch discarded the seeded
+commits and still reported success — a scenario author would only notice by
+wondering where their commits went. Growing an existing branch is `SeedCommit`'s
+job, and `commitFiles` already forks-or-appends deliberately.
+
+**Absent:** there is no seeding equivalent of a force-push — no way to move an
+existing branch to a different tip. Nothing in the engine's surface needs one;
+add it as an explicit, differently-named call rather than by relaxing this
+refusal.
+
 ### Repo directory sandboxing — **Modelled**
 
 `owner` and `repo` are validated as single path-safe names, because `repoDir`
@@ -660,6 +697,24 @@ construction: label applied-at, comment `CreatedAt`, `FetchProjectUpdatedAt`, an
 `RateLimitStats`. `time.Now` is never called outside the default clock. A test
 can therefore drive the engine's time-anchored gates without wall-clock waiting.
 
+### One mutation, one clock read — **Modelled**
+
+A mutation that stamps several fields reads the clock **once** and writes that
+one value everywhere: a status move stamps the card and its project alike, a
+label application stamps applied-at and the issue's updated-at alike, a comment
+stamps its created-at and its parent alike, and a merge stamps the PR and every
+issue it auto-closes alike. GitHub reports each of these as one event, and the
+engine reads exactly these pairs against each other — `FetchProjectUpdatedAt`
+gates whether a poll looks at the board at all, and `FetchLabelAppliedAt` is the
+timing anchor for the review gate, the CI settle scan, and the Done-archive
+scan.
+
+This is easy to regress and hard to see: under a fixed clock every ordering
+produces equal timestamps, so a per-field clock read looks correct in every test
+that uses `fakeClock`. It is *not* correct under the default `realClock`, which
+advances between reads. `TestOneMutationStampsOneTimestamp` therefore runs on a
+deliberately advancing clock.
+
 ### Ordering and timestamps of concurrent writes — **Simplified**
 
 Two writes made in the same clock instant are indistinguishable by timestamp.
@@ -704,7 +759,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 64 mutations, and
+   package cannot back up. The sweep currently catches all 69 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
