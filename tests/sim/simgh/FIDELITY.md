@@ -92,8 +92,15 @@ conditions. A draft PR that also conflicts resolves to `draft`, not `dirty`. If
 a scenario depends on a specific combination, verify the real behaviour against
 a recorded GitHub response rather than trusting the sim's ordering.
 
-**Risk:** medium, and concentrated in untested combinations. Single-condition
-cases are each covered by a test; combinations are not.
+**Risk:** medium, and concentrated in *which* state an untested combination
+resolves to rather than in the ordering itself. Each single-condition case has
+its own test, and `mergeable_precedence_test.go` additionally pins every
+adjacent link in the chain — draft > dirty > behind > blocked > unstable >
+clean — with two conditions arranged at once, so the order is constrained
+transitively rather than assumed. What those tests cannot tell you is whether
+this order is the order *GitHub* would use for the same combination; that
+remains a design choice, so verify against a recorded real response before
+relying on a combination in a load-bearing scenario.
 
 ### `has_hooks` and `unknown`-from-slowness — **Absent**
 
@@ -225,6 +232,24 @@ does, which is how a race with a concurrent push is caught).
 never merges anything, and dequeuing does not renumber the PRs behind it.
 `MergeQueueEntry.State` is always `QUEUED`; `AWAITING_CHECKS`, `MERGEABLE`, and
 `UNMERGEABLE` are never produced.
+
+**The `expectedHeadOID` check is not atomic with the enqueue.**
+`EnqueuePullRequest` resolves the head SHA under `gitMu`, releases it, then takes
+`mu` to record membership — so a concurrent push landing between the two would
+let the enqueue proceed against a head that no longer matches. GitHub performs
+that compare-and-swap server-side and cannot.
+
+This is deliberate rather than overlooked. Closing it would mean holding `gitMu`
+and `mu` simultaneously, which the package's locking invariant forbids outright
+(see `sim.go`); that invariant is what makes the two-tier design deadlock-free
+everywhere else, and it is not worth trading for a window only a scenario's own
+concurrent seeding can open. Note that `MergePR` does **not** have this gap for
+the merge itself: its trial merge and its real merge run the same `tryMerge`
+helper, so if the tree changed underneath it the merge fails and the model
+reports the conflict rather than recording a merge that did not happen.
+
+**Risk:** low — a scenario would have to push to a PR's head branch from one
+goroutine while enqueuing it from another.
 
 **Risk:** high for any merge-queue scenario. Treat merge-queue coverage here as
 absent.
@@ -438,7 +463,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 41 mutations.
+   package cannot back up. The sweep currently catches all 42 mutations.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
 GitHub* — only that the model does what this document says. For anything subtle

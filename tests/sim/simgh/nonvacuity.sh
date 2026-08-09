@@ -150,12 +150,12 @@ mutate "head SHA is not re-resolved after a push" \
   'TestHeadSHATracksNewCommits' \
   'git.go::s{^\tsha, err := r\.resolveRef\("refs/heads/" \+ branch\)$}{\tsha, err := r.resolveRef("refs/heads/" + r.defaultBranch)}m'
 
-mutate "required contexts never block" \
-  'TestMergeableStateBlockedOnFailingRequiredContext|TestMergeableStateBlockedOnMissingRequiredContext|TestMergeableStateBlockedOnPendingRequiredContext|TestMergeableStateBlockedViaClassicCommitStatus|TestMergePRGatesOnDerivedState' \
+mutate "required contexts never block (blocked no longer outranks unstable)" \
+  'TestMergeableStateBlockedOnFailingRequiredContext|TestMergeableStateBlockedOnMissingRequiredContext|TestMergeableStateBlockedOnPendingRequiredContext|TestMergeableStateBlockedViaClassicCommitStatus|TestMergePRGatesOnDerivedState|TestPrecedenceBlockedOverUnstable' \
   'prs.go::s{^\t\t\treturn stateBlocked$}{\t\t\t_ = name}m'
 
 mutate "non-required failures never surface as unstable" \
-  'TestMergeableStateUnstableOnFailingNonRequiredContext|TestMergePRSucceedsOnUnstable' \
+  'TestMergeableStateUnstableOnFailingNonRequiredContext|TestMergePRSucceedsOnUnstable|TestPrecedenceUnstableOverClean' \
   'prs.go::s{^\t\t\treturn stateUnstable$}{\t\t\t_ = name}m'
 
 mutate "commit statuses are ignored by the derivation" \
@@ -211,6 +211,23 @@ mutate "seeding does not enforce the shared number space" \
 mutate "a PR card is accepted and silently dropped" \
   'TestSeedProjectItemRejectsPRCard' \
   'seed.go::s{\tif isPR \{}{\tif false \{}'
+
+# --- precedence ordering ------------------------------------------------
+# The single-condition tests above prove each branch is reachable; only these
+# constrain the order they are tried in. Each mutation demotes one state below
+# the next, which a correctly-ordered suite must notice.
+
+mutate "draft no longer outranks dirty" \
+  'TestPrecedenceDraftOverDirty' \
+  'prs.go::s{if draft \{\n\t\treturn stateDraft\n\t\}\n\tif facts\.conflict \{\n\t\treturn stateDirty\n\t\}}{if facts.conflict \{\n\t\treturn stateDirty\n\t\}\n\tif draft \{\n\t\treturn stateDraft\n\t\}}'
+
+mutate "dirty no longer outranks behind" \
+  'TestPrecedenceDirtyOverBehind' \
+  'prs.go::s{if facts\.conflict \{\n\t\treturn stateDirty\n\t\}}{if false \{\n\t\treturn stateDirty\n\t\}}'
+
+mutate "behind no longer outranks blocked" \
+  'TestPrecedenceBehindOverBlocked' \
+  'prs.go::s{if facts\.behind > 0 && r\.requireUpToDate\[base\] \{}{if false \{}'
 
 mutate "timestamps come from wall time, not the injected clock" \
   'TestLabelAddRemoveIsObservable' \

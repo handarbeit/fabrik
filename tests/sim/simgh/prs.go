@@ -549,6 +549,12 @@ func (s *Sim) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadO
 		}
 		// GitHub rejects an enqueue whose expected head OID no longer matches,
 		// which is how a race with a concurrent push is caught.
+		//
+		// Not atomic with the write below: this read takes gitMu, the write
+		// takes mu, and the locking invariant forbids holding both. GitHub does
+		// this compare-and-swap server-side and can. Recorded in FIDELITY.md
+		// under the merge queue rather than closed, because closing it would
+		// cost the invariant that keeps the whole package deadlock-free.
 		if actual != expectedHeadOID {
 			return fmt.Errorf("simgh: enqueue PR #%d: expected head %s but branch is at %s", prNumber, expectedHeadOID, actual)
 		}
