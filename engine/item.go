@@ -1068,14 +1068,15 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 	}
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	opts := InvokeOptions{
-		ModelOverride:  modelOverride,
-		EffortOverride: effortOverride,
-		BaseBranch:     baseBranch,
-		SigIntGrace:    sigIntGrace,
-		SigTermGrace:   sigTermGrace,
-		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
-		CorrectiveHint: e.consumeStallHint(repoStr, item.Number, stage.Name),
-		FabrikRepo:     e.defaultRepo(),
+		ModelOverride:     modelOverride,
+		EffortOverride:    effortOverride,
+		BaseBranch:        baseBranch,
+		SigIntGrace:       sigIntGrace,
+		SigTermGrace:      sigTermGrace,
+		OnPIDReady:        func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+		CorrectiveHint:    e.consumeStallHint(repoStr, item.Number, stage.Name),
+		FabrikRepo:        e.defaultRepo(),
+		MaxResumeFailures: e.cfg.MaxResumeFailures,
 	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
@@ -1253,6 +1254,22 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// in claude.go and ADR-1178.
 	var turnLimitErr *claudeTurnLimitError
 	turnLimited := errors.As(err, &turnLimitErr)
+
+	// A consecutive resume-failure exit (#1414) is likewise not a genuine
+	// fault in the sense max_retries exists to catch — the session pointer,
+	// not the stage's own work, is the suspected cause. Unlike the
+	// usage-limit/api_error "did-not-run" family, this does NOT short-circuit
+	// either: a resume failure may follow real work, so commitWIP, the
+	// branch push, and InvocationRecorded all still run exactly as they do
+	// for any other incomplete run — mirroring turnLimited's shape, not
+	// handleUsageLimitExit's early return. It IS exempted from
+	// StageRetryIncremented below, for every consecutive failure up to
+	// MaxResumeFailures (not only the one that abandons the session) — the
+	// mechanism exists to guarantee a cold-start attempt, so it must not be
+	// starved by the very failures it is counting. See claudeResumeFailureError
+	// in claude.go and ADR-1414.
+	var resumeFailErr *claudeResumeFailureError
+	resumeFailed := errors.As(err, &resumeFailErr)
 
 	// Any invocation reaching this point actually ran Claude and was not itself
 	// classified as a usage-limit exit (success, blocked-on-input, no-work-needed,
@@ -1567,6 +1584,17 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 					}
 					willEscalateSlice = sliceCount >= e.cfg.MaxSliceRetries
 				}
+			} else if resumeFailed {
+				// Deliberately does NOT call StageRetryIncremented (#1414):
+				// every consecutive resume failure up to MaxResumeFailures is
+				// exempted, not only the one that abandons the session,
+				// mirroring the fabrik:claude-limit precedent (ADR-1119) —
+				// StageAttempted above already recorded the cooldown, so this
+				// cannot hot-loop. No label, no comment: this is a
+				// self-healing condition (see resumeFailErr's doc comment).
+				// If the subsequent cold-started attempt also fails, that IS
+				// a genuine failure and falls into the branch below
+				// unexempted, exactly as designed.
 			} else if e.cfg.MaxRetries > 0 {
 				e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				var count int

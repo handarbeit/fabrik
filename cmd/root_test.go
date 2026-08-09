@@ -520,6 +520,36 @@ func TestMaxSliceRetries_Default(t *testing.T) {
 	}
 }
 
+func TestExecute_MaxResumeFailuresFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-resume-failures", "5"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --max-resume-failures" {
+		t.Error("--max-resume-failures flag not registered")
+	}
+}
+
+// TestMaxResumeFailures_Default covers the lower-than-every-sibling-counter
+// default (#1414): a resume retry is provably identical each time (same
+// session id re-resumed), unlike a rebase or review cycle where each attempt
+// does something different, so a third attempt is pure waste.
+func TestMaxResumeFailures_Default(t *testing.T) {
+	if got := maxResumeFailures(0); got != 2 {
+		t.Errorf("maxResumeFailures(0) = %d, want default 2", got)
+	}
+	if got := maxResumeFailures(-1); got != 2 {
+		t.Errorf("maxResumeFailures(-1) = %d, want default 2", got)
+	}
+	if got := maxResumeFailures(5); got != 5 {
+		t.Errorf("maxResumeFailures(5) = %d, want passthrough 5", got)
+	}
+}
+
 func TestExecute_HelpIncludesSubcommands(t *testing.T) {
 	resetFlags()
 	// Route flag.CommandLine output to a buffer so we can inspect usage text.

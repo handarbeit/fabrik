@@ -44,6 +44,7 @@ type Config struct {
 	MaxConcurrent             int
 	MaxRetries                int
 	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
+	MaxResumeFailures         int    // Max consecutive failed --resume attempts per (issue, stage) session before discarding the session pointer and cold-starting; 0 means use default (2; #1414)
 	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
 	MaxReviewCycles           int    // 0 means use default (5)
 	CIWaitTimeout             int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
@@ -153,6 +154,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
+	flag.IntVar(&cfg.MaxResumeFailures, "max-resume-failures", 0, "Maximum number of consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting — independent of max-retries, since a failed resume attempt is not charged against it (0 = use default of 2; also FABRIK_MAX_RESUME_FAILURES; #1414)")
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
@@ -330,6 +332,9 @@ func Execute() error {
 	}
 	if !explicitFlags["max-slice-retries"] {
 		cfg.MaxSliceRetries = resolveInt(cfg.MaxSliceRetries, "FABRIK_MAX_SLICE_RETRIES", "", 10)
+	}
+	if !explicitFlags["max-resume-failures"] {
+		cfg.MaxResumeFailures = resolveInt(cfg.MaxResumeFailures, "FABRIK_MAX_RESUME_FAILURES", "", 2)
 	}
 	if !explicitFlags["review-wait-timeout"] {
 		cfg.ReviewWaitTimeout = resolveInt(cfg.ReviewWaitTimeout, "FABRIK_REVIEW_WAIT_TIMEOUT", "of minutes", 15)
@@ -711,6 +716,7 @@ func Execute() error {
 			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
 		}
 		fmt.Printf("  max-slice-retries: %d\n", maxSliceRetries(cfg.MaxSliceRetries))
+		fmt.Printf("  max-resume-failures: %d\n", maxResumeFailures(cfg.MaxResumeFailures))
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
@@ -753,6 +759,7 @@ func Execute() error {
 		MaxConcurrent:             cfg.MaxConcurrent,
 		MaxRetries:                cfg.MaxRetries,
 		MaxSliceRetries:           maxSliceRetries(cfg.MaxSliceRetries),
+		MaxResumeFailures:         maxResumeFailures(cfg.MaxResumeFailures),
 		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
@@ -1045,6 +1052,21 @@ func maxRebaseCycles(n int) int {
 func maxSliceRetries(n int) int {
 	if n <= 0 {
 		return 10
+	}
+	return n
+}
+
+// maxResumeFailures returns the configured MaxResumeFailures value, defaulting
+// to 2 when n is 0 (unset). The default is lower than every sibling counter
+// (3–5) because a resume retry is provably identical each time — the same
+// session id re-resumed, re-appending to a transcript that is already the
+// cause — unlike a rebase or review cycle, where each retry does something
+// different (rebase against a moved base, address new feedback). A second
+// attempt tolerates a genuinely transient failure; a third is pure waste
+// (#1414).
+func maxResumeFailures(n int) int {
+	if n <= 0 {
+		return 2
 	}
 	return n
 }

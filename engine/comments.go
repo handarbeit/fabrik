@@ -298,12 +298,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// CreateDraftPR stage's PR may already exist — pass resume=true.
 	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage, true)
 	invokeOpts := InvokeOptions{
-		ModelOverride:  modelOverride,
-		EffortOverride: effortOverride,
-		BaseBranch:     baseBranch,
-		FabrikRoot:     fabrikRoot,
-		PRNumber:       prNumber,
-		FabrikRepo:     e.defaultRepo(),
+		ModelOverride:     modelOverride,
+		EffortOverride:    effortOverride,
+		BaseBranch:        baseBranch,
+		FabrikRoot:        fabrikRoot,
+		PRNumber:          prNumber,
+		FabrikRepo:        e.defaultRepo(),
+		MaxResumeFailures: e.cfg.MaxResumeFailures,
 	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
@@ -377,6 +378,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			e.logf(item.Number, "claude-limit", "claude comment review hit the account usage limit; not counted toward the comment circuit breaker\n")
 			return nil
 		}
+		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
+		// unlike the usage-limit exclusion immediately above: a resume failure
+		// is specific to this issue's own session, not an account-wide
+		// condition, so it counts toward the comment circuit breaker exactly
+		// like *claudeAPIErrorExit already does (ADR-1458) — this path is the
+		// comment-processing loop's only bound, and exempting it would leave
+		// the comment-triggered dispatch path with no bound at all if a
+		// session kept failing to resume. The max_retries-equivalent exemption
+		// this type carries (see finalizeStageOutcome in item.go) is a
+		// separate, narrower guarantee that only applies to the stage path.
 		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		// A non-completing, erroring invocation is exactly the "no forward progress"
 		// case the circuit breaker exists to catch — check it here too, not only

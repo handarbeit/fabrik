@@ -783,6 +783,7 @@ FABRIK_USER=my-personal-username
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
 | `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
+| `--max-resume-failures` | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts the next invocation instead of resuming (0 = use default of 2; also `FABRIK_MAX_RESUME_FAILURES`). Independent of `--max-retries` — a resume failure never consumes a retry slot, so the guaranteed cold-start attempt can't be starved by the failures it exists to recover from. See the "Resume failures" troubleshooting note below | `0` (2 failures) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
@@ -832,6 +833,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
 | `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
+| `FABRIK_MAX_RESUME_FAILURES` | *(no config.yaml key)* | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts (positive integer; invalid or unset values default to 2). Independent of `max_retries` — see `--max-resume-failures`. | `2` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -1335,6 +1337,9 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A turn-cap preemption (the invocation ran out of turns and will resume on the
      next dispatch) is likewise exempted — it counts against a separate slice
      counter instead. See below.
+   - A consecutive `--resume` failure (the session pointer, not the stage's own
+     work, is the suspected cause) is likewise exempted, up to `--max-resume-failures`
+     — see below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
@@ -1356,6 +1361,26 @@ failed label, reset the retry count, and try again immediately.
 > reset the slice counter — it is already at the limit, so the very next
 > turn-cap exit re-pauses immediately unless the underlying job size or turn
 > budget actually changes. See #1199 and #1191.
+
+> **Troubleshooting: a stage keeps failing at 1 turn / $0.0000 after a large
+> prior invocation.** A `--resume` invocation resumes the same session every
+> time, including when the session's own transcript (grown too large, or
+> otherwise broken) is the cause of the failure — every retry re-triggers the
+> identical condition. Fabrik tracks consecutive failed resume attempts per
+> (issue, stage) session — shared by both the stage-run and comment-review
+> invocation paths, since they resume the same session pointer — and after
+> `--max-resume-failures` consecutive failures (default 2), discards the
+> session pointer and cold-starts the next invocation instead of resuming.
+> This is silent and self-healing: only a log line is written (no issue
+> comment, no label), since the whole point is that the *next* attempt
+> succeeds without anyone intervening. Only the resume pointer is discarded —
+> committed work on the issue branch is completely unaffected. Consecutive
+> resume failures do not consume a `--max-retries` slot (mirroring the
+> `fabrik:claude-limit` exemption above), so the guaranteed cold-start attempt
+> can never be starved by the very failures it exists to recover from; a
+> successful invocation resets the counter to zero. If the cold-started
+> attempt also fails, that *is* a genuine failure and flows into the normal
+> `--max-retries` → `fabrik:paused` path described above. See #1414.
 
 ### Stages Waiting for Input
 
@@ -4097,6 +4122,36 @@ Every terminal `pollTrainCI` decision now logs the specific check runs (name, st
 **Partial label-removal failure:** If any REST removal fails (non-404 error), `hasError` is set and the function returns without applying Store mutations. `stage:Validate:complete` remains; the next poll re-runs the scan and retries idempotently.
 
 **Why:** `stage:Validate:complete` validates a SHA, not an issue. A force-push, external commit, or operator rebase after Validate completes produces a new artifact that Fabrik has not validated. Without this scan, `attemptMergeOnValidate`'s auto-merge enablement would target the new SHA against a gate Fabrik never ran, risking auto-merge of unvalidated code. The scan closes this gap automatically for any SHA change, including ones the operator did not intend as a re-Validate signal.
+
+---
+
+### 2.17 Consecutive Resume Failure (Session Abandonment)
+
+**Source:** Automatic — evaluated inline at the end of every Claude invocation, on both invocation paths: `InvokeClaude` (the primary stage run) and `InvokeClaudeForComments` (comment review), and transitively `merge_train.go`'s conflict-resolution invocation (which also goes through `InvokeForComments`). Unlike every other event in this section, it is not detected by a settle scan reading board/label state — it is classified structurally, in-process, from the CLI's own result object.
+
+**Detection:** `interpretClaudeResult` (`engine/claude.go`) is the single funnel all three invocation paths converge on. When an invocation fails for a reason none of the more specific classifiers already claim (stale session, turn-cap `error_max_turns`, usage-limit `blocking_limit`, transient `api_error`), and the failing invocation itself passed a non-empty `--resume` session ID, `classifyResumeFailure` reads a plain-text sidecar counter file colocated with the session pointer (`<Stage>.session.resumefails`, alongside `<Stage>.session`) and increments it. The counter is durable across an engine restart — deliberately a plain file, not `itemstate.Store` (confirmed fully in-memory, resets on restart), since every sibling counter's resting place (`SliceRetries`, `ReviewCycles`, etc.) does not need to survive a restart but this one must. The counter is keyed purely to the session-pointer file path, which both `InvokeClaude` and `InvokeClaudeForComments` compute identically for a given (issue, stage) — so a failure from either path increments the same counter, and an alternating stage/comment-review failure sequence still reaches the threshold.
+
+**Effect (count reaches `MaxResumeFailures`, default 2):**
+1. Logs the abandonment (`claudeLog`, tag `resume`): session id, stage, consecutive-failure count, threshold, and the last error — the sole record of this event; see Guards below for why no comment or label is used.
+2. Removes the session pointer file — the exact same `os.Remove` call the pre-existing stale-session path (§ "the errors[] substring `No conversation found with session ID`") already uses.
+3. Resets the sidecar counter to 0.
+4. The invocation's error is wrapped as `*claudeResumeFailureError` (`Cause`, `SessionID`, `ConsecutiveFailures`, `Threshold`, `Abandoned: true`) and returned to the caller — for every occurrence of this branch, not only the one that crosses the threshold, so a below-threshold failure is also visible to `finalizeStageOutcome`'s `MaxRetries` exemption (below).
+5. No explicit "force cold start" signal is threaded anywhere: `resolveResumeSessionID` already treats an absent session file as a cold start identically for both `InvokeClaude` and `InvokeClaudeForComments` (logs a warning, returns `""`). The file's absence at step 2 *is* the cold-start signal for whichever invocation path runs next — guaranteed sequential, never concurrent, by the existing per-issue single-worker lock.
+
+**Effect (below threshold — count incremented but not yet at `MaxResumeFailures`):** Same wrapped `*claudeResumeFailureError` is returned (with `Abandoned: false`), but the session pointer is left in place — only the sidecar counter is written. The next invocation still resumes normally; only reaching the threshold triggers abandonment.
+
+**Effect (`finalizeStageOutcome`, `engine/item.go`, stage path only):** `resumeFailed := errors.As(err, &resumeFailErr)` is computed alongside the pre-existing `turnLimited` check. Unlike the usage-limit/api_error "did-not-run" family (which early-return before `commitWIP`/push), a resume failure does **not** short-circuit — a resumed session can break after real work happened, so `commitWIP`, the branch push, `markCommentsSeenByStage`, and `InvocationRecorded` all still run exactly as for any other incomplete run. `StageAttempted` is recorded unconditionally for any invocation that ran, satisfying the dispatch-cooldown requirement with no new call. In the final escalation block, `resumeFailed` is a third branch alongside `turnLimited`: it skips `StageRetryIncremented` entirely — for **every** consecutive resume failure up to `MaxResumeFailures`, not only the one that triggers abandonment, mirroring the `fabrik:claude-limit` precedent (ADR-1119). No label, no comment is applied from this branch.
+
+**Effect (`engine/comments.go`, comment-review path):** No control-flow change. A resume failure is **not** excluded from `checkCommentBreaker`'s "no forward progress" counting the way a usage-limit hit is — it counts toward the comment-processing circuit breaker exactly like `*claudeAPIErrorExit` already does (ADR-1458), since the breaker is this path's only bound and a resume failure, unlike an account-wide usage limit, is specific to this issue's own session.
+
+**Guards:**
+- **Reset on evidence of a healthy session:** the sidecar counter resets to 0 on (a) a clean process exit (`runErr == nil`), (b) `FABRIK_STAGE_COMPLETE` found despite a trailing error, and (c) a turn-cap exit (`*claudeTurnLimitError`) — by construction a turn-cap exit consumed real turns and real cost, the strongest possible evidence the session is not the poisoned-session symptom this mechanism targets.
+- **Untouched on a did-not-run exit:** a usage-limit (`blocking_limit`) or `api_error` exit neither increments nor resets the counter — the stage never ran, so the outcome says nothing about session health either way.
+- **Untouched on a cold start's own failure:** if the failing invocation's own `--resume` session ID was empty (this call was itself a cold start), the failure is not attributable to a resumed session — the counter resets to 0 (clearing any stale leftover from a since-abandoned or since-pruned prior session lineage) and the plain, unwrapped error is returned. Normal `MaxRetries` accounting applies to this outcome exactly as before this mechanism existed.
+- **No label, no issue comment:** unlike `fabrik:claude-limit` (which comments once per episode because the operator can act — wait, or clear the suspension), this condition is self-healing by construction: its entire purpose is that the *next* attempt succeeds without intervention. A comment or label here would be indistinguishable from the orphaned-durable-state leak §"`fabrik:claude-limit`" and ADR-1183 were written to clean up. If the guaranteed cold-start attempt also fails, that outcome has no `--resume` session ID attached (see the guard above) and is therefore a genuine, unexempted failure — it flows into the normal `MaxRetries` → `stage:<name>:failed` → `fabrik:paused` path, which already comments.
+- **Independent of `MaxRetries`, by design:** every consecutive resume failure up to `MaxResumeFailures` is exempted from `StageRetryIncremented`, not only the abandoning one. If only the abandoning failure were exempted, the earlier ones would still burn `MaxRetries` budget and could pause the issue before the cold-start attempt this mechanism exists to produce is ever reached — reproducing, one layer up, the exact indefinite-retry bug this mechanism fixes.
+
+**Why:** A `--resume` invocation resumes the same session every time, including when the session's own transcript (grown too large, or otherwise structurally broken) is the cause of the failure — every retry re-triggers the identical condition. Because `InvokeClaude` and `InvokeClaudeForComments` compute the identical session-pointer path for a given (issue, stage), a transcript poisoned by a long stage run equally poisons the next comment-review invocation, and vice versa; the counter and the abandonment must therefore be shared across both paths rather than kept separately, or an alternating failure sequence between the two paths would never reach the threshold. See #1414, ADR-1414.
 
 ---
 
@@ -7773,6 +7828,18 @@ A session file can point at a conversation Claude Code itself has since reaped (
 On detection, it removes the session file immediately and skips the resave of `resp.SessionID` for that invocation — the one place `saveSessionIDDirect` would otherwise persist the dead ID right back to disk. The next invocation reads no session file, `buildClaudeArgs` omits `--resume`, and a fresh session starts and is saved normally. No retry counter or label is involved: because the specific dead ID is never rewritten, the identical failure cannot recur for that pointer, which bounds the loop without any additional machinery.
 
 This applies uniformly to both the stage-invocation and comment-processing call paths, since both flow through `interpretClaudeResult`.
+
+#### Consecutive resume-failure abandonment (#1414)
+
+The dead-session self-heal above only fires for the one specific error signature it structurally matches (`error_during_execution` + the "No conversation found" substring). Any *other* resume failure — most notably, a session that has simply grown too large for Claude Code to reload — falls through to a generic error and, before #1414, re-saved the identical session ID for the next attempt: every retry re-triggered the same condition and appended to the transcript that was already the cause. The reporter's workaround (moving the 36-byte `.session` pointer aside so the next run started cold) worked precisely because `resolveResumeSessionID` already treats an absent file as a fresh session; this mechanism automates that workaround.
+
+`interpretClaudeResult` maintains a second, durable sidecar file next to the session pointer — `<stageName>.session.resumefails`, a plain-text integer, read/written with the same idiom `saveSessionIDDirect` uses for the session ID itself — counting **consecutive** failures where the invocation itself was a resume attempt (`resumeSessionID != ""`) and none of the more specific classifiers above claimed the failure. The counter is deliberately file-based rather than living in `itemstate.Store` (confirmed entirely in-memory, resetting on every engine restart): this is the one counter that must survive a restart, or a restart would silently re-enable the indefinite-retry loop this mechanism exists to close.
+
+The counter resets to 0 on any evidence the session is healthy — a clean exit, `FABRIK_STAGE_COMPLETE` found despite a trailing error, or a turn-cap exit (real turns and cost consumed is the strongest possible evidence against a poisoned transcript). It is left untouched by a usage-limit or `api_error` exit, since the stage never ran and those outcomes say nothing about session health either way. A cold start's own failure (`resumeSessionID == ""`) also resets it, clearing any stale count left over from a since-abandoned session lineage.
+
+Once the count reaches `MaxResumeFailures` (`--max-resume-failures` / `FABRIK_MAX_RESUME_FAILURES`, default 2), the session file is removed — the same `os.Remove` call the dead-session path above already uses — and the sidecar resets to 0. No new "force cold start" signal is threaded anywhere: the removed file is itself the cold-start signal, since `resolveResumeSessionID` already treats an absent file identically for both `InvokeClaude` and `InvokeClaudeForComments`. Because both invocation paths (and, transitively, `merge_train.go`'s conflict-resolution invocation) compute the identical session file path for a given (issue, stage), the counter and the abandonment are shared across all three — a session poisoned by a long stage run is abandoned for the next comment-review invocation too, and vice versa, and an alternating stage/comment-review failure sequence still reaches the threshold.
+
+Unlike the dead-session self-heal (a structural fault with no ambiguity), a resume failure caught by this mechanism is exempted from `max_retries` accounting entirely — `StageAttempted` is still recorded (so the normal dispatch cooldown applies), but `StageRetryIncremented` never fires for it, for every consecutive resume failure up to the threshold, not only the one that triggers abandonment. This mirrors the `fabrik:claude-limit` precedent and exists so the guaranteed cold-start attempt cannot be starved by the very failures it is counting. Nothing is posted to the issue and no label is applied — only a log line (session id, stage, consecutive-failure count, threshold, last error) — since the mechanism is self-healing by construction; if the cold-started attempt also fails, that failure carries no `--resume` session ID and is therefore a genuine, unexempted failure that flows into the normal `max_retries` → `fabrik:paused` path. See `docs/state-machine.md` §2.17 and ADR-1414 for the full per-outcome classification table and design rationale.
 
 ### Model Override
 
