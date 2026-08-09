@@ -3014,14 +3014,22 @@ func TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers(t *testing.T) {
 	}
 }
 
-// TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers covers R4's single-member-train
-// case: when the red batch has exactly one member, bisect's base case fires without any
-// further validation, and there is no batch to name — the comment must say so explicitly
-// rather than rendering an awkward empty list.
+// TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers covers #1440 R1/R2/R3/AC1/AC2/AC4:
+// a red batch of exactly one member has no poisoner to isolate and must never reach
+// handleRedBatch's bisection machinery (AC1) — the trainRedBatchHook seam proves this
+// structurally, not just via trial count (bisect's own len==1 base case already costs zero
+// extra validations even on unmodified main, so a trial-count-only assertion would be
+// vacuous per AC6). The disposition must read as "this PR's own validation failed," never
+// promise a retry "in a future train with a different composition," and never attribute the
+// failure to a conflict (AC2) — and it must pause immediately, on this first occurrence,
+// without touching the shared 3-strike mergeTrainEjectionCounts counter (R3/AC4).
 func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
 	skipIfNoGit(t)
 	_, _, _, wm := setupTrainRepo(t)
-	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return true }) // always red
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return true }) // always red
+
+	var redBatchHookCalls int
+	eng.trainRedBatchHook = func() { redBatchHookCalls++ }
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
@@ -3031,12 +3039,114 @@ func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
 	defer cancel()
 	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
 
-	comments := ejectionCommentBodies(client, 1)
-	if len(comments) != 1 {
-		t.Fatalf("expected exactly 1 ejection comment for #1, got %d", len(comments))
+	// AC1: handleRedBatch (multi-member bisection machinery) must never be reached.
+	if redBatchHookCalls != 0 {
+		t.Errorf("expected handleRedBatch to be skipped for a red singleton, but it was called %d time(s)", redBatchHookCalls)
 	}
-	if !strings.Contains(comments[0], "No other members were present") {
-		t.Errorf("expected the single-member-train sentence, got: %s", comments[0])
+	// AC1: no bisection sub-trial beyond the initial validation.
+	if got := rv.count(); got != 1 {
+		t.Errorf("expected exactly 1 validation (no bisection sub-trials) for a red singleton, got %d", got)
+	}
+
+	client.mu.Lock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 {
+			bodies = append(bodies, c.body)
+		}
+	}
+	client.mu.Unlock()
+	if len(bodies) != 1 {
+		t.Fatalf("expected exactly 1 comment posted for #1, got %d: %v", len(bodies), bodies)
+	}
+	body := bodies[0]
+
+	// AC2: never the bisection-ejection/conflict framing.
+	if strings.Contains(body, "different composition") {
+		t.Errorf("red-singleton comment must not promise retry in a different composition, got: %s", body)
+	}
+	if strings.Contains(body, "conflict") {
+		t.Errorf("red-singleton comment must not attribute the failure to a conflict, got: %s", body)
+	}
+	if !strings.Contains(body, "own combined Validate is failing") {
+		t.Errorf("expected the comment to state the PR's own validation failed, got: %s", body)
+	}
+	if !strings.Contains(body, "No other members were present") {
+		t.Errorf("expected the single-member-train sentence, got: %s", body)
+	}
+
+	// R3/AC4: the shared ejection counter is untouched for a red singleton...
+	if count := eng.mergeTrainEjectionCounts["owner/repo#1"]; count != 0 {
+		t.Errorf("expected mergeTrainEjectionCounts to be untouched for a red singleton, got %d", count)
+	}
+	// ...but the member is paused on this first (and only) disposition.
+	var sawPaused, sawAwaitingInput bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber != 1 {
+			continue
+		}
+		switch c.labelName {
+		case "fabrik:paused":
+			sawPaused = true
+		case "fabrik:awaiting-input":
+			sawAwaitingInput = true
+		}
+	}
+	client.mu.Unlock()
+	if !sawPaused || !sawAwaitingInput {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input applied on the first red-singleton disposition, got labels: %v", client.addLabelCalls)
+	}
+}
+
+// TestMergeTrainRedSingleton_NoRetrialOnNextPoll covers #1440 R4/AC5: escalating a red
+// singleton to fabrik:paused on its first disposition must exclude it from every future
+// Queued batch snapshot, so an unchanged red singleton never re-forms into an identical
+// trial on the next poll — no separate backoff mechanism is needed because this composes
+// with groupQueuedByRepo's pre-existing poison-well guard (the same mechanism that already
+// stops a repeatedly-ejected multi-member poisoner from being re-snapshotted).
+func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return true }) // always red
+
+	batch := makeSeamBatch(1)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	if got := rv.count(); got != 1 {
+		t.Fatalf("expected exactly 1 validation trial after the first episode, got %d", got)
+	}
+
+	var pausedLabel bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 1 && c.labelName == "fabrik:paused" {
+			pausedLabel = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedLabel {
+		t.Fatalf("expected fabrik:paused applied to #1 after the red-singleton disposition")
+	}
+
+	// Simulate the next poll's Queued snapshot: #1 now carries the fabrik:paused label
+	// ejectRedSingleton just applied.
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"fabrik:paused"}},
+	}
+	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+	if len(groups) != 0 {
+		t.Errorf("expected the paused red singleton to be excluded from the next poll's train batch, got %d group(s): %+v", len(groups), groups)
+	}
+
+	// Nothing was (re-)dispatched for a second episode, so no additional trial occurred.
+	if got := rv.count(); got != 1 {
+		t.Errorf("expected no additional validation trial on the next poll, got %d", got)
 	}
 }
 
@@ -3243,6 +3353,75 @@ func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
 	client.mu.Unlock()
 	if singletonPRs != 4 {
 		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
+
+// TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition covers #1440's extension of the
+// red-singleton fix to landOneAtATime's own TrainCIRed branch: a member validated completely
+// alone ([]trainMember{m}) after bisection degrades to the one-at-a-time fallback is
+// structurally the same true-singleton scenario the top-level arity guard targets — it must
+// get the identical ejectRedSingleton disposition (no "different composition" promise, no
+// shared-counter churn, immediate pause), not the pre-#1440 ejectMember wording that would be
+// equally misleading here. Forces the cost cap to fire before bisection can isolate #3 as an
+// ordinary poisoner, so #3's red-singleton disposition is only reachable via landOneAtATime.
+func TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Only #3 is ever red, alone or combined with anyone else.
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] })
+	eng.cfg.MaxBisectValidations = 2 // force the cost cap before bisection isolates #3 itself
+
+	batch := makeSeamBatch(4)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Fatalf("expected the cost cap to force a one-at-a-time fallback; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 {
+			bodies = append(bodies, c.body)
+		}
+	}
+	client.mu.Unlock()
+	if len(bodies) != 1 {
+		t.Fatalf("expected exactly 1 comment posted for #3, got %d: %v", len(bodies), bodies)
+	}
+	body := bodies[0]
+
+	if strings.Contains(body, "different composition") {
+		t.Errorf("red-singleton comment reached via one-at-a-time must not promise retry in a different composition, got: %s", body)
+	}
+	if strings.Contains(body, "conflict") {
+		t.Errorf("red-singleton comment reached via one-at-a-time must not attribute the failure to a conflict, got: %s", body)
+	}
+	if !strings.Contains(body, "own combined Validate is failing") {
+		t.Errorf("expected the comment to state the PR's own validation failed, got: %s", body)
+	}
+
+	if count := eng.mergeTrainEjectionCounts["owner/repo#3"]; count != 0 {
+		t.Errorf("expected mergeTrainEjectionCounts to be untouched for a red singleton reached via one-at-a-time, got %d", count)
+	}
+
+	var sawPaused bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 3 && c.labelName == "fabrik:paused" {
+			sawPaused = true
+		}
+	}
+	client.mu.Unlock()
+	if !sawPaused {
+		t.Errorf("expected fabrik:paused applied to #3 on its first (and only) red-singleton disposition, got labels: %v", client.addLabelCalls)
 	}
 }
 

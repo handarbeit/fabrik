@@ -107,6 +107,72 @@ func TestRemoveEditingLabel_ErrNotFoundSilent(t *testing.T) {
 	}
 }
 
+// --- addLandedCommentWithRetry tests ---
+
+// TestAddLandedCommentWithRetry_NonTransientNoRetry verifies that a non-transient
+// error logs a warning immediately (no retry) and returns after exactly one attempt.
+func TestAddLandedCommentWithRetry_NonTransientNoRetry(t *testing.T) {
+	orig := landedCommentRetryDelay
+	landedCommentRetryDelay = 0
+	t.Cleanup(func() { landedCommentRetryDelay = orig })
+	var calls int
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			calls++
+			return 0, errors.New("GitHub API returned 422: validation failed")
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.addLandedCommentWithRetry("owner", "repo", 5, 42, "🏭 **Fabrik merge-train** — Landed via batch PR #100.")
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call for non-transient error, got %d", calls)
+	}
+}
+
+// TestAddLandedCommentWithRetry_TransientRetrySucceeds verifies that a transient
+// error retried twice followed by success results in exactly 3 calls and no panic.
+func TestAddLandedCommentWithRetry_TransientRetrySucceeds(t *testing.T) {
+	orig := landedCommentRetryDelay
+	landedCommentRetryDelay = 0
+	t.Cleanup(func() { landedCommentRetryDelay = orig })
+	var calls int
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			calls++
+			if calls < 3 {
+				return 0, fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+			}
+			return 1, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.addLandedCommentWithRetry("owner", "repo", 5, 42, "🏭 **Fabrik merge-train** — Landed via batch PR #100.")
+	if calls != 3 {
+		t.Errorf("expected 3 calls (2 transient then success), got %d", calls)
+	}
+}
+
+// TestAddLandedCommentWithRetry_TransientExhausted verifies that 3 consecutive
+// transient errors exhaust the retry budget: exactly 3 calls are made, the landing
+// is never blocked, and no panic occurs.
+func TestAddLandedCommentWithRetry_TransientExhausted(t *testing.T) {
+	orig := landedCommentRetryDelay
+	landedCommentRetryDelay = 0
+	t.Cleanup(func() { landedCommentRetryDelay = orig })
+	var calls int
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			calls++
+			return 0, fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.addLandedCommentWithRetry("owner", "repo", 5, 42, "🏭 **Fabrik merge-train** — Landed via batch PR #100.")
+	if calls != 3 {
+		t.Errorf("expected 3 calls on transient exhaustion, got %d", calls)
+	}
+}
+
 // --- isTransientError unit tests ---
 
 func TestIsTransientError_NetOpError(t *testing.T) {

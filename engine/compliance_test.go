@@ -81,10 +81,11 @@ func TestAddCommentCompliance(t *testing.T) {
 // e.client.AddComment plus the e.postComment -> e.postItemComment /
 // e.pauseIssue mutation-helper call graph that funnels into it.
 var bodyBearingCalls = map[string]int{
-	"AddComment":      3, // (owner, repo string, issueNumber int, body string)
-	"postComment":     1, // (item, body string, react, echo bool)
-	"postItemComment": 1, // (item, body string, react bool)
-	"pauseIssue":      1, // (item, comment string, opts pauseOpts)
+	"AddComment":                3, // (owner, repo string, issueNumber int, body string)
+	"postComment":               1, // (item, body string, react, echo bool)
+	"postItemComment":           1, // (item, body string, react bool)
+	"pauseIssue":                1, // (item, comment string, opts pauseOpts)
+	"addLandedCommentWithRetry": 4, // (owner, repo string, issueNumber, prNum int, body string)
 }
 
 // funnelSkips maps a function name to the single body-bearing call name that
@@ -94,9 +95,10 @@ var bodyBearingCalls = map[string]int{
 // (postComment) <- pauseIssue (postComment). Every function's *callers* are
 // still checked normally via bodyBearingCalls.
 var funnelSkips = map[string]string{
-	"postComment":     "AddComment",
-	"postItemComment": "postComment",
-	"pauseIssue":      "postComment",
+	"postComment":               "AddComment",
+	"postItemComment":           "postComment",
+	"pauseIssue":                "postComment",
+	"addLandedCommentWithRetry": "AddComment",
 }
 
 // checkAddCommentBody walks a function body, finds all AddComment (and
