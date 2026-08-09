@@ -169,6 +169,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 
 	summary, findings := parseReviewFindings(result.Text)
+	findings = dedupeFindings(findings)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
 	body := buildReviewBody(summary, demoted)

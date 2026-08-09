@@ -58,6 +58,41 @@ func parseReviewFindings(text string) (summary string, findings []ReviewFinding)
 	return summary, parsed
 }
 
+// dedupeFindings collapses findings that share the same (Path, Line) into a
+// single entry, implementing R3's within-pass deduplication in code (not
+// just as a prompt instruction — Claude has already been observed producing
+// exactly this kind of duplicate without being told not to, on #1477).
+// (Path, Line) is the same anchor identity partitionFindings uses, so two
+// findings that would collide as inline comments at the same anchor are
+// exactly the ones collapsed here. When findings collide, the one with the
+// higher-ranked Severity (via severityRank) is kept — collapsing duplicates
+// must never accidentally weaken a REQUEST_CHANGES threshold decision — with
+// ties keeping whichever was seen first. Output order matches first-seen
+// order of each surviving (Path, Line) key.
+func dedupeFindings(findings []ReviewFinding) []ReviewFinding {
+	if len(findings) == 0 {
+		return findings
+	}
+	type key struct {
+		Path string
+		Line int
+	}
+	kept := make(map[key]int, len(findings)) // key -> index into result
+	var result []ReviewFinding
+	for _, f := range findings {
+		k := key{f.Path, f.Line}
+		if idx, ok := kept[k]; ok {
+			if severityRank(f.Severity) > severityRank(result[idx].Severity) {
+				result[idx] = f
+			}
+			continue
+		}
+		kept[k] = len(result)
+		result = append(result, f)
+	}
+	return result
+}
+
 // buildReviewBody assembles the final review body from the prose summary
 // plus any findings that could not be anchored to the diff. Demoted
 // findings are appended under an explicit heading, each rendered as

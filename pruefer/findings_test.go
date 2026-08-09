@@ -118,3 +118,50 @@ func TestBuildReviewBody_MultipleDemotedFindings(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestDedupeFindings_SamePathLine_Collapses pins AC3: two findings on the
+// same path and line collapse to one.
+func TestDedupeFindings_SamePathLine_Collapses(t *testing.T) {
+	findings := []ReviewFinding{
+		{Path: "engine/board.go", Line: 42, Body: "ArchiveProjectItem bumps updatedAt on a re-archive no-op", Severity: SeverityMedium},
+		{Path: "engine/board.go", Line: 42, Body: "ArchiveProjectItem bumps updatedAt again", Severity: SeverityMedium},
+	}
+	got := dedupeFindings(findings)
+	if len(got) != 1 {
+		t.Fatalf("dedupeFindings = %+v, want 1 entry", got)
+	}
+	if got[0].Path != "engine/board.go" || got[0].Line != 42 {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+}
+
+// TestDedupeFindings_SeverityCollision_KeepsHigherSeverity pins the
+// max-severity-on-collision policy: collapsing duplicates must never
+// silently weaken a REQUEST_CHANGES threshold decision.
+func TestDedupeFindings_SeverityCollision_KeepsHigherSeverity(t *testing.T) {
+	findings := []ReviewFinding{
+		{Path: "a.go", Line: 1, Body: "low take", Severity: SeverityLow},
+		{Path: "a.go", Line: 1, Body: "critical take", Severity: SeverityCritical},
+	}
+	got := dedupeFindings(findings)
+	if len(got) != 1 {
+		t.Fatalf("dedupeFindings = %+v, want 1 entry", got)
+	}
+	if got[0].Severity != SeverityCritical || got[0].Body != "critical take" {
+		t.Errorf("got[0] = %+v, want the critical-severity entry to survive", got[0])
+	}
+}
+
+// TestDedupeFindings_DistinctAnchors_Unchanged proves dedup only collapses
+// true (Path, Line) collisions, not findings on distinct anchors.
+func TestDedupeFindings_DistinctAnchors_Unchanged(t *testing.T) {
+	findings := []ReviewFinding{
+		{Path: "a.go", Line: 1, Body: "finding A"},
+		{Path: "a.go", Line: 2, Body: "finding B"},
+		{Path: "b.go", Line: 1, Body: "finding C"},
+	}
+	got := dedupeFindings(findings)
+	if len(got) != 3 {
+		t.Fatalf("dedupeFindings = %+v, want 3 entries (no true collisions)", got)
+	}
+}
