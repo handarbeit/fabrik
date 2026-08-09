@@ -22,8 +22,11 @@ import (
 
 // trainTestEngine builds an Engine wired with the given mock client and invoker.
 // It configures a Queued holding stage and a Done stage for merge-train use, and sets
-// a short CIWaitTimeout so CI-polling tests terminate quickly. statusField is pre-set
-// so advanceToNextStage can advance members from Queued to Done in landing tests.
+// a short CIBackstopTimeout so CI-polling tests terminate quickly — pollForMergeable/
+// pollTrainCI's blocking-loop deadline is CIBackstopTimeout (ADR-1410, R6), not
+// CIWaitTimeout (now a liveness-stall dwell consumed only by the async CI gate).
+// statusField is pre-set so advanceToNextStage can advance members from Queued to
+// Done in landing tests.
 func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker, wm *WorktreeManager) *Engine {
 	t.Helper()
 	holdingStageConfig := &stages.Stage{
@@ -42,7 +45,7 @@ func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeI
 			MaxConcurrent:          5,
 			MaxMergeTrainEjections: 3,
 			MergeTrain:             "on",
-			CIWaitTimeout:          100 * time.Millisecond, // fast timeout for tests
+			CIBackstopTimeout:      100 * time.Millisecond, // fast deadline for tests (ADR-1410)
 			Stages: []*stages.Stage{
 				{Name: "Research", Order: 1, Prompt: "Do research"},
 				{Name: "Plan", Order: 2, Prompt: "Make a plan"},
@@ -289,7 +292,7 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 			Repo:                   "repo",
 			MaxConcurrent:          5,
 			MaxMergeTrainEjections: 3,
-			CIWaitTimeout:          1 * time.Millisecond, // expires during first API call
+			CIBackstopTimeout:      1 * time.Millisecond, // expires during first API call (ADR-1410)
 			Stages: []*stages.Stage{
 				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
 			},
@@ -301,7 +304,57 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 	defer cancel()
 	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIPending {
-		t.Errorf("expected TrainCIPending on CIWaitTimeout, got %v", result)
+		t.Errorf("expected TrainCIPending on CIBackstopTimeout, got %v", result)
+	}
+}
+
+// TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades is the R6
+// acceptance test (ADR-1410): a batch member whose integration PR never
+// reaches a mergeable_state GitHub will accept is not wedged indefinitely —
+// pollForMergeable's blocking loop is bounded by CIBackstopTimeout, posts a
+// "landing timeout" comment on the first survivor, and returns false so the
+// batch simply retries on the next merge-train cycle (no fabrik:paused, no
+// escalation — it degrades, matching pollTrainCI's TrainCIPending shape
+// above rather than reproducing #342's destructive pause).
+func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) {
+	var commentPosted bool
+	client := &mockGitHubClient{
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			// Small sleep ensures the post-API deadline check (not the 30s
+			// poll-interval sleep) is what trips — mirrors
+			// TestPollTrainCI_Timeout_ReturnsPending's pattern.
+			time.Sleep(10 * time.Millisecond)
+			return nil, "", nil // mergeable never resolves
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			CIBackstopTimeout:      1 * time.Millisecond, // expires during first API call (ADR-1410)
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false when CIBackstopTimeout elapses with mergeability never resolved")
+	}
+	if !commentPosted {
+		t.Error("expected a landing-timeout comment to be posted on the first survivor")
 	}
 }
 
@@ -309,14 +362,14 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 // regression for the merge-train path: an all-skipped/neutral check-run set
 // on the trial head must NOT read as TrainCIGreen when a required context is
 // configured but hasn't confirmed success — it should keep polling until
-// CIWaitTimeout, landing on TrainCIPending, never TrainCIGreen.
+// CIBackstopTimeout, landing on TrainCIPending, never TrainCIGreen.
 func TestPollTrainCI_AllSkippedRequiredContext_NotGreen(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			return nil, "blocked", nil // not clean/unstable — falls through to check runs
 		},
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			// Sleep past CIWaitTimeout (100ms in trainTestEngine) so the
+			// Sleep past CIBackstopTimeout (100ms in trainTestEngine) so the
 			// post-classification deadline check trips on the first loop
 			// iteration instead of waiting through the 30s poll interval.
 			time.Sleep(150 * time.Millisecond)
@@ -340,7 +393,7 @@ func TestPollTrainCI_AllSkippedRequiredContext_NotGreen(t *testing.T) {
 		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen when a required context is only skipped/neutral/absent on the trial head")
 	}
 	if result != TrainCIPending {
-		t.Errorf("expected TrainCIPending (CIWaitTimeout reached while required context stays unconfirmed), got %v", result)
+		t.Errorf("expected TrainCIPending (CIBackstopTimeout reached while required context stays unconfirmed), got %v", result)
 	}
 }
 
@@ -466,7 +519,7 @@ func TestPollTrainCI_MergeableStateAccepted_NonRequiredCheckStillPending_NotGree
 		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen while a non-required check is still in_progress, even with an accepted mergeable_state")
 	}
 	if result != TrainCIPending {
-		t.Errorf("expected TrainCIPending (CIWaitTimeout reached while the non-required check stays pending), got %v", result)
+		t.Errorf("expected TrainCIPending (CIBackstopTimeout reached while the non-required check stays pending), got %v", result)
 	}
 }
 
@@ -5686,5 +5739,53 @@ func TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember(t *testi
 	}
 	if len(survivors) != 1 || survivors[0].item.Number != 1 {
 		t.Fatalf("expected only member #1 to survive (member #2 ejected despite byte-identical content), got %+v", survivors)
+	}
+}
+
+// TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase covers #1472 (found by
+// handarbeit-pruefer[bot] reviewing #1206/PR #1467): the extend-turns pre-grant for
+// resolveConflictWithClaude's InvokeForComments call must be based on the same
+// commentMaxTurns(stage) that scaledWallTime (engine/claude.go) divides by when scaling
+// max_wall_time, not on stage.MaxTurns — otherwise the two bases disagree and the
+// effective wall-time multiplier silently diverges from the intended 2x.
+func TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase(t *testing.T) {
+	tests := []struct {
+		name        string
+		stage       *stages.Stage
+		extendTurns bool
+		want        int
+	}{
+		{
+			name:        "no extend-turns label -> no override",
+			stage:       &stages.Stage{MaxTurns: 100, CommentMaxTurns: 50},
+			extendTurns: false,
+			want:        0,
+		},
+		{
+			name:        "differing max_turns/comment_max_turns (this repo's own configs) -> scales off comment_max_turns, not max_turns",
+			stage:       &stages.Stage{MaxTurns: 100, CommentMaxTurns: 50},
+			extendTurns: true,
+			want:        100, // 2 * commentMaxTurns(50), NOT 2 * MaxTurns(100) = 200
+		},
+		{
+			name:        "no explicit comment_max_turns -> falls back to MaxTurns as the base",
+			stage:       &stages.Stage{MaxTurns: 100},
+			extendTurns: true,
+			want:        200, // commentMaxTurns falls back to stage.MaxTurns per commentMaxTurns()
+		},
+		{
+			name:        "unlimited stage (MaxTurns 0, no CommentMaxTurns) -> commentMaxTurns falls back to 50 default -> still scales",
+			stage:       &stages.Stage{},
+			extendTurns: true,
+			want:        100, // commentMaxTurns() defaults to 50 when both are 0
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeTrainMaxTurnsOverride(tt.stage, tt.extendTurns)
+			if got != tt.want {
+				t.Errorf("mergeTrainMaxTurnsOverride(%+v, extendTurns=%v) = %d, want %d", tt.stage, tt.extendTurns, got, tt.want)
+			}
+		})
 	}
 }

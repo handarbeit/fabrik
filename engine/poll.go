@@ -99,6 +99,45 @@ func logClaudeConfigDir(configDir string, w io.Writer) {
 		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir)
 }
 
+// logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
+// notice: CIWaitTimeout's meaning changed from "cap on total CI wait" to
+// "CI-gate liveness-stall dwell" — an operator who tuned it must not
+// discover this silently. Unconditional (unlike logAnthropicAPIKeyOptIn/
+// logAnthropicEnvPassthrough, which are gated on an active opt-in): every
+// operator running the daemon needs this once per startup, whether or not
+// they've customized the value, since the setting's meaning changed under
+// them regardless of whether they ever touch it.
+func logCIWaitTimeoutSemantics(w io.Writer) {
+	fmt.Fprintf(w, "[startup] notice: CIWaitTimeout/--ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT now governs the "+
+		"CI-gate liveness-stall dwell (escalates only when CI shows no observable progress), not total CI wait "+
+		"time — a healthy, progressing CI suite waits indefinitely. See CIBackstopTimeout/--ci-backstop-timeout/"+
+		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
+}
+
+// warnCIBackstopTimeoutOrdering is the testable core of the ADR-1410/R5
+// startup check: CIBackstopTimeout (settleAwaitingCIScan's unconditional
+// backstop) is only "much larger than" the liveness dwell by convention — no
+// code path enforces it. If an operator sets ciBackstopTimeout at or below
+// ciWaitTimeout, the backstop fires before classifyCIFromCheckRuns' liveness
+// dwell ever gets a chance to distinguish "stalled" from "progressing",
+// silently reintroducing #342's spurious-pause behavior through the back
+// door the redesign otherwise closed (PR review, pruefer). A warning, not a
+// hard startup failure — consistent with every other cross-field config
+// check in this codebase (e.g. WarnStageDrift), and because a merely
+// suboptimal ordering (both timeouts remain valid, positive durations) should
+// not prevent the daemon from starting.
+func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duration, w io.Writer) {
+	if ciBackstopTimeout > ciWaitTimeout {
+		return
+	}
+	fmt.Fprintf(w, "[startup] warning: CIBackstopTimeout (%s) is not greater than CIWaitTimeout (%s) — the "+
+		"unconditional per-poll-cost backstop (settleAwaitingCIScan) will fire before the CI-gate liveness dwell "+
+		"(classifyCIFromCheckRuns) ever gets a chance to distinguish a stalled CI run from one that is actively "+
+		"progressing, reintroducing the spurious-pause behavior ADR-1410 fixed. Set --ci-backstop-timeout/"+
+		"FABRIK_CI_BACKSTOP_TIMEOUT well above --ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT. See docs/USER_GUIDE.md "+
+		"and ADR-1410.\n", ciBackstopTimeout, ciWaitTimeout)
+}
+
 func (e *Engine) Run() error {
 	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
 	// processing the same project board concurrently. The lock file lives in
@@ -147,6 +186,8 @@ func (e *Engine) Run() error {
 		logClaudeConfigDir(configDir, w)
 		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", w)
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
+		logCIWaitTimeoutSemantics(w)
+		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
@@ -154,6 +195,8 @@ func (e *Engine) Run() error {
 		logClaudeConfigDir(configDir, os.Stderr)
 		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", os.Stderr)
 		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
+		logCIWaitTimeoutSemantics(os.Stderr)
+		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

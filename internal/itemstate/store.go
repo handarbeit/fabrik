@@ -632,6 +632,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		flags := ChangeFlags(LinkedPRChanged)
 		if v.SHA != item.LinkedPR.HeadSHA && item.LinkedPR.HeadSHA != "" {
 			item.LinkedPR.LastHeadSHAUpdate = time.Now()
+			// A fresh push resets CI entirely — that's progress in its own
+			// right, not merely a prerequisite for future progress (ADR-1410).
+			item.LinkedPR.LastCIProgressAt = time.Now()
 			// The outgoing SHA's check runs never apply to the new head.
 			// Prune them so CheckRunsBySHA(newSHA) — and boardcache reads
 			// that trust it — can't be shadowed by a stale run left behind
@@ -644,10 +647,16 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.HeadSHA = v.SHA
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
+			drainedChanged := false
 			for _, run := range pending {
-				item.LinkedPR.CheckRuns, _ = upsertCheckRunByID(item.LinkedPR.CheckRuns, run)
+				var changed bool
+				item.LinkedPR.CheckRuns, changed = upsertCheckRunByID(item.LinkedPR.CheckRuns, run)
+				drainedChanged = drainedChanged || changed
 			}
 			item.LinkedPR.HasHadChecks = true
+			if drainedChanged {
+				item.LinkedPR.LastCIProgressAt = time.Now()
+			}
 			delete(s.pendingCheckRuns, v.SHA)
 			flags |= CheckRunChanged
 		}
@@ -798,8 +807,19 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 		item.LinkedPR = &LinkedPRState{}
 	}
 	// Update or append the check run by ID.
-	item.LinkedPR.CheckRuns, _ = upsertCheckRunByID(item.LinkedPR.CheckRuns, v.Run)
+	var changed bool
+	item.LinkedPR.CheckRuns, changed = upsertCheckRunByID(item.LinkedPR.CheckRuns, v.Run)
 	item.LinkedPR.HasHadChecks = true
+	if changed {
+		// A new check-run ID appearing, or an existing one differing at all
+		// from its prior entry per upsertCheckRunByID's reflect.DeepEqual —
+		// not only Status/Conclusion, but also OutputSummary/OutputText/
+		// DetailsURL/HTMLURL changing on an otherwise-unchanged run — counts
+		// as observable CI progress (ADR-1410, R2). Deliberately permissive:
+		// GitHub reporting any change on a check run is still evidence it is
+		// alive, even when the change itself is weak signal on its own.
+		item.LinkedPR.LastCIProgressAt = time.Now()
+	}
 
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)

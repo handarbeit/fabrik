@@ -766,7 +766,8 @@ FABRIK_USER=my-personal-username
 | `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
-| `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
+| `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
+| `--ci-backstop-timeout` | Absolute cap in minutes on how long an item may sit in `fabrik:awaiting-ci` under any classification, bounding per-poll cost independent of CI duration — sized much larger than `--ci-wait-timeout` on purpose (0 = use default of 240 = 4h; also `FABRIK_CI_BACKSTOP_TIMEOUT`; ADR-1410) | `0` (240 min / 4h) |
 | `--post-push-dwell` | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (0 = use default of 90; also `FABRIK_POST_PUSH_DWELL`). Prevents premature gate-clear in the brief post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `0` (90 sec) |
 | `--worker-stale-timeout` | Minutes before a stale worker heartbeat triggers PID-liveness check and handle clearing (0 = use default of 5; must be > `heartbeatInterval×2`; also `FABRIK_WORKER_STALE_TIMEOUT`) | `0` (5 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
@@ -819,7 +820,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_SYMLINK_ENV` | `symlink_env` | Symlink fabrikDir `.env` into each worktree at setup time (`true`/`1`/`yes`) — see `--symlink-env` | `false` |
 | `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle at the review gate (whether waiting for requested reviewers to submit or for at least one review to exist) before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
 | `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
-| `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
+| `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes of CI *inactivity* before pausing with `fabrik:awaiting-input` — not total CI wait time (positive integer; invalid or unset values default to 30). See [§3 CI Gate](#ci-gate-and-ci-fix-workflow) and ADR-1410. | `30` |
+| `FABRIK_CI_BACKSTOP_TIMEOUT` | *(no config.yaml key)* | Absolute cap in minutes on how long an item may sit in `fabrik:awaiting-ci` under any classification, independent of CI duration (positive integer; invalid or unset values default to 240 = 4h). See [§3 CI Gate](#ci-gate-and-ci-fix-workflow) and ADR-1410. | `240` |
 | `FABRIK_POST_PUSH_DWELL` | *(no config.yaml key)* | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (non-negative integer; `0` or unset uses the default of 90; negative values default to 90). Prevents premature gate-clear during the post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `90` |
 | `FABRIK_WORKER_STALE_TIMEOUT` | *(no config.yaml key)* | Minutes before a stale worker heartbeat triggers PID-liveness check; if the PID is dead the handle is cleared so the item can be re-dispatched (positive integer; invalid or unset values default to 5; must be > `heartbeatInterval×2`, i.e., > 1 min) | `5` |
 | `FABRIK_MAX_CI_FIX_CYCLES` | *(no config.yaml key)* | Maximum number of CI-fix re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
@@ -903,7 +905,11 @@ max_wall_time: "45m"      # Optional. Wall-clock deadline for a single Claude in
                           #   Recommended: "45m" for Implement and Review stages in
                           #   production use. The hardcoded 15-minute inactivity timeout
                           #   (see below) acts as a universal backstop even when this field
-                          #   is not set.
+                          #   is not set. Automatically scaled up when fabrik:extend-turns
+                          #   pre-grants a larger turn budget for a single invocation (e.g.
+                          #   2x turns -> 2x wall time for that invocation only) — size this
+                          #   field for the ordinary case; the extended case gets
+                          #   proportionate headroom for free. See fabrik:extend-turns below.
 kill_grace:               # Optional. Per-signal grace windows for the kill sequence.
   sigint: "10s"           #   How long to wait after SIGINT before escalating to SIGTERM.
                           #   Empty or absent = inherit engine default (10s).
@@ -1027,7 +1033,7 @@ These two fields control how much Claude "thinks" before responding. `disable_ad
 
 Fabrik applies two complementary timeout mechanisms to every Claude invocation to prevent indefinite hangs from stuck background processes:
 
-1. **`max_wall_time` (per-stage, opt-in):** A hard wall-clock deadline. When the deadline expires, Fabrik sends `SIGINT` to the Claude process group (which includes any background children spawned during the session), waits the `kill_grace.sigint` window (default 10 s), then `SIGTERM`, then the `kill_grace.sigterm` window (default 10 s), then `SIGKILL` to any surviving processes. Recommended: `"45m"` for Implement and Review stages in production. Legitimately long stages (e.g., a 90-minute Review on a large PR) should either set a higher limit or leave this field unset.
+1. **`max_wall_time` (per-stage, opt-in):** A hard wall-clock deadline. When the deadline expires, Fabrik sends `SIGINT` to the Claude process group (which includes any background children spawned during the session), waits the `kill_grace.sigint` window (default 10 s), then `SIGTERM`, then the `kill_grace.sigterm` window (default 10 s), then `SIGKILL` to any surviving processes. Recommended: `"45m"` for Implement and Review stages in production. Legitimately long stages (e.g., a 90-minute Review on a large PR) should either set a higher limit or leave this field unset. **Scaled automatically when `fabrik:extend-turns` pre-grants a larger turn budget:** the label-gated first invocation of a stage (or comment-review pass) that receives 2× the configured turn budget also gets `max_wall_time` scaled by the same 2× factor for that invocation — the deadline stays proportionate to the work granted rather than cutting off a legitimately-progressing extended run on a clock sized for the ordinary case. Size this field for the ordinary (1×) case; you don't need to inflate it to cover the rare extended one.
 
 2. **15-minute inactivity timeout (global, always active):** If no streamed output is received from Claude for 15 consecutive minutes, the process group is killed using the same SIGINT → `kill_grace.sigint` window (default 10 s) → SIGTERM → `kill_grace.sigterm` window (default 10 s) → SIGKILL sequence. This catches sessions that are stuck on a hung background task even when `max_wall_time` is not set — as long as Claude is actively producing output, it continues indefinitely. The threshold is hardcoded and cannot be configured.
 
@@ -1144,7 +1150,7 @@ on:
   merge_group:        # ← required for merge queue
 ```
 
-**Stall detection (ADR-058 D5):** If the PR has been in the merge queue for longer than `CIWaitTimeout` (default 30 min; `FABRIK_CI_WAIT_TIMEOUT`) with no merge-group CI ever reporting, Fabrik detects the stall poll-natively and pauses the issue with an instructional comment:
+**Stall detection (ADR-058 D5):** If the PR has been in the merge queue for longer than `CIWaitTimeout` (default 30 min; `FABRIK_CI_WAIT_TIMEOUT`) with no merge-group CI ever reporting, Fabrik detects the stall poll-natively and pauses the issue with an instructional comment. This is a genuine liveness dwell — no merge-group CI has ever run, so there is nothing to wait on — the same class of dwell `CIWaitTimeout` governs everywhere else since ADR-1410; it is unrelated to `CIBackstopTimeout`, which bounds a different, unconditional per-poll-cost cap:
 
 > 🏭 **Fabrik — merge queue stall detected**
 >
@@ -1747,7 +1753,7 @@ wait_for_ci: true
 ...
 ```
 
-CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST calls per poll: one to get the head SHA via the linked PR, and one to fetch the check runs. If no check runs exist **and** GitHub's `mergeable_state` is either empty or `"unknown"` (meaning no legacy Commit Status is blocking merge), the gate clears immediately. If `mergeable_state` is non-empty and not `"unknown"` (a legacy Commit Status or external status check is actively blocking merge), the gate holds even with no `check_runs` — Fabrik falls back to CIWaitTimeout escalation to avoid blocking forever.
+CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST calls per poll: one to get the head SHA via the linked PR, and one to fetch the check runs. If no check runs exist **and** GitHub's `mergeable_state` is either empty or `"unknown"` (meaning no legacy Commit Status is blocking merge), the gate clears immediately. If `mergeable_state` is non-empty and not `"unknown"` (a legacy Commit Status or external status check is actively blocking merge), the gate holds even with no `check_runs` — Fabrik falls back to `CIWaitTimeout` escalation to avoid blocking forever. This case has no check-run signal to observe progress on at all, so it stays elapsed-time-based even though the check-runs-present case below does not (ADR-1410).
 
 For a repo whose required CI signal is a classic commit status rather than a normal GitHub Actions check run, configure `required_status_contexts` (per-repo, in [`.fabrik/config.yaml`](#2-configuration-reference), ADR-933) so the gate can distinguish a required context that never ran from one that was correctly skipped.
 
@@ -1756,7 +1762,7 @@ For a repo whose required CI signal is a classic commit status rather than a nor
 When a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`, Fabrik immediately adds the `fabrik:awaiting-ci` label to the issue — it means "CI gate active" and covers both pending and failed CI states. `stage:X:complete` is withheld until `checkCIGate` confirms all checks pass (conjunctive gate, ADR 032). This label:
 
 - Makes the CI-blocked state visible on the project board; present whether checks are still running or have failed
-- Is cleared automatically when all CI checks pass; or when the CI wait timeout elapses (removed before pausing with `fabrik:awaiting-input`)
+- Is cleared automatically when all CI checks pass, or when a genuine liveness dwell elapses (removed before pausing with `fabrik:awaiting-input`) — since ADR-1410, a confirmed CI failure does **not** clear this label via a timeout; it instead triggers the CI-fix re-invocation above, and the label stays applied while that plays out
 - Triggers the `itemMayNeedWork` cache bypass — CI results change independently of the issue's GitHub `updatedAt`, so items with `fabrik:awaiting-ci` bypass the staleness cache and are re-evaluated on every poll
 - **R5 post-push guard**: within the current engine run, if the PR has previously had check runs, empty check run results after a push are treated as a post-push registration delay (GitHub takes a few seconds to register new runs) rather than "no CI configured" — the gate does not prematurely clear
 
@@ -1803,9 +1809,10 @@ The CI gate operates on two different paths depending on whether the item is bei
 **Catch-up loop (all other paths):**
 - Evaluates CI on every poll for items with `fabrik:awaiting-ci` on stages with `wait_for_ci: true`
 - **`mergeable_state` shortcut (v0.0.52):** `checkCIGate` queries GitHub's `mergeable_state` first; if `clean` or `unstable`, `addCompleteLabelAndRemoveCI` runs immediately — stale `fabrik:awaiting-ci` is cleared, `stage:<X>:complete` is added, and per-check classification is skipped entirely
-- On pending: `fabrik:awaiting-ci` is already present (applied at FABRIK_STAGE_COMPLETE); no additional label applied, re-evaluates next poll
-- On failure: `fabrik:awaiting-ci` applied idempotently; dispatches CI-fix re-invocation
-- On timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`; timeout measured from when `fabrik:awaiting-ci` was first applied (durable across restarts)
+- On pending: `fabrik:awaiting-ci` is already present (applied at FABRIK_STAGE_COMPLETE); no additional label applied, re-evaluates next poll — indefinitely, as long as check-run state keeps changing (ADR-1410)
+- On failure: `fabrik:awaiting-ci` applied idempotently; dispatches CI-fix re-invocation **unconditionally**, regardless of how long the gate has been open (ADR-1410, R3 — never a timeout)
+- On a genuine liveness-dwell timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`. For the pending-but-stalled case, the dwell is measured from the last observed check-run change (in-memory, resets to "no progress observed" on restart — a cold cache never escalates blind); for the required-check-never-starts and legacy-Commit-Status cases (R3 above), it's measured from when `fabrik:awaiting-ci` was first applied (durable across restarts, via `FetchLabelAppliedAt`) — see ADR-1410.
+- **Absolute backstop:** independent of the above, `fabrik:awaiting-ci` is also unconditionally capped at `FABRIK_CI_BACKSTOP_TIMEOUT` (default 4h) regardless of classification, bounding per-poll cost — see [Timeout Configuration](#timeout-configuration-adr-1410-liveness-not-elapsed-time) below.
 
 > **Rationale for the `mergeable_state` shortcut:** GitHub's `mergeable_state` reflects branch protection rules — it already aggregates required check status, reviewer approvals, and protection constraints. Non-required check_run failures (e.g., cleanup workflow jobs, notification steps) do not block merges per branch protection, so Fabrik's gate must not block on them either. Consulting `mergeable_state` first avoids over-aggressive blocking caused by raw per-check classification that cannot distinguish required from non-required checks.
 
@@ -1817,7 +1824,7 @@ Beyond the normal pending→failure→fix→pass loop, the CI gate handles four 
 
 **R2 — Closed (not merged) PR:** If the PR is closed without merging, Fabrik posts an explanatory comment and pauses the issue with `fabrik:awaiting-input`. The gate is not cleared — an operator must decide the next step (reopen the PR, create a new one, or close the issue).
 
-**R3 — Required check that never starts:** If a required check is expected but never produces a check run (e.g., converted to `workflow_dispatch` after the PR was created), the gate would wait indefinitely. After CIWaitTimeout elapses with the PR in an `OPEN+BLOCKED` state and no check runs ever having run, Fabrik pauses the issue via `pauseForRequiredNeverRunningCheck`. Apply `fabrik:revalidate` after fixing the CI configuration to re-run Validate.
+**R3 — Required check that never starts:** If a required check is expected but never produces a check run (e.g., converted to `workflow_dispatch` after the PR was created), the gate would wait indefinitely. After `CIWaitTimeout` elapses with the PR in an `OPEN+BLOCKED` state and no check runs ever having run, Fabrik pauses the issue via `pauseForRequiredNeverRunningCheck`. Apply `fabrik:revalidate` after fixing the CI configuration to re-run Validate. This case has no check-run signal to observe progress on at all, so — like the merge-guard fallback above — it stays elapsed-time-based under `CIWaitTimeout` (ADR-1410), unlike the check-runs-present pending case.
 
 **R4 — Paused-item auto-recovery:** Items paused with `fabrik:paused` and either `fabrik:awaiting-ci` or `fabrik:awaiting-review` are monitored by a separate recovery loop (`runValidatePRTerminalAdvance`) that bypasses the boardcache (which may have stale PR state). When the linked PR merges, the recovery loop automatically clears the gate, removes the pause labels, and advances the issue to Done — **no manual unpause is required**. This handles the case where a PR is merged externally (e.g., by a human or GitHub auto-merge) while the issue sits paused under either gate.
 
@@ -1856,21 +1863,40 @@ fabrik --max-ci-fix-cycles=3
 
 The cycle count resets on engine restart, and is also reset by `clearFailedStage()` when the user manually unpauses a failed issue.
 
-#### Timeout Configuration
+#### Timeout Configuration (ADR-1410: liveness, not elapsed time)
 
-`FABRIK_CI_WAIT_TIMEOUT` sets the timeout in minutes for the CI gate (catch-up loop path). If `fabrik:awaiting-ci` has been present for longer than this duration, Fabrik pauses the issue with `fabrik:awaiting-input` rather than continuing to re-invoke.
+Fabrik distinguishes CI that is *slow* from CI that is *dead*, and bounds only the latter. This changed as of ADR-1410 — see below for what an existing `FABRIK_CI_WAIT_TIMEOUT` setting means now.
+
+- **CI checks failed:** never a timeout. A confirmed failure always triggers the CI-fix re-invocation above, however long `fabrik:awaiting-ci` has been present. This is a verdict, not a wait.
+- **CI checks still pending, and observably progressing** (a check-run status changed, or a fresh commit was pushed, since the last poll): Fabrik waits indefinitely. An 18-minute suite and a 3-hour suite are both fine — nothing about their duration counts against a deadline.
+- **CI checks still pending, with no progress observed for `FABRIK_CI_WAIT_TIMEOUT` minutes:** Fabrik pauses the issue with `fabrik:awaiting-input`. This is the genuine stall case — something stopped reporting.
+- **A required check that never starts, or a legacy Commit Status actively blocking merge with no check runs at all:** also governed by `FABRIK_CI_WAIT_TIMEOUT`, unchanged — there is no check-run signal in these cases to observe progress on, so a plain elapsed-time dwell remains the right instrument (see R3 above).
+
+> **Known gap — the pending-and-stalled case above is not currently reached via the normal catch-up loop.** The merge gate (`checkMergeabilityGate`) unconditionally claims any item with check runs still pending before the CI gate is ever evaluated, so `FABRIK_CI_WAIT_TIMEOUT` never actually fires for "checks pending but frozen" in practice — only `FABRIK_CI_BACKSTOP_TIMEOUT` (below, default 4h) escalates that case today. If you lower `FABRIK_CI_WAIT_TIMEOUT` expecting a stalled-but-pending PR to escalate sooner, it won't; lower `FABRIK_CI_BACKSTOP_TIMEOUT` instead. See ADR-1410's "Architectural discovery" section for the full detail.
 
 ```bash
-FABRIK_CI_WAIT_TIMEOUT=60  # Wait up to 60 minutes for CI to pass (default: 30)
+FABRIK_CI_WAIT_TIMEOUT=60  # Pause after 60 minutes of no observed CI progress (default: 30)
 # or equivalently:
 fabrik --ci-wait-timeout=60
 ```
 
-The CI timeout is measured from when `fabrik:awaiting-ci` was first applied. Because the label is applied immediately at FABRIK_STAGE_COMPLETE, the timeout covers both pending and failed CI states — it starts from when the stage finishes, not from when CI first fails.
+**If you already had `FABRIK_CI_WAIT_TIMEOUT` set:** the name, flag, and default (30 minutes) are unchanged — you do not need to update anything. What changed is what the number *means*: before ADR-1410, it capped the PR's total time in `fabrik:awaiting-ci` regardless of whether CI was alive; now it only measures inactivity. If you had tuned it up to accommodate a slow test suite, you likely no longer need that override — a suite of any length now completes normally as long as it keeps reporting.
+
+**Absolute backstop — `FABRIK_CI_BACKSTOP_TIMEOUT` (new, ADR-1410, R5):** a separate setting bounds how long an item may sit in `fabrik:awaiting-ci` under *any* classification, including a suite that is technically still progressing. This exists purely to cap the per-poll cost of a held item (a deep-fetch plus a live check-run refresh every poll), not to bound CI duration — so it defaults much larger than the liveness dwell above:
+
+```bash
+FABRIK_CI_BACKSTOP_TIMEOUT=480  # Absolute cap of 8 hours (default: 240 = 4h)
+# or equivalently:
+fabrik --ci-backstop-timeout=480
+```
+
+Tune this down only if you want a hard ceiling on how long any single PR can occupy `fabrik:awaiting-ci`, independent of whether it's making progress.
+
+**Keep `FABRIK_CI_BACKSTOP_TIMEOUT` well above `FABRIK_CI_WAIT_TIMEOUT`.** Nothing enforces this ordering structurally — if the backstop is set at or below the liveness dwell, `settleAwaitingCIScan`'s unconditional backstop fires before the CI-gate liveness dwell ever gets a chance to distinguish a stalled CI run from one that's actively progressing, silently reintroducing the #342 spurious-pause behavior this redesign fixed. Fabrik logs a `[startup] warning` (not a hard failure) if the resolved values are misordered — watch for it after changing either setting.
 
 #### Restart Persistence
 
-The CI timeout is measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making it durable across engine restarts. The cycle count is in-memory and resets on restart.
+The R3/legacy-Commit-Status elapsed dwells and the `CIBackstopTimeout` backstop are measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making them durable across engine restarts. The check-run-pending liveness dwell instead tracks progress in memory; a restart resets it to "no progress observed yet," which is the safe default — it never escalates blind on a cold cache, only re-observes on the next poll. The CI-fix cycle count is also in-memory and resets on restart.
 
 ### CI Auto-Advance Workflow (removed)
 
@@ -2354,7 +2380,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
-| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
+| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `fabrik:awaiting-placement` | Set on a spawned child issue when its initial project-board Status placement fails (the child, board item, and `blockedBy` link already exist — only the column placement is missing). Retried every poll from `board.Items` directly. Cleared on successful placement, or when the child is observed closed. Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on both child and parent (ADR-062). |
@@ -2378,7 +2404,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes. If the linked PR was already manually merged when auto-merge runs, Fabrik treats it as a success and advances the issue to Done normally. |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence for both decisions: the PR is not auto-merged and the issue does not advance to Done. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
-| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for every stage invocation while the label is present. Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
+| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for the first stage invocation while the label is present, with `max_wall_time` scaled by the same 2× factor for that invocation (so the extra turn budget gets proportionate wall-clock headroom instead of a deadline sized for the un-extended case — see `max_wall_time` above). Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal); each such extension re-invokes with a fresh `max_wall_time` window at the un-scaled deadline. The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `fabrik:revalidate` | Force re-entry of the Validate stage. Removes `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, then itself; Validate then re-runs on the current HEAD SHA. Use this to recover from a stuck-Validate state in one action — no need to manually clear individual gate labels. Applied to non-Validate issues: removed with a warning, no work dispatched. Safe to apply while Validate is in-flight — the label is held until the worker exits, then processed normally. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
 | `review-authority:advisory` | Override the stage's configured `review_authority` to `advisory` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
@@ -2534,7 +2560,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
 | `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
 | `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
-| `fabrik:extend-turns` | Pre-grant 2× max turns budget for every stage while present; auto-extends to 3× when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
+| `fabrik:extend-turns` | Pre-grant 2× max turns budget (with matching 2× `max_wall_time`) for the first stage invocation while present; auto-extends to 3× (unscaled deadline) when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
 | `base:<branch>` | Override base branch for this issue (e.g. `base:develop`); Fabrik forks from, rebases onto, and targets PRs at this branch |
 | `review-authority:<mode>` | Override the stage's configured `review_authority` for this issue only (`advisory`, `authoritative`); only meaningful alongside `wait_for_reviews: true` |
 | `expected-reviewers:<mode>` | Override the stage's configured `expected_reviewers` for this issue only (`none`, `declared`); only meaningful alongside `wait_for_reviews: true` |

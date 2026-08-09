@@ -440,6 +440,25 @@ func (e *Engine) mergeTrainBatchMembers(repoKey string) (map[int]bool, bool) {
 	return v.(*mergeTrainWorkerState).batchNumbers, true
 }
 
+// mergeTrainMaxTurnsOverride computes the fabrik:extend-turns pre-grant for
+// resolveConflictWithClaude's conflict-resolution invocation, which routes through
+// InvokeForComments (InvokeClaudeForComments). That function's runClaude wall-time
+// scaling (scaledWallTime, engine/claude.go) divides by commentMaxTurns(stage), so the
+// override here must be based on the same commentMaxTurns(holdingStg) — not
+// holdingStg.MaxTurns — or the two bases disagree and scaledWallTime computes the wrong
+// multiplier (e.g. 4x instead of the intended 2x whenever comment_max_turns differs from
+// max_turns, as every stage in this repo's own config does). See #1472.
+func mergeTrainMaxTurnsOverride(holdingStg *stages.Stage, extendTurns bool) int {
+	if !extendTurns {
+		return 0
+	}
+	base := commentMaxTurns(holdingStg)
+	if base <= 0 {
+		return 0
+	}
+	return base * 2
+}
+
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
 // acquisition, repo readiness, base-branch resolution, holding-stage lookup,
 // extend-turns computation, trialParams construction, restart-time state
@@ -504,10 +523,7 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 			break
 		}
 	}
-	maxTurnsOverride := 0
-	if extendTurns && holdingStg.MaxTurns > 0 {
-		maxTurnsOverride = holdingStg.MaxTurns * 2
-	}
+	maxTurnsOverride := mergeTrainMaxTurnsOverride(holdingStg, extendTurns)
 
 	// Unique, monotonic trial-name generator (first call == base name). Every trial —
 	// main-loop re-forms and bisection sub-trials — gets a distinct name so their branches,
@@ -2268,15 +2284,21 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 }
 
 // pollForMergeable polls the integration PR until its mergeable_state is "clean" or
-// "unstable" (per gh.MergeableStateAccepted), blocking up to CIWaitTimeout.
+// "unstable" (per gh.MergeableStateAccepted), blocking up to CIBackstopTimeout.
 // Returns true when the PR is ready to merge.
 // On timeout, posts a warning comment on the first batch member issue and returns false.
+//
+// ADR-1410 (R6): bounded by CIBackstopTimeout, not the liveness-dwell
+// CIWaitTimeout — this is a synchronous blocking poll inside a single
+// goroutine, not re-entrant poll-driven state, so "wait indefinitely while
+// progressing" would hold the goroutine open for the suite's full duration, a
+// cost the async CI gate doesn't pay. It already degrades gracefully on
+// timeout (the batch retries next merge-train cycle, no pause), so #342's
+// destructive spurious-pause doesn't reproduce here; using the shorter,
+// repurposed CIWaitTimeout instead would force a wasted trial-branch rebuild
+// every ~30 minutes for a healthy-but-slow suite.
 func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum int, survivors []trainMember) bool {
-	ciWaitTimeout := e.cfg.CIWaitTimeout
-	if ciWaitTimeout <= 0 {
-		ciWaitTimeout = 30 * time.Minute
-	}
-	deadline := time.Now().Add(ciWaitTimeout)
+	deadline := time.Now().Add(e.ciBackstopTimeout())
 
 	for {
 		select {
@@ -2590,7 +2612,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		// Hook 2 (landing loop): apply any pending review-finding ejects flagged
 		// while this rebase cycle's assemble/validate was running (#1208). This
 		// loop is the one place a green trial can spend a second full CI wait
-		// (up to CIWaitTimeout) without ever returning control to the outer
+		// (up to CIBackstopTimeout, ADR-1410) without ever returning control to the outer
 		// re-form loop in runMergeTrainWorker, where the primary Hook 2 lives —
 		// so a finding arriving during a main-moved rebase would otherwise ride
 		// the newly-green trial straight to landMergeTrainBatch. Discard the
@@ -2836,7 +2858,12 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 
 // pollTrainCI polls the integration PR's CI signals, returning the typed result and,
 // for a red result, the diagnostic that observed it (R1/#1420) — nil for green/pending.
-// Blocks until the result is known or the CIWaitTimeout elapses.
+// Blocks until the result is known or the CIBackstopTimeout elapses (ADR-1410, R6 —
+// see pollForMergeable's doc comment for why this synchronous blocking loop keeps an
+// elapsed-time bound, pointed at the backstop rather than the liveness-dwell
+// CIWaitTimeout, instead of adopting liveness semantics itself). A confirmed CI
+// failure (check-run or required-context) already returns TrainCIRed immediately
+// below, unconditionally — it never waits out the deadline.
 //
 // mergeable_state is a red/permission gate only, not a green shortcut:
 // GitHub computes it from required checks alone (per branch protection), so
@@ -2853,11 +2880,7 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // branch below), since in that case there is no per-check signal to fall
 // back on.
 func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) (TrainCIResult, *trainCIDiagnostic) {
-	ciWaitTimeout := e.cfg.CIWaitTimeout
-	if ciWaitTimeout <= 0 {
-		ciWaitTimeout = 30 * time.Minute
-	}
-	deadline := time.Now().Add(ciWaitTimeout)
+	deadline := time.Now().Add(e.ciBackstopTimeout())
 
 	var lastPending, lastFailed []gh.CheckRun
 
@@ -2946,7 +2969,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			// settlePRMergeState's zero-check-runs branch (pr_settle.go rule
 			// 13). Without this, a confirmed required-context failure on a
 			// trial branch with no check-run footprint at all would never
-			// resolve to TrainCIRed — it would just poll to CIWaitTimeout and
+			// resolve to TrainCIRed — it would just poll to CIBackstopTimeout and
 			// return TrainCIPending, stalling the batch instead of ejecting
 			// the poisoning member. A merely missing/pending required context
 			// is not short-circuited here — it keeps polling like any other
@@ -2967,8 +2990,9 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			}
 		}
 
-		// Check deadline again before the sleep so a short CIWaitTimeout doesn't
-		// block unnecessarily in the poll interval when the deadline has already elapsed.
+		// Check deadline again before the sleep so a short CIBackstopTimeout
+		// doesn't block unnecessarily in the poll interval when the deadline
+		// has already elapsed.
 		if time.Now().After(deadline) {
 			logTimeout()
 			return TrainCIPending, nil

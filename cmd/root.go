@@ -46,7 +46,8 @@ type Config struct {
 	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
 	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
 	MaxReviewCycles           int    // 0 means use default (5)
-	CIWaitTimeout             int    // minutes; 0 means use default (30)
+	CIWaitTimeout             int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
+	CIBackstopTimeout         int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
 	WorkerStaleMins           int    // minutes; 0 means use default (5)
 	MaxCiFixCycles            int    // 0 means use default (5)
 	MaxRebaseCycles           int    // 0 means use default (3)
@@ -154,7 +155,8 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
-	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
+	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
+	flag.IntVar(&cfg.CIBackstopTimeout, "ci-backstop-timeout", 0, "Absolute cap in minutes on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (0 = use default of 240 = 4h; also FABRIK_CI_BACKSTOP_TIMEOUT; ADR-1410)")
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
@@ -337,6 +339,9 @@ func Execute() error {
 	}
 	if !explicitFlags["ci-wait-timeout"] {
 		cfg.CIWaitTimeout = resolveInt(cfg.CIWaitTimeout, "FABRIK_CI_WAIT_TIMEOUT", "of minutes", 30)
+	}
+	if !explicitFlags["ci-backstop-timeout"] {
+		cfg.CIBackstopTimeout = resolveInt(cfg.CIBackstopTimeout, "FABRIK_CI_BACKSTOP_TIMEOUT", "of minutes", 240)
 	}
 	if !explicitFlags["worker-stale-timeout"] {
 		cfg.WorkerStaleMins = resolveInt(cfg.WorkerStaleMins, "FABRIK_WORKER_STALE_TIMEOUT", "of minutes", 5)
@@ -751,6 +756,7 @@ func Execute() error {
 		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
+		CIBackstopTimeout:         ciBackstopTimeout(cfg.CIBackstopTimeout),
 		RequiredStatusContexts:    pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
 		PostPushDwell:             postPushDwell(cfg.PostPushDwell),
 		WorkerStaleTimeout:        workerStaleTimeout(cfg.WorkerStaleMins),
@@ -963,9 +969,22 @@ func maxReviewCycles(n int) int {
 
 // ciWaitTimeout converts a CIWaitTimeout config value (minutes) to a
 // time.Duration. When minutes is 0 (unset), the default of 30 minutes is used.
+// ADR-1410: this now governs the CI-gate liveness-stall dwell, not total CI
+// wait time — see ciBackstopTimeout for the absolute cap.
 func ciWaitTimeout(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 30 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// ciBackstopTimeout converts a CIBackstopTimeout config value (minutes) to a
+// time.Duration. When minutes is 0 (unset), the default of 240 minutes (4h)
+// is used. Bounds how long an item may sit in fabrik:awaiting-ci under any
+// classification, independent of any suite's expected duration (ADR-1410, R5).
+func ciBackstopTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 240 * time.Minute
 	}
 	return time.Duration(minutes) * time.Minute
 }
