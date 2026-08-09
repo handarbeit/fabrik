@@ -136,9 +136,15 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		return PRSettleResult{Status: PRMergeConflicting, Reason: "mergeable=false", MergeableState: mergeableState, PR: pr}
 	}
 
-	// ADR-033: mergeable_state ∈ {clean, unstable} → branch protection satisfied;
-	// skip per-check classification to avoid blocking on non-required workflows.
-	if gh.MergeableStateAccepted(mergeableState) {
+	// ADR-033/ADR-1441: only mergeable_state == "clean" short-circuits straight
+	// to ready — GitHub has confirmed every check (required or not) passed.
+	// "unstable" means a non-required check is failing or still pending; it
+	// must fall through to the existing per-check/required-context
+	// classification below instead of being treated as an unconditional green
+	// light, or a confirmed failure on a non-required check (e.g. the full
+	// test suite, when only a narrower context is marked required) silently
+	// clears the CI gate. See ADR-1441.
+	if mergeableState == "clean" {
 		e.logf(item.Number, "settle", "PR #%d mergeable_state=%q — ready\n", pr.Number, mergeableState)
 		return PRSettleResult{Status: PRMergeReady, Reason: fmt.Sprintf("mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
 	}
