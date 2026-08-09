@@ -3627,3 +3627,25 @@ func TestLogClaudeConfigDir_UnsetWritesNothing(t *testing.T) {
 		t.Fatalf("expected no output when configDir is empty, got: %q", buf.String())
 	}
 }
+
+// TestLogCIWaitTimeoutSemantics_WritesOneUnconditionalNotice pins ADR-1410/R8's
+// startup notice: unlike the Anthropic-auth-namespace notices it sits
+// alongside (gated on an active opt-in), this must fire for every operator on
+// every startup, whether or not they've customized CIWaitTimeout — the
+// setting's meaning changed under them either way. It also names both
+// CIWaitTimeout and CIBackstopTimeout so an operator scanning startup logs
+// can find the new setting.
+func TestLogCIWaitTimeoutSemantics_WritesOneUnconditionalNotice(t *testing.T) {
+	var buf strings.Builder
+	logCIWaitTimeoutSemantics(&buf)
+
+	out := buf.String()
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("expected exactly one line, got: %q", out)
+	}
+	for _, want := range []string{"CIWaitTimeout", "CIBackstopTimeout", "liveness"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to mention %q, got: %q", want, out)
+		}
+	}
+}
