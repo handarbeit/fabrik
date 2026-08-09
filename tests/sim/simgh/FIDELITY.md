@@ -400,6 +400,49 @@ state is resolved on every read, so closing it unblocks the dependent issue.
 **Absent:** being blocked *by a PR*, and GitHub's permission rules for creating
 a dependency across repos.
 
+### Check run IDs — **Modelled, unique across the sim**
+
+GitHub's check run IDs are unique and monotonically increasing, and production
+depends on the ordering: `latestCheckRunsByName` (`github/checkruns.go`) reduces
+same-named runs to the one with the highest ID, treating it as the most recent
+rerun, and keeps whichever it saw first on a tie. The sim therefore reserves an
+explicitly seeded ID against later auto-assignment — the same rule
+`reserveNumber` applies to the shared issue-and-PR sequence — and refuses a
+duplicate outright. Without the reservation, seeding one run as `ID: 5000` (the
+auto-assign counter's starting value) and the next with `ID: 0` produced two
+runs sharing an ID, and a "check failed, then the rerun passed" scenario would
+be classified off the *failed* run with nothing to indicate why.
+
+**Simplified:** IDs are assigned from a single counter per `Sim` rather than
+globally across a GitHub instance, and nothing ties them to creation time.
+
+### Seeding is single-threaded, except `SeedRepo` — **Modelled**
+
+The `Seed*` builder chain is designed to be driven by one goroutine during
+setup, and most of it is safe only because `Sim.mu` guards each individual call.
+`SeedRepo` is the exception that needed real work: it is the one seeding call
+that runs git *before* publishing its state, so a check-then-publish under `mu`
+alone let concurrent callers for one key both clear the check, race inside
+`initBare` against a single directory with no `gitMu` yet in existence, and then
+clobber each other's `repoState` — replacing a live `gitMu` while earlier
+callers still held the old one, which silently voids the per-repo git
+serialisation everything else depends on. It now takes its own creation lock for
+the whole sequence, so concurrent callers for one key get a clean "already
+seeded" refusal and never reach git.
+
+**Not a licence to seed concurrently.** This makes `SeedRepo` safe; it does not
+make the rest of the builder chain a concurrent API. Seed on one goroutine.
+
+### Repo directory sandboxing — **Modelled**
+
+`owner` and `repo` are validated as single path-safe names, because `repoDir`
+joins them straight into a directory under `baseDir`. Without that check,
+`SeedRepo("../evil/pwned")` split into owner `../evil` and created the bare repo
+as a *sibling* of the `t.TempDir()` this package promises to keep everything
+inside — outside the sandbox and outside the test framework's cleanup. Real
+GitHub owner and repo names cannot contain a separator either, so nothing valid
+is rejected.
+
 ### `ownerType` — **Simplified**
 
 `FetchProjectBoard` accepts `ownerType` and echoes it back but does not use it.
@@ -489,7 +532,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 45 mutations, and
+   package cannot back up. The sweep currently catches all 50 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
