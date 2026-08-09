@@ -190,3 +190,81 @@ func containsString(slice []string, s string) bool {
 	}
 	return false
 }
+
+// TestHandleStopRequest_ClearsInProgressLabel verifies the R2/#1393 fix to
+// handleStopRequest: it now clears stage:<Name>:in_progress directly, rather
+// than relying on the cancelled worker goroutine's own release() to get
+// there — Research found this was a pre-existing gap in handleStopRequest
+// itself, not something specific to daemon shutdown.
+func TestHandleStopRequest_ClearsInProgressLabel(t *testing.T) {
+	client := &mockGitHubClient{}
+	client.addLabelToIssueFn = func(owner, repo string, issueNumber int, label string) error { return nil }
+	client.addCommentFn = func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil }
+
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	eng.handleStopRequest(context.Background(), tui.StopRequest{
+		IssueNumber: 88,
+		Repo:        "owner/repo",
+		StageName:   "Implement",
+	})
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	var found bool
+	for _, c := range client.removeLabelCalls {
+		if c.issueNumber == 88 && c.labelName == "stage:Implement:in_progress" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected stage:Implement:in_progress to be removed for issue #88; got: %v", client.removeLabelCalls)
+	}
+}
+
+// TestHandleStopRequest_Idempotent_NoDuplicateComment verifies the R3/#1393
+// idempotency guard shared with the daemon-wide clean-stop pause
+// (pauseInterruptedIssue): calling handleStopRequest twice for an issue that
+// is already fabrik:paused (as recorded in the store after the first call)
+// does not post a second audit comment.
+func TestHandleStopRequest_Idempotent_NoDuplicateComment(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	// testEngineWithCache bootstraps owner/repo#1 in "Research".
+	eng.handleStopRequest(context.Background(), tui.StopRequest{
+		IssueNumber: 1,
+		Repo:        "owner/repo",
+		StageName:   "Research",
+	})
+	eng.handleStopRequest(context.Background(), tui.StopRequest{
+		IssueNumber: 1,
+		Repo:        "owner/repo",
+		StageName:   "Research",
+	})
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	var commentCount int
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 && strings.Contains(c.body, "stopped from TUI") {
+			commentCount++
+		}
+	}
+	if commentCount != 1 {
+		t.Errorf("expected exactly 1 stop comment across 2 calls, got %d", commentCount)
+	}
+
+	// Non-vacuity: confirm fabrik:paused actually landed in the store after
+	// the first call — otherwise the second call's alreadyPaused guard never
+	// engages and this test would pass vacuously.
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !hasLabel(snap.Labels(), "fabrik:paused") {
+		t.Fatal("precondition failed: fabrik:paused was not recorded in the store after the first call — idempotency check is vacuous")
+	}
+}
