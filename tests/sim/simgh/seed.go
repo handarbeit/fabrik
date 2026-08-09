@@ -30,12 +30,13 @@ type IssueSeed struct {
 	// Number is 0 to auto-assign from the repo's shared issue-and-PR sequence.
 	// An explicit number a PR already holds is a seeding error — GitHub numbers
 	// both kinds from one counter.
-	Number int
-	Title  string
-	Body   string
-	Author string
-	Labels []string
-	State  string // "OPEN" (default) or "CLOSED"
+	Number    int
+	Title     string
+	Body      string
+	Author    string
+	Labels    []string
+	Assignees []string
+	State     string // "OPEN" (default) or "CLOSED"
 
 	// Status, when non-empty, also places the issue on the default project
 	// (the first one seeded) in that column.
@@ -269,6 +270,7 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 		state:          state,
 		author:         seed.Author,
 		labels:         cloneStrings(seed.Labels),
+		assignees:      cloneStrings(seed.Assignees),
 		labelAppliedAt: make(map[string]time.Time),
 		createdAt:      now,
 		updatedAt:      now,

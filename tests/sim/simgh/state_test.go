@@ -430,3 +430,94 @@ func TestReviewDecisionEmptyWithoutBranchProtection(t *testing.T) {
 		t.Fatalf("decision = %q, want CHANGES_REQUESTED", decision)
 	}
 }
+
+// TestAssigneesAreObservableFromBothPaths pins that an issue's assignees survive
+// to ProjectItem.Assignees whether the issue was seeded or created at runtime.
+//
+// Both halves matter. CreateIssue grew its assignees parameter when production
+// did (engine/spawn.go assigns every spawned child to the configured user), and
+// the field is only useful if it reads back — a stored-but-never-projected
+// assignee would let a spawn scenario assert on nil and pass for the wrong
+// reason. Seeding is covered alongside it because a seed API that cannot express
+// what the runtime API accepts is the seed/runtime asymmetry this package has
+// had to correct repeatedly.
+func TestAssigneesAreObservableFromBothPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// place returns the issue number it put on the board.
+		place func(t *testing.T, s *Sim) int
+	}{
+		{
+			name: "seeded",
+			place: func(t *testing.T, s *Sim) int {
+				t.Helper()
+				s.SeedIssue(repoName, IssueSeed{
+					Number:    11,
+					Title:     "seeded",
+					Assignees: []string{"alice"},
+					Status:    "Implement",
+				})
+				if err := s.Err(); err != nil {
+					t.Fatalf("SeedIssue: %v", err)
+				}
+				return 11
+			},
+		},
+		{
+			name: "created at runtime",
+			place: func(t *testing.T, s *Sim) int {
+				t.Helper()
+				num, nodeID, err := s.CreateIssue("acme", "widgets", "runtime", "body", []string{"alice"})
+				if err != nil {
+					t.Fatalf("CreateIssue: %v", err)
+				}
+				board, err := s.FetchProjectBoard("acme", "widgets", 2, "organization")
+				if err != nil {
+					t.Fatalf("FetchProjectBoard: %v", err)
+				}
+				if _, err := s.AddProjectV2ItemById(board.ProjectID, nodeID); err != nil {
+					t.Fatalf("AddProjectV2ItemById: %v", err)
+				}
+				return num
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newSim(t)
+			s.SeedRepo(repoName).
+				SeedProject("acme", 2, "Engineering", []string{"Backlog", "Implement", "Review", "Done"})
+			if err := s.Err(); err != nil {
+				t.Fatalf("seeding: %v", err)
+			}
+
+			num := tc.place(t, s)
+
+			board, err := s.FetchProjectBoard("acme", "widgets", 2, "organization")
+			if err != nil {
+				t.Fatalf("FetchProjectBoard: %v", err)
+			}
+			var found *gh.ProjectItem
+			for i := range board.Items {
+				if board.Items[i].Number == num {
+					found = &board.Items[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("issue #%d is not on the board", num)
+			}
+			// Assert after the deep fetch, which is the phase that populates
+			// assignees in production. The sim currently also fills them on the
+			// shallow board read (see FIDELITY.md, "Shallow board reads return
+			// deep-phase fields"); going through FetchItemDetails keeps this
+			// test correct either way, so narrowing the shallow path later
+			// cannot silently turn it vacuous.
+			if err := s.FetchItemDetails(found); err != nil {
+				t.Fatalf("FetchItemDetails: %v", err)
+			}
+			if len(found.Assignees) != 1 || found.Assignees[0] != "alice" {
+				t.Fatalf("Assignees = %v, want [alice]", found.Assignees)
+			}
+		})
+	}
+}

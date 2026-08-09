@@ -326,6 +326,14 @@ mutate "per-repo git serialisation is removed" \
   'model.go::s|^\tgitMu sync\.Mutex$|\tgitMu noopGitMutex|m' \
   'model.go::s|\z|\ntype noopGitMutex struct{}\n\nfunc (noopGitMutex) Lock() {}\nfunc (noopGitMutex) Unlock() {}\n\nvar _ sync.Mutex\n|'
 
+mutate "CreateIssue drops its assignees" \
+  'TestAssigneesAreObservableFromBothPaths' \
+  'issues.go::s{\t\tassignees:      cloneStrings\(assignees\),\n}{}'
+
+mutate "SeedIssue drops its assignees" \
+  'TestAssigneesAreObservableFromBothPaths' \
+  'seed.go::s{\t\tassignees:      cloneStrings\(seed\.Assignees\),\n}{}'
+
 
 echo
 status=0

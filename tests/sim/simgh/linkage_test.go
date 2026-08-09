@@ -86,7 +86,7 @@ func TestIssueAndPRShareNumberSpace(t *testing.T) {
 		t.Fatalf("seeding: %v", err)
 	}
 
-	issueNum, _, err := s.CreateIssue("acme", "widgets", "an issue", "body")
+	issueNum, _, err := s.CreateIssue("acme", "widgets", "an issue", "body", nil)
 	if err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestAutoAssignedNumberSkipsSeededHoles(t *testing.T) {
 		t.Fatalf("seeding: %v", err)
 	}
 
-	num, _, err := s.CreateIssue("acme", "widgets", "an issue", "body")
+	num, _, err := s.CreateIssue("acme", "widgets", "an issue", "body", nil)
 	if err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}

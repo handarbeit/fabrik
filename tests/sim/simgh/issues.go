@@ -56,7 +56,12 @@ func (s *Sim) CloseIssue(owner, repo string, issueNumber int) error {
 // CreateIssue creates an issue and returns its number and node ID. Used by the
 // engine's child-spawn path, which then feeds the node ID to
 // AddProjectV2ItemById and AddBlockedByIssue.
-func (s *Sim) CreateIssue(owner, repo, title, body string) (int, string, error) {
+//
+// assignees is stored and surfaces on ProjectItem.Assignees, matching
+// production, which posts the field only when non-empty. The engine's spawn
+// path assigns each child to the configured user, so a scenario that asserts
+// on a spawned child's assignee reads a real value rather than nil.
+func (s *Sim) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, err := s.lookupRepo(owner, repo)
@@ -71,6 +76,7 @@ func (s *Sim) CreateIssue(owner, repo, title, body string) (int, string, error) 
 		body:           body,
 		state:          "OPEN",
 		author:         simActor,
+		assignees:      cloneStrings(assignees),
 		labelAppliedAt: make(map[string]time.Time),
 		createdAt:      now,
 		updatedAt:      now,

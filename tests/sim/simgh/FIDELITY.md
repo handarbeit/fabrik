@@ -333,6 +333,46 @@ driven by this layer.
 
 ## Issues, PRs, and the board
 
+### Shallow board reads return deep-phase fields — **Simplified**
+
+`FetchProjectBoard` returns fully-populated `ProjectItem`s. Production's board
+query is deliberately *shallow*: it fetches only what the engine needs to
+pre-filter, and leaves `Body`, `URL`, `Author`, `Assignees`, `BlockedBy`, and
+`Comments` empty until `FetchItemDetails` fills them in a second, deep phase
+(`github/project.go`, the `itemNode` doc comment; pinned by
+`github/fetch_board_test.go`). Labels *are* retained shallowly, for
+`cleanupClosedIssueLocks`. The sim populates everything in one pass, and
+`FetchItemDetails` is consequently closer to a refresh than a fill.
+
+**Risk: medium — the highest-rated entry in this document, and the one most
+likely to produce a confidently-green test.** The engine's admission logic
+(`itemMayNeedWork`, `selectDeepFetchCandidates`) runs against the *shallow*
+snapshot, so a scenario asserting that an item was admitted or skipped on the
+strength of its body or comments would be reading a signal the engine does not
+actually have at that point. The divergence is safe in the lax direction only:
+the sim never withholds a field production would have supplied, so nothing
+fails that would have passed.
+
+A test that needs a deep-phase field should call `FetchItemDetails` before
+asserting on it, even though the sim does not require it — that keeps the test
+correct if this path is later narrowed to match production, rather than
+silently vacuous. `TestAssigneesAreObservableFromBothPaths` does this.
+
+Closing the gap means splitting `buildProjectItem` into shallow and deep
+projections; it is left open here because it is a behavioural change to the
+model rather than a documentation one, and belongs with the harness work that
+first depends on the distinction (#1457).
+
+### Assignees — **Modelled**
+
+Stored per issue and surfaced on `ProjectItem.Assignees`. Settable from both
+paths: `IssueSeed.Assignees` and `CreateIssue`'s `assignees` argument, the
+latter matching production, which posts the field only when non-empty. This is
+load-bearing rather than decorative — `engine/spawn.go` assigns every spawned
+child issue to the configured user, so a child-spawn scenario asserts on a real
+value. Assignee *permissions* (GitHub silently drops an assignee who lacks
+repository access) are **absent**: the sim stores whatever it is given.
+
 ### PR-to-issue linkage — **Modelled**
 
 `FindPRForIssue` and `FetchLinkedPR` match on the head branch `fabrik/issue-<N>`,
@@ -623,7 +663,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 57 mutations, and
+   package cannot back up. The sweep currently catches all 59 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
