@@ -774,7 +774,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// merge conflict on the trial branch, not the member's own PR, so there's no
 		// single "the PR" for FABRIK_PR to name. FabrikRoot is still cheap and correct
 		// to set for consistency with the other two InvokeOptions call sites.
-		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo()}
+		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures}
 		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, opts)
 		if resolved {
 			survivors = append(survivors, member)

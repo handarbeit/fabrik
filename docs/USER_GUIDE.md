@@ -785,6 +785,7 @@ FABRIK_USER=my-personal-username
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
 | `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
+| `--max-resume-failures` | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts the next invocation instead of resuming (0 = use default of 2; also `FABRIK_MAX_RESUME_FAILURES`). Independent of `--max-retries` — a resume failure never consumes a retry slot, so the guaranteed cold-start attempt can't be starved by the failures it exists to recover from. See the "Resume failures" troubleshooting note below | `0` (2 failures) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
@@ -834,6 +835,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
 | `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
+| `FABRIK_MAX_RESUME_FAILURES` | *(no config.yaml key)* | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts (positive integer; invalid or unset values default to 2). Independent of `max_retries` — see `--max-resume-failures`. | `2` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -1337,6 +1339,9 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A turn-cap preemption (the invocation ran out of turns and will resume on the
      next dispatch) is likewise exempted — it counts against a separate slice
      counter instead. See below.
+   - A consecutive `--resume` failure (the session pointer, not the stage's own
+     work, is the suspected cause) is likewise exempted, up to `--max-resume-failures`
+     — see below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
@@ -1358,6 +1363,26 @@ failed label, reset the retry count, and try again immediately.
 > reset the slice counter — it is already at the limit, so the very next
 > turn-cap exit re-pauses immediately unless the underlying job size or turn
 > budget actually changes. See #1199 and #1191.
+
+> **Troubleshooting: a stage keeps failing at 1 turn / $0.0000 after a large
+> prior invocation.** A `--resume` invocation resumes the same session every
+> time, including when the session's own transcript (grown too large, or
+> otherwise broken) is the cause of the failure — every retry re-triggers the
+> identical condition. Fabrik tracks consecutive failed resume attempts per
+> (issue, stage) session — shared by both the stage-run and comment-review
+> invocation paths, since they resume the same session pointer — and after
+> `--max-resume-failures` consecutive failures (default 2), discards the
+> session pointer and cold-starts the next invocation instead of resuming.
+> This is silent and self-healing: only a log line is written (no issue
+> comment, no label), since the whole point is that the *next* attempt
+> succeeds without anyone intervening. Only the resume pointer is discarded —
+> committed work on the issue branch is completely unaffected. Consecutive
+> resume failures do not consume a `--max-retries` slot (mirroring the
+> `fabrik:claude-limit` exemption above), so the guaranteed cold-start attempt
+> can never be starved by the very failures it exists to recover from; a
+> successful invocation resets the counter to zero. If the cold-started
+> attempt also fails, that *is* a genuine failure and flows into the normal
+> `--max-retries` → `fabrik:paused` path described above. See #1414.
 
 ### Stages Waiting for Input
 
