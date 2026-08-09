@@ -398,6 +398,163 @@ func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, ti
 	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
 }
 
+// defaultReviewFailFastWindow is how long a linked PR may sit ready-for-review
+// with zero reviews before WaitForIssueClosedWithReviewCheck fails fast,
+// rather than running out the full close-timeout (handarbeit/fabrik#1396).
+//
+// Pruefer (the bed's real reviewer once .pruefer/config.yaml's watched_repos
+// includes the test repos — see tests/e2e/README.md "Reviewer topology")
+// polls every 120s with a concurrency_cap of 3 across its watched repos. 10
+// minutes is ~5x that cadence — comfortable headroom for a busy-but-healthy
+// Pruefer — while still catching a genuinely dropped review-dispatch well
+// before the engine's own first ReviewWaitTimeout window (15 min default)
+// completes, let alone the ~45-minute wall-clock the issue's Problem section
+// observed.
+//
+// Override with E2E_REVIEW_FAILFAST_WINDOW (any time.ParseDuration value),
+// mirroring E2E_POLL_INTERVAL's tuning convention, if real-world flakiness
+// data says the bound needs adjusting.
+const defaultReviewFailFastWindow = 10 * time.Minute
+
+func reviewFailFastWindow() time.Duration {
+	if s := os.Getenv("E2E_REVIEW_FAILFAST_WINDOW"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultReviewFailFastWindow
+}
+
+// reviewFailFastDue is the pure decision behind the fail-fast check: given
+// when the PR became ready for review (readyAt, zero if not yet ready or
+// unknown), how many reviews it currently has, the current time, and the
+// configured window, should the wait fail now?
+//
+// Deliberately author- and state-agnostic (any review counts, including
+// DISMISSED) — this is a test-side diagnostic, not a reimplementation of
+// engine/reviews.go's hasReviews gate-clearing semantics (R2 requires the
+// engine's clearing rule stay untouched).
+func reviewFailFastDue(readyAt time.Time, reviewCount int, now time.Time, window time.Duration) bool {
+	if readyAt.IsZero() {
+		return false
+	}
+	if reviewCount > 0 {
+		return false
+	}
+	return now.Sub(readyAt) >= window
+}
+
+// tryPRReviewState is the non-fatal read behind WaitForIssueClosedWithReviewCheck's
+// fail-fast check: draft state, creation time, and review count for a PR, in
+// one gh call. Returns an error on any gh/JSON failure so callers can treat
+// it like the other try* helpers — log and retry, never fail the whole wait
+// on one transient blip.
+func tryPRReviewState(env *Env, repo string, prNumber int) (isDraft bool, createdAt time.Time, reviewCount int, err error) {
+	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
+		"--json", "isDraft,createdAt,reviews")
+	if err != nil {
+		return false, time.Time{}, 0, err
+	}
+	var parsed struct {
+		IsDraft   bool              `json:"isDraft"`
+		CreatedAt time.Time         `json:"createdAt"`
+		Reviews   []json.RawMessage `json:"reviews"`
+	}
+	if uerr := json.Unmarshal([]byte(out), &parsed); uerr != nil {
+		return false, time.Time{}, 0, fmt.Errorf("parse PR review state for %s PR #%d: %w", repo, prNumber, uerr)
+	}
+	return parsed.IsDraft, parsed.CreatedAt, len(parsed.Reviews), nil
+}
+
+// WaitForIssueClosedWithReviewCheck is WaitForIssueClosed plus a bounded
+// fail-fast check on the linked PR's review state (handarbeit/fabrik#1396,
+// R3/R4). If the PR has been ready-for-review (not draft) for
+// reviewFailFastWindow() with zero reviews, it fails immediately with a
+// message that names that specific cause — distinguishable from the generic
+// close-timeout below — rather than running out the full timeout waiting on
+// a review that (per the issue's Problem section) may never come because a
+// bot-review dispatch was dropped.
+//
+// The draft→ready transition is self-observed across polls rather than read
+// from GitHub's readyForReviewAt field: that field isn't in this gh CLI's
+// supported --json fields for `pr view` (verified during Plan). The first
+// poll that observes isDraft==false anchors readyAt — to "now" if an earlier
+// poll observed isDraft==true (a real draft→ready transition happened
+// in-window), or to the PR's createdAt if it was never seen as a draft
+// (opened ready from the start; the ~poll-interval error this introduces is
+// negligible against a 10-minute window). If a later poll observes
+// isDraft==true again (a PR re-drafted after going ready — unusual but
+// possible), readyAt resets to zero so the zero-review clock doesn't keep
+// running through a period the PR genuinely wasn't reviewable.
+//
+// Once a review is observed (reviewCount > 0), the PR-review-state poll is
+// skipped for the remainder of the wait — reviewFailFastDue can never fire
+// again once a review exists, so there's no reason to keep paying the extra
+// `gh pr view` call every cycle (see tests/e2e/README.md's GraphQL-budget
+// note, which assumes exactly this bound).
+//
+// Contract for callers: this helper only trusts readyAt's createdAt fallback
+// to be within poll-interval error of "actually ready" if the wait begins at
+// or near PR creation (true of all current call sites — either no PR exists
+// yet, or, per the "opt-in" note below, a review has already organically
+// landed via the Review stage's own gate before this helper is ever called).
+// A future call site that invokes this well after a long-idle, never-drafted,
+// still-unreviewed PR was created would see readyAt anchored to that stale
+// createdAt and could fail on its very first poll — that's a real risk for a
+// hypothetical caller, not a mitigated one; verify it doesn't apply before
+// adopting this helper at a new site.
+//
+// Not wired into every WaitForIssueClosed call site — see the Plan stage's
+// "Opt-in helper, not a default-on change" decision (handarbeit/fabrik#1396):
+// only scenarios that drive a real, unreviewed PR through the organic Review
+// gate benefit: sites that submit their own review before waiting, or that
+// never create an organically-reviewed PR at all (FABRIK_NO_WORK_NEEDED,
+// merge-train Queued members, externally-force-merged PRs), would never
+// trigger the check or would trigger it spuriously.
+func WaitForIssueClosedWithReviewCheck(t *testing.T, env *Env, repo string, issueNumber int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var sawDraft bool
+	var readyAt time.Time
+	var reviewLanded bool
+	for time.Now().Before(deadline) {
+		state, err := tryIssueState(env, repo, issueNumber)
+		if err != nil {
+			t.Logf("WaitForIssueClosedWithReviewCheck: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
+		} else if state == "CLOSED" {
+			return
+		}
+
+		if !reviewLanded {
+			if prNumber, prErr := tryLinkedPRNumber(env, repo, issueNumber); prErr == nil {
+				if isDraft, createdAt, reviewCount, rsErr := tryPRReviewState(env, repo, prNumber); rsErr == nil {
+					if isDraft {
+						sawDraft = true
+						readyAt = time.Time{}
+					} else if readyAt.IsZero() {
+						if sawDraft {
+							readyAt = time.Now()
+						} else {
+							readyAt = createdAt
+						}
+					}
+					if reviewCount > 0 {
+						reviewLanded = true
+					} else if reviewFailFastDue(readyAt, reviewCount, time.Now(), reviewFailFastWindow()) {
+						t.Fatalf("%s#%d: PR #%d has been ready for review for over %s with zero reviews — "+
+							"likely a dropped bot-review dispatch, not a Fabrik engine defect (see handarbeit/fabrik#1396)",
+							repo, issueNumber, prNumber, reviewFailFastWindow())
+					}
+				}
+			}
+		}
+
+		pollSleep(pollBase())
+	}
+	state, _ := tryIssueState(env, repo, issueNumber)
+	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
+}
+
 // WaitForLabelAbsent polls until the named label is no longer on the issue.
 // Tolerant of transient gh errors — see WaitForIssueClosed for rationale.
 func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, label string, timeout time.Duration) {

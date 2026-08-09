@@ -34,20 +34,21 @@ import (
 // construction precedent as TestPausedMergedPRRecovery's R5. extraLabels are
 // applied at file time (e.g. "fabrik:yolo" for the composition scenario).
 //
-// The member PR is opened ready (non-draft), so the bed's claude-review.yml
-// bot will typically review it within ~60-100s. Scenarios that submit their
-// own deliberate verdict must not treat the bot's incidental review as proof
-// the gate engaged — see the file-level "Determinism" note below and #1312.
+// The member PR is opened ready (non-draft), so the bed's real reviewer
+// (Pruefer, as of #1396 — see tests/e2e/README.md's "Reviewer topology";
+// formerly claude-review.yml, now disabled) will typically review it within
+// its poll cadence. Scenarios that submit their own deliberate verdict must
+// not treat the bot's incidental review as proof the gate engaged — see the
+// file-level "Determinism" note below and #1312.
 func seedReviewGateItem(t *testing.T, env *Env, repo, baseBranch, column, marker string, extraLabels ...string) (issueNum, prNum int, itemID string) {
 	t.Helper()
 	return seedReviewGateItemImpl(t, env, repo, baseBranch, column, marker, false, extraLabels...)
 }
 
 // seedReviewGateItemDraft is seedReviewGateItem, but opens the member PR as a
-// draft (via CreateMemberPRDraft) so the bed's claude-review.yml bot never
-// reviews it — its job is guarded by
-// `if: github.event.pull_request.draft == false` and only triggers on
-// opened/ready_for_review. Use this when the property under test is "nothing
+// draft (via CreateMemberPRDraft) so the bed's real reviewer (Pruefer, as of
+// #1396) never reviews it — it only lists open, non-draft PRs each poll
+// (cmd/pruefer/README.md). Use this when the property under test is "nothing
 // has reviewed this PR" (e.g. expected_reviewers's declared-but-unrequested
 // and undeclared-nothing-requested scenarios): with a real (non-draft) PR, an
 // incidental bot review can satisfy checkReviewGate's

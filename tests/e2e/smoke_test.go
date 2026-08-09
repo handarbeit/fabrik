@@ -86,6 +86,6 @@ Single repo only — no cross-repo work. The Plan stage should NOT decompose.`,
 	t.Logf("filed %s#%d at Status=Specify, marker=%s", env.RepoAlpha, num, marker)
 
 	// Full pipeline can take up to ~30 min depending on Claude latency.
-	WaitForIssueClosed(t, env, env.RepoAlpha, num, 45*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 45*time.Minute)
 	t.Logf("%s#%d closed — full single-repo pipeline verified", env.RepoAlpha, num)
 }
