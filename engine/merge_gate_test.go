@@ -1796,3 +1796,89 @@ func TestEnqueueCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testin
 		}
 	}
 }
+
+// TestPauseForRebaseCycleLimit_ExistingComment_NoRepost is the AC4 regression
+// for #1460's confirmed site #3: when a pause comment for this episode
+// already exists, pauseForRebaseCycleLimit must reapply fabrik:paused +
+// fabrik:awaiting-input (re-arming itemstate.EnginePaused too) without
+// posting a duplicate comment.
+func TestPauseForRebaseCycleLimit_ExistingComment_NoRepost(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	stage := &stages.Stage{Name: "Validate"}
+	item := gh.ProjectItem{
+		Number: 41, Repo: "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "C1", Body: "🏭 **Fabrik — rebase cycle limit reached**\n\nThe stage **Validate** has been re-invoked to rebase onto the base branch 2 time(s), " +
+				"which has reached the configured limit of 2 (override with `--max-rebase-cycles` or `FABRIK_MAX_REBASE_CYCLES`)."},
+		},
+	}
+
+	escalated := eng.pauseForRebaseCycleLimit(&gh.ProjectBoard{}, item, stage, 2, 2)
+
+	if escalated {
+		t.Error("expected escalated=false when an existing pause comment is reused")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("AC4: expected no new comment posted when one already exists for this episode, got %d", len(client.addCommentCalls))
+	}
+	pausedApplied, awaitingInputApplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedApplied = true
+		case "fabrik:awaiting-input":
+			awaitingInputApplied = true
+		}
+	}
+	if !pausedApplied || !awaitingInputApplied {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input to be reapplied, got paused=%v awaitingInput=%v", pausedApplied, awaitingInputApplied)
+	}
+	snap, _ := eng.store.Get("owner/repo", 41)
+	if !snap.PausedByEngine("Validate") {
+		t.Error("R2: expected itemstate.EnginePaused to be (re-)applied even on the reapply branch")
+	}
+}
+
+// TestPauseForEnqueueCycleLimit_ExistingComment_NoRepost is the AC4
+// regression for #1460's confirmed site #4: when a pause comment for this
+// episode already exists, pauseForEnqueueCycleLimit must reapply
+// fabrik:paused + fabrik:awaiting-input (re-arming itemstate.EnginePaused
+// too) without posting a duplicate comment.
+func TestPauseForEnqueueCycleLimit_ExistingComment_NoRepost(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	stage := &stages.Stage{Name: "Validate"}
+	item := gh.ProjectItem{
+		Number: 51, Repo: "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "C1", Body: "🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\nThe linked PR for stage **Validate** has been re-enqueued into GitHub's merge queue 2 time(s), " +
+				"which has reached the configured limit of 2 (override with `--max-enqueue-cycles` or `FABRIK_MAX_ENQUEUE_CYCLES`)."},
+		},
+	}
+
+	escalated := eng.pauseForEnqueueCycleLimit(&gh.ProjectBoard{}, item, stage, 2, 2)
+
+	if escalated {
+		t.Error("expected escalated=false when an existing pause comment is reused")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("AC4: expected no new comment posted when one already exists for this episode, got %d", len(client.addCommentCalls))
+	}
+	pausedApplied, awaitingInputApplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedApplied = true
+		case "fabrik:awaiting-input":
+			awaitingInputApplied = true
+		}
+	}
+	if !pausedApplied || !awaitingInputApplied {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input to be reapplied, got paused=%v awaitingInput=%v", pausedApplied, awaitingInputApplied)
+	}
+	snap, _ := eng.store.Get("owner/repo", 51)
+	if !snap.PausedByEngine("Validate") {
+		t.Error("R2: expected itemstate.EnginePaused to be (re-)applied even on the reapply branch")
+	}
+}

@@ -3812,3 +3812,51 @@ func TestReviewCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing
 		}
 	}
 }
+
+// TestPauseForReviewCycleLimit_ExistingComment_NoRepost is the AC4 regression
+// for #1460's confirmed site #1: when a pause comment for this episode
+// already exists (hasPauseComment matches the stable review-cycle-limit
+// fragment), pauseForReviewCycleLimit must reapply fabrik:paused +
+// fabrik:awaiting-input (and re-arm itemstate.EnginePaused — R2 must fire on
+// the reapply branch too, not just the fresh-pause branch) without posting a
+// duplicate comment. Mirrors
+// TestSettleAwaitingCIScan_RaceWithMainLoop_CycleLimitPause_NoDuplicateComment's
+// assertion style for the CI-gate precedent this reuses (PR #1445/ADR-1408).
+func TestPauseForReviewCycleLimit_ExistingComment_NoRepost(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}}
+	eng := testEngineWithStages(t, client, stgs)
+	stage := stgs[0]
+	item := gh.ProjectItem{
+		Number: 31, Repo: "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "C1", Body: "🏭 **Fabrik — review cycle limit reached**\n\nThe stage **Implement** has been re-invoked to address " +
+				"PR review feedback 3 time(s), which has reached the maximum configured limit (`FABRIK_MAX_REVIEW_CYCLES=3`)."},
+		},
+	}
+
+	escalated := eng.pauseForReviewCycleLimit(&gh.ProjectBoard{}, item, stage, 3, 3)
+
+	if escalated {
+		t.Error("expected escalated=false when an existing pause comment is reused")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("AC4: expected no new comment posted when one already exists for this episode, got %d", len(client.addCommentCalls))
+	}
+	pausedApplied, awaitingInputApplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedApplied = true
+		case "fabrik:awaiting-input":
+			awaitingInputApplied = true
+		}
+	}
+	if !pausedApplied || !awaitingInputApplied {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input to be reapplied, got paused=%v awaitingInput=%v", pausedApplied, awaitingInputApplied)
+	}
+	snap, _ := eng.store.Get("owner/repo", 31)
+	if !snap.PausedByEngine("Implement") {
+		t.Error("R2: expected itemstate.EnginePaused to be (re-)applied even on the reapply branch — otherwise a second unpause after this episode would be a no-op")
+	}
+}
