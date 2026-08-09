@@ -63,8 +63,7 @@ func (s *Sim) CreateIssue(owner, repo, title, body string) (int, string, error) 
 	if err != nil {
 		return 0, "", err
 	}
-	num := r.nextIssueNumber
-	r.nextIssueNumber++
+	num := r.allocNumber()
 	now := s.now()
 	iss := &issueRecord{
 		number:         num,

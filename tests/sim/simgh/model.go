@@ -63,8 +63,40 @@ type repoState struct {
 
 	mergeQueueEnabled bool
 
-	nextIssueNumber int
-	nextPRNumber    int
+	// nextNumber is the repo's single issue-and-PR number sequence. GitHub
+	// numbers issues and pull requests from one shared per-repo counter, so
+	// #7 is either an issue or a PR and never both. Modelling them as two
+	// independent sequences would let issue #1 and PR #1 coexist — and
+	// AddComment, whose REST endpoint is likewise shared between the two,
+	// would then silently route a PR comment to the same-numbered issue.
+	nextNumber int
+}
+
+// numberTaken reports whether an issue or PR already holds this number. Caller
+// must hold mu.
+func (r *repoState) numberTaken(num int) bool {
+	_, issueExists := r.issues[num]
+	_, prExists := r.prs[num]
+	return issueExists || prExists
+}
+
+// allocNumber reserves the next free number in the repo's shared sequence.
+// Caller must hold mu.
+func (r *repoState) allocNumber() int {
+	for r.numberTaken(r.nextNumber) {
+		r.nextNumber++
+	}
+	num := r.nextNumber
+	r.nextNumber++
+	return num
+}
+
+// reserveNumber records an explicitly-seeded number so the shared sequence
+// never hands it out again. Caller must hold mu.
+func (r *repoState) reserveNumber(num int) {
+	if num >= r.nextNumber {
+		r.nextNumber = num + 1
+	}
 }
 
 // issueRecord is an issue's mutable state.

@@ -27,7 +27,10 @@ import (
 
 // IssueSeed describes an issue to create.
 type IssueSeed struct {
-	Number int // 0 to auto-assign the repo's next issue number
+	// Number is 0 to auto-assign from the repo's shared issue-and-PR sequence.
+	// An explicit number a PR already holds is a seeding error — GitHub numbers
+	// both kinds from one counter.
+	Number int
 	Title  string
 	Body   string
 	Author string
@@ -43,7 +46,9 @@ type IssueSeed struct {
 // the backing repository; both must already exist (seed them with SeedCommit
 // or SeedBranch first) so that every git-derived answer about the PR is real.
 type PRSeed struct {
-	Number int // 0 to auto-assign the repo's next PR number
+	// Number is 0 to auto-assign from the repo's shared issue-and-PR sequence.
+	// An explicit number an issue already holds is a seeding error.
+	Number int
 	Title  string
 	Body   string
 	Author string
@@ -117,8 +122,7 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 		requiredApprovals: make(map[string]int),
 		labelVocab:        make(map[string]bool),
 		access:            gh.RepoAccess{AllowAutoMerge: true, CanPush: true},
-		nextIssueNumber:   1,
-		nextPRNumber:      1,
+		nextNumber:        1,
 	}
 	s.mu.Unlock()
 	return s
@@ -232,15 +236,13 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 
 	num := seed.Number
 	if num == 0 {
-		num = r.nextIssueNumber
-	}
-	if _, exists := r.issues[num]; exists {
+		num = r.allocNumber()
+	} else if r.numberTaken(num) {
+		// Shared number space: #N may already be a PR, not just an issue.
 		s.fail("simgh: %s#%d already exists", ownerRepo, num)
 		return s
 	}
-	if num >= r.nextIssueNumber {
-		r.nextIssueNumber = num + 1
-	}
+	r.reserveNumber(num)
 	state := seed.State
 	if state == "" {
 		state = "OPEN"
@@ -302,15 +304,13 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 
 	num := seed.Number
 	if num == 0 {
-		num = r.nextPRNumber
-	}
-	if _, exists := r.prs[num]; exists {
+		num = r.allocNumber()
+	} else if r.numberTaken(num) {
+		// Shared number space: #N may already be an issue, not just a PR.
 		s.fail("simgh: PR %s#%d already exists", ownerRepo, num)
 		return s
 	}
-	if num >= r.nextPRNumber {
-		r.nextPRNumber = num + 1
-	}
+	r.reserveNumber(num)
 	state := seed.State
 	if state == "" {
 		state = "open"
