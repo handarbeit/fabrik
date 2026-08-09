@@ -395,6 +395,12 @@ func TestBuildCommentReviewPrompt_SyntheticReviewBodyComment_GetsFindingMarker(t
 	if !strings.Contains(prompt, "[Bot Review Finding]") {
 		t.Error("expected [Bot Review Finding] marker for a synthetic review-body comment")
 	}
+	// AC1: assert on the reinvoke prompt containing the review body — asserting
+	// only that the gate cleared (or, here, only that the marker is present)
+	// passes vacuously; the actual finding text must reach the prompt.
+	if !strings.Contains(prompt, "Missing nil check on line 42.") {
+		t.Error("expected the COMMENTED review's body text to appear verbatim in the prompt")
+	}
 }
 
 func TestBuildCommentReviewPrompt_ReviewThreadComment_ZeroLine(t *testing.T) {
