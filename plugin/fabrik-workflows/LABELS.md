@@ -86,6 +86,14 @@ part of the normal happy path, not an error condition.
   engine-initiated close failed after its Done-advance already happened
   (`awaiting-close`). Both retried every poll until the issue is confirmed
   closed, then escalate to `fabrik:paused` after `MaxRetries`.
+- **`fabrik:awaiting-advance`** — A terminal advance (moving the
+  project-board Status forward once a stage's PR has merged) failed —
+  most commonly because the target Status column doesn't exist on the
+  board. Applied only on failure, after every other side effect of the
+  advance has already run; a one-time comment names the failing stage and
+  the missing option. Retried every poll, independent of dispatch
+  admission, until the board is fixed; escalates to `fabrik:paused` after
+  `MaxRetries`.
 - **`fabrik:awaiting-placement`** — A spawned child issue's initial
   project-board column placement failed at spawn time. Retried every poll
   until placement succeeds or the child is observed closed; escalates to

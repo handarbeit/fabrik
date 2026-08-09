@@ -101,6 +101,20 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 	}
 
 	if pr.Merged {
+		// Guard against the unpause/retry/re-escalate loop Pruefer flagged in
+		// PR #1469 review (#1422 follow-up): this branch is re-entered every
+		// poll for a merged item regardless of pause state (deliberately — see
+		// the self-heal rationale above), and unconditionally strips
+		// fabrik:paused below. Without this check, a pause applied by
+		// escalateAwaitingAdvanceFailure would be stripped and retried right
+		// back off on the very next poll, failing and re-escalating forever
+		// instead of settling into a stable paused state. See
+		// awaitingAdvanceStuckOrReset's doc comment for why this can't be a
+		// blanket "skip whenever paused" check.
+		if e.awaitingAdvanceStuckOrReset(item) {
+			e.logf(item.Number, "awaiting-advance", "still escalated after %d attempt(s) — skipping self-heal to avoid an unpause/retry/re-escalate loop; remove fabrik:paused once the board is fixed to retry\n", e.cfg.MaxRetries)
+			return
+		}
 		e.logf(item.Number, "pr-terminal", "PR #%d merged — filling gate-checked completion labels and advancing to Done\n", pr.Number)
 
 		// Find the highest-order stage that already has a :complete label so we
@@ -187,9 +201,12 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 			}
 		}
 
-		if aerr := e.advanceToNextStage(board, item, stage); aerr != nil {
+		if aerr := e.recordAdvanceOutcome(board, item, stage); aerr != nil {
 			e.logf(item.Number, "warn", "pr-terminal: could not advance to Done: %v\n", aerr)
 		}
+		// Runs unconditionally, regardless of the advance's outcome above —
+		// see awaitingAdvanceLabel's doc comment (advance_settle.go) for why
+		// that's safe even when recordAdvanceOutcome just failed.
 		e.closeIssueIfNonDefaultBase(item, pr.Number)
 		advancedItems[iKey] = true
 		return
