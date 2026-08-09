@@ -16,6 +16,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // TestWaitGroupTimeout_CompletesInTime verifies waitGroupTimeout returns true
@@ -207,7 +208,8 @@ func TestRunShutdownPause_PostsAuditComment_AC2(t *testing.T) {
 // audit comment, satisfying AC2's "exactly one" requirement even under
 // retry. Uses a live CacheImpl so the fabrik:paused label written by the
 // first call is actually reflected back into the store's snapshot labels —
-// the signal pauseIssueForDaemonShutdown's alreadyPaused guard reads.
+// the live re-check pauseInterruptedIssue performs under its per-issue
+// mutex reads exactly this.
 func TestRunShutdownPause_Idempotent_NoDuplicateComment_AC2(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
@@ -242,6 +244,66 @@ func TestRunShutdownPause_Idempotent_NoDuplicateComment_AC2(t *testing.T) {
 	}
 	if !hasLabel(snap.Labels(), "fabrik:paused") {
 		t.Fatal("precondition failed: fabrik:paused was not recorded in the store after the first call — idempotency check is vacuous")
+	}
+}
+
+// TestPauseInterruptedIssue_ConcurrentCallers_NoDuplicateComment is a
+// regression test for a review finding on #1393: handleStopRequest (TUI
+// single-issue stop) and pauseIssueForDaemonShutdown (daemon-wide clean-stop
+// pause) can race for the *same* issue — a human hits the TUI's stop key at
+// almost the same instant the daemon receives SIGINT. Before the fix, each
+// caller computed its own "already paused?" snapshot before calling
+// pauseInterruptedIssue, so both could observe "not yet paused" and both
+// post an audit comment. pauseInterruptedIssue now serializes on a per-issue
+// mutex and re-reads live store state under that lock, so whichever caller
+// runs second always sees the first caller's already-applied fabrik:paused
+// label. This test launches both callers concurrently, released at the same
+// instant via a barrier channel, for many distinct issues (a fresh issue
+// each time so every iteration is a genuine, unresolved race, unlike
+// reusing one issue where only the first iteration would actually race) and
+// asserts each issue never accumulates more than one audit comment.
+func TestPauseInterruptedIssue_ConcurrentCallers_NoDuplicateComment(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	const iterations = 200
+	for i := 0; i < iterations; i++ {
+		number := 1000 + i
+		seedInFlightIssue(eng, "owner/repo", number, "Research")
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			eng.handleStopRequest(context.Background(), tui.StopRequest{
+				IssueNumber: number,
+				Repo:        "owner/repo",
+				StageName:   "Research",
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			eng.wg.Add(1)
+			eng.runShutdownPause()
+		}()
+		close(start) // release both goroutines at the same instant
+		wg.Wait()
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	counts := make(map[int]int)
+	for _, c := range client.addCommentCalls {
+		counts[c.issueNumber]++
+	}
+	for number, count := range counts {
+		if count > 1 {
+			t.Errorf("issue #%d: expected at most 1 audit comment from the concurrent TUI-stop/daemon-shutdown race, got %d", number, count)
+		}
 	}
 }
 

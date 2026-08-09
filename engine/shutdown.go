@@ -135,17 +135,25 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 
 	item := gh.ProjectItem{Number: number, Repo: repoStr}
 
-	// AC2 idempotency guard: re-read live labels (removeInProgressLabel above
-	// may have mutated the cache, but fabrik:paused is unaffected by it) —
-	// consistent with handleStopRequest's identical check.
-	alreadyPaused := hasLabel(snap.Labels(), "fabrik:paused")
-
+	// AC2 idempotency (exactly-one-comment) guard now lives inside
+	// pauseInterruptedIssue itself, under a per-issue mutex, rather than
+	// being precomputed here from this function's own stale snap — see
+	// pauseInterruptedIssue's doc comment (review finding: a concurrent
+	// handleStopRequest for the same issue could otherwise race this same
+	// "not yet paused" check and double-post).
+	//
+	// The wording below deliberately says "Fabrik attempts to" rather than
+	// asserting the commit/push has landed: R8's commit-and-push (item.go,
+	// finalizeStageOutcome) runs on the cancelled worker's own goroutine,
+	// unsynchronized with this pause-write phase, and a push failure there
+	// is only logged as a warning, not surfaced here (review finding).
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — paused by a daemon clean stop**\n\nStage **%s** was interrupted by a daemon clean stop (SIGINT/SIGTERM). "+
-			"In-progress worktree changes are committed and pushed automatically as part of the stop. Remove `fabrik:paused` to resume.",
+			"Fabrik attempts to commit and push any in-progress worktree changes automatically as part of the stop — check the branch "+
+			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.",
 		stageName,
 	)
-	e.pauseInterruptedIssue(item, alreadyPaused, comment)
+	e.pauseInterruptedIssue(item, comment)
 }
 
 // drainAndExit is the single shared drain tail (#1393/ADR-1393) replacing the

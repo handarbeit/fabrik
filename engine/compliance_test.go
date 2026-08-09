@@ -87,7 +87,7 @@ var bodyBearingCalls = map[string]int{
 	"postItemComment":           1, // (item, body string, react bool)
 	"pauseIssue":                1, // (item, comment string, opts pauseOpts)
 	"addLandedCommentWithRetry": 4, // (owner, repo string, issueNumber, prNum int, body string)
-	"pauseInterruptedIssue":     2, // (item, alreadyPaused bool, comment string)
+	"pauseInterruptedIssue":     1, // (item, comment string)
 }
 
 // funnelSkips maps a function name to the single body-bearing call name that

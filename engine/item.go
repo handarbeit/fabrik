@@ -2785,16 +2785,14 @@ func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
 		e.removeInProgressLabel(owner, repo, req.IssueNumber, req.StageName)
 	}
 
-	// AC2 idempotency guard: skip re-posting the audit comment if this issue
-	// is already paused (e.g. a shutdown pause raced this same stop request).
-	alreadyPaused := false
-	if snap, err := e.store.Get(repoStr, req.IssueNumber); err == nil {
-		alreadyPaused = hasLabel(snap.Labels(), "fabrik:paused")
-	}
-
+	// AC2 idempotency (exactly-one-comment) guard now lives inside
+	// pauseInterruptedIssue itself, under a per-issue mutex, rather than
+	// being precomputed here — see pauseInterruptedIssue's doc comment
+	// (review finding: a concurrent daemon shutdown pause for the same issue
+	// could otherwise race this same "not yet paused" check and double-post).
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stopped from TUI by %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
 		e.cfg.User, req.StageName,
 	)
-	e.pauseInterruptedIssue(item, alreadyPaused, comment)
+	e.pauseInterruptedIssue(item, comment)
 }

@@ -131,6 +131,7 @@ type Engine struct {
 	queuedReviewEjectsMu        sync.Mutex             // guards queuedReviewEjects
 	queuedReviewEjects          map[string]map[int]int // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
 	issueCtxs                   sync.Map               // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
+	pauseIssueMu                sync.Map               // key: issueKey string, value: *sync.Mutex; serializes concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue)
 	baseBranchWarnedSet         sync.Map               // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	ciGateCoverageWarnedSet     sync.Map               // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
 	mergeTrainBatchSnapshotSeen sync.Map               // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
