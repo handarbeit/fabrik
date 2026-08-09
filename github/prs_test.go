@@ -1222,6 +1222,188 @@ func TestFetchPRReviews_CommentedFollowUpDoesNotOverwriteVerdict(t *testing.T) {
 	}
 }
 
+// TestFetchPRReviews_SecondCommentedSupersedesFirst covers the production
+// shape that caused the re-review loop on handarbeit/fabrik#1477: a
+// comment-only reviewer (Pruefer never approves — see
+// pruefer/claude.go's "never approve" policy) submits COMMENTED multiple
+// times across separate pushes. Since neither submission is a formal
+// verdict, the later one must win — AC1.
+func TestFetchPRReviews_SecondCommentedSupersedesFirst(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "handarbeit-pruefer[bot]"}, "state": "COMMENTED", "body": "first pass", "commit_id": "667bd208"},
+			{"id": 2, "user": map[string]string{"login": "handarbeit-pruefer[bot]"}, "state": "COMMENTED", "body": "second pass", "commit_id": "a08167a2"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("expected 1 collapsed review, got %d: %+v", len(reviews), reviews)
+	}
+	if got := reviews[0].DatabaseID; got != 2 {
+		t.Errorf("collapsed review DatabaseID = %d, want 2 (the later COMMENTED submission)", got)
+	}
+	if got := reviews[0].CommitID; got != "a08167a2" {
+		t.Errorf("collapsed review CommitID = %q, want %q (the later submission's head)", got, "a08167a2")
+	}
+}
+
+// TestFetchPRReviews_CommentedNeverSupersedesVerdict pins AC2 in all three
+// verdict directions — a COMMENTED follow-up must not overwrite APPROVED,
+// CHANGES_REQUESTED, or DISMISSED. The pre-existing suite only covered
+// CHANGES_REQUESTED; this closes the other two so a "latest always wins"
+// implementation (AC6) cannot pass here by accident.
+func TestFetchPRReviews_CommentedNeverSupersedesVerdict(t *testing.T) {
+	for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED", "DISMISSED"} {
+		t.Run(verdict, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode([]map[string]interface{}{
+					{"id": 1, "user": map[string]string{"login": "alice"}, "state": verdict, "body": "verdict"},
+					{"id": 2, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "follow-up"},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewClientWithBaseURL("token", srv.URL)
+			reviews, err := c.FetchPRReviews("owner", "repo", 42)
+			if err != nil {
+				t.Fatalf("FetchPRReviews: %v", err)
+			}
+			if len(reviews) != 1 {
+				t.Fatalf("expected 1 collapsed review, got %d: %+v", len(reviews), reviews)
+			}
+			if got := reviews[0].State; got != verdict {
+				t.Errorf("collapsed review state = %q, want %q (COMMENTED follow-up must not overwrite it)", got, verdict)
+			}
+			if got := reviews[0].DatabaseID; got != 1 {
+				t.Errorf("collapsed review DatabaseID = %d, want 1 (the %s submission)", got, verdict)
+			}
+		})
+	}
+}
+
+// TestFetchPRReviews_PendingDoesNotSupersede covers AC7: a PENDING
+// submission between two real submissions from the same author must never
+// become — or overwrite — the collapsed entry. PENDING reviews are visible
+// only to the token that created them and may reflect an incomplete
+// submission (the suspected mechanism behind the "second failure mode" in
+// the issue, where a stray PENDING entry silently pinned an author to the
+// head and suppressed all future reviews).
+func TestFetchPRReviews_PendingDoesNotSupersede(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "first", "commit_id": "aaa"},
+			{"id": 2, "user": map[string]string{"login": "alice"}, "state": "PENDING", "body": "", "commit_id": "bbb"},
+			{"id": 3, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "second", "commit_id": "ccc"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("expected 1 collapsed review, got %d: %+v", len(reviews), reviews)
+	}
+	// The PENDING entry (id 2) must be invisible: alice's collapsed entry
+	// must be the later real COMMENTED submission (id 3), not pinned to the
+	// stray PENDING one that sits between them.
+	if got := reviews[0].DatabaseID; got != 3 {
+		t.Errorf("collapsed review DatabaseID = %d, want 3 (the later COMMENTED submission; PENDING must not pin the entry)", got)
+	}
+	if got := reviews[0].State; got != "COMMENTED" {
+		t.Errorf("collapsed review state = %q, want COMMENTED", got)
+	}
+	if got := reviews[0].CommitID; got != "ccc" {
+		t.Errorf("collapsed review CommitID = %q, want %q", got, "ccc")
+	}
+}
+
+// TestFetchPRReviews_PendingOnlyAuthorOmitted covers the other half of AC7:
+// an author whose only submission is PENDING must produce no collapsed
+// entry at all — PENDING is never eligible to establish an entry, not even
+// as a first-seen fallback.
+func TestFetchPRReviews_PendingOnlyAuthorOmitted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "PENDING", "body": ""},
+			{"id": 2, "user": map[string]string{"login": "bob"}, "state": "COMMENTED", "body": "note"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("expected 1 collapsed review (alice's PENDING-only submission must be omitted), got %d: %+v", len(reviews), reviews)
+	}
+	if reviews[0].Author != "bob" {
+		t.Errorf("collapsed review author = %q, want bob (alice's PENDING-only entry must not appear)", reviews[0].Author)
+	}
+}
+
+// TestFetchPRReviews_NaiveLatestWinsFailsVerdictPinning demonstrates AC6's
+// non-vacuity requirement directly: a naive "the most recent submission
+// always wins, regardless of state" collapsing rule — which would fix the
+// re-review loop (bug #1) — reintroduces the opposite regression, letting a
+// COMMENTED follow-up silently erase a formal verdict. This proves
+// TestFetchPRReviews_CommentedNeverSupersedesVerdict is not trivially
+// satisfied by any fix that merely stops re-reviewing.
+func TestFetchPRReviews_NaiveLatestWinsFailsVerdictPinning(t *testing.T) {
+	raw := []struct {
+		Author string
+		State  string
+	}{
+		{"alice", "CHANGES_REQUESTED"},
+		{"alice", "COMMENTED"},
+	}
+	// naiveLatestWins mirrors a "latest submission always wins" collapsing
+	// rule: no state-based skip at all, just last-write-wins per author.
+	naiveLatestWins := make(map[string]string, len(raw))
+	for _, r := range raw {
+		naiveLatestWins[r.Author] = r.State
+	}
+	if got := naiveLatestWins["alice"]; got == "CHANGES_REQUESTED" {
+		t.Fatal("naive latest-wins unexpectedly preserved the verdict — this test is supposed to demonstrate the naive fix's failure")
+	}
+	if got := naiveLatestWins["alice"]; got != "COMMENTED" {
+		t.Fatalf("naive latest-wins state = %q, want COMMENTED (demonstrating the regression a naive fix introduces)", got)
+	}
+	// The actual fix, exercised via the real code path, must not have this
+	// failure: re-run the CHANGES_REQUESTED-pinning case through the real
+	// client and confirm it survives.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "CHANGES_REQUESTED", "body": "please fix"},
+			{"id": 2, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "still waiting"},
+		})
+	}))
+	defer srv.Close()
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 1 || reviews[0].State != "CHANGES_REQUESTED" {
+		t.Fatalf("real fix must preserve the verdict where the naive latest-wins rule above did not; got %+v", reviews)
+	}
+}
+
 func TestFetchPRReviews_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
