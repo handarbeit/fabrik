@@ -155,7 +155,7 @@ mutate "commits-behind always reports zero" \
 
 mutate "head SHA is not re-resolved after a push" \
   'TestHeadSHATracksNewCommits' \
-  'git.go::s{^\tsha, err := r\.resolveRef\("refs/heads/" \+ branch\)$}{\tsha, err := r.resolveRef("refs/heads/" + r.defaultBranch)}m'
+  'git.go::s{return r\.resolveRef\("refs/heads/" \+ branch\)}{return r.resolveRef("refs/heads/" + r.defaultBranch)}'
 
 mutate "required contexts never block (blocked no longer outranks unstable)" \
   'TestMergeableStateBlockedOnFailingRequiredContext|TestMergeableStateBlockedOnMissingRequiredContext|TestMergeableStateBlockedOnPendingRequiredContext|TestMergeableStateBlockedViaClassicCommitStatus|TestMergePRGatesOnDerivedState|TestPrecedenceBlockedOverUnstable' \
