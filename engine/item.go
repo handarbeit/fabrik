@@ -1205,9 +1205,52 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.logf(item.Number, "info", "stash restored after read-only stage\n")
 		}
 	}
+	// Record attempt time only if Claude actually ran.
+	// Known start failures (binary not found, command not found, etc.) should
+	// not apply the cooldown so the item is retried on the next poll.
+	//
+	// Hoisted above the cancellation early-out below (R8/#1393): a
+	// shutdown-triggered cancellation needs claudeRan to decide whether to
+	// commit-and-push in-progress work before returning, using the same test
+	// the ordinary claudeRan && !completed && !stage.ReadOnly gate uses later
+	// in this function.
+	claudeRan := err == nil
+	if err != nil {
+		// Default to "Claude ran" for errors, and only treat specific
+		// start-failure types as "did not run".
+		claudeRan = true
+
+		var startErr *exec.Error
+		if errors.As(err, &startErr) {
+			claudeRan = false
+		} else {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) || errors.Is(err, exec.ErrNotFound) {
+				claudeRan = false
+			}
+		}
+	}
+
 	if err != nil {
 		if p.ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude invocation\n")
+			// R8 (#1393): commit and push any uncommitted work before releasing
+			// the lock, so a shutdown-triggered cancellation (daemon_shutdown,
+			// user_stop, or any future cancellation reason) doesn't silently
+			// discard in-progress changes the way it did before this issue.
+			// completed is always false here — the invocation never reached a
+			// FABRIK_STAGE_COMPLETE marker — so this mirrors the
+			// claudeRan && !completed && !stage.ReadOnly gate used by the
+			// ordinary (non-cancelled) path further down. Read-only stages have
+			// nothing to commit: any dirty state was already restored by the
+			// stash pop above.
+			if claudeRan && !stage.ReadOnly {
+				e.commitWIP(workDir, item.Number, stage.Name)
+				wm := e.worktreesFor(item.Repo)
+				if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
+					e.logf(item.Number, "warn", "could not push branch after cancellation: %v\n", pushErr)
+				}
+			}
 			releaseLock()
 			return
 		}
@@ -1453,25 +1496,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		}
 	}
 
-	// Record attempt time only if Claude actually ran.
-	// Known start failures (binary not found, command not found, etc.) should
-	// not apply the cooldown so the item is retried on the next poll.
-	claudeRan := err == nil
-	if err != nil {
-		// Default to "Claude ran" for errors, and only treat specific
-		// start-failure types as "did not run".
-		claudeRan = true
-
-		var startErr *exec.Error
-		if errors.As(err, &startErr) {
-			claudeRan = false
-		} else {
-			var pathErr *os.PathError
-			if errors.As(err, &pathErr) || errors.Is(err, exec.ErrNotFound) {
-				claudeRan = false
-			}
-		}
-	}
+	// claudeRan was computed above, ahead of the cancellation early-out (R8/#1393).
 	if claudeRan {
 		// Record that Claude ran. LastAttemptAt is the ONLY write site for this
 		// field — it is never refreshed by the deep-fetch defer or any other
@@ -2725,10 +2750,13 @@ func (e *Engine) handleAPIErrorExit(p stageOutcomeParams, apiErr *claudeAPIError
 }
 
 // handleStopRequest is called by the stop handler goroutine when the TUI sends a
-// StopRequest. It cancels the in-flight per-issue context (if any), then applies
-// fabrik:paused + fabrik:awaiting-input labels and posts a stop comment so there
-// is a durable audit trail. All errors are logged and do not prevent subsequent
-// steps from running.
+// StopRequest. It cancels the in-flight per-issue context (if any), clears
+// stage:<Name>:in_progress directly (R2/#1393 — not left to the cancelled
+// worker goroutine's own release(), which is a race, not a guarantee), then
+// routes fabrik:paused + fabrik:awaiting-input + the audit comment through the
+// shared pauseInterruptedIssue primitive (R3/#1393, ADR-1393) — the same one
+// the daemon-wide clean-stop pause uses (shutdown.go). All errors are logged
+// and do not prevent subsequent steps from running.
 func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
 	repoStr := req.Repo
 	if repoStr == "" {
@@ -2747,16 +2775,24 @@ func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
 
 	item := gh.ProjectItem{Number: req.IssueNumber, Repo: repoStr}
 
-	// Apply fabrik:paused with cache write-through + webhook echo.
-	e.addLabel(item, "fabrik:paused")
+	// R2 (#1393): clear stage:<Name>:in_progress directly, independent of
+	// whether the cancelled worker goroutine ever reaches its own release().
+	// Safe against a race with that goroutine — applyLabelRemove already
+	// treats gh.ErrNotFound as success, so a second removal of an
+	// already-removed label is a no-op, not an error.
+	if req.StageName != "" {
+		owner, repo := parseOwnerRepo(repoStr)
+		e.removeInProgressLabel(owner, repo, req.IssueNumber, req.StageName)
+	}
 
-	// Apply fabrik:awaiting-input with cache write-through + webhook echo.
-	e.addLabel(item, "fabrik:awaiting-input")
-
-	// Post explanatory comment so there is a durable audit trail.
+	// AC2 idempotency (exactly-one-comment) guard now lives inside
+	// pauseInterruptedIssue itself, under a per-issue mutex, rather than
+	// being precomputed here — see pauseInterruptedIssue's doc comment
+	// (review finding: a concurrent daemon shutdown pause for the same issue
+	// could otherwise race this same "not yet paused" check and double-post).
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stopped from TUI by %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
 		e.cfg.User, req.StageName,
 	)
-	e.postItemComment(item, comment, false)
+	e.pauseInterruptedIssue(item, comment)
 }
