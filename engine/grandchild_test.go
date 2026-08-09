@@ -182,11 +182,12 @@ func TestInvokeClaude_ExtendTurnsScalesWallTime(t *testing.T) {
 	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
-	// Sleeps past the unscaled 600ms deadline but well within the scaled 1200ms one,
-	// then emits a valid completion.
+	// Sleeps past the unscaled 800ms deadline but well within the scaled 1600ms one,
+	// then emits a valid completion. Margins (400ms on each side) are kept generous so
+	// this doesn't flake under CPU contention from sibling subprocess tests.
 	script := "#!/bin/sh\n" +
 		"cat >/dev/null\n" +
-		"sleep 0.9\n" +
+		"sleep 1.2\n" +
 		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\\nFABRIK_STAGE_COMPLETE\\n\",\"session_id\":\"sess_scaled\",\"num_turns\":150,\"total_cost_usd\":0.001,\"is_error\":false}'\n"
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -203,7 +204,7 @@ func TestInvokeClaude_ExtendTurnsScalesWallTime(t *testing.T) {
 		Name:        "Implement",
 		Prompt:      "Do implement",
 		MaxTurns:    100,
-		MaxWallTime: 600 * time.Millisecond,
+		MaxWallTime: 800 * time.Millisecond,
 	}
 	issue := gh.ProjectItem{Number: 99, Title: "ExtendTurnsScalesWallTime"}
 	opts := InvokeOptions{MaxTurnsOverride: 200} // 2x stage.MaxTurns, as the extend-turns pre-grant sets
@@ -222,7 +223,7 @@ func TestInvokeClaude_ExtendTurnsScalesWallTime(t *testing.T) {
 	select {
 	case res := <-ch:
 		if res.err != nil {
-			t.Fatalf("InvokeClaude: %v (expected the scaled 1200ms deadline to cover the 900ms sleep)", res.err)
+			t.Fatalf("InvokeClaude: %v (expected the scaled 1600ms deadline to cover the 1.2s sleep)", res.err)
 		}
 		if !res.completed {
 			t.Errorf("expected completed=true; output=%q", res.output)
@@ -271,10 +272,10 @@ func TestInvokeClaude_ExtendTurnsStillKilledAtScaledDeadline(t *testing.T) {
 		Name:        "Implement",
 		Prompt:      "Do implement",
 		MaxTurns:    100,
-		MaxWallTime: 600 * time.Millisecond,
+		MaxWallTime: 800 * time.Millisecond,
 	}
 	issue := gh.ProjectItem{Number: 99, Title: "ExtendTurnsStillKilledAtScaledDeadline"}
-	opts := InvokeOptions{MaxTurnsOverride: 200} // 2x stage.MaxTurns -> scaled deadline ~1200ms
+	opts := InvokeOptions{MaxTurnsOverride: 200} // 2x stage.MaxTurns -> scaled deadline ~1600ms
 
 	start := time.Now()
 	type result struct {
@@ -294,13 +295,13 @@ func TestInvokeClaude_ExtendTurnsStillKilledAtScaledDeadline(t *testing.T) {
 		if res.completed {
 			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE); output=%q", res.output)
 		}
-		// Must run past the unscaled 600ms deadline (proves scaling applied), but must
+		// Must run past the unscaled 800ms deadline (proves scaling applied), but must
 		// still be killed well short of the 60s sleep (proves the deadline is a real,
 		// proportionate bound, not unlimited).
-		if elapsed < 700*time.Millisecond {
-			t.Errorf("killed too early (elapsed=%v) — scaled deadline (~1200ms) was not honored", elapsed)
+		if elapsed < 900*time.Millisecond {
+			t.Errorf("killed too early (elapsed=%v) — scaled deadline (~1600ms) was not honored", elapsed)
 		}
-		if elapsed > 5*time.Second {
+		if elapsed > 6*time.Second {
 			t.Errorf("killed too late (elapsed=%v) — deadline scaling may be unbounded", elapsed)
 		}
 	case <-time.After(15 * time.Second):
@@ -383,9 +384,11 @@ func TestInvokeClaudeForComments_ExtendTurnsScalesWallTime(t *testing.T) {
 	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
+	// Sleeps past the unscaled 800ms deadline but well within the scaled 1600ms one —
+	// see the identical margin rationale in TestInvokeClaude_ExtendTurnsScalesWallTime.
 	script := "#!/bin/sh\n" +
 		"cat >/dev/null\n" +
-		"sleep 0.9\n" +
+		"sleep 1.2\n" +
 		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"comment done\",\"session_id\":\"sess_cmt_scaled\",\"num_turns\":90,\"total_cost_usd\":0.001,\"is_error\":false}'\n"
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -402,7 +405,7 @@ func TestInvokeClaudeForComments_ExtendTurnsScalesWallTime(t *testing.T) {
 		Name:        "Implement",
 		Prompt:      "Do implement",
 		MaxTurns:    50,
-		MaxWallTime: 600 * time.Millisecond,
+		MaxWallTime: 800 * time.Millisecond,
 	}
 	issue := gh.ProjectItem{Number: 99, Title: "CommentsExtendTurnsScalesWallTime"}
 	comments := []gh.Comment{{Author: "user", Body: "please continue", CreatedAt: time.Now()}}
@@ -422,7 +425,7 @@ func TestInvokeClaudeForComments_ExtendTurnsScalesWallTime(t *testing.T) {
 	select {
 	case res := <-ch:
 		if res.err != nil {
-			t.Fatalf("InvokeClaudeForComments: %v (expected the scaled 1200ms deadline to cover the 900ms sleep)", res.err)
+			t.Fatalf("InvokeClaudeForComments: %v (expected the scaled 1600ms deadline to cover the 1.2s sleep)", res.err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("InvokeClaudeForComments did not return within 10s")
