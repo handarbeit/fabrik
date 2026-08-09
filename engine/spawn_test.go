@@ -476,6 +476,125 @@ FABRIK_SPAWN_CHILD_END`
 	}
 }
 
+// ---- formatMidflightSpawnReceiptNote unit tests (#1419) ----
+
+func TestFormatMidflightSpawnReceiptNote_Empty(t *testing.T) {
+	if note := formatMidflightSpawnReceiptNote(nil); note != "" {
+		t.Fatalf("expected empty note for zero spawned children, got %q", note)
+	}
+}
+
+func TestFormatMidflightSpawnReceiptNote_SingleChild(t *testing.T) {
+	note := formatMidflightSpawnReceiptNote([]string{"owner/child#101"})
+	if !strings.Contains(note, "1 sub-issue") {
+		t.Errorf("note should state the count of 1, got %q", note)
+	}
+	if !strings.Contains(note, "owner/child#101") {
+		t.Errorf("note should name the spawned child, got %q", note)
+	}
+	if !strings.Contains(note, "registered, assigned, and linked") {
+		t.Errorf("note should describe the wiring already performed (present tense), got %q", note)
+	}
+}
+
+func TestFormatMidflightSpawnReceiptNote_MultipleChildren(t *testing.T) {
+	note := formatMidflightSpawnReceiptNote([]string{"owner/child#101", "owner/child#102"})
+	if !strings.Contains(note, "2 sub-issues") {
+		t.Errorf("note should state the count of 2, got %q", note)
+	}
+	if !strings.Contains(note, "owner/child#101") || !strings.Contains(note, "owner/child#102") {
+		t.Errorf("note should name both spawned children, got %q", note)
+	}
+}
+
+// ---- stripSpawnBlocks unit tests (#1419 review finding) ----
+
+func TestStripSpawnBlocks_NoBlock_Unchanged(t *testing.T) {
+	body := "Nothing to spawn this cycle.\nFABRIK_STAGE_COMPLETE\n"
+	if got := stripSpawnBlocks(body); got != body {
+		t.Errorf("expected unchanged output with no block, got %q", got)
+	}
+}
+
+func TestStripSpawnBlocks_SingleBlock_RemovedButSurroundingTextSurvives(t *testing.T) {
+	body := "Found a blocker while reviewing.\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN owner/repo\n" +
+		"TITLE: Fix the underlying library first\n" +
+		"\n" +
+		"Discovered mid-review; must land before this PR.\n" +
+		"FABRIK_SPAWN_CHILD_END\n" +
+		"FABRIK_STAGE_COMPLETE\n"
+
+	got := stripSpawnBlocks(body)
+
+	if strings.Contains(got, "FABRIK_SPAWN_CHILD_BEGIN") || strings.Contains(got, "FABRIK_SPAWN_CHILD_END") {
+		t.Errorf("expected BEGIN/END markers stripped, got %q", got)
+	}
+	if strings.Contains(got, "TITLE: Fix the underlying library first") {
+		t.Errorf("expected TITLE: line stripped, got %q", got)
+	}
+	if strings.Contains(got, "Discovered mid-review") {
+		t.Errorf("expected block body stripped, got %q", got)
+	}
+	if !strings.Contains(got, "Found a blocker while reviewing.") {
+		t.Errorf("expected text preceding the block to survive, got %q", got)
+	}
+	if !strings.Contains(got, "FABRIK_STAGE_COMPLETE") {
+		t.Errorf("expected text following the block to survive, got %q", got)
+	}
+}
+
+func TestStripSpawnBlocks_MultipleBlocks_AllRemoved(t *testing.T) {
+	body := "Two blockers found.\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN owner/repo-a\n" +
+		"TITLE: First blocker\n" +
+		"Body one.\n" +
+		"FABRIK_SPAWN_CHILD_END\n" +
+		"FABRIK_SPAWN_CHILD_BEGIN owner/repo-b\n" +
+		"TITLE: Second blocker\n" +
+		"Body two.\n" +
+		"FABRIK_SPAWN_CHILD_END\n" +
+		"FABRIK_STAGE_COMPLETE\n"
+
+	got := stripSpawnBlocks(body)
+
+	if strings.Contains(got, "FABRIK_SPAWN_CHILD_BEGIN") || strings.Contains(got, "FABRIK_SPAWN_CHILD_END") {
+		t.Errorf("expected all BEGIN/END markers stripped, got %q", got)
+	}
+	if strings.Contains(got, "First blocker") || strings.Contains(got, "Body one") {
+		t.Errorf("expected first block content stripped, got %q", got)
+	}
+	if strings.Contains(got, "Second blocker") || strings.Contains(got, "Body two") {
+		t.Errorf("expected second block content stripped, got %q", got)
+	}
+	if !strings.Contains(got, "Two blockers found.") {
+		t.Errorf("expected leading text to survive, got %q", got)
+	}
+}
+
+func TestStripSpawnBlocks_MalformedBlock_LeftVisible(t *testing.T) {
+	// No TITLE: line — ParseSpawnBlocks would skip this as malformed, so
+	// nothing was ever spawned for it; stripSpawnBlocks must leave it alone
+	// rather than silently discarding content that was never processed.
+	body := "FABRIK_SPAWN_CHILD_BEGIN owner/repo\n" +
+		"Just prose, no TITLE: line.\n" +
+		"FABRIK_SPAWN_CHILD_END\n"
+
+	got := stripSpawnBlocks(body)
+	if got != body {
+		t.Errorf("expected malformed block left untouched, got %q, want %q", got, body)
+	}
+}
+
+func TestStripSpawnBlocks_ProseOnlyMention_Unchanged(t *testing.T) {
+	// #1263 own-line discipline: a marker merely mentioned in prose (not on
+	// its own line) must not be treated as a real block boundary.
+	body := "- [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN owner/repo` block if a blocker turns up\n"
+	if got := stripSpawnBlocks(body); got != body {
+		t.Errorf("expected prose-only mention left untouched, got %q", got)
+	}
+}
+
 // ---- resolveSpecifyOptionID unit tests ----
 
 func TestResolveSpecifyOptionID_Nil(t *testing.T) {
@@ -583,6 +702,14 @@ func TestResolveSpecifyOptionID_UnmanagedAndDoneOnly(t *testing.T) {
 func spawnTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
 	t.Helper()
 	eng := testEngine(t, client, &mockClaudeInvoker{})
+	// These tests exercise cross-repo spawning ("owner/repo" parent spawning
+	// into "owner/child"), which only a multi-repo instance (cfg.Repo == "")
+	// is configured to serve — testEngine's default cfg.Repo ("repo") would
+	// now make spawnTargetServedByThisInstance refuse every one of them.
+	// This is exactly the issue's own "Instance A processes multiple repos on
+	// board 5 without issue" shape; the repo-scoped-mismatch shape (Instance
+	// B / reproduction 1) is covered by its own dedicated tests below.
+	eng.cfg.Repo = ""
 	// Register "owner/repo" and "owner/child" as managed repos.
 	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
 	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
@@ -689,7 +816,7 @@ FABRIK_SPAWN_CHILD_END
 			}
 			return nil
 		},
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 300 + childCounter, fmt.Sprintf("I_recovered%d", childCounter), nil
 		},
@@ -856,7 +983,7 @@ func TestPreImplement_NoOp_NoBlocks(t *testing.T) {
 func TestPreImplement_HappyPath(t *testing.T) {
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 100 + childCounter, fmt.Sprintf("I_child%d", childCounter), nil
 		},
@@ -1025,7 +1152,7 @@ func TestPreImplement_OnDemandClone_Success(t *testing.T) {
 
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 200 + childCounter, fmt.Sprintf("I_newchild%d", childCounter), nil
 		},
@@ -1077,7 +1204,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_DependsOnChain_WiresSiblingEdges(t *testing.T) {
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 400 + childCounter, fmt.Sprintf("I_chain%d", childCounter), nil
 		},
@@ -1165,7 +1292,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_NoDependsOn_MatchesTodaysCallsExactly(t *testing.T) {
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 500 + childCounter, fmt.Sprintf("I_star%d", childCounter), nil
 		},
@@ -1307,7 +1434,7 @@ func TestPreImplement_SiblingWireFailure_PausesAfterChildrenCreated(t *testing.T
 	childCounter := 0
 	blockedByCalls := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 600 + childCounter, fmt.Sprintf("I_wirefail%d", childCounter), nil
 		},
@@ -1372,7 +1499,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_PartialFailure(t *testing.T) {
 	callCount := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			callCount++
 			if callCount == 2 {
 				return 0, "", fmt.Errorf("github: 500 internal server error")
@@ -1430,6 +1557,181 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// ---- board-servability scope-check tests (#1419, failure mode 1) ----
+
+// TestPreImplement_RepoScopedInstance_RefusesMismatchedTarget covers Instance
+// B's shape from the issue's reproduction 1: a repo:-scoped instance (cfg.Repo
+// != "") asked to spawn into a repo other than its own must refuse loudly —
+// zero CreateIssue calls, the parent paused, no silent registration onto this
+// instance's own (wrong) board.
+func TestPreImplement_RepoScopedInstance_RefusesMismatchedTarget(t *testing.T) {
+	client := &mockGitHubClient{}
+	// testEngine's default Config is repo:-scoped to "owner/repo" — do NOT
+	// widen it to multi-repo mode here, unlike spawnTestEngine.
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Cross-repo child this instance cannot serve
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected error when the spawn target is not served by this instance")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+	if len(client.createIssueCalls) != 0 {
+		t.Errorf("expected 0 CreateIssue calls (scope check runs before any mutation), got %d", len(client.createIssueCalls))
+	}
+	if len(client.addProjectV2ItemCalls) != 0 {
+		t.Errorf("expected 0 AddProjectV2ItemById calls, got %d", len(client.addProjectV2ItemCalls))
+	}
+
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("fabrik:paused not added when spawn target is not served by this instance")
+	}
+
+	var sawRefusalComment bool
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "not served by this Fabrik instance") {
+			sawRefusalComment = true
+		}
+	}
+	if !sawRefusalComment {
+		t.Error("expected a comment explaining the spawn target is not served by this instance")
+	}
+}
+
+// TestPreImplement_MultiRepoInstance_SpawnsCrossRepo pins the multi-repo shape
+// (cfg.Repo == "") explicitly: this instance already legitimately serves any
+// repo the org grants board access to (the issue's own "Instance A processes
+// multiple repos on board 5 without issue"), so the scope-check must not
+// interfere with it.
+func TestPreImplement_MultiRepoInstance_SpawnsCrossRepo(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			return 700, "I_multirepo", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.Repo = "" // multi-repo mode
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Cross-repo child a multi-repo instance may serve
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true for a multi-repo instance")
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+}
+
+// TestPreImplement_RepoScopedInstance_SameRepoSpawnUnaffected verifies the
+// scope-check does not interfere with the ordinary same-repo spawn shape: a
+// repo:-scoped instance spawning within its own configured repo.
+func TestPreImplement_RepoScopedInstance_SameRepoSpawnUnaffected(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			return 701, "I_samerepo", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{}) // cfg.Owner="owner", cfg.Repo="repo"
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Same-repo child
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true for a same-repo spawn")
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+}
+
+// TestPreImplement_EveryCreateIssueCallCarriesAssignee is requirement 4: every
+// spawned child must be assigned to the user: of the instance meant to
+// process it, regardless of same-repo or cross-repo spawning.
+func TestPreImplement_EveryCreateIssueCallCarriesAssignee(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 800 + childCounter, fmt.Sprintf("I_assignee%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := spawnTestEngine(t, client) // multi-repo mode; cfg.User == "testuser"
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child two
+Body two.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(client.createIssueCalls) != 2 {
+		t.Fatalf("expected 2 CreateIssue calls, got %d", len(client.createIssueCalls))
+	}
+	for i, c := range client.createIssueCalls {
+		if len(c.assignees) != 1 || c.assignees[0] != "testuser" {
+			t.Errorf("call %d: assignees = %v, want [testuser]", i, c.assignees)
+		}
+	}
+}
+
 // ---- status-set and label-inheritance tests ----
 
 func spawnTestEngineWithSpecify(t *testing.T, client *mockGitHubClient) *Engine {
@@ -1449,7 +1751,7 @@ func spawnTestEngineWithSpecify(t *testing.T, client *mockGitHubClient) *Engine 
 
 func TestPreImplement_SetsSpecifyStatus(t *testing.T) {
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			return 101, "I_child101", nil
 		},
 		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
@@ -1495,7 +1797,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_StatusSetNilField(t *testing.T) {
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			return 102, "I_child102", nil
 		},
 		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {

@@ -194,6 +194,34 @@ The marker must be the *only* content on its line. Treat it as a control signal,
 
 If blocked, describe exactly what's wrong. Be specific enough that someone can act on it without re-investigating.
 
+## If You Discover a Blocking Issue
+
+If validation fails because this PR genuinely depends on other work landing first — a bug in a dependency, a missing capability in another repo, work that was scoped out but turns out to be required — don't just describe it in prose and block. Declare it as a spawned child issue using `FABRIK_SPAWN_CHILD_BEGIN/END`, the same mechanism Plan uses for decomposition.
+
+**Do not run `gh issue create` yourself.** The engine never observes an issue you create directly — no board registration, no assignee, and critically no `blocked_by` edge on this issue. Fabrik would then have no record that this PR is blocked, and on the next poll could resume as if nothing were wrong, reporting green and merging without the blocker's fix.
+
+### Block Format
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Single-line title for the new issue
+
+Full scoped spec body — markdown, multiple paragraphs OK, no nested FABRIK_* markers.
+Include enough context for the child to run autonomously through its own pipeline
+without consulting this issue.
+FABRIK_SPAWN_CHILD_END
+```
+
+Rules:
+- `FABRIK_SPAWN_CHILD_BEGIN` and `FABRIK_SPAWN_CHILD_END` must each be on their own line
+- The `owner/repo` follows `BEGIN` on the same line, separated by a space
+- `TITLE:` must be the first non-empty line after `BEGIN`; the body follows after a blank line and continues until `END`
+- Only spawn into a repo this Fabrik instance is actually configured to serve (its own `repo:`/`project:` config) — a mismatched repo fails the spawn loudly rather than silently misrouting; if you're unsure which repos are servable, say so in your output rather than guessing
+- The engine creates the issue, adds it to the project board, assigns it, and links it as a `blocked_by` dependency of this issue automatically — you do not need to do any of that yourself, and must not attempt it via `gh`
+- Emit the block alongside your normal validation report; **do NOT emit `FABRIK_STAGE_COMPLETE`** in the same response
+
+**Why this matters more here than at Review**: signaling completion is what `READY TO MERGE` means for Validate — on a `fabrik:yolo` issue, that can trigger an immediate merge in the very same poll cycle, before the newly-created `blocked_by` edge is ever consulted. Verdict and blocker declaration are mutually exclusive: if you just declared a blocker, the correct verdict is BLOCKED, not READY TO MERGE — treat it exactly like any other unmet requirement in "Decision: Complete or Block" above.
+
 ## Pre-Completion Gate — MANDATORY before emitting FABRIK_STAGE_COMPLETE
 
 **Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.

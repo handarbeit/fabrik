@@ -171,6 +171,58 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 	return blocks
 }
 
+// stripSpawnBlocks removes every well-formed FABRIK_SPAWN_CHILD_BEGIN/END
+// block from body, using the identical line-scanning algorithm
+// ParseSpawnBlocks uses (spawnBeginRepo/isSpawnEndLine/parseTitleAndBody) —
+// so it strips exactly the set of blocks ParseSpawnBlocks would parse and
+// spawnChildren would act on, no more and no less. A malformed block (one
+// ParseSpawnBlocks itself skips, e.g. a missing TITLE: line) is left
+// visible rather than silently discarded, matching ParseSpawnBlocks's own
+// judgment that it was never really a block.
+//
+// Used by the Review/Validate mid-flight spawn hook (finalizeStageOutcome,
+// engine/item.go) so a successfully-processed declaration does not also leak
+// its raw BEGIN/END/TITLE: syntax into the posted PR/issue comment alongside
+// the receipt note — mirroring the stripMarkers call already made for
+// FABRIK_PR_CREATE/FABRIK_ISSUE_UPDATE in the same function. Not used by
+// Plan's own comment (preImplement reads a stored comment back later and
+// formatSpawnReceiptNote's "declared above" wording depends on the raw
+// blocks staying visible there — see that function's doc comment).
+func stripSpawnBlocks(body string) string {
+	lines := strings.Split(body, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		repo := spawnBeginRepo(lines[i])
+		if repo == "" {
+			out = append(out, lines[i])
+			continue
+		}
+
+		end := -1
+		for j := i + 1; j < len(lines); j++ {
+			if isSpawnEndLine(lines[j]) {
+				end = j
+				break
+			}
+		}
+		if end == -1 {
+			// No matching END — nothing further can be well-formed (mirrors
+			// ParseSpawnBlocks's own bail-out). Keep the remainder verbatim.
+			out = append(out, lines[i:]...)
+			break
+		}
+
+		if title, _, _, _, _ := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title == "" {
+			// Malformed block body — ParseSpawnBlocks would have skipped it
+			// too, so nothing was spawned for it. Leave it visible.
+			out = append(out, lines[i:end+1]...)
+		}
+		// Well-formed block: omit its lines (BEGIN through END) entirely.
+		i = end
+	}
+	return strings.Join(out, "\n")
+}
+
 // parseTitleAndBody extracts the title (from the "TITLE: ..." line), the
 // optional DEPENDS_ON: header, and the remaining body content from the
 // inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.
@@ -334,7 +386,8 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		return false, nil
 	}
 
-	return e.spawnChildren(ctx, board, item, owner, repo, blocks)
+	_, ok, err := e.spawnChildren(ctx, board, item, owner, repo, blocks)
+	return ok, err
 }
 
 // recoverMissingPlanComment handles the inconsistency where stage:Plan:complete
@@ -388,39 +441,66 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 	}
 
 	e.logf(item.Number, "spawn", "pre-Implement: live re-read recovered %d child(ren) missed by stale snapshot — proceeding to spawn\n", len(blocks))
-	return e.spawnChildren(ctx, board, fresh, owner, repo, blocks)
+	_, ok, err := e.spawnChildren(ctx, board, fresh, owner, repo, blocks)
+	return ok, err
+}
+
+// spawnTargetServedByThisInstance reports whether this Fabrik instance's own
+// project board is a legitimate registration target for a spawned child in
+// childOwner/childRepo.
+//
+// A multi-repo instance (cfg.Repo == "") already legitimately serves any repo
+// the org grants board access to — this is the existing, working shape of
+// same-process cross-repo spawning (the issue's own "Instance A processes
+// multiple repos on board 5 without issue"). A repo:-scoped instance serves
+// only its own declared repo; per the issue's own out-of-scope boundary (no
+// cross-instance board discovery), it has no basis to claim any other repo is
+// servable here, so it must refuse rather than silently registering the child
+// on its own board anyway (failure mode 1 — see ADR-1419). This is a
+// scope-check, not a route-finder: it does not locate the correct board for a
+// mismatched repo, it only prevents guessing the wrong one.
+func (e *Engine) spawnTargetServedByThisInstance(childOwner, childRepo string) bool {
+	if e.cfg.Repo == "" {
+		return true
+	}
+	return childOwner == e.cfg.Owner && childRepo == e.cfg.Repo
 }
 
 // spawnChildren creates the child issues described by blocks, adds them to the
-// project board, links them as blockedBy dependencies of the parent, and marks
-// the parent with fabrik:children-spawned. Shared by preImplement's direct path
-// and recoverMissingPlanComment's recovery path so both add the idempotency
-// guard through a single code path.
+// project board, assigns them to cfg.User, links them as blockedBy
+// dependencies of the parent, and marks the parent with fabrik:children-spawned.
+// Shared by all spawn origins — preImplement's direct path, recoverMissingPlanComment's
+// recovery path, and finalizeStageOutcome's Review/Validate mid-flight hook —
+// so every origin gets identical wiring through a single code path (ADR-1419).
 //
-// Returns (true, nil) when children were spawned — the Implement Claude
-// invocation must be skipped in this case; checkDependencies will block the
-// parent on its next evaluation cycle.
-// Returns (false, err) on any fatal error; the parent is paused before returning.
-func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string, blocks []SpawnBlock) (bool, error) {
-	e.logf(item.Number, "spawn", "pre-Implement: found %d child(ren) to spawn\n", len(blocks))
+// Returns (spawned, true, nil) when children were spawned, where spawned lists
+// each child as "owner/repo#N". For the Implement dispatch caller specifically,
+// this also means the Implement Claude invocation must be skipped in this
+// case — checkDependencies will block the parent on its next evaluation cycle.
+// Returns (partial, false, err) on any fatal error; the parent is paused
+// before returning. partial lists whatever children were created before the
+// failure, for error-message purposes.
+func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string, blocks []SpawnBlock) ([]string, bool, error) {
+	e.logf(item.Number, "spawn", "found %d child(ren) to spawn\n", len(blocks))
 
 	// Validate DEPENDS_ON headers upfront, before any GitHub mutation. This is
 	// purely structural (no created-issue data needed) so an invalid index
 	// fails loud and cheap, with zero orphaned issues — "Created so far: none"
 	// is always accurate for this failure class.
 	if err := validateSpawnDependsOn(blocks); err != nil {
-		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\n%s. Created so far: %s\n\nRemove `fabrik:paused` after fixing the Plan output to retry.",
+		msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\n%s. Created so far: %s\n\nRemove `fabrik:paused` after fixing the output to retry.",
 			err, formatSpawnedList(nil))
 		e.pauseIssue(item, msg, pauseOpts{
 			labelEcho: true,
 		})
-		return false, fmt.Errorf("pre-implement: %w", err)
+		return nil, false, fmt.Errorf("spawn: %w", err)
 	}
 
-	// Ensure all target repos are initialized (bare-cloned) before any mutation.
-	// On-demand clone via singleflight — no prior processing of an issue from the
-	// target repo is required. Error comment and labels are posted by
-	// ensureSpawnTargetReady on failure.
+	// Ensure every target repo is one this instance is actually configured to
+	// serve, before any GitHub mutation — the board-servability guard
+	// (requirement 3). A repo:-scoped instance that doesn't cover a target
+	// repo fails loud here rather than silently registering the child onto
+	// its own (wrong) board.
 	uniqueRepos := make(map[string]struct{})
 	for _, b := range blocks {
 		uniqueRepos[b.Repo] = struct{}{}
@@ -431,8 +511,28 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			// Malformed repo string — the per-block loop below will catch and report it.
 			continue
 		}
+		if !e.spawnTargetServedByThisInstance(targetOwner, targetRepoName) {
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nSpawn target `%s` is not served by this Fabrik instance (configured for `%s/%s` only, and this instance's `repo:` scoping means it does not process other repos' boards). Created so far: %s\n\nEither reconfigure this instance's `repo:`/`project:` to cover `%s`, or run the spawn from an instance that does. Remove `fabrik:paused` after fixing, then re-advance to retry.",
+				targetRepo, e.cfg.Owner, e.cfg.Repo, formatSpawnedList(nil), targetRepo)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
+			return nil, false, fmt.Errorf("spawn: target %s not served by this instance (configured for %s/%s)", targetRepo, e.cfg.Owner, e.cfg.Repo)
+		}
+	}
+
+	// Ensure all target repos are initialized (bare-cloned) before any mutation.
+	// On-demand clone via singleflight — no prior processing of an issue from the
+	// target repo is required. Error comment and labels are posted by
+	// ensureSpawnTargetReady on failure.
+	for targetRepo := range uniqueRepos {
+		targetOwner, targetRepoName, ok := parseOwnerRepoStr(targetRepo)
+		if !ok {
+			// Malformed repo string — the per-block loop below will catch and report it.
+			continue
+		}
 		if err := e.ensureSpawnTargetReady(ctx, targetOwner, targetRepoName, item); err != nil {
-			return false, fmt.Errorf("pre-implement: initializing spawn target %s: %w", targetRepo, err)
+			return nil, false, fmt.Errorf("spawn: initializing spawn target %s: %w", targetRepo, err)
 		}
 	}
 
@@ -449,23 +549,27 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	for i, block := range blocks {
 		childOwner, childRepo, ok := parseOwnerRepoStr(block.Repo)
 		if !ok {
-			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nInvalid repo in spawn block #%d: `%s`. Created so far: %s\n\nRemove `fabrik:paused` after fixing the Plan output to retry.",
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nInvalid repo in spawn block #%d: `%s`. Created so far: %s\n\nRemove `fabrik:paused` after fixing the output to retry.",
 				i+1, block.Repo, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
-			return false, fmt.Errorf("pre-implement: invalid repo %q in block %d", block.Repo, i+1)
+			return spawned, false, fmt.Errorf("spawn: invalid repo %q in block %d", block.Repo, i+1)
 		}
 
+		// Every spawned child is assigned to cfg.User — the user of the
+		// instance meant to process it (requirement 4). Folded into the same
+		// CreateIssue POST rather than a separate call, so a bad/misconfigured
+		// user still fails loud through this single, already-fail-loud path.
 		fullBody := block.Body + childFooter(owner, repo, item.Number)
-		childNumber, childNodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody)
+		childNumber, childNodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody, []string{e.cfg.User})
 		if err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				i+1, len(blocks), block.Repo, err, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
-			return false, fmt.Errorf("pre-implement: creating child %d: %w", i+1, err)
+			return spawned, false, fmt.Errorf("spawn: creating child %d: %w", i+1, err)
 		}
 		e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
 		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
@@ -474,23 +578,23 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		// Add child to the project board.
 		childItemID, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID)
 		if err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
-			return false, fmt.Errorf("pre-implement: adding child %s#%d to project: %w", block.Repo, childNumber, err)
+			return spawned, false, fmt.Errorf("spawn: adding child %s#%d to project: %w", block.Repo, childNumber, err)
 		}
 
 		// Link child as a blockedBy dependency of the parent.
 		// item.ID is the parent issue's GraphQL node ID.
 		if err := e.client.AddBlockedByIssue(item.ID, childNodeID); err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
-			return false, fmt.Errorf("pre-implement: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
+			return spawned, false, fmt.Errorf("spawn: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
 		}
 
 		// Apply fabrik:sub-issue label to child (for human-visible filtering; no engine semantics).
@@ -541,12 +645,12 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 		blockerIdx := block.DependsOn - 1
 		if err := e.client.AddBlockedByIssue(childNodeIDs[i], childNodeIDs[blockerIdx]); err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to link sibling dependency for spawn block #%d (DEPENDS_ON: %d): `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to link sibling dependency for spawn block #%d (DEPENDS_ON: %d): `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				i+1, block.DependsOn, err, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
-			return false, fmt.Errorf("pre-implement: linking sibling dependency for block %d: %w", i+1, err)
+			return spawned, false, fmt.Errorf("spawn: linking sibling dependency for block %d: %w", i+1, err)
 		}
 		e.logf(item.Number, "spawn", "linked sibling dependency: block %d depends on block %d\n", i+1, block.DependsOn)
 	}
@@ -559,8 +663,8 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	// No webhook echo here — preserving prior behavior (never echoed at this site).
 	e.applyLabelAdd(item, "fabrik:children-spawned", false)
 
-	e.logf(item.Number, "spawn", "pre-Implement: spawned %d child(ren); parent will be gated until all close\n", len(blocks))
-	return true, nil
+	e.logf(item.Number, "spawn", "spawned %d child(ren); parent will be gated until all close\n", len(blocks))
+	return spawned, true, nil
 }
 
 // addPausedLabelToItem adds fabrik:paused to the given item, with cache write-through

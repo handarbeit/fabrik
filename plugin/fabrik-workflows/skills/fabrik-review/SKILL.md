@@ -156,6 +156,34 @@ In preference order:
 
 This paragraph's CI-gating language applies only if `wait_for_ci: true` is configured for this stage — see "CI-fix re-invocation" in Engine Context below, which is conditional on that same setting and is unset by default for Review.
 
+## If You Discover a Blocking Issue
+
+If, while reviewing, you determine this PR cannot be safely completed without another piece of work landing first — a bug in a dependency, a missing capability in another repo, work that was scoped out but turns out to be required — declare it as a spawned child issue using `FABRIK_SPAWN_CHILD_BEGIN/END`, the same mechanism Plan uses for decomposition.
+
+**Do not run `gh issue create` yourself.** The engine never observes an issue you create directly — no board registration, no assignee, and critically no `blocked_by` edge on this issue. Fabrik would then have no record that this PR is blocked, and would resume review work as if nothing were wrong, potentially reporting green and merging without the blocker's fix.
+
+### Block Format
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Single-line title for the new issue
+
+Full scoped spec body — markdown, multiple paragraphs OK, no nested FABRIK_* markers.
+Include enough context for the child to run autonomously through its own pipeline
+without consulting this issue.
+FABRIK_SPAWN_CHILD_END
+```
+
+Rules:
+- `FABRIK_SPAWN_CHILD_BEGIN` and `FABRIK_SPAWN_CHILD_END` must each be on their own line
+- The `owner/repo` follows `BEGIN` on the same line, separated by a space
+- `TITLE:` must be the first non-empty line after `BEGIN`; the body follows after a blank line and continues until `END`
+- Only spawn into a repo this Fabrik instance is actually configured to serve (its own `repo:`/`project:` config) — a mismatched repo fails the spawn loudly rather than silently misrouting; if you're unsure which repos are servable, say so in your output rather than guessing
+- The engine creates the issue, adds it to the project board, assigns it, and links it as a `blocked_by` dependency of this issue automatically — you do not need to do any of that yourself, and must not attempt it via `gh`
+- Emit the block anywhere in your normal output; you may still emit `FABRIK_STAGE_COMPLETE` in the same response — the engine processes the spawn before posting your output
+
+Once the spawn is processed, this issue gets `fabrik:blocked` automatically and will not resume until the new child closes.
+
 ## Output
 
 The engine captures your stdout and posts it on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
