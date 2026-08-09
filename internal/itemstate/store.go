@@ -811,8 +811,13 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 	item.LinkedPR.CheckRuns, changed = upsertCheckRunByID(item.LinkedPR.CheckRuns, v.Run)
 	item.LinkedPR.HasHadChecks = true
 	if changed {
-		// A new check-run ID appearing, or an existing one's Status/Conclusion
-		// transitioning, is observable CI progress (ADR-1410, R2).
+		// A new check-run ID appearing, or an existing one differing at all
+		// from its prior entry per upsertCheckRunByID's reflect.DeepEqual —
+		// not only Status/Conclusion, but also OutputSummary/OutputText/
+		// DetailsURL/HTMLURL changing on an otherwise-unchanged run — counts
+		// as observable CI progress (ADR-1410, R2). Deliberately permissive:
+		// GitHub reporting any change on a check run is still evidence it is
+		// alive, even when the change itself is weak signal on its own.
 		item.LinkedPR.LastCIProgressAt = time.Now()
 	}
 

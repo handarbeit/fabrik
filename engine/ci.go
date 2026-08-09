@@ -34,8 +34,8 @@ import (
 //     never conflated with timedOut.
 //
 //   - (false, false, true, false)  — a genuine liveness dwell elapsed: check runs are pending but have
-//     shown no observable progress for ciWaitTimeout (classifyCIFromCheckRuns/classifyCIFromRequiredContexts),
-//     or R3/mergeable-state-blocks-with-no-checks (classifyCIFromMergeableState) — never for a confirmed
+//     shown no observable progress for ciWaitTimeout (classifyCIFromCheckRuns), or
+//     R3/mergeable-state-blocks-with-no-checks (classifyCIFromMergeableState) — never for a confirmed
 //     failure or for merely-elapsed time on healthy, progressing CI (R1). Caller should pause the issue.
 //     fabrik:awaiting-ci is removed before returning.
 //
@@ -43,6 +43,19 @@ import (
 //     (e.g. PR closed without merging, or R3's required-check-never-runs case). The caller MUST
 //     claim the item (do not treat this as "gate cleared") so Phase 2 does not advance an item
 //     that was just paused in this same pass. See ADR-1223.
+//
+// IMPORTANT — production reachability: this function is never reached at all for a
+// merely-pending CI state via the async settle pipeline. checkMergeabilityGate
+// (merge_gate.go) unconditionally claims settlePRMergeState's PRMergeUnsettled
+// classification — which is the *only* classification "CI checks pending" ever
+// produces (pr_settle.go) — and handleMergeAndCIGates returns before ever calling
+// checkCIGate. classifyCIFromCheckRuns's pending-liveness-dwell branch is therefore
+// exercised only by a direct unit-level call to checkCIGate (as engine/ci_test.go
+// does), never by real poll traffic. What actually bounds a stalled-but-pending CI
+// state in production is settleAwaitingCIScan's own unconditional CIBackstopTimeout
+// backstop (ci_settle.go) — an elapsed-time cap, not the liveness dwell described
+// above. See ADR-1410's "Architectural discovery during implementation" section for
+// the full analysis and why this was accepted rather than restructured.
 //
 // See ADR-1410 for the liveness-vs-elapsed-time redesign this outcome table reflects.
 func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) (blocked, ciFailure, timedOut, terminated bool) {
@@ -147,14 +160,19 @@ func (e *Engine) ciBackstopTimeout() time.Duration {
 }
 
 // ciProgressStalledSince returns the time CI was last observed to make
-// progress for item's linked PR (LinkedPRState.LastCIProgressAt — a new
-// check-run ID appearing, an existing one's Status/Conclusion transitioning,
-// or the head SHA advancing), and whether that value is meaningful. ok is
-// false when no progress has ever been recorded for this item in the current
-// process's lifetime — a cold start after restart, or a store lookup miss —
-// which is the safe default (ADR-1410): never escalate on an absent signal,
-// only keep re-observing. The itemstate store is entirely in-memory and has
-// no persistence across a restart, and GitHub exposes no change-history
+// progress for item's linked PR (LinkedPRState.LastCIProgressAt), and whether
+// that value is meaningful. "Progress" is set by applyCheckRunCompleted
+// (internal/itemstate/store.go) whenever upsertCheckRunByID's
+// reflect.DeepEqual reports the upserted gh.CheckRun differs at all from the
+// prior entry for that ID — not just a Status/Conclusion transition, but also
+// OutputSummary/OutputText/DetailsURL/HTMLURL changing on an otherwise-unchanged
+// run (weaker evidence of liveness, but still a GitHub-reported change) — plus
+// a new check-run ID appearing, or the head SHA advancing. ok is false when no
+// progress has ever been recorded for this item in the current process's
+// lifetime — a cold start after restart, or a store lookup miss — which is
+// the safe default (ADR-1410): never escalate on an absent signal, only keep
+// re-observing. The itemstate store is entirely in-memory and has no
+// persistence across a restart, and GitHub exposes no change-history
 // equivalent to backfill it from (unlike labelAppliedAt's REST fallback).
 func (e *Engine) ciProgressStalledSince(owner, repo string, item gh.ProjectItem) (time.Time, bool) {
 	snap, err := e.store.Get(owner+"/"+repo, item.Number)
@@ -177,6 +195,17 @@ func (e *Engine) ciProgressStalledSince(owner, repo string, item gh.ProjectItem)
 // dwell: escalate only once CI has shown no observable progress
 // (ciProgressStalledSince) for ciWaitTimeout, never merely because elapsed
 // time has passed while CI is alive and reporting (R1).
+//
+// NOT REACHED VIA REAL POLL TRAFFIC for the pending branch specifically: see
+// checkCIGate's doc comment above ("production reachability") and ADR-1410's
+// "Architectural discovery during implementation" — checkMergeabilityGate
+// claims settlePRMergeState's PRMergeUnsettled classification (which is what
+// "CI checks pending" always produces) before this function is ever called
+// from the async settle pipeline. This pending-liveness-dwell code remains
+// correct and tested at the unit level, and is defensive against a future
+// change to the merge-gate claim priority, but settleAwaitingCIScan's
+// unconditional CIBackstopTimeout backstop — not this dwell — is what
+// actually bounds a stalled pending-CI item in production today.
 func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem, checkRuns []gh.CheckRun) (blocked, ciFailure, timedOut bool) {
 	status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
 
