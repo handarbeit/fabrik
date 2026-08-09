@@ -186,7 +186,7 @@ mutate "a name in both collections does not keep the worse verdict" \
 
 mutate "FetchPRDetails reports no mergeable_state" \
   'TestFetchPRDetailsReportsDerivedMergeableState' \
-  'prs.go::s{\t\tMergeableState:   state,}{\t\tMergeableState:   "",}'
+  'prs.go::s{\t\tMergeableState:   state,}{\t\tMergeableState:   state[:0],}'
 
 mutate "behind is reported without branch protection" \
   'TestMergeableStateBehindRequiresBranchProtection' \
