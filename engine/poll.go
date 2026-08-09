@@ -1348,6 +1348,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
 	}
 
+	// Source-checkout staleness check (#1464): reports (never acts on) how far
+	// a dev-build daemon's running binary is behind origin/main, via the
+	// warnings/ lifecycle. Runs unconditionally every poll (throttled
+	// internally to once per stalenessCheckPollInterval polls) — deliberately
+	// outside the dispatched==0 block below, so it stays reachable on a board
+	// that dispatches work every single cycle and never reaches idleCount's
+	// threshold. This is purely additive: it never touches idleCount,
+	// checkAndUpgrade, or checkVersionSkew, all of which remain gated exactly
+	// as before.
+	e.maybeCheckSourceStaleness()
+
 	if dispatched == 0 {
 		// Check whether any workers from a previous poll cycle — or a merge-train
 		// worker, which registers repo-scoped rather than per-item liveness — are

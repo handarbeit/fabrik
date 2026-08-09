@@ -13,6 +13,7 @@ import (
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -109,6 +110,11 @@ type Engine struct {
 	repoAccess                  map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
 	idleCount                   int                      // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart                   time.Time                // when consecutive idle polls began; zero value = not idle
+	pollsUntilStalenessCheck    int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
+	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
+	// Used by tests to inject a synthetic DevBuildStatus without real git
+	// subprocesses. Production leaves this nil.
+	stalenessCompareFn func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
 	lastProjectUpdatedAt        time.Time                // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
 	wakeCh                      chan struct{}            // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	stopCh                      chan tui.StopRequest     // TUI sends on this to stop a specific in-flight issue; nil if no TUI
