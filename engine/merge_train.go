@@ -1755,25 +1755,37 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 		if _, err := e.client.AddComment(owner, repo, memberItem.Number, pauseMsg); err != nil {
 			e.logf(memberItem.Number, "merge-train", "warn: could not post pause comment: %v\n", err)
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, memberItem.Number, "fabrik:paused"); err != nil {
-			e.logf(memberItem.Number, "warn", "could not add fabrik:paused: %v\n", err)
-		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:paused")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, memberItem.Number)+"+"+"fabrik:paused")
-			}
+		e.pauseMergeTrainMember(owner, repo, memberItem.Number)
+	}
+}
+
+// pauseMergeTrainMember applies fabrik:paused and fabrik:awaiting-input to a merge-train
+// member being taken out of automated circulation, updating the board cache and
+// registering the webhook echo suppression for both labels so a redundant webhook
+// delivery for this mutation doesn't double-apply. Extracted from ejectMember's
+// cap-reached escalation (unchanged behavior there) and shared with ejectRedSingleton's
+// immediate pause (#1440) — both callers pause a member outright, they just differ in
+// when they decide to (after N ejections vs. immediately for a self-inflicted red
+// singleton).
+func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
+	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:paused"); err != nil {
+		e.logf(issueNumber, "warn", "could not add fabrik:paused: %v\n", err)
+	} else {
+		if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:paused")
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, memberItem.Number, "fabrik:awaiting-input"); err != nil {
-			e.logf(memberItem.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:awaiting-input")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, memberItem.Number)+"+"+"fabrik:awaiting-input")
-			}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:paused")
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:awaiting-input"); err != nil {
+		e.logf(issueNumber, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else {
+		if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:awaiting-input")
 		}
 	}
 }
