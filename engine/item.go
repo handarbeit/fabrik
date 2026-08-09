@@ -1326,6 +1326,32 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		}
 	}
 
+	// Process FABRIK_SPAWN_CHILD markers on Review/Validate output — the
+	// sanctioned route (ADR-1419) for a stage that discovers a blocker
+	// mid-flight to declare a spawned child, instead of calling `gh issue
+	// create` directly (which the engine would never observe). Parsed
+	// directly from this dispatch's own raw output, mirroring the
+	// FABRIK_PR_CREATE handling immediately above — Review/Validate are
+	// post_to_pr: true stages, so nothing later re-reads their comment the
+	// way preImplement re-reads Plan's, and output is this dispatch's own
+	// fresh content, never replayed, so a block is processed exactly once by
+	// construction (no new idempotency label needed). Routed through the
+	// same e.spawnChildren every other spawn origin uses, so board
+	// registration, assignment, and the blocked_by edge are identical
+	// regardless of which stage originated the spawn (requirement 2).
+	if (stage.Name == "Review" || stage.Name == "Validate") && output != "" {
+		if blocks := ParseSpawnBlocks(output); len(blocks) > 0 {
+			spawnedIDs, _, spawnErr := e.spawnChildren(p.ctx, p.board, item, owner, repo, blocks)
+			if spawnErr != nil {
+				// spawnChildren already paused the issue and posted its own
+				// failure comment — do not also post this stage's own output.
+				releaseLock()
+				return
+			}
+			output = formatMidflightSpawnReceiptNote(spawnedIDs) + output
+		}
+	}
+
 	// Strip all Fabrik markers from output before posting as a comment.
 	// This must happen after extractUpdatedBody (above) but the raw output is
 	// still needed for CheckBlockedOnInput (below), so we strip into a separate
