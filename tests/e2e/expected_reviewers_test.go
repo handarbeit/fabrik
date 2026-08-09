@@ -13,9 +13,10 @@ import (
 // This file covers ADR-1283's expected_reviewers (declared unrequested
 // reviewers for the review gate) end-to-end (issue #1298), using
 // deterministic harness-posted verdicts (SubmitPRReview +
-// FABRIK_REVIEWER_TOKEN) — never the bed's COMMENT-only claude-review.yml
-// bot — for every verdict assertion. This is the direct #1258 precedent
-// applied to a second, list-shaped stage-config field.
+// FABRIK_REVIEWER_TOKEN) — never the bed's real reviewer (Pruefer, as of
+// #1396; formerly claude-review.yml, now disabled) — for every verdict
+// assertion. This is the direct #1258 precedent applied to a second,
+// list-shaped stage-config field.
 //
 // Mechanism: all scenarios seed a member PR directly via the GitHub API
 // (seedReviewGateItem -> CreateMemberPR, zero Claude cost) against the bed's
@@ -72,11 +73,10 @@ import (
 // requested", "declared but unrequested") would be falsified by
 // RequestPRReviewer, so unlike the review_authority_test.go fix they can't
 // use a genuinely outstanding reviewer to make the wait deterministic.
-// Opening the member PR as a draft keeps the bed's claude-review.yml bot
-// from ever reviewing it (its job is guarded by
-// `if: github.event.pull_request.draft == false`, triggering only on
-// opened/ready_for_review), removing the incidental review entirely rather
-// than racing it.
+// Opening the member PR as a draft keeps the bed's real reviewer (Pruefer,
+// as of #1396) from ever reviewing it — it only lists open, non-draft PRs
+// each poll (cmd/pruefer/README.md) — removing the incidental review
+// entirely rather than racing it.
 const (
 	expectedReviewersNoneLabel     = "expected-reviewers:none"
 	expectedReviewersDeclaredLabel = "expected-reviewers:declared"
@@ -137,14 +137,14 @@ func TestExpectedReviewersFastAdvance(t *testing.T) {
 // Uses seedReviewGateItemDraft (#1312): this scenario's entire mechanism
 // depends on nothing being reviewed until the Phase 1/2 timeouts fire, but
 // expected_reviewers is not consulted by checkReviewGate's outer clearing
-// branch — an incidental bot COMMENT review would clear the gate in advisory
+// branch — an incidental bot review would clear the gate in advisory
 // mode before Phase 1 can ever be reached, silently preventing the
 // re-prompt ladder (this test's actual subject) from engaging at all.
 // RequestPRReviewer isn't an option here either: a genuinely outstanding
 // *requested* reviewer routes to the mixed/human pause path instead of the
 // bot ladder (reviewGateAllBots). The draft PR is never marked ready for
-// the duration of this test, so the bed's claude-review.yml never reviews
-// it and there is no incidental review to race.
+// the duration of this test, so the bed's real reviewer (Pruefer, as of
+// #1396) never reviews it and there is no incidental review to race.
 //
 // Wall-clock (worst case): ~2xFABRIK_REVIEW_WAIT_TIMEOUT + buffer — see
 // README for a recommended bed value.
@@ -203,9 +203,9 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 // Uses seedReviewGateItemDraft (#1312): the property under test is "nothing
 // requested, nothing reviewed yet" — RequestPRReviewer would falsify that
 // premise, so it can't be used to make the wait deterministic the way the
-// TestReviewAuthority* scenarios do. A draft PR means the bed's
-// claude-review.yml bot never reviews it, so there is no incidental review
-// to race against the engine's first gate evaluation.
+// TestReviewAuthority* scenarios do. A draft PR means the bed's real
+// reviewer (Pruefer, as of #1396) never reviews it, so there is no
+// incidental review to race against the engine's first gate evaluation.
 //
 // Wall-clock: ~2-5 min.
 func TestExpectedReviewersUndeclaredRegressionGuard(t *testing.T) {

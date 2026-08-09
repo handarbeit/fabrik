@@ -89,11 +89,12 @@ func CreateMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 }
 
 // CreateMemberPRDraft is CreateMemberPR, but opens the PR as a draft. The bed's
-// claude-review.yml review workflow guards its job with
-// `if: github.event.pull_request.draft == false` and only triggers on
-// opened/ready_for_review — a draft PR that is never marked ready is therefore
-// permanently invisible to it. Scenarios whose property under test is "nothing
-// has reviewed this PR yet" (e.g. expected_reviewers's declared-but-unrequested
+// real reviewer (Pruefer, as of #1396 — see tests/e2e/README.md's "Reviewer
+// topology"; formerly claude-review.yml, now disabled) only lists open,
+// non-draft PRs each poll (cmd/pruefer/README.md) — a draft PR that is never
+// marked ready is therefore permanently invisible to it. Scenarios whose
+// property under test is "nothing has reviewed this PR yet" (e.g.
+// expected_reviewers's declared-but-unrequested
 // and undeclared-nothing-requested cases) use this instead of CreateMemberPR to
 // avoid racing that bot's incidental review against the engine's first gate
 // evaluation (see #1312).

@@ -11,8 +11,9 @@ import (
 
 // This file covers ADR-1250's review_authority: authoritative mode
 // end-to-end (issue #1258), using deterministic harness-posted verdicts
-// (SubmitPRReview + FABRIK_REVIEWER_TOKEN) — never the bed's COMMENT-only
-// claude-review.yml bot — for every verdict assertion.
+// (SubmitPRReview + FABRIK_REVIEWER_TOKEN) — never the bed's real reviewer
+// (Pruefer, as of #1396; formerly claude-review.yml, now disabled) — for
+// every verdict assertion.
 //
 // Mechanism: all scenarios seed a member PR directly via the GitHub API
 // (CreateMemberPR, zero Claude cost) against the bed's existing Review
@@ -61,13 +62,14 @@ import (
 // ADR-1258's original "no RequestPRReviewer call is needed" rationale — that
 // reasoning covered checkReviewGate's outer clearing condition
 // (len(outstanding)==0 && hasReviews) in isolation, but didn't account for
-// the bed's own claude-review.yml bot satisfying that same condition with an
-// incidental COMMENT review before the engine's first gate evaluation, which
-// is exactly what #1312 reports. YoloDoesNotBypassBlock's two
-// fabrik:awaiting-review waits need no such fix: both occur after this
-// test's own genuine REQUEST_CHANGES review is already submitted, and once a
-// genuine CHANGES_REQUESTED review exists, an unrelated incidental bot
-// COMMENT landing before or after it can never satisfy the outer clearing
+// the bed's own incidental reviewer (formerly claude-review.yml, now
+// Pruefer as of #1396) satisfying that same condition with an incidental
+// review before the engine's first gate evaluation, which is exactly what
+// #1312 reports. YoloDoesNotBypassBlock's two fabrik:awaiting-review waits
+// need no such fix: both occur after this test's own genuine
+// REQUEST_CHANGES review is already submitted, and once a genuine
+// CHANGES_REQUESTED review exists, an unrelated incidental bot review
+// landing before or after it can never satisfy the outer clearing
 // condition on its own — the wait is already deterministic. See
 // adrs/1258-e2e-review-authority-coverage.md's Revision section.
 //
@@ -128,8 +130,8 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 
 	// Request the reviewer so outstanding is genuinely non-empty by
 	// construction, before confirming the gate's pre-verdict block. Without
-	// this, the bed's claude-review.yml bot can land its own incidental
-	// COMMENT review before the engine's first gate evaluation; that alone
+	// this, the bed's real reviewer (Pruefer, as of #1396) can land its own
+	// incidental review before the engine's first gate evaluation; that alone
 	// satisfies checkReviewGate's outer len(outstanding)==0 && hasReviews
 	// clearing branch, which never applies fabrik:awaiting-review — the wait
 	// below would then time out against genuinely correct engine behavior
@@ -276,9 +278,9 @@ func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 
 	// Request the reviewer so outstanding is genuinely non-empty by
 	// construction, before confirming the gate engages. Without this, the
-	// bed's claude-review.yml bot can land its own incidental COMMENT review
-	// before the engine's first gate evaluation and before this test's own
-	// APPROVE — that alone satisfies checkReviewGate's outer
+	// bed's real reviewer (Pruefer, as of #1396) can land its own incidental
+	// review before the engine's first gate evaluation and before this test's
+	// own APPROVE — that alone satisfies checkReviewGate's outer
 	// len(outstanding)==0 && hasReviews clearing branch, which never applies
 	// fabrik:awaiting-review. The wait below would then time out against
 	// genuinely correct engine behavior (#1312) instead of proving the gate
@@ -412,9 +414,9 @@ func TestReviewAuthorityAdvisoryRegressionGuard(t *testing.T) {
 
 	// Request the reviewer so outstanding is genuinely non-empty by
 	// construction, before confirming the gate engages. Without this, the
-	// bed's claude-review.yml bot can land its own incidental COMMENT review
-	// before the engine's first gate evaluation and before this test's own
-	// REQUEST_CHANGES — that alone satisfies checkReviewGate's outer
+	// bed's real reviewer (Pruefer, as of #1396) can land its own incidental
+	// review before the engine's first gate evaluation and before this test's
+	// own REQUEST_CHANGES — that alone satisfies checkReviewGate's outer
 	// len(outstanding)==0 && hasReviews clearing branch, which never applies
 	// fabrik:awaiting-review. The wait below would then time out against
 	// genuinely correct engine behavior (#1312) instead of proving the gate

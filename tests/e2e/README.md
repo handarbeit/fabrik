@@ -102,6 +102,11 @@ E2E_POLL_INTERVAL=15s scripts/e2e/run.sh -run TestCruiseFullPipeline
 Shortening it is safe for a single scenario in isolation, where budget is not a
 constraint; leave it at the default for a full parallel run.
 
+`WaitForIssueClosedWithReviewCheck` (#1396) adds one `gh pr view --json
+isDraft,createdAt,reviews` call (also ~1 pt) per poll cycle, on the 7 call
+sites that adopt it, only until a review lands or the fail-fast check fires
+— a bounded addition well inside the ~2x headroom above.
+
 If you hit the limit anyway, check the reset time and wait it out:
 
 ```bash
@@ -508,16 +513,21 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     *interprets* the label on an issue it already carries, not the GitHub label object
     itself — the object must exist before any of these scenarios can even file their
     seed issue.
-23. **Why the bed reviewer (`claude-review.yml`) stays COMMENT-only, and is not used
-    for verdict assertions here**: `.github/workflows/claude-review.yml` submits
-    `gh pr review --comment` in both its agent path and its fallback path — it can
-    never produce `APPROVE` or `CHANGES_REQUESTED`, so it cannot exercise authoritative
-    mode's blocking or clearing paths. Switching it to a real reviewer bot (e.g. pruefer)
-    was explicitly rejected for issue #1258: non-determinism (verdict depends on Claude's
-    severity classification of a synthetic diff), latency (pruefer polls, default 120s,
-    vs. an Action firing on PR-open), cost (a real Claude invocation per test PR), and
-    coupling (Fabrik's release gate depending on pruefer's health). All verdict assertions
-    in `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
+23. **Why the bed's real reviewer (Pruefer, as of #1396 — see "Reviewer topology"
+    below) is not used for verdict assertions here**: this is narrower than it
+    once was. Before #1396, the bed's incidental reviewer was `claude-review.yml`,
+    which submits `gh pr review --comment` in both its agent path and its fallback
+    path — it could never produce `APPROVE` or `CHANGES_REQUESTED`, so it could not
+    exercise authoritative mode's blocking or clearing paths at all. #1396 disabled
+    that workflow and made Pruefer the bed's real reviewer, and Pruefer *can* submit
+    APPROVE/REQUEST_CHANGES verdicts — but using it as the deterministic verdict
+    source for `TestReviewAuthority*`'s assertions was explicitly rejected for issue
+    #1258, and #1396 does not reopen that rejection: non-determinism (verdict
+    depends on Claude's severity classification of a synthetic diff), latency
+    (Pruefer polls, default 120s, vs. an Action firing on PR-open), cost (a real
+    Claude invocation per test PR), and coupling (Fabrik's release gate depending
+    on Pruefer's health) all still apply. All verdict assertions in
+    `TestReviewAuthority*` instead use `SubmitPRReview` + `FABRIK_REVIEWER_TOKEN` —
     deterministic, harness-posted formal reviews from a non-author identity.
 24. **`TestReviewAuthorityReinvokesOnChangesRequested`'s wall-clock is dominated by one
     real Claude invocation** (the review-reinvoke itself addressing the harness's
@@ -639,14 +649,57 @@ is a documented, accepted e2e gap.
     "declared but unrequested" — would be falsified by requesting a reviewer via
     `RequestPRReviewer`, so unlike `TestReviewAuthority*` these scenarios can't
     win the race deterministically that way. Opening the member
-    PR as a draft instead removes the race altogether: `claude-review.yml`
-    guards its review job with `if: github.event.pull_request.draft == false`
-    and triggers only on `opened`/`ready_for_review`, so a draft PR that is
-    never marked ready is permanently invisible to it — there is no incidental
-    bot review to land before the engine's first gate evaluation, or before
-    these scenarios' own bounded-window assertions. This requires no additional
-    bed setup; it is purely a change in how the harness constructs the member
-    PR.
+    PR as a draft instead removes the race altogether: Pruefer (the bed's real
+    reviewer as of #1396 — see "Reviewer topology" below; formerly
+    `claude-review.yml`, disabled) only lists "open, non-draft PRs" each poll
+    (`cmd/pruefer/README.md`), so a draft PR that is never marked ready is
+    permanently invisible to it — there is no incidental bot review to land
+    before the engine's first gate evaluation, or before these scenarios' own
+    bounded-window assertions. This requires no additional bed setup; it is
+    purely a change in how the harness constructs the member PR.
+
+### Reviewer topology (#1396)
+
+Every scenario that drives a PR through the organic Review gate depends on
+some external actor actually submitting a review. As of #1396, the bed's
+reviewer topology is:
+
+- **Pruefer (`handarbeit-pruefer`) is the present, real reviewer.** Once
+  `.pruefer/config.yaml`'s `watched_repos` includes `fabrik-test-alpha` and
+  `fabrik-test-beta` (an operator action against Pruefer's own deployment,
+  not a file in this repo — `.gitignore` excludes `.pruefer/` wholesale),
+  Pruefer polls both test repos like every other repo it watches (default
+  `poll_interval_seconds: 120`, `concurrency_cap: 3`) and reviews open,
+  non-draft PRs. The bed's `expected_reviewers: [handarbeit-pruefer]`
+  declaration in `review.yaml`/`validate.yaml` names this identity — no bed
+  stage-YAML change was needed, since the identity was already correct, only
+  previously unreachable.
+- **`e2e-synthetic-declared-reviewer` is the deliberately absent reviewer.**
+  Reachable per-issue via the `expected-reviewers:declared` label (ADR-1283,
+  see prerequisite #26), it never posts a review by construction
+  (`engine/reviews.go:523`) — used by scenarios that need a declared-but-
+  never-responding reviewer (`TestExpectedReviewersDeclaredWaitsAndReprompts`
+  and friends), independent of Pruefer's own presence or health.
+- **`claude-review.yml` is disabled, not deleted, on both test repos**
+  (`gh workflow disable`, the same mechanism used to retire it on
+  `handarbeit/fabrik` when Pruefer took over there). The file itself is
+  untouched — its trigger set (`opened`/`ready_for_review`, deliberately
+  excluding `synchronize` per #1078) is preserved for the record, but the
+  workflow no longer runs and no longer participates in the bed's reviewer
+  topology.
+- **Gemini does not participate in this topology at all.** It was considered
+  as the deliberately-absent reviewer and rejected: Gemini is *usually*
+  silent on the bed but not reliably so, which would make a scenario's
+  verdict a function of a third party's uptime rather than a deterministic
+  property (see the issue's discussion for the full reasoning).
+- **A dropped Pruefer review-dispatch still presents as a review-timeout
+  pause** — same failure signature the Problem section of #1396 describes
+  for the (now-retired) `claude-review.yml` case. `WaitForIssueClosedWithReviewCheck`
+  (see prerequisite/harness discussion above) exists to catch this faster and
+  more legibly than running out the full close-timeout, but it does not
+  change the underlying risk: Pruefer going silent (dispatch dropped,
+  daemon down, etc.) is still a single point of failure for every scenario
+  that depends on an organic review landing.
 
 ## Running
 
