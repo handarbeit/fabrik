@@ -71,7 +71,13 @@ func TestMergePR_ConfiguredStrategyFirst(t *testing.T) {
 // TestMergePR_DefaultAttemptsMergeFirst is a regression test guarding against
 // reintroducing rebase-first behavior: a Client with no configured strategy
 // (the zero value) must attempt "merge" first, not "rebase".
+// TestMergePR_DefaultAttemptsMergeFirst serves
+// github/testdata/recordings/merge_pr.json — a real merge response recorded
+// from actually merging a disposable PR on handarbeit/fabrik-test-alpha
+// (#1453 R2/R5/R3a) — for the PUT .../merge call, instead of a
+// hand-authored literal.
 func TestMergePR_DefaultAttemptsMergeFirst(t *testing.T) {
+	raw := loadRecording(t, "merge_pr")
 	putCalls := 0
 	srv, c := fakePRServer(t, 42,
 		func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +92,7 @@ func TestMergePR_DefaultAttemptsMergeFirst(t *testing.T) {
 				t.Errorf("merge_method = %v, want merge", body["merge_method"])
 			}
 			w.WriteHeader(200)
-			json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
+			w.Write(raw)
 		},
 	)
 	defer srv.Close()
@@ -477,7 +483,23 @@ func TestFetchPRDetails_NotFound(t *testing.T) {
 	}
 }
 
+// TestFetchCheckRuns_Success serves github/testdata/recordings/fetch_check_runs.json
+// — a real check-runs response recorded from a merged handarbeit/fabrik PR
+// (#1453 R2/R5, read-only) — instead of a hand-authored literal, and
+// asserts the exact constructed path and method (R6).
 func TestFetchCheckRuns_Success(t *testing.T) {
+	raw := loadRecording(t, "fetch_check_runs")
+	var recorded struct {
+		CheckRuns []struct {
+			Name       string `json:"name"`
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		} `json:"check_runs"`
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatalf("parsing recorded response: %v", err)
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			t.Errorf("method = %s, want GET", r.Method)
@@ -486,17 +508,7 @@ func TestFetchCheckRuns_Success(t *testing.T) {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"check_runs": []map[string]interface{}{
-				{
-					"name": "ci/test", "status": "completed", "conclusion": "failure",
-					"output":      map[string]string{"summary": "1 test failed", "text": "FAIL: TestFoo\nline 141: assertion failed"},
-					"details_url": "https://ci.example.com/runs/1",
-					"html_url":    "https://github.com/owner/repo/runs/1",
-				},
-				{"name": "ci/lint", "status": "in_progress", "conclusion": ""},
-			},
-		})
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
@@ -505,20 +517,13 @@ func TestFetchCheckRuns_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchCheckRuns: %v", err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("len(runs) = %d, want 2", len(runs))
+	if len(runs) != len(recorded.CheckRuns) {
+		t.Fatalf("len(runs) = %d, want %d (recorded)", len(runs), len(recorded.CheckRuns))
 	}
-	if runs[0].Name != "ci/test" || runs[0].Status != "completed" || runs[0].Conclusion != "failure" {
-		t.Errorf("runs[0] = %+v", runs[0])
-	}
-	if runs[0].OutputSummary != "1 test failed" || runs[0].OutputText != "FAIL: TestFoo\nline 141: assertion failed" {
-		t.Errorf("runs[0] output fields = %+v", runs[0])
-	}
-	if runs[0].DetailsURL != "https://ci.example.com/runs/1" || runs[0].HTMLURL != "https://github.com/owner/repo/runs/1" {
-		t.Errorf("runs[0] url fields = %+v", runs[0])
-	}
-	if runs[1].Name != "ci/lint" || runs[1].Status != "in_progress" || runs[1].Conclusion != "" {
-		t.Errorf("runs[1] = %+v", runs[1])
+	for i, want := range recorded.CheckRuns {
+		if runs[i].Name != want.Name || runs[i].Status != want.Status || runs[i].Conclusion != want.Conclusion {
+			t.Errorf("runs[%d] = %+v, want name=%q status=%q conclusion=%q", i, runs[i], want.Name, want.Status, want.Conclusion)
+		}
 	}
 }
 
@@ -1002,15 +1007,52 @@ func TestFetchPRReviewDecision_ErrorWrapped(t *testing.T) {
 	}
 }
 
+// TestMarkPRReady serves github/testdata/recordings/mark_pr_ready.json — a
+// real markPullRequestReadyForReview response recorded against a disposable
+// draft PR on handarbeit/fabrik-test-alpha (#1453 R2/R5/R3a) — for the
+// mutation step of the two-step (fetch node ID, then mutate) flow, instead
+// of a hand-authored literal.
 func TestMarkPRReady(t *testing.T) {
 	const prNodeID = "PR_readynode"
+	raw := loadRecording(t, "mark_pr_ready")
 
-	_, c := makeTwoStepGraphQLServer(t, prNodeID, func(t *testing.T, vars map[string]interface{}) {
-		t.Helper()
-		if got, ok := vars["prId"].(string); !ok || got != prNodeID {
-			t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"repository": map[string]interface{}{
+						"pullRequest": map[string]interface{}{
+							"id": prNodeID,
+						},
+					},
+				},
+			})
+		case 2:
+			vars := readVars(r)
+			if got, ok := vars["prId"].(string); !ok || got != prNodeID {
+				t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+			}
+			w.Write(raw)
+		default:
+			t.Errorf("unexpected call #%d to /graphql", callCount)
+			http.Error(w, "unexpected call", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(func() {
+		srv.Close()
+		if callCount != 2 {
+			t.Errorf("expected 2 GraphQL calls, got %d", callCount)
 		}
 	})
+	c := NewClientWithBaseURL("test-token", srv.URL)
 
 	if err := c.MarkPRReady("owner", "repo", 42); err != nil {
 		t.Fatalf("MarkPRReady: %v", err)
