@@ -346,6 +346,48 @@ func TestBuildReviewPrompt_TruncatedThreadCommentsNotedInPrompt(t *testing.T) {
 	}
 }
 
+// TestBuildReviewPrompt_LongCommentBodyTruncated pins R4's per-comment bound:
+// a single comment body larger than maxThreadCommentBodyChars is truncated
+// with an inline note, rather than flowing into the prompt unbounded.
+func TestBuildReviewPrompt_LongCommentBodyTruncated(t *testing.T) {
+	longBody := strings.Repeat("x", maxThreadCommentBodyChars+500)
+	req := ReviewRequest{
+		ReviewThreads: []gh.PRReviewThread{
+			{Path: "a.go", Line: 1, Comments: []gh.PRReviewThreadComment{
+				{Author: "x", Body: longBody},
+			}},
+		},
+	}
+	prompt := buildReviewPrompt(req)
+
+	if strings.Contains(prompt, longBody) {
+		t.Error("expected the long comment body to be truncated, not rendered in full")
+	}
+	if !strings.Contains(prompt, "truncated, 500 more characters") {
+		t.Errorf("expected a truncation note naming the omitted character count, prompt = %s", prompt)
+	}
+}
+
+// TestBuildReviewPrompt_ShortCommentBodyNotTruncated proves the truncation
+// note only appears when a body actually exceeds the bound.
+func TestBuildReviewPrompt_ShortCommentBodyNotTruncated(t *testing.T) {
+	req := ReviewRequest{
+		ReviewThreads: []gh.PRReviewThread{
+			{Path: "a.go", Line: 1, Comments: []gh.PRReviewThreadComment{
+				{Author: "x", Body: "a short finding"},
+			}},
+		},
+	}
+	prompt := buildReviewPrompt(req)
+
+	if !strings.Contains(prompt, "a short finding") {
+		t.Errorf("expected the short body to render verbatim, prompt = %s", prompt)
+	}
+	if strings.Contains(prompt, "truncated") {
+		t.Errorf("expected no truncation note for a body under the bound, prompt = %s", prompt)
+	}
+}
+
 // TestBuildReviewPrompt_NoThreads_OmitsThreadSection proves the AC1 test
 // above is non-vacuous (AC6): with ReviewThreads empty/absent, none of the
 // thread markers appear.

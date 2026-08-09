@@ -40,6 +40,8 @@ A prompt instruction ("report each distinct underlying finding once") is also ad
 
 This is separate from, and upstream of, `github/prs.go`'s own `reviewThreads(first: 50)` GraphQL ceiling (unpaginated, matching the existing `fetchItemDetailsQuery` fragment's ceiling). A PR with more than 50 threads would lose the excess at the fetch layer before `selectPromptThreads` ever sees it — out of scope for this issue; R4's cap (20) sits well under the fetch ceiling (50).
 
+`maxPromptThreads` bounds thread *count* and `FetchPRReviewThreads`'s per-thread `comments(first: 20)` bounds comment *count*, but neither bounds an individual comment's *size* — a single pasted log or long discussion could still make the prompt unbounded. `maxThreadCommentBodyChars = 2000` (`pruefer/claude.go`) closes that gap: `truncateCommentBody` caps each rendered comment body and appends an inline note naming how many characters were cut, following the same "tell the reviewer, never silently drop" convention as the thread-count omission line and `CommentsTruncated`.
+
 ### R5 — Sharper bar for a low-severity finding, prompt wording only
 
 The instruction "Skip nitpicks and style preferences unless they matter" is revised to explicitly name the failure mode observed on `#1477` (a dozen `low`-severity fidelity observations against a test fixture): a `low` finding must be something a reviewer would actually act on, not merely true. This stays a prompt-wording change, not a `severity.go` structural change — `severityRank`/`decideEvent` drive `Config.RequestChangesThreshold` (`ADR-1251`), and touching that ladder has a bigger, less reversible blast radius than the issue's "judgement call" framing warrants.

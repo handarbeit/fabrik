@@ -145,6 +145,27 @@ func threadLastCommentTime(t gh.PRReviewThread) time.Time {
 	return latest
 }
 
+// maxThreadCommentBodyChars caps how many characters of a single review
+// thread comment body renderReviewThreads renders (R4). maxPromptThreads
+// bounds the number of threads and FetchPRReviewThreads's per-thread page
+// size bounds the number of comments, but neither bounds the size of an
+// individual comment body — a single large pasted comment (e.g. a log or
+// long discussion) could still make the prompt unbounded without this.
+// Truncation is noted inline, consistent with the CommentsTruncated signal
+// below, so the reviewer knows content was cut rather than trusting a
+// silently partial body.
+const maxThreadCommentBodyChars = 2000
+
+// truncateCommentBody bounds body to at most maxThreadCommentBodyChars
+// runes, appending a note naming how much was cut when truncation occurs.
+func truncateCommentBody(body string) string {
+	runes := []rune(body)
+	if len(runes) <= maxThreadCommentBodyChars {
+		return body
+	}
+	return string(runes[:maxThreadCommentBodyChars]) + fmt.Sprintf(" […truncated, %d more characters]", len(runes)-maxThreadCommentBodyChars)
+}
+
 // renderReviewThreads writes the "## Existing review threads" section plus
 // the R2 policy paragraph that governs it. Both belong to buildReviewPrompt's
 // eventual Go-owned "contract" half once #1446 splits the function into an
@@ -174,7 +195,7 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread) {
 			if author == "" {
 				author = "unknown"
 			}
-			fmt.Fprintf(b, "  - @%s: %s\n", author, c.Body)
+			fmt.Fprintf(b, "  - @%s: %s\n", author, truncateCommentBody(c.Body))
 		}
 		if t.CommentsTruncated {
 			b.WriteString("  - (this thread has more replies than shown here — a later reply, possibly the one that resolved it, may be missing)\n")
