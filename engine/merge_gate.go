@@ -671,7 +671,7 @@ func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.Projec
 	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
 	e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
 	e.removeRebaseNeededLabel(owner, repo, item)
-	if err := e.advanceToNextStage(board, item, stage); err != nil {
+	if err := e.recordAdvanceOutcome(board, item, stage); err != nil {
 		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
 	}
 	if merged {
