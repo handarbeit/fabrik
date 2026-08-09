@@ -38,7 +38,7 @@ a duplicate call re-posting its comment.
 
 `handleStopRequest` (TUI single-issue stop) and the new daemon-wide clean-stop pause
 (`runShutdownPause`/`pauseIssueForDaemonShutdown`, `engine/shutdown.go`) both route through one new
-shared primitive, `pauseInterruptedIssue(item, alreadyPaused bool, comment string)`
+shared primitive, `pauseInterruptedIssue(item gh.ProjectItem, comment string)`
 (`engine/mutate.go`), which wraps the codebase's existing generalized "pause + comment" primitive,
 `pauseIssue`/`pauseOpts`. This fixes the gaps in the cited prior art as a side effect of unification
 rather than as a separate patch: both callers now clear `stage:<Name>:in_progress` directly before
