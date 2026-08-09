@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -391,5 +392,73 @@ func TestAwaitingAdvance_EndToEnd_RecoversAndClearsDownstreamBlocked(t *testing.
 	}
 	if !depUnblocked {
 		t.Error("expected fabrik:blocked removed from the dependent — this is the specific cross-issue harm #1422 reports, not just the advance succeeding")
+	}
+}
+
+// TestValidatePRTerminalAdvance_AdvanceFails_AppliesAwaitingAdvanceLabel is a
+// wiring-level check (Acceptance #3): it exercises the real call site,
+// runValidatePRTerminalAdvance's merged-PR path, rather than calling
+// recordAdvanceOutcome directly, so a regression that reverts the
+// pr_terminal_advance.go wiring back to a bare advanceToNextStage call is
+// actually caught by the suite. Confirmed to fail red against such a
+// revert before this test was added.
+func TestValidatePRTerminalAdvance_AdvanceFails_AppliesAwaitingAdvanceLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
+			return missingDoneOptionErr()
+		},
+	}
+	stgs := terminalAdvanceStages()
+	eng := testEngineWithStages(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	item := gh.ProjectItem{
+		Number: 101, ItemID: "PVTI_101", Repo: "owner/repo", Status: "Validate",
+		Labels: []string{"stage:Implement:complete"},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if !containsLabel(addedLabelNames(client.addLabelCalls), awaitingAdvanceLabel) {
+		t.Errorf("expected %s applied via the real runValidatePRTerminalAdvance call site, got labels %v", awaitingAdvanceLabel, addedLabelNames(client.addLabelCalls))
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected exactly one explanatory comment, got %d", len(client.addCommentCalls))
+	}
+}
+
+// TestCheckAutoMergeConvergence_AdvanceFails_AppliesAwaitingAdvanceLabel is
+// the merge_gate.go sibling of the wiring check above: exercises
+// checkAutoMergeConvergence's real merged-PR path into
+// advanceConvergedPRToDone, rather than calling recordAdvanceOutcome
+// directly, so a regression that reverts the merge_gate.go wiring is caught.
+func TestCheckAutoMergeConvergence_AdvanceFails_AppliesAwaitingAdvanceLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "closed", Merged: true, AutoMergeEnabled: true}, nil
+		},
+		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
+			return missingDoneOptionErr()
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 102, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeTerminal, PR: &gh.PRDetails{Number: 10}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if !containsLabel(addedLabelNames(client.addLabelCalls), awaitingAdvanceLabel) {
+		t.Errorf("expected %s applied via the real checkAutoMergeConvergence call site, got labels %v", awaitingAdvanceLabel, addedLabelNames(client.addLabelCalls))
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected exactly one explanatory comment, got %d", len(client.addCommentCalls))
 	}
 }
