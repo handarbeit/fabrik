@@ -155,10 +155,14 @@ func snapshotRepoGit(r *repoState, stagingDir string) error {
 	r.gitMu.Lock()
 	defer r.gitMu.Unlock()
 
-	// Defensive, and deliberately not fatal: a repo with no worktrees to prune
-	// still succeeds, and a prune failure should not lose an otherwise good
-	// snapshot. What it buys is that stale entries — which hold absolute paths
-	// into a baseDir the restore will not have — do not travel forward.
+	// Defensive, and deliberately fatal. What the prune buys is that stale
+	// worktree admin entries — which hold absolute paths into a baseDir the
+	// restore will not have — do not travel forward into the copy. A repo with
+	// no worktrees to prune succeeds trivially, so the only way this fails is
+	// that git itself could not run, and a snapshot copied without the prune
+	// having happened is precisely the one whose restore breaks later, on a
+	// git operation, in a way that reads as a model bug. Failing here names
+	// the cause; deferring it hides it.
 	if _, err := runGit(r.bareDir, "worktree", "prune"); err != nil {
 		return fmt.Errorf("simgh: Snapshot: pruning worktrees for %s/%s: %w", r.owner, r.repo, err)
 	}
