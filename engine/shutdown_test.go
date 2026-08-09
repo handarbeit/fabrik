@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -56,6 +57,59 @@ func TestWaitGroupTimeout_TimesOut(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("waitGroupTimeout took %v, expected to return near the 100ms deadline, not hang", elapsed)
+	}
+}
+
+// TestBeginShutdownPause_NoAddWaitRace is a regression test for a confirmed
+// "sync: WaitGroup misuse: Add called concurrently with Wait" panic found
+// during review of #1393: the original code called e.wg.Add(1) (for the
+// pause-write phase) *after* cancel(), racing the main poll loop's
+// drainAndExit -> waitGroupTimeout -> e.wg.Wait() call with no
+// happens-before relationship between the two. Whenever the sole in-flight
+// worker's own e.wg.Done() dropped the counter to zero in the same window,
+// the runtime panicked — a crash in the very code meant to make shutdown
+// clean. beginShutdownPause fixes this by calling e.wg.Add(1) strictly
+// before cancel(); this test simulates the race many times (one fake
+// in-flight worker racing Done() against beginShutdownPause's Add, with a
+// concurrent Wait() standing in for drainAndExit) and would panic-crash the
+// test binary within a handful of iterations if the ordering ever
+// regresses.
+func TestBeginShutdownPause_NoAddWaitRace(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	const iterations = 2000
+	for i := 0; i < iterations; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Simulate one in-flight worker whose own Done() may land at any
+		// moment relative to beginShutdownPause's internal Add(1)/cancel().
+		eng.wg.Add(1)
+		var workerDone sync.WaitGroup
+		workerDone.Add(1)
+		go func() {
+			defer workerDone.Done()
+			eng.wg.Done()
+		}()
+
+		// Simulate drainAndExit's waitGroupTimeout -> e.wg.Wait(): in
+		// production the main poll loop's only path to that call is
+		// observing ctx.Done(), so this goroutine gates on the same signal
+		// rather than calling Wait() unconditionally — an ungated Wait()
+		// here would race the fake worker's Done() independently of
+		// beginShutdownPause entirely, which doesn't exercise the ordering
+		// guarantee under test.
+		var waiterDone sync.WaitGroup
+		waiterDone.Add(1)
+		go func() {
+			defer waiterDone.Done()
+			<-ctx.Done()
+			eng.wg.Wait()
+		}()
+
+		eng.beginShutdownPause(cancel)
+
+		workerDone.Wait()
+		waiterDone.Wait()
 	}
 }
 

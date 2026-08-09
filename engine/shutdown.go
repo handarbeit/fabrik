@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -9,6 +10,37 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 )
+
+// beginShutdownPause performs the R1/R2 (#1393, ADR-1393) shutdown-initiation
+// sequence, called once from the SIGINT/SIGTERM goroutine in poll.go:
+// annotate every in-flight per-issue context with the "daemon_shutdown" kill
+// reason, register the pause-write phase on e.wg, cancel the root context,
+// then launch the pause-write phase. Extracted into its own method (rather
+// than left inline) so the ordering requirement below is exercised directly
+// by TestBeginShutdownPause_NoAddWaitRace without needing to drive the full
+// Run() signal-handling machinery.
+//
+// e.wg.Add(1) MUST happen before cancel() is called, not after: the main
+// poll loop's only path to drainAndExit's e.wg.Wait() is observing
+// ctx.Done(), which only becomes observable once cancel() runs. Adding first
+// establishes a happens-before edge (Add is sequenced before cancel() in
+// this goroutine; cancel()'s channel close is itself sequenced before any
+// receive that observes it) that guarantees the Wait() call can never race
+// this Add() against a concurrently-zero counter. Getting this order
+// backwards is a confirmed, reproducible "sync: WaitGroup misuse: Add called
+// concurrently with Wait" panic whenever the sole in-flight worker's own
+// Done() lands in the same window as this Add(1) and the main loop's Wait()
+// call — exactly the ordinary one-worker clean-stop case this feature exists
+// for. Do not reorder.
+func (e *Engine) beginShutdownPause(cancel context.CancelFunc) {
+	e.issueCtxs.Range(func(_, val any) bool {
+		val.(issueCtxEntry).holder.val.Store("daemon_shutdown")
+		return true
+	})
+	e.wg.Add(1)
+	cancel()
+	go e.runShutdownPause()
+}
 
 // waitGroupTimeout waits for wg to complete, bounded by timeout. Returns true
 // if wg.Wait() returned within the deadline, false on timeout. This is the

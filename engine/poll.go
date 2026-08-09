@@ -270,24 +270,11 @@ func (e *Engine) Run() error {
 		select {
 		case sig := <-sigCh:
 			fmt.Fprintf(os.Stderr, "\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
-			// Annotate all in-flight per-issue contexts with the shutdown reason so
-			// the kill log emits "daemon_shutdown" rather than "context_cancel".
-			e.issueCtxs.Range(func(_, val any) bool {
-				val.(issueCtxEntry).holder.val.Store("daemon_shutdown")
-				return true
-			})
-			cancel()
-			// R1/R2 (#1393, ADR-1393): durably pause every issue with a live
-			// worker — fabrik:paused + fabrik:awaiting-input, an audit comment,
-			// and a direct stage:<Name>:in_progress clear — rather than relying
-			// on each worker goroutine's own cancellation early-out to get there
-			// before the process exits. Tracked on e.wg so drainAndExit's single
-			// bounded wait covers both the worker drain and this write phase.
-			// Deliberately only reached from this SIGINT/SIGTERM path, never from
-			// registerSighupHandler — a SIGHUP restart-in-place must not pause
-			// every in-flight issue (see Scope note, ADR-1393).
-			e.wg.Add(1)
-			go e.runShutdownPause()
+			// R1/R2 (#1393, ADR-1393): annotate in-flight contexts, register and
+			// launch the durable clean-stop pause, then cancel — see
+			// beginShutdownPause's doc comment for why the internal ordering is
+			// load-bearing and must not be reordered inline here.
+			e.beginShutdownPause(cancel)
 		case <-ctx.Done():
 			return
 		}
