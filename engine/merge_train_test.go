@@ -319,12 +319,12 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) {
 	var commentPosted bool
 	client := &mockGitHubClient{
-		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
 			// Small sleep ensures the post-API deadline check (not the 30s
 			// poll-interval sleep) is what trips — mirrors
 			// TestPollTrainCI_Timeout_ReturnsPending's pattern.
 			time.Sleep(10 * time.Millisecond)
-			return nil, "", nil // mergeable never resolves
+			return &gh.PRDetails{Number: prNumber, MergeableState: ""}, nil // mergeable never resolves, no HeadSHA
 		},
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			commentPosted = true
@@ -1458,6 +1458,9 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil // CI green immediately
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 	}
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, wm)
@@ -1535,6 +1538,9 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil // CI green immediately, every trial
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 	}
 	claude := &mockClaudeInvoker{}
@@ -1646,6 +1652,9 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 	}
 	// Claude returns success but doesn't actually fix the conflict (simulates failure).
@@ -1874,6 +1883,9 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 	}
 
 	// Claude resolves the conflict by writing a resolved file and committing.
@@ -2062,6 +2074,9 @@ func TestAssembleAndValidate_LeavesWorktreeForCallerCleanup(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil // CI green immediately
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 
@@ -2142,6 +2157,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			mergePRNum = prNumber
@@ -2259,6 +2277,9 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			return 1, nil
@@ -2310,6 +2331,9 @@ func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
@@ -2417,6 +2441,9 @@ func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			return 1, nil
@@ -2472,6 +2499,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return fmt.Errorf("merge rejected: branch protection rules not satisfied")
@@ -2536,6 +2566,9 @@ func TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
 		},
@@ -2594,6 +2627,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
 		},
@@ -2649,6 +2685,9 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
@@ -2752,6 +2791,9 @@ func seamTrainEngine(t *testing.T, wm *WorktreeManager, redWhen func(map[int]boo
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
@@ -4316,6 +4358,9 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
