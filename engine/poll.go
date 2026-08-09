@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,6 +84,32 @@ func pollStatusClear() {
 	}
 }
 
+// claudeProfileAccount returns the account email the profile at configDir is
+// currently logged in as, read from that directory's .claude.json
+// (oauthAccount.emailAddress). Returns "" on any failure — a missing,
+// unreadable, or unrecognised file is not an error worth surfacing at startup,
+// since the notice degrades to naming the directory alone.
+//
+// The directory name does NOT determine the account: a profile dir is whatever
+// account it was last `/login`-ed as, so a dir named after one account can hold
+// another's credentials. That is precisely the ambiguity this read exists to
+// remove, so it must come from the file rather than being inferred from the path.
+func claudeProfileAccount(configDir string) string {
+	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		OAuthAccount struct {
+			EmailAddress string `json:"emailAddress"`
+		} `json:"oauthAccount"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return ""
+	}
+	return parsed.OAuthAccount.EmailAddress
+}
+
 // logClaudeConfigDir is the testable core of the R1/R3 startup notice: when
 // CLAUDE_CONFIG_DIR is set in the engine's environment, Claude Code invocations
 // use that directory's credentials/profile instead of the default account, and
@@ -91,12 +118,23 @@ func pollStatusClear() {
 // the unset case stays byte-for-byte silent (R2). Emitted once, from the
 // environment snapshot at process start — if CLAUDE_CONFIG_DIR ever became
 // reloadable without a full re-exec, this notice would go stale.
+//
+// The notice names the resolved account alongside the directory when it can be
+// read. Naming only the directory is not enough to answer "which account is
+// this instance billing?", because the two are independent — a profile dir
+// holds whatever account it was last logged in as. Operating three instances
+// against one profile dir and inferring the account from its name cost a long
+// diagnostic detour once; printing the email makes it a glance.
 func logClaudeConfigDir(configDir string, w io.Writer) {
 	if configDir == "" {
 		return
 	}
-	fmt.Fprintf(w, "[startup] notice: CLAUDE_CONFIG_DIR is set to %q — Claude invocations will use this profile "+
-		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir)
+	account := ""
+	if email := claudeProfileAccount(configDir); email != "" {
+		account = fmt.Sprintf(" (logged in as %s)", email)
+	}
+	fmt.Fprintf(w, "[startup] notice: CLAUDE_CONFIG_DIR is set to %q%s — Claude invocations will use this profile "+
+		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir, account)
 }
 
 // logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
