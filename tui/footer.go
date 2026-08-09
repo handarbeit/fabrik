@@ -161,6 +161,20 @@ func (f FooterComponent) View(width int) string {
 	rightWidth := lipgloss.Width(rightStr)
 	leftRendered := renderWithOSC8(leftPlain, f.projectInfo.BoardTitle, f.projectInfo.BoardURL)
 	gap := maxWidth - lipgloss.Width(leftRendered) - rightWidth
+
+	// Centre the Claude account in the gap when it fits with at least one
+	// space of separation on each side. It is deliberately the first thing
+	// dropped when the terminal narrows: the left (cwd/board) and right
+	// (webhook/rate-limit) segments are operational state, while this is
+	// standing context that the startup notice also records.
+	if account := f.projectInfo.ClaudeAccount; account != "" && gap > 0 {
+		rendered := dimStyle.Render(account)
+		if w := lipgloss.Width(rendered); gap >= w+2 {
+			leftPad := (gap - w) / 2
+			return leftRendered + strings.Repeat(" ", leftPad) + rendered +
+				strings.Repeat(" ", gap-w-leftPad) + rightStr
+		}
+	}
 	if gap < 1 {
 		availLeft := maxWidth - rightWidth - 1
 		if availLeft < 0 {

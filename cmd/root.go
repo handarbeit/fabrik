@@ -1327,6 +1327,9 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 		Repo:          repo,
 		Version:       version,
 		FabrikVersion: Version,
+		// Same resolver the startup notice uses, so the footer and the log can
+		// never disagree about which account this instance is billing.
+		ClaudeAccount: engine.ClaudeProfileAccount(os.Getenv("CLAUDE_CONFIG_DIR")),
 	}
 }
 

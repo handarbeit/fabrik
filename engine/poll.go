@@ -84,7 +84,7 @@ func pollStatusClear() {
 	}
 }
 
-// claudeProfileAccount returns the account email the profile at configDir is
+// ClaudeProfileAccount returns the account email the profile at configDir is
 // currently logged in as, read from that directory's .claude.json
 // (oauthAccount.emailAddress). Returns "" on any failure — a missing,
 // unreadable, or unrecognised file is not an error worth surfacing at startup,
@@ -94,7 +94,7 @@ func pollStatusClear() {
 // account it was last `/login`-ed as, so a dir named after one account can hold
 // another's credentials. That is precisely the ambiguity this read exists to
 // remove, so it must come from the file rather than being inferred from the path.
-func claudeProfileAccount(configDir string) string {
+func ClaudeProfileAccount(configDir string) string {
 	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
 	if err != nil {
 		return ""
@@ -130,7 +130,7 @@ func logClaudeConfigDir(configDir string, w io.Writer) {
 		return
 	}
 	account := ""
-	if email := claudeProfileAccount(configDir); email != "" {
+	if email := ClaudeProfileAccount(configDir); email != "" {
 		account = fmt.Sprintf(" (logged in as %s)", email)
 	}
 	fmt.Fprintf(w, "[startup] notice: CLAUDE_CONFIG_DIR is set to %q%s — Claude invocations will use this profile "+

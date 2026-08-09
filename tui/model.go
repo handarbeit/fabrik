@@ -88,6 +88,15 @@ type ProjectInfo struct {
 	Repo          string // "owner/repo" — used as fallback for OSC 8 issue links when per-entry Repo is empty
 	Version       string // optional version or module name of the monitored project; empty if unknown
 	FabrikVersion string // fabrik binary version (e.g. "v1.2.3" or "dev(abc1234)")
+	// ClaudeAccount is the account email the CLAUDE_CONFIG_DIR profile was
+	// logged in as at process start; empty when unset or unreadable. Shown in
+	// the footer so "which account is this instance billing?" is answerable at
+	// a glance — the profile directory name does not determine the account.
+	//
+	// Resolved once at startup, like the matching startup notice. A `/login`
+	// performed against the same profile while the daemon runs will change
+	// what NEW workers use without updating this value; a restart re-resolves.
+	ClaudeAccount string
 }
 
 // Model is the bubbletea TUI model for Fabrik.

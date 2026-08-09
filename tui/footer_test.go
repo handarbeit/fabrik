@@ -236,3 +236,61 @@ func TestViewFooter_NoTitleSlot(t *testing.T) {
 		t.Errorf("footer should not contain separator when board title is absent; got: %q", plain)
 	}
 }
+
+// The footer must name the account, not just the profile directory: the two
+// are independent, so "which account is this instance billing?" is otherwise
+// unanswerable from the UI.
+func TestViewFooter_ShowsClaudeAccount(t *testing.T) {
+	m := New(30, ProjectInfo{CWD: "~/dev/fabrik", ClaudeAccount: "someone@example.com"}, "", nil, nil, 0, false)
+	m.width = 120
+	m.footer.graphqlStats = RateLimitStats{Remaining: 4000, Limit: 5000}
+
+	footer := ansi.Strip(m.footer.View(m.width))
+	if !strings.Contains(footer, "someone@example.com") {
+		t.Errorf("footer must name the logged-in account; got: %q", footer)
+	}
+	// Left and right segments must survive alongside it.
+	for _, want := range []string{"~/dev/fabrik", "4000/5000"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("footer lost %q when the account was added; got: %q", want, footer)
+		}
+	}
+	if lipgloss.Width(m.footer.View(m.width)) > m.width {
+		t.Errorf("footer exceeded width %d: %q", m.width, footer)
+	}
+}
+
+// The account is standing context, not operational state, so it is the first
+// thing dropped when the terminal is too narrow — never at the cost of the
+// cwd or the rate-limit indicator, and never by overflowing the line.
+func TestViewFooter_ClaudeAccountDroppedWhenNarrow(t *testing.T) {
+	for _, width := range []int{40, 50, 60} {
+		m := New(30, ProjectInfo{CWD: "~/dev/fabrik", ClaudeAccount: "a-very-long-account-name@example.com"}, "", nil, nil, 0, false)
+		m.width = width
+		m.footer.graphqlStats = RateLimitStats{Remaining: 4000, Limit: 5000}
+
+		rendered := m.footer.View(m.width)
+		footer := ansi.Strip(rendered)
+		if strings.Contains(footer, "a-very-long-account-name@example.com") {
+			t.Errorf("width %d: account should be dropped rather than crowd the line; got: %q", width, footer)
+		}
+		if lipgloss.Width(rendered) > width {
+			t.Errorf("width %d: footer overflowed: %q (%d cols)", width, footer, lipgloss.Width(rendered))
+		}
+	}
+}
+
+// An unset or unreadable account leaves the footer byte-for-byte as before.
+func TestViewFooter_NoAccountUnchanged(t *testing.T) {
+	withAcct := New(30, ProjectInfo{CWD: "~/dev/fabrik"}, "", nil, nil, 0, false)
+	withAcct.width = 120
+	withAcct.footer.graphqlStats = RateLimitStats{Remaining: 4000, Limit: 5000}
+	got := withAcct.footer.View(withAcct.width)
+
+	if strings.Contains(ansi.Strip(got), "  logged in") {
+		t.Errorf("unset account must render nothing extra; got: %q", ansi.Strip(got))
+	}
+	if lipgloss.Width(got) > withAcct.width {
+		t.Errorf("footer overflowed: %q", ansi.Strip(got))
+	}
+}
