@@ -9,9 +9,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // reviewAllowedTools is the fixed, read-only tool allowlist for every review
@@ -63,6 +66,19 @@ type ReviewRequest struct {
 	Effort      string
 	WorkDir     string        // ephemeral clone directory; claude's cwd
 	MaxWallTime time.Duration // 0 = no wall-time cap
+	// ReviewThreads carries existing review threads (resolved and
+	// unresolved) on the PR, fetched by ReviewPR via
+	// GitHubReviewer.FetchPRReviewThreads (R1). nil when the fetch failed
+	// (non-fatal degrade) or the PR genuinely has no threads yet —
+	// buildReviewPrompt renders no thread-context section in either case.
+	ReviewThreads []gh.PRReviewThread
+	// ReviewThreadsTruncated is true when the PR has more review threads
+	// than FetchPRReviewThreads' own fetch-layer page size returned (distinct
+	// from selectPromptThreads' smaller prompt-level cap, and from any
+	// individual thread's CommentsTruncated). Always false on a degraded
+	// (nil ReviewThreads) fetch. buildReviewPrompt notes this so a PR that
+	// has grown past the fetch ceiling doesn't silently look complete.
+	ReviewThreadsTruncated bool
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -90,6 +106,119 @@ type ReviewResult struct {
 // SIGINT→SIGTERM→SIGKILL process-group kill on cancellation.
 type RealClaudeInvoker struct{}
 
+// maxPromptThreads caps how many existing review threads buildReviewPrompt
+// renders (R4). A fixed constant, not operator-configurable: no evidence yet
+// that this needs tuning, and it keeps buildReviewPrompt a pure function of
+// ReviewRequest with no config dependency. See selectPromptThreads for the
+// selection/ordering policy applied when a PR has more threads than this.
+const maxPromptThreads = 20
+
+// selectPromptThreads chooses which of threads to render in the prompt and
+// reports how many were left out, implementing R4's cap. Ordering keeps the
+// highest-signal context under the cap: unresolved threads before resolved
+// ones (an open finding is more actionable than a closed one), and within
+// each group, non-outdated (still-current) threads before outdated (stale)
+// ones, most-recently-commented first. Truncation therefore drops resolved
+// threads before unresolved ones, and stale threads before active ones
+// within each group.
+func selectPromptThreads(threads []gh.PRReviewThread, limit int) (selected []gh.PRReviewThread, omitted int) {
+	if len(threads) <= limit {
+		return threads, 0
+	}
+	ordered := make([]gh.PRReviewThread, len(threads))
+	copy(ordered, threads)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.IsResolved != b.IsResolved {
+			return !a.IsResolved // unresolved first
+		}
+		if a.IsOutdated != b.IsOutdated {
+			return !a.IsOutdated // non-outdated first
+		}
+		return threadLastCommentTime(a).After(threadLastCommentTime(b))
+	})
+	return ordered[:limit], len(ordered) - limit
+}
+
+// threadLastCommentTime returns the CreatedAt of a thread's most recent
+// comment, or the zero time if it has none.
+func threadLastCommentTime(t gh.PRReviewThread) time.Time {
+	var latest time.Time
+	for _, c := range t.Comments {
+		if c.CreatedAt.After(latest) {
+			latest = c.CreatedAt
+		}
+	}
+	return latest
+}
+
+// maxThreadCommentBodyChars caps how many characters of a single review
+// thread comment body renderReviewThreads renders (R4). maxPromptThreads
+// bounds the number of threads and FetchPRReviewThreads's per-thread page
+// size bounds the number of comments, but neither bounds the size of an
+// individual comment body — a single large pasted comment (e.g. a log or
+// long discussion) could still make the prompt unbounded without this.
+// Truncation is noted inline, consistent with the CommentsTruncated signal
+// below, so the reviewer knows content was cut rather than trusting a
+// silently partial body.
+const maxThreadCommentBodyChars = 2000
+
+// truncateCommentBody bounds body to at most maxThreadCommentBodyChars
+// runes, appending a note naming how much was cut when truncation occurs.
+func truncateCommentBody(body string) string {
+	runes := []rune(body)
+	if len(runes) <= maxThreadCommentBodyChars {
+		return body
+	}
+	return string(runes[:maxThreadCommentBodyChars]) + fmt.Sprintf(" […truncated, %d more characters]", len(runes)-maxThreadCommentBodyChars)
+}
+
+// renderReviewThreads writes the "## Existing review threads" section plus
+// the R2 policy paragraph that governs it. Both belong to buildReviewPrompt's
+// eventual Go-owned "contract" half once #1446 splits the function into an
+// overridable guidance half and a Go-owned contract half — a repo using
+// `mode: replace` on the guidance half must not be able to silently drop
+// this context and reintroduce the duplicate findings this exists to
+// eliminate (see adrs/1497-pruefer-prior-review-thread-context.md).
+func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, threadsTruncated bool) {
+	if len(threads) == 0 {
+		return
+	}
+	selected, omitted := selectPromptThreads(threads, maxPromptThreads)
+
+	b.WriteString("## Existing review threads\n\n")
+	b.WriteString("These are review threads already on this PR, from prior review passes.\n\n")
+	for _, t := range selected {
+		status := "[OPEN]"
+		if t.IsResolved {
+			status = "[RESOLVED]"
+		}
+		if t.IsOutdated {
+			status += " (outdated — the commented lines have since changed)"
+		}
+		fmt.Fprintf(b, "- %s:%d %s\n", t.Path, t.Line, status)
+		for _, c := range t.Comments {
+			author := c.Author
+			if author == "" {
+				author = "unknown"
+			}
+			fmt.Fprintf(b, "  - @%s: %s\n", author, truncateCommentBody(c.Body))
+		}
+		if t.CommentsTruncated {
+			b.WriteString("  - (this thread has more replies than shown here — a later reply, possibly the one that resolved it, may be missing)\n")
+		}
+	}
+	if omitted > 0 {
+		fmt.Fprintf(b, "\n(%d additional thread(s) omitted to keep this prompt bounded; unresolved and current threads were prioritized over resolved and outdated ones.)\n", omitted)
+	}
+	if threadsTruncated {
+		b.WriteString("\n(This PR has more review threads than could be fetched; the newest threads — disproportionately likely to be open — may be missing from the list above entirely.)\n")
+	}
+	b.WriteString("\n")
+
+	b.WriteString("Policy for the threads above: do not raise a finding that restates an [OPEN] thread — it is already tracked. Do not restate a [RESOLVED] thread unless the fix (or the current diff) introduces a new defect, in which case say so explicitly and reference the prior thread. Where a thread was answered with a reasoned reply, engage with that reasoning or drop the point — do not simply repeat the original observation.\n\n")
+}
+
 // buildReviewPrompt constructs the prompt sent to claude via stdin.
 func buildReviewPrompt(req ReviewRequest) string {
 	var b strings.Builder
@@ -103,7 +232,8 @@ func buildReviewPrompt(req ReviewRequest) string {
 		b.WriteString(req.Body)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. Skip nitpicks and style preferences unless they matter.\n\n")
+	renderReviewThreads(&b, req.ReviewThreads, req.ReviewThreadsTruncated)
+	b.WriteString("Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. On a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\n")
 	b.WriteString("You do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\n")
 	b.WriteString("Output has two parts, in this exact order:\n\n")
 	b.WriteString("1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own.\n\n")
@@ -114,7 +244,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 	b.WriteString("- \"medium\": a real defect, but scoped and low-impact.\n")
 	b.WriteString("- \"high\": a bug or design issue that will likely cause incorrect behavior.\n")
 	b.WriteString("- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\n")
-	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only.\n\n")
+	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\n")
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
 	return b.String()
 }
