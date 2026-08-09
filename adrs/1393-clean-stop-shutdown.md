@@ -73,6 +73,25 @@ the issue simply becomes re-dispatchable — indistinguishable from ordinary cra
 failure is still logged via `applyLabelAdd`'s existing warning path (R2's "reportable, not silent").
 No new label is introduced (R6 intact).
 
+**The in-flight snapshot itself is taken before `cancel()`, not after (validate-comment review
+finding).** The first implementation had `runShutdownPause` enumerate `e.store.All()` for
+`Worker() != nil` itself, from inside its own freshly launched goroutine — which only runs *after*
+`beginShutdownPause` calls `cancel()`. A worker cancelled before or while starting its Claude
+subprocess (no long kill-escalation wait to lose the race against) can run its own cancellation
+branch — commit, push, `releaseLock()` — and its goroutine-level deferred `WorkerExited` in a
+handful of milliseconds, fast enough to clear its `Worker()` entry before the newly scheduled
+`runShutdownPause` goroutine gets to its own `e.store.All()` read. That issue would silently vanish
+from the pause set: no `fabrik:paused`, no audit comment, and since the worker's own `release()`
+already removed `in_progress` and the lock, R7's startup scan can't catch it either — indistinguishable
+on the board from an issue that was never dispatched. Fixed by moving the enumeration
+(`inFlightSnapshot()`) into `beginShutdownPause`, synchronously, strictly before `cancel()` is called:
+at that point no worker has had any chance to react to the shutdown this call is about to trigger, so
+the captured list is authoritative. `runShutdownPause` now takes the snapshot as a parameter instead
+of computing its own. Regression-tested by
+`TestBeginShutdownPause_SnapshotSurvivesRaceWithWorkerExit`, which clears the seeded issue's
+`Worker()` from inside a wrapped `cancel()` — the earliest a real worker could react — and confirmed to
+fail against the pre-fix enumeration-inside-the-goroutine shape.
+
 ### R4 — 30s default drain deadline, computed from the same `e.wg` workers use
 
 The pause-write phase (`runShutdownPause`) is tracked on the *same* `sync.WaitGroup` (`e.wg`) that

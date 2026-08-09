@@ -32,14 +32,49 @@ import (
 // Done() lands in the same window as this Add(1) and the main loop's Wait()
 // call — exactly the ordinary one-worker clean-stop case this feature exists
 // for. Do not reorder.
+//
+// The in-flight snapshot is likewise taken here, synchronously, strictly
+// before cancel() — not inside runShutdownPause's own goroutine (review
+// finding on #1393). A worker whose invocation is cancelled before/while
+// starting its Claude subprocess can run the cancellation branch in
+// finalizeStageOutcome (commit/push/releaseLock) and reach its
+// goroutine-level deferred WorkerExited (poll.go) in a handful of
+// milliseconds — fast enough, once cancel() fires, to beat a freshly
+// scheduled runShutdownPause goroutine to its own e.store.All() read.
+// snap.Worker() would already be nil by the time that scan ran, silently
+// dropping the issue from inFlight: no fabrik:paused, no audit comment
+// (in_progress and the lock are already gone via the worker's own release(),
+// so R7's startup scan can't catch it either) — indistinguishable on the
+// board from an issue that was never dispatched at all. Capturing inFlight
+// here, before cancel() is called, closes the window: at this exact point no
+// worker has had any chance to observe the cancellation this call is about
+// to trigger, so the snapshot is authoritative for "every issue this
+// shutdown is about to interrupt."
 func (e *Engine) beginShutdownPause(cancel context.CancelFunc) {
 	e.issueCtxs.Range(func(_, val any) bool {
 		val.(issueCtxEntry).holder.val.Store("daemon_shutdown")
 		return true
 	})
+
+	inFlight := e.inFlightSnapshot()
+
 	e.wg.Add(1)
 	cancel()
-	go e.runShutdownPause()
+	go e.runShutdownPause(inFlight)
+}
+
+// inFlightSnapshot returns every store item currently carrying an active
+// Worker() — the set runShutdownPause pauses. Extracted so beginShutdownPause
+// can capture it synchronously, before cancel() fires (see that method's doc
+// comment).
+func (e *Engine) inFlightSnapshot() []itemstate.Snapshot {
+	var inFlight []itemstate.Snapshot
+	for _, snap := range e.store.All() {
+		if snap.Worker() != nil {
+			inFlight = append(inFlight, snap)
+		}
+	}
+	return inFlight
 }
 
 // waitGroupTimeout waits for wg to complete, bounded by timeout. Returns true
@@ -78,24 +113,25 @@ func waitGroupTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
 // drainAndExit's single waitGroupTimeout call bounds both the ordinary
 // worker drain and this write phase together.
 //
-// R9: when no issue has an active Worker(), this returns immediately having
-// written nothing — a stop with an idle queue must not become slower or
-// noisier than before this issue.
+// inFlight is the set of issues to pause, captured by the caller
+// (beginShutdownPause) via inFlightSnapshot() *before* cancel() was called —
+// not read fresh here. Reading it fresh from this goroutine, after cancel(),
+// was a confirmed race (review finding on #1393): see beginShutdownPause's
+// doc comment for why a post-cancel read here can silently miss an issue
+// whose worker's cancellation branch outruns this goroutine's own scheduling.
+//
+// R9: when inFlight is empty, this returns immediately having written
+// nothing — a stop with an idle queue must not become slower or noisier than
+// before this issue.
 //
 // Per-issue writes are parallelized (one goroutine per in-flight issue) so
 // N issues' worth of GitHub REST calls (up to 2 label ops + 1 comment each)
 // don't serialize inside the single overall drain deadline; see the ADR's
 // "known limitation" note on REST rate-limit pressure at high MaxConcurrent,
 // which this issue deliberately does not add throttling for.
-func (e *Engine) runShutdownPause() {
+func (e *Engine) runShutdownPause(inFlight []itemstate.Snapshot) {
 	defer e.wg.Done()
 
-	var inFlight []itemstate.Snapshot
-	for _, snap := range e.store.All() {
-		if snap.Worker() != nil {
-			inFlight = append(inFlight, snap)
-		}
-	}
 	if len(inFlight) == 0 {
 		return
 	}

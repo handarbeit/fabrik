@@ -114,6 +114,69 @@ func TestBeginShutdownPause_NoAddWaitRace(t *testing.T) {
 	}
 }
 
+// TestBeginShutdownPause_SnapshotSurvivesRaceWithWorkerExit is a regression
+// test for a review finding on #1393: runShutdownPause used to enumerate
+// in-flight issues itself, from inside its own freshly launched goroutine,
+// strictly *after* cancel() had already run. A worker whose invocation is
+// cancelled before/while starting its Claude subprocess can reach its own
+// cancellation branch (commit/push/releaseLock in finalizeStageOutcome) and
+// its goroutine-level deferred WorkerExited (poll.go) in a handful of
+// milliseconds — fast enough, once cancel() fires, to beat a freshly
+// scheduled runShutdownPause goroutine to its own e.store.All() read. That
+// issue's Worker() would already be nil by the time the scan ran, silently
+// dropping it from the pause set: no fabrik:paused, no audit comment — and
+// since the worker's own release() already cleared in_progress and the lock,
+// R7's startup scan can't catch it either. This test simulates that exact
+// race by clearing the seeded issue's Worker() from inside the cancel
+// function itself — the earliest any real worker could possibly react to the
+// cancellation beginShutdownPause is about to trigger — and asserts the
+// issue is still paused, proving the fix (capturing the snapshot
+// synchronously, before cancel() is called) actually closes the window
+// rather than merely narrowing it.
+func TestBeginShutdownPause_SnapshotSurvivesRaceWithWorkerExit(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	seedInFlightIssue(eng, "owner/repo", 999, "Implement")
+
+	_, realCancel := context.WithCancel(context.Background())
+	cancel := func() {
+		// Simulate the fast-cancelling worker's own exit path completing
+		// synchronously inside cancel() — the earliest point any real worker
+		// could possibly observe and react to this cancellation.
+		eng.store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 999})
+		realCancel()
+	}
+
+	eng.beginShutdownPause(cancel)
+	if !waitGroupTimeout(&eng.wg, 5*time.Second) {
+		t.Fatal("runShutdownPause did not complete in time")
+	}
+
+	// Non-vacuity check: confirm the race actually happened. If Worker() were
+	// still non-nil here, this test would pass against the pre-fix code too,
+	// proving nothing about the fix.
+	snap, err := eng.store.Get("owner/repo", 999)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.Worker() != nil {
+		t.Fatal("test setup error: Worker() was not cleared before runShutdownPause ran — the race this test simulates never happened")
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var gotPaused bool
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 999 && c.labelName == "fabrik:paused" {
+			gotPaused = true
+		}
+	}
+	if !gotPaused {
+		t.Error("issue #999: expected fabrik:paused despite its Worker() being cleared immediately after cancel() fired — the pre-cancel snapshot should have preserved it")
+	}
+}
+
 // seedInFlightIssue registers repo#number in the store as carrying an active
 // Worker for stageName — the shape runShutdownPause enumerates via
 // snap.Worker() != nil.
@@ -133,7 +196,7 @@ func TestRunShutdownPause_PausesInFlightIssues_AC1(t *testing.T) {
 	seedInFlightIssue(eng, "owner/repo", 20, "Research")
 
 	eng.wg.Add(1)
-	eng.runShutdownPause()
+	eng.runShutdownPause(eng.inFlightSnapshot())
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -183,7 +246,7 @@ func TestRunShutdownPause_PostsAuditComment_AC2(t *testing.T) {
 	seedInFlightIssue(eng, "owner/repo", 30, "Validate")
 
 	eng.wg.Add(1)
-	eng.runShutdownPause()
+	eng.runShutdownPause(eng.inFlightSnapshot())
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -218,10 +281,10 @@ func TestRunShutdownPause_Idempotent_NoDuplicateComment_AC2(t *testing.T) {
 	seedInFlightIssue(eng, "owner/repo", 1, "Research")
 
 	eng.wg.Add(1)
-	eng.runShutdownPause()
+	eng.runShutdownPause(eng.inFlightSnapshot())
 
 	eng.wg.Add(1)
-	eng.runShutdownPause() // simulates a retried/duplicate shutdown pause call
+	eng.runShutdownPause(eng.inFlightSnapshot()) // simulates a retried/duplicate shutdown pause call
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -287,7 +350,7 @@ func TestPauseInterruptedIssue_ConcurrentCallers_NoDuplicateComment(t *testing.T
 			defer wg.Done()
 			<-start
 			eng.wg.Add(1)
-			eng.runShutdownPause()
+			eng.runShutdownPause(eng.inFlightSnapshot())
 		}()
 		close(start) // release both goroutines at the same instant
 		wg.Wait()
@@ -316,7 +379,7 @@ func TestRunShutdownPause_IdleQueue_NoWrites_AC5(t *testing.T) {
 
 	start := time.Now()
 	eng.wg.Add(1)
-	eng.runShutdownPause()
+	eng.runShutdownPause(eng.inFlightSnapshot())
 	elapsed := time.Since(start)
 
 	if elapsed > 200*time.Millisecond {
