@@ -92,7 +92,7 @@ func TestClassifyAPIErrorExit(t *testing.T) {
 // finalizeStageOutcome classifies on.
 func TestInterpretClaudeResult_APIErrorExit_ReturnsSentinelError(t *testing.T) {
 	raw := []byte(`{"result":"","session_id":"sid-1","terminal_reason":"api_error","is_error":true,"num_turns":1,"total_cost_usd":0}`)
-	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -127,7 +127,7 @@ func TestInterpretClaudeResult_APIErrorExit_ReturnsSentinelError(t *testing.T) {
 // interpretClaudeResult and returns before api_error detection is reached.
 func TestInterpretClaudeResult_APIErrorExit_MarkerTakesPrecedence(t *testing.T) {
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","terminal_reason":"api_error"}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	if err == nil {
 		t.Fatalf("expected error (non-zero exit)")
@@ -149,7 +149,7 @@ func TestInterpretClaudeResult_APIErrorExit_MarkerTakesPrecedence(t *testing.T) 
 // new classifier (#1458 Acceptance 6).
 func TestInterpretClaudeResult_APIErrorExit_UnparseableJSON_NotClassified(t *testing.T) {
 	raw := []byte("not valid json, but mentions api_error anyway")
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	if err == nil {
 		t.Fatalf("expected error (non-zero exit)")
@@ -181,7 +181,7 @@ func TestInterpretClaudeResult_APIErrorWithRealProgress_NotClassified(t *testing
 		`"result":"partial work before a transient API error",` +
 		`"errors":["transient API error"]}`)
 
-	_, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	_, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	// Guard the wiring the exclusion depends on: if these are zero, the gate is
 	// inert and the assertion below would pass for the wrong reason.

@@ -117,6 +117,44 @@ func (e *claudeAPIErrorExit) Error() string {
 	return fmt.Sprintf("claude exited: transient api_error (terminal_reason=%q, num_turns=%d, cost=$%.4f)", e.TerminalReason, e.NumTurns, e.CostUSD)
 }
 
+// claudeResumeFailureError signals that a Claude invocation which resumed an
+// existing session (--resume) failed for a reason none of the more specific
+// classifiers above caught. Unlike claudeUsageLimitError/claudeAPIErrorExit,
+// this does NOT imply the stage never ran — a resumed session can fail after
+// real work happened — so it must NOT short-circuit finalizeStageOutcome the
+// way the did-not-run family does; it follows claudeTurnLimitError's
+// non-short-circuiting shape instead (commitWIP, push, InvocationRecorded all
+// still run). It is exempted from StageRetryIncremented (mirroring the
+// did-not-run family's max_retries exemption) precisely so the mechanism this
+// type exists to enable — a guaranteed cold-start attempt once
+// ConsecutiveFailures reaches Threshold — cannot itself be starved by the
+// failures it is counting. See #1414, ADR-1414.
+type claudeResumeFailureError struct {
+	// Cause is the underlying error the CLI exited with.
+	Cause error
+	// SessionID is the --resume session ID this invocation attempted to
+	// resume, for logging.
+	SessionID string
+	// ConsecutiveFailures is the count of consecutive resume failures for
+	// this (issue, stage) session, including this one.
+	ConsecutiveFailures int
+	// Threshold is the configured MaxResumeFailures value in effect for this
+	// invocation, for logging.
+	Threshold int
+	// Abandoned reports whether this invocation's failure pushed the
+	// consecutive count to (or past) Threshold, causing the session pointer
+	// to be discarded so the next invocation cold-starts.
+	Abandoned bool
+}
+
+func (e *claudeResumeFailureError) Error() string {
+	return fmt.Sprintf("claude exited with error while resuming session %s (consecutive failures=%d/%d, abandoned=%t): %v", e.SessionID, e.ConsecutiveFailures, e.Threshold, e.Abandoned, e.Cause)
+}
+
+func (e *claudeResumeFailureError) Unwrap() error {
+	return e.Cause
+}
+
 // classifyAPIErrorExit determines whether a Claude invocation exited on a
 // transient Anthropic-side API error, using only the CLI's own structured
 // result object (resp) — never text the assistant itself wrote, per the same
@@ -613,7 +651,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -650,7 +688,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -1151,7 +1189,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -1285,7 +1323,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// we still process whatever output was collected before the kill.
 	wasTimedOut := inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)
 
-	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir)
+	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures)
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log
@@ -1315,6 +1353,61 @@ func openStageLog(issueNumber int, logDir, label string, stdout *bytes.Buffer) (
 	return io.MultiWriter(stdout, logFile), logFile
 }
 
+// classifyResumeFailure implements the consecutive-resume-failure counter's
+// increment/threshold/abandon logic for the generic-failure fallthrough in
+// interpretClaudeResult (see #1414). It is only reached for a failure not
+// already classified by a more specific check above it (stale session,
+// turn-cap, usage-limit, api_error) — see interpretClaudeResult's final
+// return point.
+//
+//   - maxResumeFailures <= 0 disables the mechanism entirely (mirrors
+//     MaxRetries == 0's "unlimited" convention): the sidecar is left
+//     untouched and the plain, unwrapped error is returned so normal
+//     max_retries accounting applies exactly as it did before #1414.
+//     resolveInt always resolves a positive default, so production never
+//     exercises this branch.
+//   - resumeSessionID == "" means this invocation was itself a cold start
+//     (no --resume) that failed — not attributable to a resumed session, so
+//     the count resets to 0 (clearing any stale leftover from a
+//     since-abandoned or since-pruned prior session lineage) and the plain
+//     error is returned unwrapped.
+//   - Otherwise the count increments. At or past maxResumeFailures, the
+//     session pointer is discarded (the same os.Remove used by the existing
+//     stale-session path) and the sidecar reset to 0, so the very next
+//     invocation on either invocation path cold-starts —
+//     resolveResumeSessionID already treats an absent session file as a
+//     cold start for both callers identically, so no separate "force cold
+//     start" signal is needed. Every occurrence of this branch — not only
+//     the one that crosses the threshold — returns *claudeResumeFailureError
+//     so finalizeStageOutcome can exempt it from StageRetryIncremented; see
+//     that type's doc comment for why.
+func classifyResumeFailure(issueNumber int, sessFilePath, resumeSessionID string, maxResumeFailures int, lastErr error) error {
+	plain := fmt.Errorf("claude exited with error: %w", lastErr)
+	if maxResumeFailures <= 0 {
+		return plain
+	}
+	if resumeSessionID == "" {
+		resetResumeFailureCount(sessFilePath)
+		return plain
+	}
+	count := readResumeFailureCount(sessFilePath) + 1
+	abandoned := count >= maxResumeFailures
+	if abandoned {
+		claudeLog(issueNumber, "resume", "abandoning session %s after %d consecutive resume failures (threshold %d), last error: %v — branch work on disk is unaffected, only the resume pointer is discarded; next invocation will cold-start\n", resumeSessionID, count, maxResumeFailures, lastErr)
+		os.Remove(sessFilePath)
+		resetResumeFailureCount(sessFilePath)
+	} else {
+		writeResumeFailureCount(issueNumber, sessFilePath, count)
+	}
+	return &claudeResumeFailureError{
+		Cause:               lastErr,
+		SessionID:           resumeSessionID,
+		ConsecutiveFailures: count,
+		Threshold:           maxResumeFailures,
+		Abandoned:           abandoned,
+	}
+}
+
 // interpretClaudeResult classifies a completed Claude invocation's raw NDJSON
 // output: it checks for a WaitDelay-related exit override, parses the
 // stream-json result, extracts result text and token usage (falling back to
@@ -1322,7 +1415,12 @@ func openStageLog(issueNumber int, logDir, label string, stdout *bytes.Buffer) (
 // process was killed before emitting a result line), and classifies the
 // completion/error status of the invocation from the parsed or extracted
 // text.
-func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string) (string, bool, TokenUsage, error) {
+//
+// resumeSessionID is the --resume session ID this invocation attempted (""
+// if this was a cold start) and maxResumeFailures is the effective
+// MaxResumeFailures threshold — both threaded through from the caller's
+// InvokeOptions purely to drive classifyResumeFailure; see #1414.
+func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
@@ -1391,6 +1489,10 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// and (b) timeout kills where FABRIK_STAGE_COMPLETE appeared in streamed output.
 		if stageCompleteRE.MatchString(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
+			// Completed is completed — the strongest possible evidence the
+			// session is healthy, regardless of the trailing error. Reset the
+			// resume-failure counter (#1414).
+			resetResumeFailureCount(sessFilePath)
 			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
 		}
 		// Structural turn-cap classification from the CLI's own result object,
@@ -1402,6 +1504,11 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// condition to misclassify as a usage-limit exit — see #1183.
 		if ok && resp.Subtype == "error_max_turns" {
 			claudeLog(issueNumber, "claude", "turn limit reached (subtype=error_max_turns, terminal_reason=%q, num_turns=%d)\n", resp.TerminalReason, resp.NumTurns)
+			// A turn-cap exit consumed real turns and real cost — by
+			// construction the strongest possible evidence the session is
+			// healthy, not the poisoned-session symptom #1414 targets. Reset
+			// the resume-failure counter.
+			resetResumeFailureCount(sessFilePath)
 			return text, false, usage, &claudeTurnLimitError{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns}
 		}
 		// Structural usage-limit classification from the CLI's own result
@@ -1424,9 +1531,18 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 				claudeLog(issueNumber, "claude", "error exit with unmatched terminal_reason=%q (not classified as usage limit)\n", resp.TerminalReason)
 			}
 		}
-		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
+		// None of the classifiers above matched — the generic fallthrough.
+		// classifyResumeFailure owns the consecutive-resume-failure counter
+		// from here: it increments (and abandons the session at threshold)
+		// when resumeSessionID != "", or resets when this was itself a
+		// failed cold start. See its doc comment and #1414.
+		return text, false, usage, classifyResumeFailure(issueNumber, sessFilePath, resumeSessionID, maxResumeFailures, runErr)
 	}
 
+	// A clean process exit (runErr == nil) is evidence the session loaded and
+	// ran without a structural break, even if the stage itself didn't finish
+	// (no FABRIK_STAGE_COMPLETE). Reset the resume-failure counter (#1414).
+	resetResumeFailureCount(sessFilePath)
 	completed := stageCompleteRE.MatchString(text)
 	return text, completed, usage, nil
 }
@@ -2223,4 +2339,55 @@ func saveSessionIDDirect(issueNumber int, path, sessionID string) {
 	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
 		claudeLog(issueNumber, "warn", "failed to save session id to %s: %v\n", path, err)
 	}
+}
+
+// resumeFailureCountPath returns the sidecar file path that tracks the
+// consecutive-resume-failure count for the session at sessFilePath. It is
+// deliberately a plain sibling file (not itemstate, which is confirmed
+// entirely in-memory — see #1414 Research) so the counter survives an engine
+// restart, exactly as the spec requires. It is shared by both InvokeClaude
+// and InvokeClaudeForComments (and merge_train.go's conflict-resolution
+// path), since all three compute the identical sessFilePath stem — the
+// counter is keyed to the session-pointer identity, not the invocation path.
+func resumeFailureCountPath(sessFilePath string) string {
+	return sessFilePath + ".resumefails"
+}
+
+// readResumeFailureCount reads the consecutive-resume-failure count for
+// sessFilePath. A missing or unparseable sidecar is treated as 0 — the same
+// "absence means zero/cold" convention resolveResumeSessionID already uses
+// for the session file itself.
+func readResumeFailureCount(sessFilePath string) int {
+	data, err := os.ReadFile(resumeFailureCountPath(sessFilePath))
+	if err != nil {
+		return 0
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || count < 0 {
+		return 0
+	}
+	return count
+}
+
+// writeResumeFailureCount persists count to the sidecar file for
+// sessFilePath, mirroring saveSessionIDDirect's plain-text write idiom.
+// Best-effort: a write failure is logged but does not fail the invocation.
+func writeResumeFailureCount(issueNumber int, sessFilePath string, count int) {
+	path := resumeFailureCountPath(sessFilePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		claudeLog(issueNumber, "warn", "failed to create session dir for %s: %v\n", path, err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(count)), 0600); err != nil {
+		claudeLog(issueNumber, "warn", "failed to save resume-failure count to %s: %v\n", path, err)
+	}
+}
+
+// resetResumeFailureCount discards the sidecar file for sessFilePath,
+// restoring the consecutive-failure count to its implicit zero. Best-effort:
+// a missing file is not an error (os.Remove's own ENOENT is silently
+// ignored, matching the existing stale-session os.Remove(sessFilePath) call
+// this mirrors).
+func resetResumeFailureCount(sessFilePath string) {
+	os.Remove(resumeFailureCountPath(sessFilePath))
 }

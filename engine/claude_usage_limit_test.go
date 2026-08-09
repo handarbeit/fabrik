@@ -85,7 +85,7 @@ func TestClassifyUsageLimitExit(t *testing.T) {
 // mocked ClaudeInvoker in item-level tests) classifies on.
 func TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError(t *testing.T) {
 	raw := []byte(`{"result":"","session_id":"sid-1","terminal_reason":"blocking_limit","is_error":true,"num_turns":0,"total_cost_usd":0}`)
-	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -121,7 +121,7 @@ func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing
 		`"result":"added a test fixture: You've hit your session limit · resets 10:20pm (America/Edmonton)",` +
 		`"errors":["Reached maximum number of turns (50)"]}`)
 
-	_, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	_, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	// Guard the wiring the exclusion depends on: if these are zero, the gate is
 	// inert and the assertion below would pass for the wrong reason.
@@ -149,7 +149,7 @@ func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing
 // interpretClaudeResult and returns before usage-limit detection is reached.
 func TestInterpretClaudeResult_UsageLimitExit_MarkerTakesPrecedence(t *testing.T) {
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","terminal_reason":"blocking_limit"}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	if err == nil {
 		t.Fatalf("expected error (non-zero exit)")
@@ -170,7 +170,7 @@ func TestInterpretClaudeResult_UsageLimitExit_MarkerTakesPrecedence(t *testing.T
 // error/timeout handling paths. See #1183 Requirement 2.
 func TestInterpretClaudeResult_UsageLimitExit_UnparseableJSON_NotClassified(t *testing.T) {
 	raw := []byte("not valid json, but mentions hit your session limit anyway")
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir())
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
 
 	if err == nil {
 		t.Fatalf("expected error (non-zero exit)")

@@ -110,6 +110,17 @@ type InvokeOptions struct {
 	// is the case for every item that has passed through a board fetch or
 	// deep-fetch.
 	FabrikRepo string
+	// MaxResumeFailures is the effective Config.MaxResumeFailures value
+	// (#1414): the number of consecutive failed --resume attempts for this
+	// (issue, stage) session before the session pointer is discarded and the
+	// next invocation cold-starts. Threaded from e.cfg.MaxResumeFailures at
+	// every InvokeOptions construction site (stage path, comment path, and
+	// merge-train conflict resolution) so classifyResumeFailure in claude.go
+	// has it without needing engine.Config access itself. 0 or negative
+	// disables the mechanism (mirrors MaxRetries == 0's "unlimited"
+	// convention); resolveInt always resolves a positive default in
+	// production.
+	MaxResumeFailures int
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
