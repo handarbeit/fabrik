@@ -394,6 +394,55 @@ mutate "a zero approval requirement is accepted (APPROVED with no reviews)" \
   'TestSeedRequiredApprovalsRefusesNonPositive' \
   'seed.go::s{if n < 1 \{}{if false \{\n\t\t_ = n}'
 
+mutate "the probe reports the snapshot's status, not the card's" \
+  'TestProbeReadsCardStateLive' \
+  'board.go::s{Status:    live\.status,}{Status:    ref.status,}'
+
+mutate "the probe does not re-check archived after the snapshot" \
+  'board.go::s{live, ok := p\.items\[ref\.itemID\]\n\t\tif !ok \|\| live\.archived \{}{live, ok := p.items[ref.itemID]\n\t\tif !ok \{}' \
+  'TestProbeReadsCardStateLive' \
+  'board.go::s{live, ok := p\.items\[ref\.itemID\]\n\t\tif !ok \|\| live\.archived \{}{live, ok := p.items[ref.itemID]\n\t\tif !ok \{}'
+
+mutate "FetchPRReviews returns the raw submission history" \
+  'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
+  'reviews.go::s{return latestReviewsByAuthor\(pr\.reviews\), nil}{out := make([]gh.PRReview, len(pr.reviews)); copy(out, pr.reviews); return out, nil}'
+
+mutate "a COMMENTED follow-up overwrites the author's formal verdict" \
+  'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
+  'reviews.go::s{\} else if rev\.State == "COMMENTED" \{\n\t\t\tcontinue\n\t\t\}}{\} else if rev.State == "COMMENTED" \&\& false \{\n\t\t\tcontinue\n\t\t\}}'
+
+mutate "the board projection reports raw reviews, disagreeing with FetchPRReviews" \
+  'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
+  'board.go::s{item\.LinkedPRReviews = latestReviewsByAuthor\(linked\.reviews\)}{item.LinkedPRReviews = append([]gh.PRReview(nil), linked.reviews...)}'
+
+mutate "repo directories flatten owner and repo, colliding" \
+  'TestRepoDirsDoNotCollide' \
+  'sim.go::s{filepath\.Join\(s\.baseDir, owner, repo\+"\.git"\)}{filepath.Join(s.baseDir, owner+"-"+repo+".git")}'
+
+mutate "a merged PR may also be a draft" \
+  'TestSeedPRRefusesImpossibleShapes' \
+  'seed.go::s{if seed\.Draft \{\n\t\t\ts\.fail\("simgh: PR %s#%d cannot be both merged and draft"}{if false \{\n\t\t\ts.fail("simgh: PR %s#%d cannot be both merged and draft"}'
+
+mutate "a merged PR may also be open" \
+  'TestSeedPRRefusesImpossibleShapes' \
+  'seed.go::s{if state == "open" \{\n\t\t\ts\.fail\("simgh: PR %s#%d cannot be merged and open}{if false \{\n\t\t\ts.fail("simgh: PR %s#%d cannot be merged and open}'
+
+mutate "an issue may block itself (runtime)" \
+  'TestSelfBlockIsRefused' \
+  'deps.go::s{if targetRepo == blockerRepo \&\& targetNum == blockerNum \{}{if false \&\& targetRepo == blockerRepo \&\& targetNum == blockerNum \{}'
+
+mutate "an issue may block itself (seeding)" \
+  'TestSelfBlockIsRefused' \
+  'seed.go::s{if blockerOwnerRepo == ownerRepo \&\& blockerNumber == issueNumber \{}{if false \&\& blockerOwnerRepo == ownerRepo \&\& blockerNumber == issueNumber \{}'
+
+mutate "a negative explicit issue number is accepted" \
+  'TestSeedIssueRefusesNegativeNumber' \
+  'seed.go::s{case num < 0:\n\t\t// reserveNumber is a no-op}{case num < 0 \&\& false:\n\t\t// reserveNumber is a no-op}'
+
+mutate "a negative explicit PR number is accepted" \
+  'TestSeedPRRefusesImpossibleShapes' \
+  'seed.go::s{case num < 0:\n\t\ts\.fail\("simgh: PR number}{case num < 0 \&\& false:\n\t\ts.fail("simgh: PR number}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

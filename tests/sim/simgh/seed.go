@@ -251,9 +251,16 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 	defer s.mu.Unlock()
 
 	num := seed.Number
-	if num == 0 {
+	switch {
+	case num == 0:
 		num = r.allocNumber()
-	} else if r.numberTaken(num) {
+	case num < 0:
+		// reserveNumber is a no-op below nextNumber, so a negative number would
+		// be accepted silently and then embedded in node IDs and every board
+		// projection — a number GitHub could never assign.
+		s.fail("simgh: issue number %d is not valid; use 0 to auto-assign", num)
+		return s
+	case r.numberTaken(num):
 		// Shared number space: #N may already be a PR, not just an issue.
 		s.fail("simgh: %s#%d already exists", ownerRepo, num)
 		return s
@@ -320,18 +327,38 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	}
 
 	num := seed.Number
-	if num == 0 {
+	switch {
+	case num == 0:
 		num = r.allocNumber()
-	} else if r.numberTaken(num) {
+	case num < 0:
+		s.fail("simgh: PR number %d is not valid; use 0 to auto-assign", num)
+		return s
+	case r.numberTaken(num):
 		// Shared number space: #N may already be an issue, not just a PR.
 		s.fail("simgh: PR %s#%d already exists", ownerRepo, num)
 		return s
 	}
-	r.reserveNumber(num)
+
+	// Refuse shapes GitHub cannot produce. A merged PR is always closed, and a
+	// draft can never have been merged — accepting either would let a scenario
+	// drive the engine from a state production can never deliver, and pass.
 	state := seed.State
+	if seed.Merged {
+		if seed.Draft {
+			s.fail("simgh: PR %s#%d cannot be both merged and draft", ownerRepo, num)
+			return s
+		}
+		if state == "open" {
+			s.fail("simgh: PR %s#%d cannot be merged and open; a merged PR is closed", ownerRepo, num)
+			return s
+		}
+		// Unspecified means "whatever merging implies", which is closed.
+		state = "closed"
+	}
 	if state == "" {
 		state = "open"
 	}
+	r.reserveNumber(num)
 	now := s.now()
 	r.prs[num] = &prRecord{
 		number:                  num,
@@ -661,6 +688,12 @@ func (s *Sim) SeedBlockedBy(ownerRepo string, issueNumber int, blockerOwnerRepo 
 	iss, ok := r.issues[issueNumber]
 	if !ok {
 		s.fail("simgh: issue %s#%d not found", ownerRepo, issueNumber)
+		return s
+	}
+	// Refused on both paths, for the reason AddBlockedByIssue states: a
+	// self-block is unsatisfiable, so the dependency gate holds forever.
+	if blockerOwnerRepo == ownerRepo && blockerNumber == issueNumber {
+		s.fail("simgh: issue %s#%d cannot block itself", ownerRepo, issueNumber)
 		return s
 	}
 	// Validate the blocker for the same reason AddBlockedByIssue does: an

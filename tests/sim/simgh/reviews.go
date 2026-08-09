@@ -4,7 +4,19 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
-// FetchPRReviews returns the reviews submitted on a PR, in submission order.
+// FetchPRReviews returns the **latest review per author**, in first-submission
+// order — not the raw submission history.
+//
+// The collapsing is the load-bearing part, and it is production's behaviour
+// rather than a convenience: github.Client.FetchPRReviews reads a REST endpoint
+// that returns every submission and reduces it to one entry per author, so that
+// the result matches GraphQL's latestReviews semantics. The engine's review-gate
+// call sites (engine/reviews.go) consume that result assuming the reduction has
+// already happened. Returning the raw list here would leave a superseded
+// CHANGES_REQUESTED visible forever, blocking a gate that real GitHub would have
+// cleared — and disagreeing with this package's own FetchPRReviewDecision, which
+// reduces correctly. Two reads of one model reporting two verdicts is a bug the
+// sim would be introducing.
 func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -12,9 +24,38 @@ func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, e
 	if err != nil {
 		return nil, err
 	}
-	out := make([]gh.PRReview, len(pr.reviews))
-	copy(out, pr.reviews)
-	return out, nil
+	return latestReviewsByAuthor(pr.reviews), nil
+}
+
+// latestReviewsByAuthor reduces a submission history to one entry per author,
+// reproducing github.Client.FetchPRReviews's rule exactly:
+//
+//   - the most recent submission wins, and authors keep first-submission order;
+//   - except that a COMMENTED follow-up never supersedes an author's existing
+//     formal verdict (APPROVED, CHANGES_REQUESTED, DISMISSED). GitHub treats
+//     COMMENTED as informational, not a state transition, so a reviewer who
+//     requests changes and later comments still has an active
+//     CHANGES_REQUESTED. Only when an author's *first* submission is COMMENTED
+//     does it become their entry.
+func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
+	latest := make(map[string]gh.PRReview, len(reviews))
+	order := make([]string, 0, len(reviews))
+	for _, rev := range reviews {
+		if rev.Author == "" {
+			continue
+		}
+		if _, seen := latest[rev.Author]; !seen {
+			order = append(order, rev.Author)
+		} else if rev.State == "COMMENTED" {
+			continue
+		}
+		latest[rev.Author] = rev
+	}
+	out := make([]gh.PRReview, 0, len(order))
+	for _, author := range order {
+		out = append(out, latest[author])
+	}
+	return out
 }
 
 // FetchPRReviewRequests returns the reviewers still outstanding on a PR.

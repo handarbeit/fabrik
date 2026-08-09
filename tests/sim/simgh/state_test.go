@@ -718,3 +718,246 @@ func TestSeedRequiredApprovalsRefusesNonPositive(t *testing.T) {
 		t.Fatalf("reviewDecision = %q, want \"\"; the refused requirement was recorded anyway", decision)
 	}
 }
+
+// TestProbeReadsCardStateLive pins that the probe reports the card's state at
+// projection time, not at snapshot time — the same property buildProjectItem
+// has, in the sibling that feeds the engine's idle poll.
+//
+// A stale answer matters more here than on a full board read: the probe is
+// what the poll consults to decide whether anything changed, so a stale column
+// is a poll that does not notice work it should.
+func TestProbeReadsCardStateLive(t *testing.T) {
+	t.Run("a status move after the snapshot is reported", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		projectID, itemID := mustLookupItem(t, s)
+		field, err := s.FetchStatusField(projectID)
+		if err != nil {
+			t.Fatalf("FetchStatusField: %v", err)
+		}
+		if err := s.UpdateProjectItemStatus(projectID, itemID, field.FieldID, field.Options["Review"]); err != nil {
+			t.Fatalf("UpdateProjectItemStatus: %v", err)
+		}
+
+		probe, _, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+		if err != nil {
+			t.Fatalf("ProbeProjectBoard: %v", err)
+		}
+		if len(probe) != 1 {
+			t.Fatalf("probe items = %d, want 1", len(probe))
+		}
+		if probe[0].Status != "Review" {
+			t.Fatalf("probe Status = %q, want %q", probe[0].Status, "Review")
+		}
+	})
+
+	t.Run("an archived card is absent", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		projectID, itemID := mustLookupItem(t, s)
+		if err := s.ArchiveProjectItem(projectID, itemID); err != nil {
+			t.Fatalf("ArchiveProjectItem: %v", err)
+		}
+
+		probe, _, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+		if err != nil {
+			t.Fatalf("ProbeProjectBoard: %v", err)
+		}
+		if len(probe) != 0 {
+			t.Fatalf("probe still reports %d archived card(s)", len(probe))
+		}
+	})
+}
+
+// TestFetchPRReviewsCollapsesToLatestPerAuthor pins production's reduction rule.
+//
+// github.Client.FetchPRReviews reduces the REST endpoint's full submission
+// history to one entry per author, and the engine's review-gate call sites
+// consume the result assuming that already happened. A raw list would leave a
+// superseded CHANGES_REQUESTED visible forever — blocking a gate real GitHub
+// would have cleared, and disagreeing with FetchPRReviewDecision on the same PR.
+func TestFetchPRReviewsCollapsesToLatestPerAuthor(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"}).
+		SeedReview(repoName, 42, gh.PRReview{Author: "carol", State: "CHANGES_REQUESTED", Body: "needs work"}).
+		SeedReview(repoName, 42, gh.PRReview{Author: "dave", State: "APPROVED", Body: "lgtm"}).
+		SeedReview(repoName, 42, gh.PRReview{Author: "carol", State: "APPROVED", Body: "fixed now"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	reviews, err := s.FetchPRReviews("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 2 {
+		t.Fatalf("got %d reviews, want 2 (one per author); the history was not collapsed", len(reviews))
+	}
+	// First-submission order is preserved, so carol stays first.
+	if reviews[0].Author != "carol" || reviews[0].State != "APPROVED" {
+		t.Fatalf("reviews[0] = %s/%s, want carol/APPROVED; the stale verdict outlived the later one",
+			reviews[0].Author, reviews[0].State)
+	}
+	if reviews[1].Author != "dave" || reviews[1].State != "APPROVED" {
+		t.Fatalf("reviews[1] = %s/%s, want dave/APPROVED", reviews[1].Author, reviews[1].State)
+	}
+
+	// A COMMENTED follow-up must NOT supersede a formal verdict — GitHub treats
+	// it as informational, not a state transition. Pinning this direction too,
+	// or "latest wins" would be indistinguishable from "last write wins".
+	s.SeedReview(repoName, 42, gh.PRReview{Author: "dave", State: "COMMENTED", Body: "one more thought"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding follow-up: %v", err)
+	}
+	reviews, err = s.FetchPRReviews("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews after comment: %v", err)
+	}
+	if reviews[1].State != "APPROVED" {
+		t.Fatalf("dave's verdict = %q after a COMMENTED follow-up, want APPROVED", reviews[1].State)
+	}
+
+	// The board projection sources the same field from GraphQL's latestReviews,
+	// so it must agree. Two reads of one model reporting two answers is a bug
+	// the sim would be introducing.
+	item, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if len(item.LinkedPRReviews) != len(reviews) {
+		t.Fatalf("board projection has %d reviews, FetchPRReviews has %d; the two reads disagree",
+			len(item.LinkedPRReviews), len(reviews))
+	}
+}
+
+// TestRepoDirsDoNotCollide pins that two distinct owner/repo pairs never share
+// one backing repository.
+//
+// Joining owner and repo with a separator is not collision-free:
+// "acme-widgets/foo" and "acme/widgets-foo" flatten to the same name. Since the
+// already-seeded check is keyed on the full "owner/repo" string, both would be
+// accepted and would produce two repoStates — each with its own gitMu — over
+// one physical repo, voiding the per-repo git serialisation everything rests on.
+func TestRepoDirsDoNotCollide(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme-widgets/foo").
+		SeedRepo("acme/widgets-foo")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding two distinct repos: %v", err)
+	}
+
+	a, err := s.repoByKey("acme-widgets/foo")
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	b, err := s.repoByKey("acme/widgets-foo")
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	if a.bareDir == b.bareDir {
+		t.Fatalf("both repos share the backing directory %s; their gitMus guard one repository", a.bareDir)
+	}
+
+	// And the sharing must be observable as such: a commit on one must not
+	// appear in the other.
+	s.SeedCommit("acme-widgets/foo", "only-in-a", map[string]string{"a.txt": "a"}, "a")
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedCommit: %v", err)
+	}
+	if _, err := s.HeadSHA("acme/widgets-foo", "only-in-a"); err == nil {
+		t.Fatal("a branch seeded in one repo is visible in the other; they share a backing repository")
+	}
+}
+
+// TestSeedPRRefusesImpossibleShapes pins that the seeding API will not build a
+// PR state GitHub cannot produce. A scenario driving the engine from an
+// impossible state can pass for a reason production never delivers.
+func TestSeedPRRefusesImpossibleShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seed    PRSeed
+		wantErr string
+	}{
+		{"merged and draft", PRSeed{Number: 42, Draft: true, Merged: true}, "both merged and draft"},
+		{"merged and open", PRSeed{Number: 42, Merged: true, State: "open"}, "merged and open"},
+		{"negative number", PRSeed{Number: -3}, "not valid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := seedBasicBoard(t)
+			seedCleanDivergence(t, s)
+			seed := tc.seed
+			seed.Head = headBranch
+			seed.Base = "main"
+			s.SeedPR(repoName, seed)
+
+			err := s.Err()
+			if err == nil {
+				t.Fatalf("SeedPR accepted %+v; GitHub cannot produce that shape", tc.seed)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	// Merged with State unspecified is the ordinary case and must be accepted,
+	// resolving to closed — otherwise the refusals above would be satisfied by
+	// a seed API that simply rejects Merged outright.
+	t.Run("merged defaults to closed", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		seedCleanDivergence(t, s)
+		s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Merged: true})
+		if err := s.Err(); err != nil {
+			t.Fatalf("SeedPR(Merged) rejected: %v", err)
+		}
+		prs, err := s.ListPRs("acme", "widgets")
+		if err != nil {
+			t.Fatalf("ListPRs: %v", err)
+		}
+		if len(prs) != 1 || prs[0].State != "closed" || !prs[0].Merged {
+			t.Fatalf("PR = %+v, want merged and closed", prs)
+		}
+	})
+}
+
+// TestSelfBlockIsRefused pins that an issue cannot be recorded as blocking
+// itself, on either the runtime or the seeding path. A self-block is
+// unsatisfiable, so the engine's dependency gate would hold the issue forever
+// with nothing to diagnose.
+func TestSelfBlockIsRefused(t *testing.T) {
+	t.Run("runtime", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		id := "issue:acme/widgets#7"
+		if err := s.AddBlockedByIssue(id, id); err == nil {
+			t.Fatal("AddBlockedByIssue accepted a self-block")
+		} else if !strings.Contains(err.Error(), "cannot block itself") {
+			t.Fatalf("error = %v, want a self-block refusal", err)
+		}
+	})
+
+	t.Run("seeding", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		s.SeedBlockedBy("acme/widgets", 7, "acme/widgets", 7)
+		err := s.Err()
+		if err == nil {
+			t.Fatal("SeedBlockedBy accepted a self-block")
+		}
+		if !strings.Contains(err.Error(), "cannot block itself") {
+			t.Fatalf("error = %v, want a self-block refusal", err)
+		}
+	})
+}
+
+// TestSeedIssueRefusesNegativeNumber pins that an explicit number GitHub could
+// never assign is refused. reserveNumber is a no-op below nextNumber, so a
+// negative number would be accepted silently and embedded in node IDs.
+func TestSeedIssueRefusesNegativeNumber(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	s.SeedIssue("acme/widgets", IssueSeed{Number: -3, Title: "impossible"})
+	err := s.Err()
+	if err == nil {
+		t.Fatal("SeedIssue accepted a negative number")
+	}
+	if !strings.Contains(err.Error(), "not valid") {
+		t.Fatalf("error = %v, want a 'not valid' refusal", err)
+	}
+}

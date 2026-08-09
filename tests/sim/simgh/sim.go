@@ -214,8 +214,17 @@ func (s *Sim) lookupRepo(owner, repo string) (*repoState, error) {
 }
 
 // repoDir is the on-disk path of a repo's backing bare repository.
+// Owner and repo are separate path segments rather than joined with a
+// separator, because joining is not collision-free: "acme-widgets/foo" and
+// "acme/widgets-foo" both flatten to "acme-widgets-foo". SeedRepo's
+// already-seeded check is keyed on the full "owner/repo" string, so both would
+// be accepted and would produce two repoState values — each with its own gitMu
+// — pointing at one physical repository. That silently voids the per-repo git
+// serialisation the whole locking design rests on, and lets commits from one
+// logical repo land in the other. Both segments are validated as single
+// path-safe names (splitOwnerRepo), so nesting cannot escape baseDir.
 func (s *Sim) repoDir(owner, repo string) string {
-	return filepath.Join(s.baseDir, owner+"-"+repo+".git")
+	return filepath.Join(s.baseDir, owner, repo+".git")
 }
 
 // ensureBaseDir creates baseDir if it does not exist.

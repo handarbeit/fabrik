@@ -145,7 +145,10 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		linkedHead = linked.head
 		item.LinkedPRNumber = linked.number
 		item.LinkedPRNumberShallow = linked.number
-		item.LinkedPRReviews = append([]gh.PRReview(nil), linked.reviews...)
+		// Collapsed for the same reason FetchPRReviews collapses: production
+		// sources this field from GraphQL's latestReviews, which is one entry
+		// per author by definition. The two reads must agree.
+		item.LinkedPRReviews = latestReviewsByAuthor(linked.reviews)
 		item.LinkedPRReviewRequests = append([]gh.ReviewRequest(nil), linked.reviewRequests...)
 		item.LinkedPRResolvedThreadCount = linked.resolvedThreads
 		item.LinkedPRIsMergeQueueEnabled = r.mergeQueueEnabled
@@ -244,6 +247,17 @@ func (s *Sim) ProbeProjectBoard(owner, repo string, projectNum int, ownerType st
 		}
 
 		s.mu.Lock()
+		// Re-read the card live, for the same reason buildProjectItem does:
+		// the refs above were snapshotted under an earlier lock acquisition,
+		// so a status move or an archive landing in between would otherwise be
+		// invisible here — a stale column, or an archived card still in the
+		// probe output. The probe feeds the engine's idle poll, so a stale
+		// answer here is a poll that does not notice work it should.
+		live, ok := p.items[ref.itemID]
+		if !ok || live.archived {
+			s.mu.Unlock()
+			continue
+		}
 		r, ok := s.repos[ref.ownerRepo]
 		if !ok {
 			s.mu.Unlock()
@@ -258,14 +272,14 @@ func (s *Sim) ProbeProjectBoard(owner, repo string, projectNum int, ownerType st
 			ItemID:    ref.itemID,
 			ContentID: iss.nodeID(ref.ownerRepo),
 			Number:    iss.number,
-			IsPR:      ref.isPR,
-			IsClosed:  iss.state == "CLOSED" && !ref.isPR,
+			IsPR:      live.isPR,
+			IsClosed:  iss.state == "CLOSED" && !live.isPR,
 			State:     iss.state,
 			Repo:      ref.ownerRepo,
-			Status:    ref.status,
+			Status:    live.status,
 		}
 		// effectiveUpdatedAt is max(content, project item, linked PR).
-		probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, ref.updatedAt)
+		probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, live.updatedAt)
 		linked := findPRByHeadLocked(r, issueBranch(iss.number))
 		var linkedHead string
 		if linked != nil {

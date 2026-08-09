@@ -317,6 +317,24 @@ pull request before merging", and what `reviewDecision` reports in that
 configuration is **not verified here** — which is the second reason to refuse
 rather than guess a semantic for it.
 
+### `FetchPRReviews` returns the latest review per author — **Modelled**
+
+Not the raw submission history. `github.Client.FetchPRReviews` reads a REST
+endpoint that returns every submission and reduces it to one entry per author,
+so its result matches GraphQL's `latestReviews`; the engine's review-gate call
+sites consume it assuming that reduction already happened. The model reproduces
+the rule exactly, including its one exception: a `COMMENTED` follow-up never
+supersedes an author's existing formal verdict (`APPROVED`,
+`CHANGES_REQUESTED`, `DISMISSED`), because GitHub treats a comment as
+informational rather than a state transition. Only an author's *first*
+submission being `COMMENTED` makes it their entry.
+
+The board projection's `LinkedPRReviews` applies the same reduction, since
+production sources that field from `latestReviews`, which is one-per-author by
+definition. Two reads of one model must not report two verdicts — and
+`FetchPRReviewDecision` has always reduced correctly, so a raw list here would
+have put the package in contradiction with itself.
+
 ### Review requests and self-submitting bots — **Modelled**
 
 `FetchPRReviewRequests` returns only reviewers actually requested. The model
@@ -599,6 +617,11 @@ would report a stale column, or return an archived card on a board fetch, in
 precisely the situation this package exists to make trustworthy — and would
 contradict both the "never cached" guarantee at the top of `board.go` and R1.
 
+`ProbeProjectBoard` does the same, and it matters more there: the probe is what
+the engine's idle poll consults to decide whether anything changed, so a stale
+column is a poll that does not notice work it should, and an archived card left
+in the probe output is work the poll invents.
+
 ### Archived cards: board reads hide them, a direct ID read does not — **Simplified, unverified**
 
 The two are deliberately asymmetric, and the asymmetry follows production's two
@@ -661,6 +684,18 @@ state is resolved on every read, so closing it unblocks the dependent issue.
 **Absent:** being blocked *by a PR*, and GitHub's permission rules for creating
 a dependency across repos.
 
+### Dependency cycles — **Self-block refused, longer cycles absent**
+
+`AddBlockedByIssue` and `SeedBlockedBy` both refuse an issue blocked by itself,
+as GitHub does: a self-block is unsatisfiable by construction, so the engine's
+dependency gate would hold the issue forever with nothing to diagnose.
+
+**Absent:** longer cycles (A blocks B blocks A) are *not* detected — that needs a
+graph traversal the model does not perform, and GitHub does reject them.
+**Risk:** low. A scenario that builds a cycle gets a permanently blocked pair
+rather than a refusal, which is visible as a stuck scenario rather than a green
+one; but do not use this layer to test cycle *rejection*.
+
 ### Check run IDs — **Modelled, unique across the sim**
 
 GitHub's check run IDs are unique and monotonically increasing, and production
@@ -676,6 +711,19 @@ be classified off the *failed* run with nothing to indicate why.
 
 **Simplified:** IDs are assigned from a single counter per `Sim` rather than
 globally across a GitHub instance, and nothing ties them to creation time.
+
+### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
+
+`SeedPR` refuses a merged draft, and a PR that is merged *and* open (a merged PR
+is always closed; `Merged` with the state unspecified resolves to closed).
+`SeedIssue` and `SeedPR` both refuse a negative explicit number — `reserveNumber`
+is a no-op below `nextNumber`, so one would otherwise be accepted silently and
+embedded in node IDs and every projection.
+
+The point is not tidiness: a scenario built on a state production can never
+deliver exercises engine logic against an input it will never see, and passes.
+That is the "confidently green for the wrong reason" failure this whole document
+exists to prevent, arriving through the seed API rather than through the model.
 
 ### Seeding is single-threaded, except `SeedRepo` — **Modelled**
 
@@ -718,6 +766,14 @@ as a *sibling* of the `t.TempDir()` this package promises to keep everything
 inside — outside the sandbox and outside the test framework's cleanup. Real
 GitHub owner and repo names cannot contain a separator either, so nothing valid
 is rejected.
+
+Owner and repo are also kept as **separate path segments** rather than joined
+with a separator. Joining is not collision-free — `acme-widgets/foo` and
+`acme/widgets-foo` flatten to the same name — and since the already-seeded check
+is keyed on the full `owner/repo` string, both would be accepted and would
+produce two `repoState` values, each with its own `gitMu`, over one physical
+repository. That silently voids the per-repo git serialisation the whole locking
+design rests on, and lets commits from one logical repo land in the other.
 
 The same rule is enforced on the other door into the sandbox: the keys of a
 `SeedCommit` files map, which `commitFiles` joins onto the throwaway worktree
@@ -851,7 +907,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 74 mutations, and
+   package cannot back up. The sweep currently catches all 84 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

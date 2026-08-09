@@ -28,6 +28,14 @@ func (s *Sim) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 		return fmt.Errorf("simgh: AddBlockedByIssue target: %w", err)
 	}
 
+	// GitHub refuses an issue blocked by itself, and so does the model: a
+	// self-block is unsatisfiable by construction, so the engine's dependency
+	// gate would hold the issue forever with nothing to diagnose. Longer cycles
+	// are *not* detected — see FIDELITY.md.
+	if targetRepo == blockerRepo && targetNum == blockerNum {
+		return fmt.Errorf("simgh: issue %s#%d cannot block itself", targetRepo, targetNum)
+	}
+
 	r, ok := s.repos[targetRepo]
 	if !ok {
 		return fmt.Errorf("simgh: repo %s not seeded", targetRepo)
