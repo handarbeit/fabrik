@@ -278,6 +278,37 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return true, false, nil
 	}
 
+	// Dependency guard (ADR-1419): re-verify BlockedBy live, immediately
+	// before any landing decision. A Review/Validate mid-flight spawn
+	// (finalizeStageOutcome, engine/item.go) can create a brand-new
+	// blockedBy edge within this very dispatch — after Claude already
+	// emitted FABRIK_STAGE_COMPLETE alongside the spawn block — so the
+	// `item` snapshot passed in here predates that edge entirely.
+	// checkDependencies's own live-reread (engine/dependencies.go) only
+	// fires when the item is *already* fabrik:blocked, which it never is
+	// yet on a same-dispatch edge, so it cannot catch this on its own.
+	// Without this guard, a Validate agent that (against its own skill
+	// instructions — see "If You Discover a Blocking Issue" in
+	// fabrik-validate/SKILL.md) emits a spawn block together with
+	// FABRIK_STAGE_COMPLETE on a yolo issue could reach MergePR/auto-merge
+	// before fabrik:blocked is ever applied — reproducing, one dispatch
+	// earlier, the exact silent-merge-past-an-undeclared-blocker danger
+	// this issue exists to close. Both callers of this function
+	// (handleStageComplete and poll.go's catch-up loop) already gate on
+	// yolo and return above once fabrik:auto-merge-enabled is set, so this
+	// live fetch is bounded to the same narrow per-Validate-completion
+	// window guard 1 below already re-fetches live data in.
+	fresh := item
+	if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+		e.logf(item.Number, "warn", "attemptMergeOnValidate: live re-read of dependencies failed (%v) — using possibly-stale snapshot\n", ferr)
+	} else {
+		item = fresh
+	}
+	if e.checkDependencies(board, item, stage) {
+		e.logf(item.Number, "yolo-merge-guard", "not merging: dependencies are open (live re-check)\n")
+		return false, false, nil
+	}
+
 	// Guard 1 (#1207): do not advance out of Validate or enable auto-merge/
 	// merge-queue while an unresolved review thread exists on the current
 	// head. Scoped to the current head via currentHeadReviewThreadComments
