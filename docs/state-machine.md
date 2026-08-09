@@ -2793,6 +2793,17 @@ a configured stage name is. Its `Clear` branch (`diskVersion == running`) is the
 single evaluation, so the warning can never outlive the condition that produced it — see the doc comment
 on `checkVersionSkew` for the same reasoning in code.
 
+**`source_staleness`: no sweep needed, by construction — same reasoning as `version_skew`.**
+`checkSourceStaleness` (`engine/staleness.go`, #1464) uses a single fixed key
+(`"source_staleness"`) rather than a per-subject key, because there is exactly one source
+checkout per Fabrik process — unlike `allow_auto_merge`/`stage_drift` (one entry per board
+repo/configured stage, a set that shrinks as repos leave the board or stages are removed).
+Every throttled evaluation (§9.2 below) re-derives the comparison from scratch via
+`selfupgrade.CompareDevBuild` and either records or clears the same key, so its `Clear` branch
+is reachable on every single evaluation the same way `checkVersionSkew`'s is — the warning
+cannot outlive the condition that produced it, and there is no "subject went away" case to sweep
+for.
+
 **Non-goals.** No change to which conditions *produce* a warning, no TUI rendering change, and this is
 not a general warning-expiry/TTL mechanism — only subjects that have provably gone away (absent from a
 known-good set already computed elsewhere) are ever cleared. See ADR-1348.
@@ -2945,6 +2956,30 @@ The dispatch loop uses `snap.Worker() != nil` to detect whether a goroutine is a
 - **Idempotent:** the `WorkerExited` mutation handler (`internal/itemstate/store.go`) returns 0 changes when `item.Worker == nil`, so a redundant defer (e.g. an inner `defer WorkerExited` inside `processItem` firing in addition to the goroutine-top defer) does not produce spurious observer notifications.
 
 **Version-skew watchdog (#1074):** Piggybacked on the same idle+no-in-flight gate described above, `Engine.checkVersionSkew()` (`engine/upgrade.go`) runs immediately before `checkAndUpgrade()` whenever `AutoUpgrade` is enabled and `idleUpgradeThreshold` is reached — no new counter or threshold. It resolves the on-disk executable path (`versionSkewExecutableFn` → `os.Executable` + `filepath.EvalSymlinks` — engine's own private seam, distinct from `internal/selfupgrade`'s `executableFn` used by `PerformReleaseUpgrade`/`CheckAndRebuildDev` since ADR-1196 moved the self-upgrade trigger logic to its own package), spawns `<exe> --version` with a 5s timeout, and compares the trimmed output to `e.cfg.Version`. A mismatch is a general "the code on disk has moved on from what's running" signal — it catches a `SemverGreater` bug, a `syscall.Exec` failure after a successful binary replace, or an externally-replaced binary (e.g. a fleet sharing `~/go/bin/fabrik`) uniformly, without needing a dedicated warning per cause. The mismatch is recorded as a persistent `warnings.Entry` (`Type: "version_skew"`, keyed by the resolved executable path, `FixAction: "shell_command"` suggesting `kill -HUP <pid>`) via the same `warnings.Record`/`warnings.Clear` pattern as `checkAllowAutoMerge` (ADR-052), so it survives process restarts and surfaces in the TUI Warnings panel. A matching version clears any existing entry for that key. All failures resolving the path or running the subprocess are logged and non-fatal — the check is simply skipped for that poll.
+
+**Source-checkout staleness reporting (#1464): deliberately *not* piggybacked on the idle
+gate.** Unlike the version-skew watchdog above, `Engine.checkSourceStaleness()`
+(`engine/staleness.go`) does **not** run inside the idle+no-in-flight branch — it is called
+unconditionally from `poll()`, before the `dispatched == 0` check, throttled internally by
+its own poll-count gate (`maybeCheckSourceStaleness`, every `stalenessCheckPollInterval` = 30
+polls, ≈15 minutes at the default 30s `--poll` interval, firing on the very first poll too).
+This is the fix for the gap the version-skew watchdog and `checkAndUpgrade` both share: both
+require `idleUpgradeThreshold` consecutive fully-idle polls to ever run, so a board that
+dispatches work (or has a merge-train worker in flight) on every single poll never reaches
+either one — the daemon can run arbitrarily stale code indefinitely with no signal. Since
+`checkSourceStaleness` only *reports* (via `selfupgrade.CompareDevBuild`, which never calls
+`git pull`, `go build`, or `execFn` — see its doc comment), it has no in-flight-worker
+precondition to honor: there's nothing here that would kill a live Claude invocation, unlike
+`checkAndUpgrade`'s `syscall.Exec`. `CompareDevBuild` is the same comparison
+`selfupgrade.CheckAndRebuildDev` uses to decide whether to actually rebuild, so the staleness
+warning and the real upgrade decision are structurally unable to disagree. Applicability
+mirrors `checkAndUpgrade`'s own fork (`e.cfg.Version` must start with `"dev"`, then
+`CompareDevBuild`'s own `IsSourceCheckout` gate) — a release build never calls into
+`selfupgrade` for this check at all, so it never runs a `git fetch`. Recorded via the same
+`warnings.Record`/`warnings.Clear` pattern as `version_skew`, under the single fixed key
+`"source_staleness"` (§7.11 above); the `FixAction` differs depending on `e.cfg.AutoUpgrade`,
+since `kill -HUP` only self-heals staleness when the startup-time `checkAndUpgrade()` call that
+a SIGHUP re-exec re-triggers is itself enabled.
 
 **Safe-point-gating race (investigated for #1074, none found):** the concern was whether a webhook-triggered concurrent poll could dispatch a new worker while a synchronous `checkReleaseUpgrade()` download+exec is in flight on another poll cycle. It cannot: `Engine.Run()`'s single `for { select {...} }` loop is the only caller of `doPollCycle()`; webhook wakes are delivered through `e.wakeCh` and consumed serially by that same loop, so `checkAndUpgrade()` (and its `syscall.Exec`) always runs synchronously on the main goroutine between poll cycles — never concurrently with worker dispatch from a different cycle. The in-flight check at the top of this section (`Store.HasInFlightWorker()`, covering both `snap.Worker() != nil` over `e.store.All()` and the repo-scoped merge-train registry) already detects workers dispatched by any prior poll cycle regardless of which cycle started them, so no additional guard was needed. This also covers the same-cycle case: `dispatchMergeTrainWorker` calls `Store.EnterRepoWorker` synchronously before returning, so the very poll cycle that just launched a merge-train worker (which `dispatchCandidates` does not count in its `dispatched` return value) no longer misreports itself as idle.
 

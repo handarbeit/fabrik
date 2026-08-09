@@ -361,8 +361,8 @@ None of these affect correctness — they may just show a `github.com`-shaped li
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself automatically. It checks for a newer version in two places:
 
-- **At startup** — once before the first poll, so boards that are always busy still receive upgrades promptly. The check fires after the exclusive file lock is acquired, so concurrent Fabrik instances never race on the upgrade check.
-- **After 2 consecutive idle polls** — as a belt-and-suspenders check for long-running instances.
+- **At startup** — once before the first poll. The check fires after the exclusive file lock is acquired, so concurrent Fabrik instances never race on the upgrade check.
+- **After 2 consecutive idle polls** — the only other trigger. Because upgrading a dev build re-execs the process (`syscall.Exec`), this check requires true idleness — no workers in flight, including merge-train workers — so an in-progress Claude invocation is never killed mid-run. A board that is *continuously* busy (dispatching work, or with a merge-train worker in flight, every single poll) never reaches this check, and therefore never upgrades on its own — see "Staleness reporting on a busy board" below for how that gap is surfaced instead of going unnoticed.
 
 For release builds, Fabrik queries the GitHub Releases API at each check point. If a newer version is found, it downloads the new binary, replaces the running executable, runs `fabrik upgrade` to refresh plugin skills, and re-execs itself. Version comparison ignores any pre-release/build/pseudo-version suffix (`-...`/`+...`) on the running version's version string — so a `go install ...@main` or branch install (which reports a pseudo-version like `v0.0.72-0.20260716173320-6198e8102f90+dirty` in `--version`) still upgrades correctly when a newer clean release tag is published; before this fix such a suffixed version silently compared as "already up to date" and the daemon would never upgrade (#1074). On macOS, the freshly-downloaded binary is best-effort re-signed (`xattr -cr` + `codesign --force --sign -`) before the re-exec, working around an Apple Silicon quirk where a binary materialized via a fresh file write (rather than built in place) can otherwise be killed on exec.
 
@@ -383,6 +383,27 @@ local `HEAD`:
 After rebuilding, Fabrik runs `fabrik upgrade` (non-interactive, silent — see below)
 and re-execs the new binary. This keeps dev builds current with the same hands-off
 experience as release binaries.
+
+**Staleness reporting on a busy board:** the two upgrade-check points above both
+require true idleness before a dev build can rebuild and re-exec (upgrading kills
+in-flight workers). A board that dispatches work every poll — or has a merge-train
+worker running continuously — never reaches either one, so the daemon can end up
+running arbitrarily stale code indefinitely with no signal that anything is wrong.
+To close that gap, dev-build source checkouts get a separate, report-only staleness
+check that runs independently of idleness: every 30 polls (~15 minutes at the
+default 30s `--poll` interval, including once on the very first poll), Fabrik
+compares the running binary's commit against `origin/main` — the same comparison
+the upgrade path itself uses, so the two can never disagree — and, if it's behind,
+records a warning naming the running SHA, how many commits behind it is, and the
+age of the running commit (e.g. "75 commits behind origin/main" was the exact
+signal that would have caught the incident this feature was built to prevent).
+The warning surfaces in the TUI Warnings panel, in the startup/poll log output,
+and in `fabrik.log`; it clears itself on the next check once the daemon is
+restarted onto current code. This check **never** runs `git pull`, `go build`, or
+re-execs — it only reports. Applies to dev-build source checkouts only (the same
+`handarbeit/fabrik`-remote gate the upgrade path itself uses); release-binary
+installs and non-source-checkout directories see no change and trigger no `git
+fetch`.
 
 > **Plugin-skills upgrade: automatic vs. standalone behavior**: The plugin-skills check
 > runs in two contexts with different behavior.
