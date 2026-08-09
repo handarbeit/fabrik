@@ -45,11 +45,15 @@ func seedRichSim(t *testing.T) (*Sim, *fakeClock, string) {
 	s.SeedRequiredContexts("acme/widgets", "main", []string{"build"}).
 		SeedCheckRun("acme/widgets", sha, gh.CheckRun{ID: 900, Name: "build", Conclusion: "success"}).
 		SeedCommitStatus("acme/widgets", sha, gh.CommitStatus{Context: "legacy", State: "success"}).
-		// Two steps: one due within the test's reach, one far out so it is
-		// still undrained when the snapshot is taken.
+		// Three steps: one due within the test's reach, and one on each
+		// schedule far enough out that it is still undrained when the snapshot
+		// is taken. Both schedules need a surviving step, or a restore that
+		// dropped one of the two would go unnoticed.
 		SeedCheckRunsAfter("acme/widgets", sha, time.Hour,
 			gh.CheckRun{ID: 900, Name: "build", Status: "completed", Conclusion: "failure"}).
-		SeedReviewsAfter("acme/widgets", 8, 2*time.Hour, gh.PRReview{Author: "late", State: "CHANGES_REQUESTED"})
+		SeedReviewsAfter("acme/widgets", 8, 2*time.Hour, gh.PRReview{Author: "late", State: "CHANGES_REQUESTED"}).
+		SeedCheckRunsAfter("acme/widgets", sha, 3*time.Hour,
+			gh.CheckRun{ID: 901, Name: "lint", Conclusion: "failure"})
 	if err := s.Err(); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
@@ -257,7 +261,19 @@ func TestRestoreResumesScheduledSequencesAtTheSamePosition(t *testing.T) {
 		t.Fatalf("FetchPRReviews: %v", err)
 	}
 	if len(reviews) != 2 {
-		t.Errorf("got %d reviews after the pending step's instant, want 2 — the step did not survive the restore", len(reviews))
+		t.Errorf("got %d reviews after the pending step's instant, want 2 — the review schedule did not survive the restore", len(reviews))
+	}
+
+	// The CI schedule has its own pending step, further out. Both schedules
+	// are separate fields, so a restore that carried one and dropped the other
+	// would look correct from the review side alone.
+	restoredClock.Advance(time.Hour)
+	runs, err = restored.FetchCheckRuns("acme", "widgets", sha)
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Errorf("got %d check runs after the pending CI step's instant, want 2 — the CI schedule did not survive the restore", len(runs))
 	}
 }
 
