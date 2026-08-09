@@ -2283,10 +2283,77 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 	return behind > 0
 }
 
-// pollForMergeable polls the integration PR until its mergeable_state is "clean" or
-// "unstable" (per gh.MergeableStateAccepted), blocking up to CIBackstopTimeout.
+// classifyLandingCI classifies a landing PR's CI state for pollForMergeable
+// (R6, ADR-1441) — the merge-train *landing* counterpart to
+// settlePRMergeState/checkCIGate's (engine/pr_settle.go, engine/ci.go)
+// per-check classification, and structurally mirroring pollTrainCI's own
+// composition (engine/merge_train.go, ADR-1153) so the two pollers reach
+// consistent verdicts for the same inputs. Built from the same shared
+// primitives pollTrainCI already uses — gh.ClassifyCheckRuns,
+// e.classifyRequiredContexts, describeCheckRuns, gh.MergeableStateAccepted —
+// rather than a literal shared function with pollTrainCI: pollTrainCI is
+// explicitly out of scope for this issue (already fixed by ADR-1153), and
+// refactoring it to share a function would mean editing out-of-scope code for
+// a cosmetic gain. This is R6's documented resolution of "if a single
+// mechanism genuinely cannot serve both, say so explicitly" — the reason is
+// scope, not technical infeasibility. Reuses TrainCIResult as the verdict
+// type (rather than a parallel enum) since the three outcomes — not yet
+// resolved, ready, confirmed-red — are identical in meaning to pollTrainCI's.
+//
+// dirty is checked by the caller before this is reached (mirrors pollTrainCI
+// checking it first). A confirmed check-run failure or required-context
+// failure is TrainCIRed unconditionally, regardless of mergeable_state. Zero
+// check runs falls back to mergeable_state + required-context — the one case
+// where mergeable_state is genuinely load-bearing for green, exactly as in
+// pollTrainCI and settlePRMergeState's ADR-933 zero-check-runs branch.
+func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, checkRuns []gh.CheckRun) (result TrainCIResult, detail string) {
+	if len(checkRuns) > 0 {
+		status, _, failed := gh.ClassifyCheckRuns(checkRuns)
+		if status == gh.CheckRunsFailed {
+			return TrainCIRed, fmt.Sprintf("failed check(s): %s", describeCheckRuns(failed))
+		}
+		if status == gh.CheckRunsReady {
+			rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, headSHA, checkRuns)
+			switch rcStatus {
+			case gh.RequiredContextsSatisfied:
+				return TrainCIGreen, fmt.Sprintf("checks: %s", describeCheckRuns(checkRuns))
+			case gh.RequiredContextsFailed:
+				return TrainCIRed, fmt.Sprintf("required status context(s) failed: %v", rcFailed)
+			}
+		}
+		// CheckRunsPending, or a required context still pending above: keep polling.
+		return TrainCIPending, fmt.Sprintf("checks: %s", describeCheckRuns(checkRuns))
+	}
+
+	// Zero check runs (e.g. GitHub Actions disabled — the local-CI-takeover
+	// case #933 was filed for): mirrors settlePRMergeState/pollTrainCI's
+	// ADR-933 zero-check-runs branch. A confirmed required-context failure
+	// blocks regardless of mergeable_state; otherwise an accepted
+	// mergeable_state is the only remaining evidence that nothing is
+	// outstanding.
+	rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, headSHA, nil)
+	if rcStatus == gh.RequiredContextsFailed {
+		return TrainCIRed, fmt.Sprintf("required status context(s) failed: %v", rcFailed)
+	}
+	if gh.MergeableStateAccepted(mergeableState) && rcStatus == gh.RequiredContextsSatisfied {
+		return TrainCIGreen, fmt.Sprintf("mergeable_state %q accepted, zero check runs, required contexts satisfied", mergeableState)
+	}
+	return TrainCIPending, fmt.Sprintf("mergeable_state=%q, zero check runs", mergeableState)
+}
+
+// pollForMergeable polls the integration PR until CI is confirmed green —
+// per classifyLandingCI (R6, ADR-1441) — blocking up to CIBackstopTimeout.
 // Returns true when the PR is ready to merge.
 // On timeout, posts a warning comment on the first batch member issue and returns false.
+//
+// Prior to ADR-1441 this only read mergeable_state and treated
+// gh.MergeableStateAccepted (clean/unstable) as an unconditional green light
+// — the same defect ADR-1153 already fixed for pollTrainCI, left unfixed here
+// and explicitly flagged as a "candidate fast-follow" that never got its own
+// issue. It now also fetches and classifies check runs, so a confirmed
+// failure on a non-required check (mergeable_state=unstable) blocks landing
+// exactly as it now blocks the advance gate — required or not (R5's strict
+// policy, mirroring ADR-1153 §4).
 //
 // ADR-1410 (R6): bounded by CIBackstopTimeout, not the liveness-dwell
 // CIWaitTimeout — this is a synchronous blocking poll inside a single
@@ -2312,14 +2379,32 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 			break
 		}
 
-		_, mergeableState, err := e.client.FetchPRMergeableFields(owner, repo, prNum)
+		pr, err := e.client.FetchPRDetails(owner, repo, prNum)
 		if err != nil {
-			e.logf(0, "merge-train", "warn: FetchPRMergeableFields failed for integration PR #%d: %v\n", prNum, err)
-		} else if gh.MergeableStateAccepted(mergeableState) {
-			return true
-		} else if mergeableState == "dirty" {
+			e.logf(0, "merge-train", "warn: FetchPRDetails failed for integration PR #%d: %v\n", prNum, err)
+		} else if pr.MergeableState == "dirty" {
 			e.logf(0, "merge-train", "integration PR #%d has merge conflict (dirty) — cannot land\n", prNum)
 			return false
+		} else {
+			var checkRuns []gh.CheckRun
+			if pr.HeadSHA != "" {
+				checkRuns, err = e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
+				if err != nil {
+					e.logf(0, "merge-train", "warn: FetchCheckRuns failed for integration PR #%d: %v\n", prNum, err)
+					checkRuns = nil
+				}
+			}
+
+			switch verdict, detail := e.classifyLandingCI(owner, repo, pr.MergeableState, pr.HeadSHA, checkRuns); verdict {
+			case TrainCIGreen:
+				e.logf(0, "merge-train", "integration PR #%d ready to land — %s\n", prNum, detail)
+				return true
+			case TrainCIRed:
+				e.logf(0, "merge-train", "integration PR #%d not mergeable — %s\n", prNum, detail)
+				return false
+			default: // TrainCIPending — keep polling
+				e.logf(0, "merge-train", "integration PR #%d not yet ready — %s\n", prNum, detail)
+			}
 		}
 
 		if time.Now().After(deadline) {
