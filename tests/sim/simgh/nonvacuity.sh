@@ -380,7 +380,7 @@ mutate "board projections use the stale snapshot's status" \
 
 mutate "board projections do not re-check archived after the snapshot" \
   'TestBoardProjectionReadsCardStateLive' \
-  'board.go::s{if !ok \|\| live\.archived \{}{if !ok \{}'
+  'board.go::s{if !ok \|\| live\.archived \{\n\t\ts\.mu\.Unlock\(\)\n\t\treturn nil, nil\n\t\}\n\tstatus, isPR}{if !ok \{\n\t\ts.mu.Unlock()\n\t\treturn nil, nil\n\t\}\n\tstatus, isPR}'
 
 mutate "a board card may point at an issue that does not exist" \
   'TestSeedProjectItemRefusesUnresolvableTarget' \
@@ -399,9 +399,8 @@ mutate "the probe reports the snapshot's status, not the card's" \
   'board.go::s{Status:    live\.status,}{Status:    ref.status,}'
 
 mutate "the probe does not re-check archived after the snapshot" \
-  'board.go::s{live, ok := p\.items\[ref\.itemID\]\n\t\tif !ok \|\| live\.archived \{}{live, ok := p.items[ref.itemID]\n\t\tif !ok \{}' \
   'TestProbeReadsCardStateLive' \
-  'board.go::s{live, ok := p\.items\[ref\.itemID\]\n\t\tif !ok \|\| live\.archived \{}{live, ok := p.items[ref.itemID]\n\t\tif !ok \{}'
+  'board.go::s{if !ok \|\| live\.archived \{\n\t\ts\.mu\.Unlock\(\)\n\t\treturn nil, nil\n\t\}\n\tr, ok := s\.repos}{if !ok \{\n\t\ts.mu.Unlock()\n\t\treturn nil, nil\n\t\}\n\tr, ok := s.repos}'
 
 mutate "FetchPRReviews returns the raw submission history" \
   'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
