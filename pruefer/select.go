@@ -73,7 +73,26 @@ func Eligible(in EligibilityInput) (bool, SkipReason) {
 	if len(in.ExcludedPaths) > 0 && allPathsExcluded(in.ChangedPaths, in.ExcludedPaths) {
 		return false, SkipExcludedPath
 	}
-	if !in.ForceReview && alreadyReviewedAtHead(in.ExistingReviews, in.BotLogin, in.PR.HeadSHA) {
+	matched, foundSHA := alreadyReviewedAtHead(in.ExistingReviews, in.BotLogin, in.PR.HeadSHA)
+	// Defense-in-depth (R3): this decision depends entirely on FetchPRReviews
+	// having correctly collapsed the bot's review history to its true latest
+	// submission — a defect there (as in #1496) produces no error and no
+	// distinguishing symptom other than silent misbehavior. Logging both the
+	// compared SHA and the found SHA on every check, not just on skip, means
+	// a future regression of that kind is visible in pruefer.log even though
+	// this code has no independent way to verify FetchPRReviews's output.
+	found := foundSHA
+	if found == "" {
+		found = "(none)"
+	}
+	outcome := "proceeding"
+	if matched && !in.ForceReview {
+		outcome = "skipping"
+	} else if matched && in.ForceReview {
+		outcome = "proceeding (force review)"
+	}
+	logf(in.PR.Number, "select", "head-SHA check for %s: compared=%s found=%s outcome=%s\n", in.BotLogin, in.PR.HeadSHA, found, outcome)
+	if !in.ForceReview && matched {
 		return false, SkipAlreadyReviewed
 	}
 	return true, ""
@@ -134,17 +153,23 @@ func matchGlobParts(pat, name []string) bool {
 }
 
 // alreadyReviewedAtHead reports whether reviews contains a review authored
-// by botLogin whose CommitID matches headSHA exactly.
-func alreadyReviewedAtHead(reviews []gh.PRReview, botLogin, headSHA string) bool {
+// by botLogin whose CommitID matches headSHA exactly, and returns the bot's
+// found CommitID (the SHA of its collapsed entry, "" if the bot has no
+// entry at all) for logging — so a caller can tell a healthy skip (found
+// really does equal compared) apart from an anomalous one after the fact.
+func alreadyReviewedAtHead(reviews []gh.PRReview, botLogin, headSHA string) (matched bool, foundSHA string) {
 	if botLogin == "" || headSHA == "" {
-		return false
+		return false, ""
 	}
 	for _, r := range reviews {
-		if strings.EqualFold(r.Author, botLogin) && r.CommitID == headSHA {
-			return true
+		if strings.EqualFold(r.Author, botLogin) {
+			foundSHA = r.CommitID
+			if r.CommitID == headSHA {
+				return true, foundSHA
+			}
 		}
 	}
-	return false
+	return false, foundSHA
 }
 
 // diffGitHeaderRE matches a unified diff's per-file header line:
