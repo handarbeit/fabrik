@@ -1503,7 +1503,7 @@ In this 5-issue formation:
 
 ### Sub-issue Decomposition
 
-When Plan determines that an issue is too broad for a single Implement cycle — or that work needs to happen in more than one repository — it can fan out the work into focused sub-issues, each of which runs through the full Fabrik pipeline independently.
+When Plan determines that an issue is too broad for a single Implement cycle — or that work needs to happen in more than one repository — it can fan out the work into focused sub-issues, each of which runs through the full Fabrik pipeline independently. Review and Validate can declare sub-issues too, for the different case of a blocker discovered mid-flight rather than an upfront decomposition — see [Mid-flight Spawning from Review/Validate](#mid-flight-spawning-from-reviewvalidate) below. Everything in this section (block format, board registration, assignment, dependency wiring) applies identically regardless of which stage declares the spawn.
 
 **No user configuration required.** Decomposition is Plan's judgment call based on Research findings. If the issue is well-scoped and single-repo, Plan produces a normal implementation plan. If it requires parallel work or spans multiple repos, Plan declares sub-issues to spawn.
 
@@ -1525,14 +1525,17 @@ These blocks are **declarative data**, not immediate actions. They persist in th
 When the parent advances to Implement, the engine's `preImplement` step fires **before** Claude is invoked:
 
 1. Validates any `DEPENDS_ON:` headers declared in the blocks (see below); an invalid one pauses the parent before any child is created
-2. Creates each child issue in its target repo (same repo or cross-repo)
-3. Adds each child to the same project board
-4. Links each child as a `blockedBy` dependency of the parent
-5. Applies `fabrik:sub-issue` label to each child (informational)
-6. Wires any declared `DEPENDS_ON` sibling edges, once all children exist
-7. Applies `fabrik:children-spawned` to the parent (idempotency guard, applied only after step 6 succeeds)
+2. Confirms this Fabrik instance is actually configured to serve each target repo (see [Same-Repo and Cross-Repo](#same-repo-and-cross-repo) below) — if not, the spawn fails loudly rather than silently registering the child on the wrong board
+3. Creates each child issue in its target repo (same repo or cross-repo) and **assigns it to the `user:` configured on this instance** — every spawned child gets an assignee, unconditionally
+4. Adds each child to the same project board
+5. Links each child as a `blockedBy` dependency of the parent
+6. Applies `fabrik:sub-issue` label to each child (informational)
+7. Wires any declared `DEPENDS_ON` sibling edges, once all children exist
+8. Applies `fabrik:children-spawned` to the parent (idempotency guard, applied only after step 7 succeeds)
 
-If step 3's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
+If step 4's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
+
+Any failure in steps 1–3 — including the board-servability refusal in step 2 — pauses the parent with an explanatory comment and creates no children for the affected batch; there is no partial, silently-registered-but-broken spawn.
 
 #### Ordering Siblings with `DEPENDS_ON`
 
@@ -1564,6 +1567,23 @@ After spawning, the parent waits at Implement with `fabrik:blocked` until all ch
 #### Same-Repo and Cross-Repo
 
 Spawn blocks work identically whether the target is the parent's own repo or a different repo. Research is responsible for identifying which repos are in scope — it emits a `## Repositories` section listing all potentially-relevant repos. Plan is constrained to spawn only into repos Research named.
+
+**A cross-repo spawn also requires the *spawning instance's own* `repo:`/`project:` config to actually cover the target repo.** Each Fabrik instance polls exactly one project board. A multi-repo instance (no `repo:` configured) already serves any repo the org grants that board access to — spawning cross-repo into any of those repos just works, the same as it always has. A `repo:`-scoped instance, however, is declared to serve only that one repo; asking it to spawn into a different repo has no board for the engine to register the child on. Before this was enforced, that scenario silently registered the child onto the *spawning* instance's own board anyway — wrong, and invisible, since the child sat correctly in a real column the whole time, just on a board no `repo:`-scoped instance watching the *right* repo would ever see. Fabrik now refuses instead: the spawn fails loudly (parent paused, explanatory comment naming both the unservable target and this instance's own configured repo) rather than silently mis-registering. If you hit this, either point the spawning instance's own `repo:`/`project:` at a board that covers the target repo, or have a differently-configured instance perform the spawn.
+
+#### Mid-flight Spawning from Review/Validate
+
+Plan is not the only stage that can declare a spawn. Review and Validate — the stages positioned to discover a blocker mid-flight, after implementation is already underway — recognize the same `FABRIK_SPAWN_CHILD_BEGIN/END` block format, with identical board registration, assignment, and dependency wiring. This exists because an agent with `gh` available and no sanctioned route to declare a blocker will reasonably reach for `gh issue create` directly — which Fabrik never observes: no board registration, no assignee, and critically no `blocked_by` edge, so the parent has no record it is blocked at all and can proceed to merge without the blocker's fix ever landing.
+
+What differs from a Plan-stage spawn:
+
+- **Parsed from the stage's own output directly**, not from a stored comment — Review/Validate post to the linked PR, so there's no comment for the engine to re-read later the way it re-reads Plan's.
+- **Takes effect immediately**, not deferred to Implement — since Review/Validate run *after* Implement, there is no later dispatch step to defer to. The child is created, boarded, assigned, and linked as soon as the block is recognized.
+- **The receipt note is present-tense**: "Spawned 1 sub-issue: owner/repo#N. It has been registered, assigned, and linked as a blocker of this issue" — rather than Plan's "will be created when this issue advances to Implement."
+- **No separate idempotency label** — each stage dispatch's output is fresh and never replayed, so a block is only ever processed once.
+
+Once a mid-flight spawn is processed, the parent picks up `fabrik:blocked` on its next dispatch, exactly as any other dependency does — it will not proceed past the blocked stage until the newly spawned child closes.
+
+**A Validate agent that discovers a blocker will not signal completion in the same turn.** Signaling completion at Validate means "ready to merge" — on a `fabrik:yolo` issue, that can trigger an actual merge before the newly-created dependency is ever consulted, since Validate's merge decision does not separately re-check `blocked_by` state. A blocker discovered at Validate is therefore reported as BLOCKED (per Validate's own "Decision: Complete or Block" criteria), not completed alongside the spawn. Review carries no equivalent risk — completing Review while also spawning a blocker is safe, because the next stage's dispatch is gated on dependency resolution before it runs.
 
 #### Recursive Decomposition
 
