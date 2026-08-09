@@ -1184,6 +1184,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// items at Validate. See its doc comment.
 	e.settleClosedValidateAdvance(board, advancedItems)
 
+	// Awaiting-advance settle scan (#1422): the exclusive owner of a terminal
+	// advance (advanceToNextStage) that failed to move the board Status
+	// forward — most commonly a missing target Status option. Runs over the
+	// raw board snapshot, not deepFetchCandidates, for the same reason as the
+	// settle scans around it: a stranded item's stage is already complete and
+	// admission does not reliably see it. Deliberately placed after
+	// settleClosedValidateAdvance immediately above so it shares this poll's
+	// advancedItems map — that pair already retries a closed Validate item's
+	// advance unconditionally every poll, so this scan is a no-op there and
+	// only does real work for the two gaps that pair doesn't cover (see its
+	// own doc comment).
+	e.settleAwaitingAdvanceScan(board, advancedItems)
+
 	// Awaiting-CI settle scan (#1270): the sole per-poll evaluator of the CI gate
 	// for open, not-yet-complete fabrik:awaiting-ci items. Runs over the raw board
 	// snapshot, not deepFetchCandidates — the whole point is independence from the
