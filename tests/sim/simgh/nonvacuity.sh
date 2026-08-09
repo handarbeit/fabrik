@@ -676,9 +676,12 @@ mutate "copyDir silently skips a non-regular file" \
   'TestCopyDirRefusesNonRegularFiles' \
   'snapshot.go::s{\t\t\treturn fmt\.Errorf\("simgh: copying %s: mode %v is neither a regular file nor a directory; "\+\n\t\t\t\t"a bare repository should contain only those", path, info\.Mode\(\)\)}{\t\t\treturn nil}'
 
+# Neutralised by pointing the remove at a path that never exists, rather than
+# by deleting the block: deleting it would leave the errors import unused, and
+# a mutation that does not compile is one the sweep never ran.
 mutate "copyFile cannot overwrite git's read-only objects" \
   'TestSnapshotAndRestoreAreIdempotentOverAnExistingDirectory' \
-  'snapshot.go::s{\tif err := os\.Remove\(dst\); err != nil && !errors\.Is\(err, fs\.ErrNotExist\) \{\n\t\treturn fmt\.Errorf\("simgh: replacing %s: %w", dst, err\)\n\t\}\n}{}'
+  'snapshot.go::s{\tif err := os\.Remove\(dst\); err != nil && !errors\.Is\(err, fs\.ErrNotExist\) \{}{\tif err := os.Remove(dst + ".nonexistent"); err != nil \&\& !errors.Is(err, fs.ErrNotExist) \{}'
 
 mutate "RestoreInstrumented accepts a snapshot carrying no instruments" \
   'TestRestoreInstrumentedRefusesABareSnapshot' \

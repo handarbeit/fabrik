@@ -41,6 +41,48 @@
 // write the result back. A violation of this ordering surfaces only as an
 // intermittent deadlock or -race failure, so it is enforced by review.
 //
+// The instrumentation layer adds two more mutexes — MutationLog's and
+// FaultTable's — and they add no edge to that ordering, because both are
+// acquired and released *before* control enters Sim and neither is ever held
+// across a Sim call. They are leaves. Sim's own code never touches them.
+//
+// # The instrumentation layer
+//
+// A faithful model is a GitHub stand-in; three further capabilities make it a
+// test instrument. Two are cross-cutting and live in a decorator, one is part
+// of the model itself.
+//
+//   - Clock-driven schedules (schedule.go, and the Seed*At / Seed*After methods
+//     in seed.go) enqueue a mutation for a future instant on the injected
+//     clock. A step is a *pending mutation applied on read*, not a read filter:
+//     when its time arrives it writes into the model permanently, so repeated
+//     reads at one instant are stable and later engine mutations to the same
+//     surface stay observable. Sequencing is clock-driven rather than
+//     read-count-driven because one poll is not one read — see schedule.go's
+//     file comment for the full reasoning.
+//
+//   - Fault injection (fault.go) makes any engine.GitHubClient method fail on
+//     demand. The error shape is the caller's choice and it matters: the engine
+//     classifies rate-limit shapes specially, so use the ghfault constructors.
+//     RateLimitStats is the one method it cannot fail — no error return — and
+//     registering a fault against it panics rather than sitting inert.
+//
+//   - The mutation log (mutationlog.go) records every intercepted call with its
+//     outcome, in order. Attempts, not just mutations: "N failures then the
+//     success" is unexpressible otherwise. Ordering is exact within a goroutine
+//     and reserve-order across goroutines; both halves of that contract are in
+//     FIDELITY.md, because a cross-goroutine ordering assertion that looks
+//     exact and is not is a flaky test waiting to happen.
+//
+// Wrap a seeded Sim with Instrument to get the latter two. The wrapper holds
+// its *Sim as a NAMED field, never an embedded one — see instrumented.go for
+// why that one word is load-bearing.
+//
+// Snapshot/Restore (snapshot.go) round-trip the model, the backing git
+// repositories, the fault schedule and the log, so a restart scenario can
+// discard the engine and rebuild against exactly the state GitHub would have
+// retained.
+//
 // # Adding a method
 //
 // Sim pins itself to engine.GitHubClient with a compile-time assertion, so any
@@ -52,6 +94,12 @@
 // FIDELITY.md. Do not add a stub that returns an error — an unimplemented
 // method that compiles is exactly the silent-green failure mode this layer
 // must not introduce.
+//
+// Instrumented pins itself the same way, and because it holds its *Sim as a
+// named field the new method must be wrapped there too or the build breaks.
+// Add the wrapper alongside its neighbours in instrumented.go; the
+// reflection-driven tests in mutationlog_test.go and fault_test.go will then
+// confirm it is actually instrumented and actually faultable.
 package simgh
 
 import (
