@@ -24,6 +24,7 @@ func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, e
 	if err != nil {
 		return nil, err
 	}
+	s.drainReviews(pr)
 	return latestReviewsByAuthor(pr.reviews), nil
 }
 
@@ -72,6 +73,7 @@ func (s *Sim) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.Revi
 	if err != nil {
 		return nil, err
 	}
+	s.drainReviews(pr)
 	out := make([]gh.ReviewRequest, len(pr.reviewRequests))
 	copy(out, pr.reviewRequests)
 	return out, nil
@@ -86,6 +88,9 @@ func (s *Sim) AddReviewRequest(owner, repo string, prNumber int, reviewers []str
 	if err != nil {
 		return err
 	}
+	// Drain before mutating: a step already due must land before this
+	// withdrawal or addition, not after it. See schedule.go's drainReviews.
+	s.drainReviews(pr)
 	changed := false
 	for _, login := range reviewers {
 		already := false
@@ -121,6 +126,7 @@ func (s *Sim) DeleteReviewRequest(owner, repo string, prNumber int, reviewers []
 	if err != nil {
 		return err
 	}
+	s.drainReviews(pr)
 	kept := pr.reviewRequests[:0:0]
 	for _, existing := range pr.reviewRequests {
 		if !contains(reviewers, existing.Login) {
@@ -155,6 +161,7 @@ func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, e
 	if err != nil {
 		return "", err
 	}
+	s.drainReviews(pr)
 	required, ok := r.requiredApprovals[pr.base]
 	if !ok {
 		// No review requirement configured on the base branch — GraphQL

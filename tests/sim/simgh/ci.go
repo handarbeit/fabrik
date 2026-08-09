@@ -19,6 +19,7 @@ func (s *Sim) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.drainCI(r)
 	runs := r.checkRuns[sha]
 	out := make([]gh.CheckRun, len(runs))
 	copy(out, runs)
@@ -33,6 +34,7 @@ func (s *Sim) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, e
 		if err != nil {
 			return nil, err
 		}
+		s.drainCI(r)
 		if direct, ok := r.commitStatuses[ref]; ok {
 			out := make([]gh.CommitStatus, len(direct))
 			copy(out, direct)
@@ -61,6 +63,7 @@ func (s *Sim) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, e
 	if err != nil {
 		return nil, err
 	}
+	s.drainCI(r)
 	out := make([]gh.CommitStatus, len(r.commitStatuses[sha]))
 	copy(out, r.commitStatuses[sha])
 	return out, nil
