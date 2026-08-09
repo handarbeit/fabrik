@@ -451,25 +451,7 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
 	timeoutWant := fmt.Sprintf("The CI gate for stage **%s** timed out", stage.Name)
 	cycleWant := fmt.Sprintf("The stage **%s** has been re-invoked to fix CI failures", stage.Name)
-	for _, c := range item.Comments {
-		if strings.Contains(c.Body, timeoutWant) || strings.Contains(c.Body, cycleWant) {
-			return true
-		}
-	}
-	return false
-}
-
-// reapplyCIGatePauseLabels re-applies fabrik:paused + fabrik:awaiting-input
-// without posting a new comment. Used by pauseForCITimeout/
-// pauseForCIFixCycleLimit (issue #1408) when hasCIGatePauseComment finds an
-// existing pause comment for this episode: a human resuming the item removes
-// only fabrik:paused, never the comment, so a still-blocked item must be
-// re-escalated (labels reapplied) without spamming a duplicate comment.
-// applyLabelAdd's underlying AddLabelToIssue call is idempotent, so this is
-// safe to call even in the (should-be-rare) case the labels are still present.
-func (e *Engine) reapplyCIGatePauseLabels(item gh.ProjectItem) {
-	e.applyLabelAdd(item, "fabrik:paused", false)
-	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
+	return hasPauseComment(item, timeoutWant, cycleWant)
 }
 
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
@@ -489,7 +471,7 @@ func (e *Engine) reapplyCIGatePauseLabels(item gh.ProjectItem) {
 func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (escalated bool) {
 	if hasCIGatePauseComment(item, stage) {
 		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyCIGatePauseLabels(item)
+		e.reapplyPauseLabels(item)
 		return false
 	}
 	e.logf(item.Number, "ci-timeout", "CI wait timeout elapsed — pausing for human intervention\n")
@@ -511,12 +493,25 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 // for the reapply-without-repost behavior on an existing episode (issue
 // #1408) — identical shape, applied here for R5.
 //
+// Applies itemstate.EnginePaused (#1460 R2) in both branches — the fresh
+// pause AND the reapply-existing-comment branch. This is one of the four
+// confirmed one-way-door sites: CIFixCycles has no reset path other than
+// clearFailedStage's EngineCyclesCleared, and clearFailedStage only fires
+// when PausedByEngine is true. It must be (re-)applied even on the reapply
+// branch: a resume clears PausedByEngine via handleEngineUnpause, so if CI
+// keeps failing and the counter climbs back to the limit a second time, this
+// function is called again (reapply branch, since the old comment still
+// matches) and must re-arm PausedByEngine or the next resume would be a
+// no-op.
+//
 // Returns escalated: true when a fresh pause comment was posted, false when
 // an existing episode's pause was merely reapplied.
 func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasCIGatePauseComment(item, stage) {
 		e.logf(item.Number, "ci-cycles", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyCIGatePauseLabels(item)
+		e.reapplyPauseLabels(item)
+		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		return false
 	}
 	e.logf(item.Number, "ci-cycles", "CI-fix cycle limit %d reached — pausing for human intervention\n", maxCycles)
@@ -533,6 +528,7 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	return true
 }
 
