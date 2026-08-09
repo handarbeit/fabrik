@@ -80,6 +80,64 @@ func (e *claudeTurnLimitError) Error() string {
 	return fmt.Sprintf("claude exited: turn limit reached (num_turns=%d)", e.NumTurns)
 }
 
+// apiErrorTerminalReason is the CLI's structural terminal_reason value for a
+// transient Anthropic-side API error — observed live on 2026-08-08 (#1458) as
+// eight exits across two issues, each at 1 turn and $0.0000. Unlike
+// usageLimitTerminalReason, this is per-invocation and self-resolving: it
+// says nothing about the account as a whole, so it must never trigger
+// activateClaudeSuspension (see claudeAPIErrorExit's doc comment and #1458 R3).
+const apiErrorTerminalReason = "api_error"
+
+// claudeAPIErrorExit signals that a Claude invocation exited because of a
+// transient Anthropic-side API error, not because the stage genuinely
+// failed. The stage never ran, so this condition must be excluded from
+// max_retries — see handleAPIErrorExit in item.go, which is the sole
+// consumer (via errors.As).
+//
+// Deliberately a distinct type from claudeUsageLimitError, not a second
+// value recognized by classifyUsageLimitExit itself: claudeUsageLimitError
+// is also the trigger, by Go type, for two behaviors that must NOT apply
+// here — activateClaudeSuspension (item.go/comments.go, forbidden by R3,
+// since an api_error is per-invocation, not account-wide) and the
+// comment-processing circuit breaker bypass (comments.go, forbidden by R6's
+// spirit, since exempting api_error from the breaker would leave the
+// comment-triggered dispatch path with no bound at all). Being a distinct
+// type means neither errors.As(&claudeUsageLimitError{}) check ever matches
+// a *claudeAPIErrorExit, so both call sites need no changes. See ADR-1458.
+type claudeAPIErrorExit struct {
+	// TerminalReason is the CLI's own terminal_reason field, for logging.
+	TerminalReason string
+	// NumTurns is the CLI-reported turn count at exit, for logging.
+	NumTurns int
+	// CostUSD is the CLI-reported cost at exit, for logging.
+	CostUSD float64
+}
+
+func (e *claudeAPIErrorExit) Error() string {
+	return fmt.Sprintf("claude exited: transient api_error (terminal_reason=%q, num_turns=%d, cost=$%.4f)", e.TerminalReason, e.NumTurns, e.CostUSD)
+}
+
+// classifyAPIErrorExit determines whether a Claude invocation exited on a
+// transient Anthropic-side API error, using only the CLI's own structured
+// result object (resp) — never text the assistant itself wrote, per the same
+// structural-only discipline #1183 established for classifyUsageLimitExit.
+//
+// resp.TerminalReason == "api_error" is the CLI's structural signal. usage is
+// kept as the same belt-and-suspenders exclusion gate classifyUsageLimitExit
+// uses: an invocation that consumed turns and incurred real cost is never
+// classified as a did-not-run exit, regardless of what TerminalReason says
+// (#1458 R5 could not empirically verify CostUSD on a real api_error sample,
+// so this guard is reused unchanged rather than dropped — see ADR-1458).
+func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, detected bool) {
+	if resp.TerminalReason != apiErrorTerminalReason {
+		return "", false
+	}
+	if usage.TurnsUsed > 0 && usage.CostUSD > 0 {
+		return "", false
+	}
+	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
+}
+
 // classifyUsageLimitExit determines whether a Claude invocation exited on a
 // genuine account usage-limit condition, using only the CLI's own structured
 // result object (resp) — never text the assistant itself wrote. This
@@ -1336,6 +1394,9 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 			if msg, detected := classifyUsageLimitExit(resp, usage); detected {
 				claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (turns=%d, cost=$%.4f): %s\n", usage.TurnsUsed, usage.CostUSD, msg)
 				return text, false, usage, &claudeUsageLimitError{Message: msg}
+			} else if _, detected := classifyAPIErrorExit(resp, usage); detected {
+				claudeLog(issueNumber, "claude", "api_error exit detected (turns=%d, cost=$%.4f) — stage did not run, not charged against max_retries\n", usage.TurnsUsed, usage.CostUSD)
+				return text, false, usage, &claudeAPIErrorExit{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 			} else if resp.TerminalReason != "" && resp.TerminalReason != usageLimitTerminalReason {
 				// Diagnostic-only: records any other non-empty terminal_reason
 				// seen on an error exit (e.g. "rapid_refill_breaker"), so a
