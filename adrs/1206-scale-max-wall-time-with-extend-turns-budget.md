@@ -144,23 +144,37 @@ initially inherited was wrong, not just unverified: `resolveConflictWithClaude` 
 its pre-grant as `holdingStg.MaxTurns * 2` — scaled off `stage.MaxTurns`, not
 `commentMaxTurns(holdingStg)`, the base `scaledWallTime` actually divides by inside
 `InvokeClaudeForComments` (`limit` vs. `commentMaxTurns(stage)`). Whenever a stage's
-`comment_max_turns` differs from its `max_turns` — true of every stage YAML in this repo,
-which sets `max_turns: 100` and `comment_max_turns: 50` — the two bases disagreed and the
-multiplier came out to 4x (`30m` → `120m`) instead of the intended 2x, weakening the
-runaway bound for merge-train conflict resolution beyond what this issue set out to fix.
-This was a pre-existing mismatch in `merge_train.go`'s own turn-budget sizing that
-predated this issue (not part of this issue's original diff), but leaving a 4x-scaled
-deadline live on `main` as a side effect of centralizing the scaling here was judged not
-acceptable to defer, so the fix was folded into this issue rather than left solely to the
-follow-up: `resolveConflictWithClaude` now computes its pre-grant via
-`mergeTrainMaxTurnsOverride(holdingStg, extendTurns)` (`engine/merge_train.go`), which
-bases it on `commentMaxTurns(holdingStg) * 2` — the same base `scaledWallTime` divides
-by — with direct unit coverage
-(`TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase`,
-`engine/merge_train_test.go`). [#1472](https://github.com/handarbeit/fabrik/issues/1472)
-remains open only to add real-subprocess wall-time coverage for this path (mirroring the
-`engine/grandchild_test.go` tests added for `item.go`/`comments.go`), which is out of this
-issue's explicit test-coverage scope; the correctness fix itself landed here.
+`comment_max_turns` differs from its `max_turns`, the two bases disagreed and the
+multiplier came out to 4x (`30m` → `120m`) instead of the intended 2x. This mismatch was
+real and worth fixing regardless of whether any repo's config currently trips it — the
+numerator and denominator were genuinely different bases — so it was folded into this
+issue rather than left solely to the follow-up: `resolveConflictWithClaude` now computes
+its pre-grant via `mergeTrainMaxTurnsOverride(holdingStg, extendTurns)`
+(`engine/merge_train.go`), which bases it on `commentMaxTurns(holdingStg) * 2` — the same
+base `scaledWallTime` divides by — with direct unit coverage
+(`TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase`, `engine/merge_train_test.go`)
+and real-subprocess wall-time coverage against a non-degenerate holding-stage fixture
+(`TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime`,
+`engine/grandchild_test.go`, added by [#1472](https://github.com/handarbeit/fabrik/issues/1472)).
+
+**Important correction, made after this ADR first landed:** the *bug* described above was
+never live on this repo, and the "`max_turns: 100`/`comment_max_turns: 50`, true of every
+stage YAML in this repo" framing this section originally used was wrong in a way that
+mattered. `resolveConflictWithClaude` reads the *holding stage* passed in by
+`assembleTrialBranch` (`e.holdingStg`), not a pipeline stage — on this repo that is
+`Queued`, and `.fabrik/stages/queued.yaml` is three lines: `name`, `order`,
+`holding_stage: true`. It sets none of `max_turns`, `comment_max_turns`, or
+`max_wall_time`. With `holdingStg.MaxTurns == 0`, the pre-fix guard
+(`holdingStg.MaxTurns > 0`) was false, so no turn-budget pre-grant was ever applied on
+this path; and with `stage.MaxWallTime == 0`, `scaledWallTime`'s `base <= 0` guard
+short-circuited before any scaling happened. So the ratio was never actually 4x here:
+this code path was inert both before and after this issue, and merge-train conflict
+resolution ran uncapped (not at a live 4x deadline) the whole time — nothing regressed
+in production as a result of the original mismatch. The mismatch was still real and
+worth fixing (any holding-stage config that *does* set these three fields, with the two
+turn fields differing, would trip it), which is why the fix above was kept; it just never
+fired against this repo's own config. See #1472's discussion thread for the fuller
+account of this correction.
 
 ## Consequences
 
@@ -194,6 +208,8 @@ issue's explicit test-coverage scope; the correctness fix itself landed here.
 - PR #1201 — the `60m` workaround this issue's config change reverts.
 - [#1472](https://github.com/handarbeit/fabrik/issues/1472) — originally filed to fix
   `engine/merge_train.go`'s turn-budget/wall-time scaling multiplier; the correctness fix
-  landed in this issue instead (see above), and #1472 was narrowed to the remaining
-  real-subprocess test-coverage gap. Found by `handarbeit-pruefer[bot]` reviewing PR
-  #1467.
+  landed in this issue instead (see above). #1472 added the real-subprocess wall-time
+  coverage for this path (`TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime`,
+  `engine/grandchild_test.go`) and corrected this section's original "weakened the
+  runaway bound in production" framing to the latent/inert-on-this-repo account above.
+  Found by `handarbeit-pruefer[bot]` reviewing PR #1467.
