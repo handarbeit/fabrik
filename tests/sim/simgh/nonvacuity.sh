@@ -199,8 +199,8 @@ mutate_race "model mutex is removed (expects a data race)" \
   'sim.go::s{^\tmu sync\.Mutex$}{\tmu noopMutex}m' \
   'sim.go::s{^type realClock struct\{\}$}{type noopMutex struct{}\n\nfunc (noopMutex) Lock()   {}\nfunc (noopMutex) Unlock() {}\n\nvar _ sync.Mutex\n\ntype realClock struct{}}m'
 
-mutate_race "per-repo git serialisation is removed" \
-  'TestConcurrentTrialMergesOnOneRepo|TestConcurrentModelAccess' \
+mutate "per-repo git serialisation is removed" \
+  'TestConcurrentMergesOntoOneBase' \
   'model.go::s|^\tgitMu sync\.Mutex$|\tgitMu noopGitMutex|m' \
   'model.go::s|\z|\ntype noopGitMutex struct{}\n\nfunc (noopGitMutex) Lock() {}\nfunc (noopGitMutex) Unlock() {}\n\nvar _ sync.Mutex\n|'
 

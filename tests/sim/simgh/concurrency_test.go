@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -202,11 +203,13 @@ func TestConcurrentModelAccess(t *testing.T) {
 	}
 }
 
-// TestConcurrentTrialMergesOnOneRepo hammers the single most git-hostile path:
-// repeated trial merges against one repository from several goroutines. Each
-// probe checks out a throwaway worktree; without per-repo serialisation these
-// collide on the repo's worktree administration and produce either a git error
-// or a wrong answer.
+// TestConcurrentTrialMergesOnOneRepo runs repeated trial merges against one
+// repository from several goroutines, checking that two probes of different
+// PRs never contaminate each other's answer.
+//
+// Note what this does *not* prove: removing the per-repo git mutex leaves it
+// green, because each probe works in its own throwaway worktree and moves no
+// ref. TestConcurrentMergesOntoOneBase is the case that pins the mutex.
 func TestConcurrentTrialMergesOnOneRepo(t *testing.T) {
 	s, _ := newSim(t)
 	s.SeedRepo(repoName).
@@ -250,6 +253,85 @@ func TestConcurrentTrialMergesOnOneRepo(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// TestConcurrentMergesOntoOneBase is the test that actually pins per-repo git
+// serialisation.
+//
+// Concurrent read-only trial merges turn out to be fairly benign — each runs in
+// its own throwaway worktree and touches no ref. The genuine hazard is the
+// read-modify-write MergePR performs: it checks the base branch out, merges
+// onto it, and moves the ref. Two of those interleaved both fork from the same
+// tip and both move the ref, so the first merge is silently lost — a wrong
+// answer, not a crash, and one no race detector would report. The merge train
+// merges several PRs onto one base, so this is a shape the engine really
+// produces.
+func TestConcurrentMergesOntoOneBase(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo(repoName).
+		SeedCommit(repoName, "main", map[string]string{"base.txt": "base\n"}, "base")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding base: %v", err)
+	}
+
+	// Three PRs off main, each adding a distinct file so no merge conflicts.
+	const prCount = 3
+	for i := 1; i <= prCount; i++ {
+		branch := fmt.Sprintf("feature-%d", i)
+		s.SeedCommitFrom(repoName, branch, "main", map[string]string{
+			fmt.Sprintf("feature-%d.txt", i): "content\n",
+		}, fmt.Sprintf("feature %d", i)).
+			SeedPR(repoName, PRSeed{Number: i, Head: branch, Base: "main"})
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding PRs: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, prCount)
+	for i := 1; i <= prCount; i++ {
+		wg.Add(1)
+		go func(num int) {
+			defer wg.Done()
+			if err := s.MergePR("acme", "widgets", num); err != nil {
+				errs <- fmt.Errorf("MergePR(%d): %w", num, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// Every merge must be present in main's tree. A lost update shows up here
+	// as a missing file, even though every MergePR call returned nil.
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	r.gitMu.Lock()
+	tree, gitErr := runGit(r.bareDir, "ls-tree", "--name-only", "refs/heads/main")
+	r.gitMu.Unlock()
+	if gitErr != nil {
+		t.Fatalf("ls-tree: %v", gitErr)
+	}
+	for i := 1; i <= prCount; i++ {
+		want := fmt.Sprintf("feature-%d.txt", i)
+		if !strings.Contains(tree, want) {
+			t.Errorf("main is missing %s after a concurrent merge; tree = %q", want, tree)
+		}
+	}
+
+	for i := 1; i <= prCount; i++ {
+		merged, err := s.FetchPRMerged("acme", "widgets", i)
+		if err != nil {
+			t.Fatalf("FetchPRMerged(%d): %v", i, err)
+		}
+		if !merged {
+			t.Errorf("PR %d does not report merged", i)
+		}
 	}
 }
 
