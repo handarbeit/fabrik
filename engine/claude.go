@@ -638,7 +638,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	ld := logDirForItem(issue)
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
-	limit := commentMaxTurns(stage)
+	base := commentMaxTurns(stage)
+	limit := base
 	if opts.MaxTurnsOverride > 0 {
 		limit = opts.MaxTurnsOverride
 	}
@@ -648,7 +649,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
-	wallTime := scaledWallTime(stage.MaxWallTime, limit, commentMaxTurns(stage))
+	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
