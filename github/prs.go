@@ -197,6 +197,120 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	return result.Data.Repository.PullRequest.ReviewDecision, nil
 }
 
+// FetchPRReviewThreads returns every review thread on a pull request —
+// resolved and unresolved alike — via GraphQL, keyed on PR number (same
+// base-independent shape as FetchPRReviewDecision, since Pruefer reviews PRs
+// directly with no linked issue in scope).
+//
+// Unlike applyLinkedPRs' engine-facing fetch (which discards resolved-thread
+// bodies and only counts them, since only unresolved feedback is actionable
+// for a reinvoke), this returns full thread content — including resolved
+// threads — because Pruefer's prompt-assembly use case needs to see how a
+// prior finding was addressed, not just that it was. See
+// adrs/1497-pruefer-prior-review-thread-context.md.
+//
+// Threads are capped at 50 (GraphQL's reviewThreads(first: 50), matching the
+// existing fetchItemDetailsQuery fragment's ceiling) and comments per thread
+// at 20; neither is paginated. A PR with more threads than that silently
+// loses the excess at this layer — out of scope for the caller's own
+// prompt-level cap (a much smaller number).
+//
+// Returns an error (not an empty slice) when the query resolves with no
+// pullRequest node, matching FetchPRReviewDecision's convention.
+func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, error) {
+	query := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 20) {
+            nodes {
+              author { login }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	vars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest *struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID           string `json:"id"`
+							IsResolved   bool   `json:"isResolved"`
+							IsOutdated   bool   `json:"isOutdated"`
+							Path         string `json:"path"`
+							Line         *int   `json:"line"`
+							OriginalLine *int   `json:"originalLine"`
+							Comments     struct {
+								Nodes []struct {
+									Author *struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									Body      string `json:"body"`
+									CreatedAt string `json:"createdAt"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return nil, fmt.Errorf("fetching PR #%d review threads: %w", prNumber, err)
+	}
+	if result.Data.Repository.PullRequest == nil {
+		return nil, fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	var threads []PRReviewThread
+	for _, n := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		line := 0
+		if n.Line != nil {
+			line = *n.Line
+		} else if n.OriginalLine != nil {
+			line = *n.OriginalLine
+		}
+		t := PRReviewThread{
+			ID:         n.ID,
+			Path:       n.Path,
+			Line:       line,
+			IsResolved: n.IsResolved,
+			IsOutdated: n.IsOutdated,
+		}
+		for _, cm := range n.Comments.Nodes {
+			tc := PRReviewThreadComment{Body: cm.Body}
+			if cm.Author != nil {
+				tc.Author = cm.Author.Login
+			}
+			if ts, err := parseTime(cm.CreatedAt); err == nil {
+				tc.CreatedAt = ts
+			}
+			t.Comments = append(t.Comments, tc)
+		}
+		threads = append(threads, t)
+	}
+	return threads, nil
+}
+
 // FetchPRReviewRequests returns the outstanding requested reviewers for a pull
 // request via the REST API, keyed on PR number — the base-independent counterpart
 // to the GraphQL-nested reviewRequests field. Team review requests are ignored,
