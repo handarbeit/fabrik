@@ -204,6 +204,9 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 		if aerr := e.recordAdvanceOutcome(board, item, stage); aerr != nil {
 			e.logf(item.Number, "warn", "pr-terminal: could not advance to Done: %v\n", aerr)
 		}
+		// Runs unconditionally, regardless of the advance's outcome above —
+		// see awaitingAdvanceLabel's doc comment (advance_settle.go) for why
+		// that's safe even when recordAdvanceOutcome just failed.
 		e.closeIssueIfNonDefaultBase(item, pr.Number)
 		advancedItems[iKey] = true
 		return

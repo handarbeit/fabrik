@@ -14,14 +14,28 @@ import (
 // forward — most commonly because the target stage's Status option does not
 // exist on the board (#1422). Unlike fabrik:awaiting-done (ADR-060), which is
 // applied unconditionally before the Done-move is attempted, this label is
-// applied only in the failure branch: advanceToNextStage is the last
-// mutation at both call sites, so by the time it can fail, every other side
-// effect (gate-label clearing, completion-label filling,
-// fabrik:auto-merge-enabled removal) has already landed — the same shape as
-// fabrik:awaiting-close (ADR-1097). Durable (a GitHub label, not an
-// itemstate.Store-only marker) so a stranded item survives an engine restart
-// and is picked up by settleAwaitingAdvanceScan without operator
-// intervention beyond fixing the underlying board misconfiguration.
+// applied only in the failure branch: advanceToNextStage is the last board
+// mutation both call sites make before it, so by the time it can fail, every
+// other side effect that precedes it (gate-label clearing, completion-label
+// filling, fabrik:auto-merge-enabled removal) has already landed — the same
+// shape as fabrik:awaiting-close (ADR-1097).
+//
+// One caveat (Pruefer, PR #1469 review, third round): advanceToNextStage is
+// not the *final* mutation at either call site — both unconditionally call
+// closeIssueIfNonDefaultBase (§6.13/ADR-1096) immediately afterward,
+// regardless of whether the advance just succeeded or failed, so a
+// non-default-base issue can end up closed while fabrik:awaiting-advance is
+// still outstanding. This is pre-existing ordering, not something this
+// label's introduction changes, and it's harmless: settleAwaitingAdvanceScan
+// doesn't filter on IsClosed, so the retry (and, on exhaustion, the escalation
+// pause/comment) still land correctly — just on an issue that is already
+// closed, which can read oddly to an operator. closeIssueIfNonDefaultBase's
+// own failures have an independent owner (fabrik:awaiting-close).
+//
+// Durable (a GitHub label, not an itemstate.Store-only marker) so a stranded
+// item survives an engine restart and is picked up by
+// settleAwaitingAdvanceScan without operator intervention beyond fixing the
+// underlying board misconfiguration.
 const awaitingAdvanceLabel = "fabrik:awaiting-advance"
 
 // advanceAwaitingRetryStage is a dedicated, non-real stage name used to key

@@ -674,6 +674,9 @@ func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.Projec
 	if err := e.recordAdvanceOutcome(board, item, stage); err != nil {
 		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
 	}
+	// Runs unconditionally on a confirmed merge, regardless of the advance's
+	// outcome above — see awaitingAdvanceLabel's doc comment (advance_settle.go)
+	// for why that's safe even when recordAdvanceOutcome just failed.
 	if merged {
 		e.closeIssueIfNonDefaultBase(item, prNumber)
 	}
