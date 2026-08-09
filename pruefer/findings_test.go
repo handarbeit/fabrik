@@ -147,8 +147,50 @@ func TestDedupeFindings_SeverityCollision_KeepsHigherSeverity(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("dedupeFindings = %+v, want 1 entry", got)
 	}
-	if got[0].Severity != SeverityCritical || got[0].Body != "critical take" {
-		t.Errorf("got[0] = %+v, want the critical-severity entry to survive", got[0])
+	if got[0].Severity != SeverityCritical {
+		t.Errorf("got[0].Severity = %q, want %q", got[0].Severity, SeverityCritical)
+	}
+}
+
+// TestDedupeFindings_DistinctBodiesOnCollision_BothPreserved guards against
+// dedupeFindings silently discarding a genuinely distinct finding that
+// happens to share an anchor with another: unlike partitionFindings (which
+// happily emits multiple separate inline comments at one line), dedup must
+// not pick a winner and drop the loser's content with no trace.
+func TestDedupeFindings_DistinctBodiesOnCollision_BothPreserved(t *testing.T) {
+	findings := []ReviewFinding{
+		{Path: "a.go", Line: 1, Body: "out-of-bounds slice access", Severity: SeverityHigh},
+		{Path: "a.go", Line: 1, Body: "unrelated: this branch never releases the lock", Severity: SeverityMedium},
+	}
+	got := dedupeFindings(findings)
+	if len(got) != 1 {
+		t.Fatalf("dedupeFindings = %+v, want 1 entry", got)
+	}
+	if !strings.Contains(got[0].Body, "out-of-bounds slice access") {
+		t.Errorf("got[0].Body = %q, missing first finding's text", got[0].Body)
+	}
+	if !strings.Contains(got[0].Body, "unrelated: this branch never releases the lock") {
+		t.Errorf("got[0].Body = %q, missing second finding's text", got[0].Body)
+	}
+	if got[0].Severity != SeverityHigh {
+		t.Errorf("got[0].Severity = %q, want %q", got[0].Severity, SeverityHigh)
+	}
+}
+
+// TestDedupeFindings_IdenticalBodyOnCollision_NotDuplicatedInMerge ensures
+// the literal-restatement case (the one #1477 actually exhibited) doesn't
+// produce a merged body with the same sentence repeated twice.
+func TestDedupeFindings_IdenticalBodyOnCollision_NotDuplicatedInMerge(t *testing.T) {
+	findings := []ReviewFinding{
+		{Path: "a.go", Line: 1, Body: "same exact restatement", Severity: SeverityMedium},
+		{Path: "a.go", Line: 1, Body: "same exact restatement", Severity: SeverityMedium},
+	}
+	got := dedupeFindings(findings)
+	if len(got) != 1 {
+		t.Fatalf("dedupeFindings = %+v, want 1 entry", got)
+	}
+	if got[0].Body != "same exact restatement" {
+		t.Errorf("got[0].Body = %q, want the single unduplicated body", got[0].Body)
 	}
 }
 
