@@ -120,6 +120,25 @@ func TestSeedRejectsNumberHeldByOtherKind(t *testing.T) {
 	}
 }
 
+// TestSeedProjectItemRejectsPRCard pins that an unmodelled PR card fails loudly
+// at seed time.
+//
+// Board projections resolve a card's content as an issue, so a PR card would be
+// omitted from every board read with no error — a scenario would assert against
+// a board the model never built and pass for the wrong reason.
+func TestSeedProjectItemRejectsPRCard(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedProject("acme", 2, "Engineering", []string{"Backlog", "Done"}).
+		SeedCommit("acme/widgets", "feature", map[string]string{"a.txt": "a"}, "work").
+		SeedPR("acme/widgets", PRSeed{Number: 4, Title: "a PR", Head: "feature"}).
+		SeedProjectItem("acme", 2, "acme/widgets", 4, true, "Backlog")
+
+	if err := s.Err(); err == nil {
+		t.Fatal("seeding a PR card succeeded; want a failure, since board projections cannot represent one")
+	}
+}
+
 // TestAutoAssignedNumberSkipsSeededHoles pins that auto-assignment steps over a
 // number already held by either kind, rather than colliding with it.
 func TestAutoAssignedNumberSkipsSeededHoles(t *testing.T) {

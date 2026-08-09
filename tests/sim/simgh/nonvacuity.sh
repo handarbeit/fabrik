@@ -208,6 +208,10 @@ mutate "seeding does not enforce the shared number space" \
   'TestSeedRejectsNumberHeldByOtherKind' \
   'seed.go::s{\} else if r\.numberTaken\(num\) \{}{\} else if false \{}g'
 
+mutate "a PR card is accepted and silently dropped" \
+  'TestSeedProjectItemRejectsPRCard' \
+  'seed.go::s{\tif isPR \{}{\tif false \{}'
+
 mutate "timestamps come from wall time, not the injected clock" \
   'TestLabelAddRemoveIsObservable' \
   'sim.go::s{func \(s \*Sim\) now\(\) time\.Time \{ return s\.clock\.Now\(\) \}}{func (s *Sim) now() time.Time { return time.Now() }}'

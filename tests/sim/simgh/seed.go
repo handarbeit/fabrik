@@ -358,6 +358,16 @@ func (s *Sim) placeOnProjectLocked(p *projectState, ownerRepo string, number int
 		s.fail("simgh: project %s has no column %q", p.id, status)
 		return
 	}
+	if isPR {
+		// Board projections resolve a card's content as an issue
+		// (buildProjectItem), so a PR card would read back as nothing at all —
+		// every board fetch would silently omit it, with no error. Refuse it at
+		// seed time instead: a loud failure here beats a scenario quietly
+		// asserting against a board the model never built. Recorded in
+		// FIDELITY.md as absent.
+		s.fail("simgh: PR cards on a project board are not modelled (%s#%d); see FIDELITY.md", ownerRepo, number)
+		return
+	}
 	id := itemNodeID(p.owner, p.num, ownerRepo, number)
 	if existing, ok := p.items[id]; ok {
 		existing.status = status

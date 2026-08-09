@@ -338,6 +338,17 @@ Projects are keyed by `(owner, number)`, because Projects v2 is owner-scoped, no
 repo-scoped. The `repo` argument on a board fetch is a query input, not part of
 the project's identity.
 
+### PR cards on a board — **Absent**
+
+A project board can hold pull-request cards as well as issue cards, but the
+model's board projections (`buildProjectItem`, `ProbeProjectBoard`) resolve a
+card's content as an issue. A PR card would therefore read back as nothing —
+silently omitted from every board fetch, with no error.
+
+`SeedProjectItem` rejects `isPR: true` rather than accepting it and dropping the
+card later. A scenario that needs the engine's PR-card handling (which
+`itemMayNeedWork` skips) cannot be written on this layer.
+
 ### `ownerType` — **Simplified**
 
 `FetchProjectBoard` accepts `ownerType` and echoes it back but does not use it.
