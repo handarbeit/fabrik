@@ -102,6 +102,25 @@ var catchUpPhase1Handlers = []catchUpHandler{
 // item — the rest of the chain (including the cycle-limit checks that would
 // otherwise re-pause) must still run in the same pass so a genuine resume
 // converges in one poll (AC2), not two.
+//
+// Scope note (#1460 review finding): the check below is `snap.PausedByEngine`
+// for the item's current stage, not specifically one of the four named sites
+// — it fires for *any* stage whose EnginePaused record is stale when the item
+// reaches this chain, including escalateFailedStage/escalatePRCreationFailure/
+// handleBoundaryViolation/pauseForSliceLimit's own EnginePaused applications.
+// This is currently safe, not merely idempotent-by-luck: every one of those
+// other appliers pauses strictly *before* stage:<name>:complete is set for
+// that stage (mid-invocation, on a non-terminal Claude exit), and this chain
+// is reachable only for items that are already stage-complete (or carrying
+// fabrik:awaiting-ci) — see the reachability argument above. So a stage
+// paused by one of those sites can never simultaneously be in the
+// stage-complete-or-awaiting-ci state this chain requires; by the time such a
+// stage does reach stage:<name>:complete, processItem's own gate has already
+// cleared its EnginePaused record on the resuming dispatch, well before this
+// chain would ever see it. If a future pause site ever applies EnginePaused
+// after its stage is already marked complete, it would be picked up here too
+// — which is the intended, general behavior (any stale EnginePaused record on
+// a stage-complete item should reset), not a defect to guard against.
 func (e *Engine) handleEngineUnpause(pctx *phase1Ctx) bool {
 	repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
 	snap, err := e.store.Get(repoStr, pctx.item.Number)

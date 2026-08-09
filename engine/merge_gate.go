@@ -610,6 +610,21 @@ func rebaseCyclePauseFragment(stage *stages.Stage) string {
 //
 // Returns escalated: true when a fresh pause comment was posted, false when
 // an existing episode's pause was merely reapplied.
+//
+// The pause message also asks the operator to remove fabrik:rebase-needed
+// alongside fabrik:paused (#1460 review finding: clearFailedStage, run by
+// handleEngineUnpause on resume, never touches fabrik:rebase-needed — it only
+// knows about EnginePaused/cycle-counter state, not this gate's own label).
+// Confirmed harmless either way: checkMergeabilityGate recomputes
+// fabrik:rebase-needed from GitHub's live mergeability on every catch-up
+// pass, independent of what clearFailedStage did — if the conflict is
+// resolved it clears the label itself (removeRebaseNeededLabel), and if the
+// conflict persists it re-applies the label (idempotent) and a fresh rebase
+// reinvoke is exactly what should happen against the just-reset RebaseCycles.
+// So a stale fabrik:rebase-needed left behind by a manual unpause self-heals
+// on the very next observation and never blocks or misleads the gate either
+// way; the message's instruction to remove it is a courtesy, not a
+// requirement.
 func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasPauseComment(item, rebaseCyclePauseFragment(stage)) {
