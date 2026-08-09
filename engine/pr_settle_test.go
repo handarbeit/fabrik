@@ -354,7 +354,14 @@ func TestSettle_MergeableStateClean_ReturnsReady(t *testing.T) {
 	}
 }
 
-func TestSettle_MergeableStateUnstable_ReturnsReady(t *testing.T) {
+// TestSettle_MergeableStateUnstable_NoCheckRuns_ReturnsUnsettled confirms
+// ADR-1441's narrowed shortcut: "unstable" no longer short-circuits to
+// PRMergeReady. With zero check runs observed (FetchCheckRuns defaults to
+// (nil, nil) — no fetchCheckRunsFn configured), it falls through into the
+// existing R3/branch-protection-signal branch and blocks as PRMergeUnsettled,
+// exactly like "blocked" already does — re-evaluated next poll, not a green
+// light. See ADR-1441.
+func TestSettle_MergeableStateUnstable_NoCheckRuns_ReturnsUnsettled(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
@@ -365,8 +372,93 @@ func TestSettle_MergeableStateUnstable_ReturnsReady(t *testing.T) {
 	}
 	eng := testEngineForMerge(t, client)
 	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeUnsettled {
+		t.Errorf("expected PRMergeUnsettled for mergeable_state=unstable with no check runs, got %v", r.Status)
+	}
+	if r.MergeableState != "unstable" {
+		t.Errorf("expected MergeableState=unstable in result, got %q", r.MergeableState)
+	}
+}
+
+// TestSettle_MergeableStateUnstable_FailedCheckRun_ReturnsBlocked is the
+// direct regression test for #1441 / the PR #1429 incident: a PR reporting
+// mergeable_state=unstable with a concluded failure check run on its head SHA
+// must not clear the CI gate. This must fail against pre-ADR-1441 main (AC1,
+// AC8) — the old shortcut returned PRMergeReady for any accepted
+// mergeable_state before ever calling FetchCheckRuns.
+func TestSettle_MergeableStateUnstable_FailedCheckRun_ReturnsBlocked(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "unstable", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeBlocked {
+		t.Errorf("expected PRMergeBlocked for mergeable_state=unstable with a failed check run, got %v (%s)", r.Status, r.Reason)
+	}
+	if r.MergeableState != "unstable" {
+		t.Errorf("expected MergeableState=unstable in result, got %q", r.MergeableState)
+	}
+}
+
+// TestSettle_MergeableStateUnstable_PendingCheckRun_ReturnsUnsettled covers
+// R2: a still-running non-required check under mergeable_state=unstable must
+// classify as blocked-not-failed (PRMergeUnsettled), not a confirmed failure —
+// re-evaluated next poll under the existing CIWaitTimeout backstop, never a
+// false PRMergeReady pass.
+func TestSettle_MergeableStateUnstable_PendingCheckRun_ReturnsUnsettled(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "unstable", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Test and vet", Status: "in_progress"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeUnsettled {
+		t.Errorf("expected PRMergeUnsettled for mergeable_state=unstable with a pending check run, got %v", r.Status)
+	}
+}
+
+// TestSettle_MergeableStateUnstable_SkippedChecksOnly_ReturnsReady covers R5:
+// skipped/neutral/cancelled conclusions must not block. A PR that is
+// unstable purely because of non-blocking check conclusions still clears.
+func TestSettle_MergeableStateUnstable_SkippedChecksOnly_ReturnsReady(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "unstable", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "optional-lint", Status: "completed", Conclusion: "skipped"},
+				{Name: "optional-preview", Status: "completed", Conclusion: "neutral"},
+				{Name: "optional-canary", Status: "completed", Conclusion: "cancelled"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
 	if r.Status != PRMergeReady {
-		t.Errorf("expected PRMergeReady for mergeable_state=unstable, got %v", r.Status)
+		t.Errorf("expected PRMergeReady for mergeable_state=unstable with only skipped/neutral/cancelled checks, got %v (%s)", r.Status, r.Reason)
 	}
 }
 
