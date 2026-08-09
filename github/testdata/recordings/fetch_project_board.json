@@ -1,0 +1,178 @@
+{
+  "provenance": {
+    "operation": "fetch_project_board",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-08-09T18:35:00Z",
+    "source_repo": "handarbeit/fabrik (project #1, read-only)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "organization": {
+        "projectV2": {
+          "id": "PVT_kwDOENB0Ac4BW0n_",
+          "title": "Fabrik",
+          "items": {
+            "totalCount": 94,
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "Y3Vyc29yOnYyOpK5MDAwMDAwMDAuMDAyMDI4Mzk3NTY1OTIyOc4MpMDr"
+            },
+            "nodes": [
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zXpw",
+                "updatedAt": "2026-08-09T18:29:26Z",
+                "fieldValueByName": {
+                  "name": "Plan"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_NaWQ",
+                  "number": 1457,
+                  "title": "test: simgh scripting, fault injection, mutation log, and snapshot/restore",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T18:29:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "model:opus"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtnw0U",
+                "updatedAt": "2026-07-26T19:31:00Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDMefTw",
+                  "number": 774,
+                  "title": "fabrik: re-enable Done-stage auto-archive with completion-anchored timing",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:30:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtsWSQ",
+                "updatedAt": "2026-08-02T21:25:32Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDQvz9g",
+                  "number": 815,
+                  "title": "fix: prevent stage Claude from posting via gh issue comment directly (skill + tool allowlist)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:25:31Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "reconsider"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgv_E0Y",
+                "updatedAt": "2026-08-02T21:25:43Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABFvM0aQ",
+                  "number": 884,
+                  "title": "feat(stages): skip redundant test runs when required checks already green on HEAD",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:25:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "reconsider"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgykwOs",
+                "updatedAt": "2026-07-26T19:13:23Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABIitXew",
+                  "number": 971,
+                  "title": "e2e: full suite oversubscribes the shared bed \u2192 cascading timeouts (harness parallelism cap)",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:14:11Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
