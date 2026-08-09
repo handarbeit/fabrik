@@ -48,6 +48,25 @@ takes no strategy argument (production's does not either), so every merge is a
 merge commit. A scenario that depends on squash-merge history shape cannot be
 written here.
 
+**A merge that would write no commit is refused, not recorded.** `git merge
+--no-ff` prints *"Already up to date."* and exits **zero** when the head is
+already contained in the base, leaving the tip untouched — the state a second
+merge of the same branch reaches. `tryMerge` compares the result against the
+pre-merge base tip and refuses on the commit path (surfaced through `MergePR`
+as `gh.ErrNotMergeable`), because publishing an unchanged ref would flip
+`merged = true` having written no merge commit at all, silently contradicting
+the guarantee stated above.
+
+The read-only probe is deliberately **not** affected: nothing-to-merge is
+genuinely not a conflict, so `FetchPRMergeable` still reports true. GitHub
+behaves the same way — it reports no conflict, and its merge endpoint declines
+to manufacture an empty merge commit rather than calling the PR unmergeable.
+
+**Risk:** low, and it is the conservative direction — a scenario gets a loud
+refusal rather than a false success. What is *not* verified against a recorded
+response is GitHub's exact status code and message in this corner; only the
+shape (refuse, do not fabricate) is modelled.
+
 ### Commits behind — **Modelled**
 
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
@@ -363,21 +382,19 @@ projections; it is left open here because it is a behavioural change to the
 model rather than a documentation one, and belongs with the harness work that
 first depends on the distinction (#1457).
 
-### Comment edits bump the issue, not the PR — **Simplified**
+### Comment edits bump the parent's updatedAt — **Modelled**
 
-`UpdateComment` bumps the parent issue's `updatedAt`, as GitHub does when a
-comment is edited. This is not incidental: the engine rewrites an existing stage
-comment rather than posting a new one (`engine/comments.go`,
-`engine/dependencies.go`), so an unbumped timestamp would hide a real edit from
-any read that watches `updatedAt` to decide something changed.
+`UpdateComment` bumps the parent's `updatedAt`, as GitHub does when a comment is
+edited — the issue's for an issue comment, the PR's for a PR or review-thread
+comment. This is not incidental: the engine rewrites an existing stage comment
+rather than posting a new one (`engine/comments.go`, `engine/dependencies.go`),
+so an unbumped timestamp would hide a real edit from any read that watches
+`updatedAt` to decide something changed. The PR side is observable too —
+`buildProjectItem` folds a linked PR's `updatedAt` into the board item's, and
+`ProbeProjectBoard` surfaces it as `LinkedPRUpdatedAt`.
 
-Editing a comment that belongs to a **PR** bumps nothing — `prRecord` has no
-`updatedAt`, and `ProjectItem.UpdatedAt` is derived from the issue. Adding a
-*reaction* deliberately bumps nothing either, matching GitHub, which does not
+Adding a *reaction* deliberately bumps nothing, matching GitHub, which does not
 treat a reaction as an update to the parent.
-
-**Risk:** low. The lax direction only — a PR-comment edit is invisible to
-timestamp-watching reads that would have seen it on real GitHub.
 
 ### Assignees — **Modelled**
 
@@ -585,7 +602,15 @@ root, and absolute paths are refused rather than silently relocated by
 refuses the whole commit and leaves the branch tip untouched rather than writing
 the map's other files first.
 
-**Risk (both checks): low.** Seed data is authored by test writers, not
+Throwaway worktrees are the third door, and are handled by placement rather
+than validation: `withWorktree` creates them under `baseDir`, not the OS temp
+dir. Its deferred cleanup removes them on every ordinary path, but a process
+killed mid-merge (OOM, SIGKILL, a CI timeout) never runs deferred code, and an
+orphan under the OS temp dir would outlive both this sandbox and
+`t.TempDir()`'s cleanup. Keeping it inside `baseDir` makes the test framework
+the backstop.
+
+**Risk (all three): low.** Seed data is authored by test writers, not
 attacker-controlled input, so this is a sandbox-hygiene guarantee — everything
 this package creates stays inside the `baseDir` you gave it — rather than a
 security boundary. Do not treat `simgh` as safe against hostile input.
@@ -679,7 +704,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 61 mutations, and
+   package cannot back up. The sweep currently catches all 64 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
