@@ -19,11 +19,21 @@ import (
 //		SeedIssue("acme/widgets", simgh.IssueSeed{Number: 7, Title: "…", Status: "Implement"})
 //	if err := s.Err(); err != nil { t.Fatal(err) }
 //
-// Seeding constructs *static initial state only*. There is deliberately no way
-// here to script a sequence of future responses, inject a fault, or replay a
-// mutation log — those are a separate layer (#1457) that will build on these
-// same objects. Keeping seeding static is what lets that layer be added
-// without breaking this API.
+// Most Seed* methods construct *static initial state*: the board as it stands
+// when the scenario begins. Alongside them are the Seed*At / Seed*After
+// methods, which enqueue a mutation for a future instant on the injected clock
+// — "this SHA goes red at T", "the reviewer responds forty minutes in". They
+// are the same seeding idiom (sticky error, chainable) and write into the same
+// objects; what differs is *when* the write lands. See schedule.go for why
+// sequencing is clock-driven rather than read-count-driven, and FIDELITY.md
+// for what a scheduled surface lets a scenario construct that real GitHub
+// never would.
+//
+// Fault injection and the mutation log are deliberately *not* here. They are
+// cross-cutting concerns over every interface method, and live in the
+// instrumentation layer (instrumented.go, fault.go, mutationlog.go) which
+// decorates a Sim rather than modifying it. Wrap a seeded Sim with Instrument
+// to get them.
 
 // IssueSeed describes an issue to create.
 type IssueSeed struct {
@@ -800,6 +810,261 @@ func (s *Sim) SeedMergeQueueEnabled(ownerRepo string, enabled bool) *Sim {
 	defer s.mu.Unlock()
 	r.mergeQueueEnabled = enabled
 	return s
+}
+
+// SeedRateLimits overrides the static budgets RateLimitStats reports, after
+// construction and chainably (WithClock's sibling WithRateLimits does the same
+// at construction).
+//
+// This is the controllability the rate-limit surface actually needs.
+// RateLimitStats is the one interface method with no error return, so fault
+// injection cannot fail it — registering a fault against it panics rather than
+// sitting silently inert (see fault.go). What the engine consumes from it is
+// budget *ratios* (engine/backoff.go), so scripting the numbers is what makes
+// its thresholds reachable. Recorded in FIDELITY.md.
+func (s *Sim) SeedRateLimits(restLimit, restRemaining, graphqlLimit, graphqlRemaining int) *Sim {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if restRemaining > restLimit || graphqlRemaining > graphqlLimit {
+		s.fail("simgh: SeedRateLimits: remaining (%d rest, %d graphql) cannot exceed the limit (%d rest, %d graphql)",
+			restRemaining, graphqlRemaining, restLimit, graphqlLimit)
+		return s
+	}
+	s.restRate = rateBudget{limit: restLimit, remaining: restRemaining, used: restLimit - restRemaining, resetIn: time.Hour}
+	s.graphqlRate = rateBudget{limit: graphqlLimit, remaining: graphqlRemaining, used: graphqlLimit - graphqlRemaining, resetIn: time.Hour}
+	return s
+}
+
+// --- scheduled seeding -----------------------------------------------------
+//
+// The Seed*At / Seed*After methods enqueue a mutation for a future instant on
+// the injected clock instead of applying it now. The step lands on the first
+// read of that surface at or after its time, and the write is permanent — see
+// schedule.go for why that shape rather than a read filter, and why the clock
+// rather than a read count.
+//
+// Every one of them refuses an empty step: a scheduled mutation that changes
+// nothing could never be observed, so a scenario built on one would pass
+// without its sequence ever having existed.
+
+// SeedCheckRunsAt schedules check runs to land on a SHA at instant at.
+//
+// A run whose ID matches one already recorded for that SHA **supersedes it in
+// place**, which is how a scenario models one check *transitioning* (queued →
+// in_progress → failure): pass the same explicit ID each time. A run with a
+// new or auto-assigned ID is appended, which models a *rerun* — the shape
+// production's latestCheckRunsByName reduces by keeping the highest ID.
+//
+// Unlike SeedCheckRun, reusing an existing ID here is allowed rather than a
+// seeding error, precisely because the transition case needs it.
+func (s *Sim) SeedCheckRunsAt(ownerRepo, sha string, at time.Time, runs ...gh.CheckRun) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(runs) == 0 {
+		s.fail("simgh: SeedCheckRunsAt(%s, %s): no check runs given; an empty step is unobservable", ownerRepo, sha)
+		return s
+	}
+	prepared := make([]gh.CheckRun, 0, len(runs))
+	for _, run := range runs {
+		prepared = append(prepared, s.reserveCheckRunID(run))
+	}
+	r.ciSchedule.add(at, func(rs *repoState) {
+		for _, run := range prepared {
+			rs.checkRuns[sha] = upsertCheckRun(rs.checkRuns[sha], run)
+		}
+	})
+	return s
+}
+
+// SeedCheckRunsAfter is SeedCheckRunsAt relative to the clock's current
+// reading.
+func (s *Sim) SeedCheckRunsAfter(ownerRepo, sha string, d time.Duration, runs ...gh.CheckRun) *Sim {
+	return s.SeedCheckRunsAt(ownerRepo, sha, s.now().Add(d), runs...)
+}
+
+// SeedCommitStatusesAt schedules classic commit statuses to land on a SHA at
+// instant at.
+//
+// Statuses are appended rather than superseded by context, because that is
+// already how the classic Statuses API behaves and how contextsForSHA reduces
+// them: the last one posted for a context wins. Posting a second status for
+// the same context is therefore the transition, with no ID bookkeeping needed.
+func (s *Sim) SeedCommitStatusesAt(ownerRepo, sha string, at time.Time, statuses ...gh.CommitStatus) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(statuses) == 0 {
+		s.fail("simgh: SeedCommitStatusesAt(%s, %s): no statuses given; an empty step is unobservable", ownerRepo, sha)
+		return s
+	}
+	pending := make([]gh.CommitStatus, len(statuses))
+	copy(pending, statuses)
+	r.ciSchedule.add(at, func(rs *repoState) {
+		rs.commitStatuses[sha] = append(rs.commitStatuses[sha], pending...)
+	})
+	return s
+}
+
+// SeedCommitStatusesAfter is SeedCommitStatusesAt relative to the clock's
+// current reading.
+func (s *Sim) SeedCommitStatusesAfter(ownerRepo, sha string, d time.Duration, statuses ...gh.CommitStatus) *Sim {
+	return s.SeedCommitStatusesAt(ownerRepo, sha, s.now().Add(d), statuses...)
+}
+
+// SeedReviewsAt schedules submitted reviews to land on a PR at instant at —
+// "the reviewer responds forty minutes in".
+//
+// Reviews append, matching SeedReview and real GitHub: a submission never
+// erases an earlier one, and latestReviewsByAuthor does the collapsing on
+// read. A review whose SubmittedAt is zero is stamped with the step's instant
+// rather than with the clock's reading when the step happens to be drained, so
+// the value does not depend on which read triggered it.
+func (s *Sim) SeedReviewsAt(ownerRepo string, prNumber int, at time.Time, reviews ...gh.PRReview) *Sim {
+	pr, ok := s.prForSeed(ownerRepo, prNumber)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(reviews) == 0 {
+		s.fail("simgh: SeedReviewsAt(%s#%d): no reviews given; an empty step is unobservable", ownerRepo, prNumber)
+		return s
+	}
+	pending := make([]gh.PRReview, 0, len(reviews))
+	for _, rev := range reviews {
+		if rev.SubmittedAt.IsZero() {
+			rev.SubmittedAt = at
+		}
+		pending = append(pending, rev)
+	}
+	pr.reviewSchedule.add(at, func(p *prRecord) {
+		p.reviews = append(p.reviews, pending...)
+		p.updatedAt = laterOf(p.updatedAt, at)
+	})
+	return s
+}
+
+// SeedReviewsAfter is SeedReviewsAt relative to the clock's current reading.
+func (s *Sim) SeedReviewsAfter(ownerRepo string, prNumber int, d time.Duration, reviews ...gh.PRReview) *Sim {
+	return s.SeedReviewsAt(ownerRepo, prNumber, s.now().Add(d), reviews...)
+}
+
+// SeedReviewRequestsAt schedules reviewer requests to appear on a PR at
+// instant at.
+//
+// Requests are added, not replaced, and an already-outstanding login is
+// skipped — the same rule AddReviewRequest applies, so a step and an engine
+// re-request cannot produce a duplicate entry between them. The step is not
+// authoritative over the list: a reviewer the engine has since withdrawn
+// (DeleteReviewRequest, the bot re-prompt ladder's own mutation) is genuinely
+// gone, and this will re-add them only if its own time had not yet come.
+func (s *Sim) SeedReviewRequestsAt(ownerRepo string, prNumber int, at time.Time, requests ...gh.ReviewRequest) *Sim {
+	pr, ok := s.prForSeed(ownerRepo, prNumber)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(requests) == 0 {
+		s.fail("simgh: SeedReviewRequestsAt(%s#%d): no requests given; an empty step is unobservable", ownerRepo, prNumber)
+		return s
+	}
+	pending := make([]gh.ReviewRequest, 0, len(requests))
+	for _, req := range requests {
+		if !req.IsBot {
+			req.IsBot = gh.IsBotLogin(req.Login)
+		}
+		pending = append(pending, req)
+	}
+	pr.reviewSchedule.add(at, func(p *prRecord) {
+		changed := false
+		for _, req := range pending {
+			already := false
+			for _, existing := range p.reviewRequests {
+				if existing.Login == req.Login {
+					already = true
+					break
+				}
+			}
+			if already {
+				continue
+			}
+			p.reviewRequests = append(p.reviewRequests, req)
+			changed = true
+		}
+		if changed {
+			p.updatedAt = laterOf(p.updatedAt, at)
+		}
+	})
+	return s
+}
+
+// SeedReviewRequestsAfter is SeedReviewRequestsAt relative to the clock's
+// current reading.
+func (s *Sim) SeedReviewRequestsAfter(ownerRepo string, prNumber int, d time.Duration, requests ...gh.ReviewRequest) *Sim {
+	return s.SeedReviewRequestsAt(ownerRepo, prNumber, s.now().Add(d), requests...)
+}
+
+// reserveCheckRunID assigns an ID when unset and keeps the auto-assign counter
+// ahead of every explicit one, so a later ID: 0 seed cannot collide with an ID
+// chosen by hand.
+//
+// Unlike SeedCheckRun's inline version it tolerates an ID that already exists,
+// because reusing one is exactly how a scheduled step models a run
+// transitioning rather than a rerun. Caller must hold mu.
+func (s *Sim) reserveCheckRunID(run gh.CheckRun) gh.CheckRun {
+	if run.ID == 0 {
+		run.ID = s.nextCheckRunID
+		s.nextCheckRunID++
+	} else if run.ID >= s.nextCheckRunID {
+		s.nextCheckRunID = run.ID + 1
+	}
+	s.seededCheckRunIDs[run.ID] = true
+	if run.Status == "" {
+		if run.Conclusion == "" {
+			run.Status = "in_progress"
+		} else {
+			run.Status = "completed"
+		}
+	}
+	return run
+}
+
+// upsertCheckRun replaces the entry sharing run's ID, or appends when there is
+// none. Replacing in place preserves position, so a transition does not
+// reorder the collection under a caller reading it raw.
+func upsertCheckRun(list []gh.CheckRun, run gh.CheckRun) []gh.CheckRun {
+	for i := range list {
+		if list[i].ID == run.ID {
+			list[i] = run
+			return list
+		}
+	}
+	return append(list, run)
+}
+
+// prForSeed looks up a PR for a chained Seed* call, recording a sticky error
+// and reporting false when the repo or the PR is missing.
+func (s *Sim) prForSeed(ownerRepo string, prNumber int) (*prRecord, bool) {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		s.fail("simgh: PR %s#%d not found", ownerRepo, prNumber)
+		return nil, false
+	}
+	return pr, true
 }
 
 // repoForSeed looks up a repo for a chained Seed* call, recording a sticky

@@ -41,6 +41,12 @@ type repoState struct {
 	checkRuns      map[string][]gh.CheckRun
 	commitStatuses map[string][]gh.CommitStatus
 
+	// ciSchedule holds pending clock-driven mutations to checkRuns and
+	// commitStatuses: "this SHA goes red at T". Applied lazily by drainCI on
+	// every read of either collection, so a scenario expresses a CI transition
+	// as an instant rather than as a read count. See schedule.go.
+	ciSchedule schedule[*repoState]
+
 	// requiredContexts maps a branch name to the set of check/status context
 	// names branch protection requires on that branch. This is what makes the
 	// blocked/unstable distinction reachable: a red *required* context yields
@@ -162,6 +168,14 @@ type prRecord struct {
 
 	reviews        []gh.PRReview
 	reviewRequests []gh.ReviewRequest
+
+	// reviewSchedule holds pending clock-driven mutations to reviews and
+	// reviewRequests: "the reviewer responds at T". Applied lazily by
+	// drainReviews on every read of either collection — and by
+	// AddReviewRequest/DeleteReviewRequest before they mutate, so an engine
+	// withdrawal cannot be undone by a step that was already due. See
+	// schedule.go.
+	reviewSchedule schedule[*prRecord]
 
 	// resolvedThreads counts review threads marked resolved, surfaced as
 	// ProjectItem.LinkedPRResolvedThreadCount for the engine's progress

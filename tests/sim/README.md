@@ -48,6 +48,41 @@ means something, cheap enough to run on every commit.
 - **[`simgh/nonvacuity.sh`](simgh/nonvacuity.sh)** — a mutation sweep that
   neutralises each modelled behaviour and asserts the suite goes red.
 
+## The instrumentation layer
+
+A faithful model is a GitHub stand-in; it is not yet a test *instrument*. Three
+capabilities turn it into one, and they are what let a scenario reach behaviour
+the live bed cannot be made to produce on demand:
+
+- **Clock-driven schedules** (`simgh/schedule.go`). `SeedCheckRunsAfter`,
+  `SeedReviewsAfter` and their siblings enqueue a mutation for a future instant
+  on the injected clock — "CI goes red thirty minutes in", "the reviewer
+  responds on the third poll". Sequencing is driven by the clock rather than by
+  a read count, because **one poll is not one read**: `settleAwaitingCIScan`
+  reads a SHA's check runs twice in a single poll, and whether it does depends
+  on harness configuration. A read-count sequence would not correspond to poll
+  boundaries at all.
+- **Fault injection** (`simgh/fault.go`). Any `engine.GitHubClient` method can
+  be made to fail once, N times then succeed, always, on the Kth call, or only
+  for calls matching a predicate. The five settle scans' retry loops and
+  `MaxRetries` escalation cutovers are reachable no other way. The error shape
+  is the caller's choice and it matters — `simgh/ghfault` supplies the
+  rate-limit and abuse-detection shapes the engine classifies specially.
+- **An ordered mutation log** (`simgh/mutationlog.go`). Several engine
+  guarantees are *ordering* claims rather than state claims, and reading
+  terminal labels cannot assert one. It records every intercepted call with its
+  outcome — attempts, not just mutations — so "N failures then the success" is
+  expressible, and doubles as the harness's debugging output.
+
+Fault injection and the log live in a decorator, `simgh.Instrument(sim)`, which
+holds its `*Sim` as a **named field and never an embedded one** — embedding
+would satisfy the interface assertion by method promotion and let a forgotten
+wrapper silently bypass both instruments.
+
+`Sim.Snapshot`/`Restore` (`simgh/snapshot.go`) round-trip the model, the git
+repositories, the fault schedule and the log, so a restart scenario can discard
+the engine and rebuild against exactly the state GitHub would have retained.
+
 The seam this layer targets is `engine.NewWithDeps(cfg, GitHubClient,
 ClaudeInvoker, *WorktreeManager)`, which accepts substituted dependencies.
 Wiring `simgh` into it, along with a `ClaudeInvoker` and a scenario harness, is

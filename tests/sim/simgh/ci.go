@@ -19,6 +19,7 @@ func (s *Sim) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.drainCI(r)
 	runs := r.checkRuns[sha]
 	out := make([]gh.CheckRun, len(runs))
 	copy(out, runs)
@@ -26,6 +27,16 @@ func (s *Sim) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 }
 
 // FetchCombinedStatus returns the classic commit statuses for a ref.
+//
+// The drain below covers *both* of this function's read sections. Draining is
+// repo-wide and keyed on time, not on the SHA being read, so once the first
+// section has applied everything due the second cannot have anything left to
+// apply. A second drain would be code no mutation could prove does anything —
+// the standard this package holds itself to (see allocNumber's comment). The
+// one case it would catch is a step falling due during the git subprocess
+// between the two sections, which requires a real clock; schedules exist to be
+// driven by the injected one, and under it the two sections read the same
+// instant.
 func (s *Sim) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
 	s.mu.Lock()
 	statuses, err := func() ([]gh.CommitStatus, error) {
@@ -33,6 +44,7 @@ func (s *Sim) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, e
 		if err != nil {
 			return nil, err
 		}
+		s.drainCI(r)
 		if direct, ok := r.commitStatuses[ref]; ok {
 			out := make([]gh.CommitStatus, len(direct))
 			copy(out, direct)
