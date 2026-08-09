@@ -165,6 +165,9 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — this claim
+				// (dispatchWithCycleLimit always returns true) is correct whether the
+				// call posted a fresh pause or reused an existing one (#1460 R4).
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
 		)
@@ -292,6 +295,8 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchRebaseReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — same reasoning as
+				// the review-reinvoke pause callback above (#1460 R4).
 				e.pauseForRebaseCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxRebaseCycles)
 			},
 		)
