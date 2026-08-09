@@ -2,6 +2,8 @@ package simgh
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1182,4 +1184,218 @@ func prUpdatedAt(t *testing.T, s *Sim, prNumber int) time.Time {
 		t.Fatalf("prLocked: %v", err)
 	}
 	return pr.updatedAt
+}
+
+// TestNoOpBoardMutationsDoNotBump pins the no-op timestamp convention on the
+// two board mutations that were still bumping unconditionally.
+//
+// FetchProjectUpdatedAt gates whether the engine's idle poll looks at the board
+// at all, so a bump for a mutation that changed nothing is a wake signal real
+// GitHub does not produce — and one a scenario cannot tell from a real change.
+// AddLabelToIssue, AddReviewRequest, AddProjectV2ItemById, and
+// placeOnProjectLocked already follow this rule; these two were the holdouts.
+func TestNoOpBoardMutationsDoNotBump(t *testing.T) {
+	t.Run("re-archiving an archived card", func(t *testing.T) {
+		s, clk := seedBasicBoard(t)
+		projectID, itemID := mustLookupItem(t, s)
+		if err := s.ArchiveProjectItem(projectID, itemID); err != nil {
+			t.Fatalf("ArchiveProjectItem: %v", err)
+		}
+
+		before, err := s.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			t.Fatalf("FetchProjectUpdatedAt: %v", err)
+		}
+		// Time must move, or an unbumped timestamp is indistinguishable from a
+		// bumped one.
+		clk.Advance(time.Hour)
+
+		if err := s.ArchiveProjectItem(projectID, itemID); err != nil {
+			t.Fatalf("re-ArchiveProjectItem: %v", err)
+		}
+		after, err := s.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			t.Fatalf("FetchProjectUpdatedAt after re-archive: %v", err)
+		}
+		if !after.Equal(before) {
+			t.Fatalf("re-archiving bumped the project updated-at from %v to %v", before, after)
+		}
+	})
+
+	t.Run("moving a card to the column it already occupies", func(t *testing.T) {
+		s, clk := seedBasicBoard(t)
+		projectID, itemID := mustLookupItem(t, s)
+		field, err := s.FetchStatusField(projectID)
+		if err != nil {
+			t.Fatalf("FetchStatusField: %v", err)
+		}
+
+		before, err := s.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			t.Fatalf("FetchProjectUpdatedAt: %v", err)
+		}
+		clk.Advance(time.Hour)
+
+		// The card was seeded into Implement.
+		if err := s.UpdateProjectItemStatus(projectID, itemID, field.FieldID, field.Options["Implement"]); err != nil {
+			t.Fatalf("UpdateProjectItemStatus: %v", err)
+		}
+		after, err := s.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			t.Fatalf("FetchProjectUpdatedAt after same-column move: %v", err)
+		}
+		if !after.Equal(before) {
+			t.Fatalf("a same-column move bumped the project updated-at from %v to %v", before, after)
+		}
+
+		// A real move must still bump, or the assertion above would be
+		// satisfied by a method that never bumps at all.
+		if err := s.UpdateProjectItemStatus(projectID, itemID, field.FieldID, field.Options["Review"]); err != nil {
+			t.Fatalf("UpdateProjectItemStatus(Review): %v", err)
+		}
+		moved, err := s.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			t.Fatalf("FetchProjectUpdatedAt after a real move: %v", err)
+		}
+		if !moved.After(before) {
+			t.Fatalf("a real column move did not bump updated-at (%v -> %v)", before, moved)
+		}
+	})
+}
+
+// TestGitIgnoresTheInvokingUsersGlobalConfig pins that this package's git
+// subprocesses do not inherit ~/.gitconfig.
+//
+// This is the one correctness issue here that breaks the package for someone
+// other than its author. commit.gpgsign=true is a common developer and CI
+// setting, and without isolation every commit-writing operation in this package
+// fails or hangs on a GPG prompt for reasons unrelated to the code under test.
+// core.hooksPath and commit.template do the same in different ways.
+//
+// The test provokes it directly: a global config that would make any inheriting
+// commit fail. It must not.
+func TestGitIgnoresTheInvokingUsersGlobalConfig(t *testing.T) {
+	skipIfNoGit(t)
+
+	home := t.TempDir()
+	cfg := "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent/gpg-that-does-not-exist\n"
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing global gitconfig: %v", err)
+	}
+	// Both are consulted for the global layer; set them together so the test
+	// does not depend on which one the host happens to use.
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+
+	s := New(t.TempDir())
+	s.SeedRepo("acme/widgets").
+		SeedCommit("acme/widgets", "main", map[string]string{"a.txt": "a\n"}, "a commit")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding under a hostile global gitconfig: %v\n"+
+			"git subprocesses are inheriting ~/.gitconfig; they must not", err)
+	}
+	if _, err := s.HeadSHA("acme/widgets", "main"); err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+}
+
+// TestUpdatePRBaseRefusesHeadAsBase pins the same "No commits between ..."
+// refusal createPR and SeedPR already carry, on the one path that could still
+// arrive at that shape after the PR exists.
+func TestUpdatePRBaseRefusesHeadAsBase(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	err := s.UpdatePRBase("acme", "widgets", 42, headBranch)
+	if err == nil {
+		t.Fatal("UpdatePRBase retargeted a PR onto its own head branch")
+	}
+	if !strings.Contains(err.Error(), "its head branch") {
+		t.Fatalf("error = %v, want a head-as-base refusal", err)
+	}
+	base, err := s.GetPRBase("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("GetPRBase: %v", err)
+	}
+	if base != "main" {
+		t.Fatalf("base = %q after a refused retarget, want main", base)
+	}
+
+	// Retargeting to the base it already has is a no-op and must not bump.
+	before := prUpdatedAt(t, s, 42)
+	clk.Advance(time.Hour)
+	if err := s.UpdatePRBase("acme", "widgets", 42, "main"); err != nil {
+		t.Fatalf("UpdatePRBase(main): %v", err)
+	}
+	if got := prUpdatedAt(t, s, 42); !got.Equal(before) {
+		t.Fatalf("retargeting to the current base bumped updated-at from %v to %v", before, got)
+	}
+
+	// A real retarget must still work and bump.
+	s.SeedBranch(repoName, "release", "main")
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedBranch: %v", err)
+	}
+	if err := s.UpdatePRBase("acme", "widgets", 42, "release"); err != nil {
+		t.Fatalf("UpdatePRBase(release): %v", err)
+	}
+	if got := prUpdatedAt(t, s, 42); !got.After(before) {
+		t.Fatalf("a real retarget did not bump updated-at (%v -> %v)", before, got)
+	}
+}
+
+// TestSeedBlockedByDedupesAndStamps pins that the seeding path agrees with
+// AddBlockedByIssue about what a repeated dependency link means: GitHub
+// silently ignores a duplicate, and a link that is recorded bumps the issue.
+func TestSeedBlockedByDedupesAndStamps(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+	s.SeedIssue("acme/widgets", IssueSeed{Number: 8, Title: "blocker", Status: "Implement"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	before := issueUpdatedAt(t, s, 7)
+	clk.Advance(time.Hour)
+
+	s.SeedBlockedBy("acme/widgets", 7, "acme/widgets", 8)
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedBlockedBy: %v", err)
+	}
+	stamped := issueUpdatedAt(t, s, 7)
+	if !stamped.After(before) {
+		t.Fatalf("recording a dependency did not bump the issue's updated-at (%v -> %v)", before, stamped)
+	}
+
+	clk.Advance(time.Hour)
+	s.SeedBlockedBy("acme/widgets", 7, "acme/widgets", 8)
+	if err := s.Err(); err != nil {
+		t.Fatalf("duplicate SeedBlockedBy reported an error; GitHub ignores duplicates: %v", err)
+	}
+
+	item, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if len(item.BlockedBy) != 1 {
+		t.Fatalf("blockedBy = %+v, want one entry; the duplicate was not deduped", item.BlockedBy)
+	}
+	if got := issueUpdatedAt(t, s, 7); !got.Equal(stamped) {
+		t.Fatalf("a deduped duplicate bumped updated-at from %v to %v", stamped, got)
+	}
+}
+
+// issueUpdatedAt reads an issue's updated-at from the model.
+func issueUpdatedAt(t *testing.T, s *Sim, issueNumber int) time.Time {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	iss, err := s.issueLocked("acme", "widgets", issueNumber)
+	if err != nil {
+		t.Fatalf("issueLocked: %v", err)
+	}
+	return iss.updatedAt
 }

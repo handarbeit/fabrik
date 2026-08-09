@@ -39,6 +39,15 @@ func gitEnv() []string {
 	return append(os.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
+		// Isolate the invoking user's ~/.gitconfig as well as the system one.
+		// Without this the package inherits whatever the developer or CI runner
+		// has set, and several common settings break it for reasons unrelated
+		// to the code under test: commit.gpgsign=true makes every commit here
+		// fail or hang on a GPG prompt, core.hooksPath points commits at hooks
+		// that know nothing about these throwaway worktrees, and commit.template
+		// perturbs the messages. /dev/null is git's documented way to say "no
+		// global config" (GIT_CONFIG_GLOBAL, git >= 2.32).
+		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_AUTHOR_NAME="+simGitName,
 		"GIT_AUTHOR_EMAIL="+simGitEmail,
 		"GIT_COMMITTER_NAME="+simGitName,

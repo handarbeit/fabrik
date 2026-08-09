@@ -595,6 +595,15 @@ func (s *Sim) UpdatePRBase(owner, repo string, prNumber int, newBase string) err
 	if err != nil {
 		return err
 	}
+	// Same refusal createPR and SeedPR already carry: GitHub will not leave a
+	// PR whose head is its base ("No commits between ...").
+	if newBase == pr.head {
+		return fmt.Errorf("simgh: cannot retarget PR #%d: base %q is its head branch", prNumber, newBase)
+	}
+	if pr.base == newBase {
+		// Retargeting to the base it already has changes nothing.
+		return nil
+	}
 	pr.base = newBase
 	pr.updatedAt = s.now()
 	return nil

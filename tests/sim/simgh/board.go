@@ -467,6 +467,12 @@ func (s *Sim) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOp
 		if optID != statusOptionID {
 			continue
 		}
+		// Moving a card to the column it already occupies changes nothing.
+		// placeOnProjectLocked already gets this right via its `changed` check;
+		// the same rule belongs here, for the same reason.
+		if it.status == name {
+			return nil
+		}
 		now := s.now()
 		it.status = name
 		it.updatedAt = now
@@ -488,6 +494,15 @@ func (s *Sim) ArchiveProjectItem(projectID, itemID string) error {
 	it, ok := p.items[itemID]
 	if !ok {
 		return fmt.Errorf("simgh: project item %q not found in %q", itemID, projectID)
+	}
+	// Re-archiving an already-archived card changes nothing, so it must not
+	// advance either timestamp — FetchProjectUpdatedAt gates whether the
+	// engine's idle poll looks at the board at all, and a bump for a no-op is a
+	// wake signal real GitHub does not produce. Same convention as
+	// AddProjectV2ItemById's live-card re-add, AddLabelToIssue, and
+	// AddReviewRequest.
+	if it.archived {
+		return nil
 	}
 	now := s.now()
 	it.archived = true

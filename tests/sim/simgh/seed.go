@@ -744,11 +744,25 @@ func (s *Sim) SeedBlockedBy(ownerRepo string, issueNumber int, blockerOwnerRepo 
 		s.fail("simgh: blocker issue %s#%d not found", blockerOwnerRepo, blockerNumber)
 		return s
 	}
+	// Dedupe and stamp exactly as AddBlockedByIssue does. GitHub silently
+	// ignores a duplicate dependency rather than erroring, and the seeding path
+	// diverging from the runtime path about what a repeated link means is the
+	// asymmetry this package has had to correct repeatedly.
+	for _, dep := range iss.blockedBy {
+		depRepo := dep.Repo
+		if depRepo == "" {
+			depRepo = ownerRepo
+		}
+		if dep.Number == blockerNumber && depRepo == blockerOwnerRepo {
+			return s
+		}
+	}
 	repoField := ""
 	if blockerOwnerRepo != ownerRepo {
 		repoField = blockerOwnerRepo
 	}
 	iss.blockedBy = append(iss.blockedBy, gh.Dependency{Number: blockerNumber, Repo: repoField})
+	iss.updatedAt = s.now()
 	return s
 }
 

@@ -133,7 +133,7 @@ accumulates orphaned objects for the life of the test process.
 **Risk:** low, and it is disk and inode cost rather than a wrong answer — the
 objects are unreachable, so no read can observe them. The backing repos live
 under `t.TempDir()` and vanish with the test. Worth revisiting only if a
-scenario in #1449 grows long enough for it to matter.
+scenario in #1449 grows long enough for it to matter; tracked in #1498.
 
 ### A PR whose head branch is gone errors — **Simplified**
 
@@ -249,6 +249,20 @@ immediately reads will see a resolved answer here and might not on GitHub.
 
 ## Check runs and commit statuses
 
+
+**Each read drains one unit, including the two single-field accessors.**
+`FetchPRMergeable` and `FetchPRMergeableState` are independent calls into
+`FetchPRMergeableFields`, so a caller that wants both — which is the natural
+thing to want, and what `FetchPRDetails` sanctions for itself — burns two units
+rather than one, and can see the flag and the state resolve at different points.
+Real GitHub reports both from a single response, so they resolve together.
+
+**Risk:** low but real for a scenario that seeds a *short* window (1–2 reads) and
+then reads both fields; the window drains faster than the scenario intends. The
+sim does not share a drain between them because doing so would require the two
+accessors to know they are part of one logical read, which the interface does not
+express. Prefer `FetchPRMergeableFields` when a scenario needs both, exactly as
+production's single-PR endpoint does. See #1498.
 ### Two separate collections — **Modelled**
 
 Check runs (`FetchCheckRuns`) and classic commit statuses (`FetchCombinedStatus`)
@@ -314,6 +328,17 @@ collections at one SHA.
 ---
 
 ## Reviews
+
+### `ResolveReviewThread` marks only the first comment on a thread — **Simplified**
+
+A thread is modelled as comments sharing a `reviewThreadID`, and resolving it
+flips `threadResolved` on the first match rather than on every comment in the
+thread. Board projections surface unresolved thread comments individually, so a
+thread with more than one comment reads as partially unresolved after being
+resolved. **Risk:** low — the engine's progress detection reads the resolved
+*count*, and no scenario in the downstream chain seeds multi-comment threads —
+but a scenario that does would see the wrong shape. See #1498.
+
 
 ### `reviewDecision` under branch protection — **Simplified**
 
@@ -757,6 +782,21 @@ be classified off the *failed* run with nothing to indicate why.
 **Simplified:** IDs are assigned from a single counter per `Sim` rather than
 globally across a GitHub instance, and nothing ties them to creation time.
 
+### `SeedPR{Merged: true}` sets the flag without merging — **Simplified**
+
+A directly-seeded merged PR sets the `merged` bookkeeping flag only. It does
+**not** write a merge commit onto the base branch, and it does **not** run the
+closing-keyword auto-close loop `MergePR` performs, so linked issues stay open
+and the base branch's git history shows no merge.
+
+That is a different world from one reached by calling `MergePR`, and the
+divergence is silent: a scenario that seeds a pre-merged PR and then asserts on
+git history or a linked issue's closed state gets a confidently wrong answer.
+**Risk:** medium — it is the one seeding shape whose *consequences* are not
+modelled rather than merely coarse. Seed the pre-merge state and call `MergePR`
+when a scenario depends on either consequence; use `Merged: true` only as an
+inert "this PR is already done" marker. Tracked in #1498.
+
 ### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
 
 `SeedPR` refuses a merged draft, a PR that is merged *and* open (a merged PR is
@@ -971,7 +1011,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 96 mutations, and
+   package cannot back up. The sweep currently catches all 103 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

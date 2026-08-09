@@ -482,6 +482,34 @@ mutate "re-seeding a card into its current column bumps timestamps" \
   'TestReAddingLiveCardIsANoOp' \
   'seed.go::s{changed := existing\.archived \|\| existing\.status != status}{changed := true; _ = existing.archived}'
 
+mutate "re-archiving an archived card bumps timestamps" \
+  'TestNoOpBoardMutationsDoNotBump' \
+  'board.go::s{if it\.archived \{\n\t\treturn nil\n\t\}\n\tnow := s\.now\(\)\n\tit\.archived = true}{if false \{\n\t\treturn nil\n\t\}\n\tnow := s.now()\n\tit.archived = true}'
+
+mutate "a same-column move bumps timestamps" \
+  'TestNoOpBoardMutationsDoNotBump' \
+  'board.go::s{if it\.status == name \{\n\t\t\treturn nil\n\t\t\}}{if false \{\n\t\t\treturn nil\n\t\t\}}'
+
+mutate "git subprocesses inherit the user's global gitconfig" \
+  'TestGitIgnoresTheInvokingUsersGlobalConfig' \
+  'git.go::s{"GIT_CONFIG_GLOBAL=/dev/null",}{}'
+
+mutate "UpdatePRBase accepts the head branch as the new base" \
+  'TestUpdatePRBaseRefusesHeadAsBase' \
+  'prs.go::s{if newBase == pr\.head \{}{if false \&\& newBase == pr.head \{}'
+
+mutate "retargeting to the current base still bumps" \
+  'TestUpdatePRBaseRefusesHeadAsBase' \
+  'prs.go::s{if pr\.base == newBase \{\n\t\t// Retargeting to the base it already has changes nothing\.\n\t\treturn nil\n\t\}}{}'
+
+mutate "SeedBlockedBy does not dedupe duplicates" \
+  'TestSeedBlockedByDedupesAndStamps' \
+  'seed.go::s{if dep\.Number == blockerNumber \&\& depRepo == blockerOwnerRepo \{\n\t\t\treturn s\n\t\t\}}{if false \{\n\t\t\treturn s\n\t\t\}}'
+
+mutate "SeedBlockedBy does not stamp the issue" \
+  'TestSeedBlockedByDedupesAndStamps' \
+  'seed.go::s{iss\.blockedBy = append\(iss\.blockedBy, gh\.Dependency\{Number: blockerNumber, Repo: repoField\}\)\n\tiss\.updatedAt = s\.now\(\)}{iss.blockedBy = append(iss.blockedBy, gh.Dependency\{Number: blockerNumber, Repo: repoField\})}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
