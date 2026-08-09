@@ -280,3 +280,86 @@ func (e *Engine) runStartupOrphanedInProgressScan() {
 		e.logf(0, "startup", "orphaned in_progress scan: removed %d stale label(s)\n", cleaned)
 	}
 }
+
+// runStartupBareInProgressScan (R7/#1393, ADR-1393) scans every item in the
+// store for a stage:<Name>:in_progress label that carries neither a
+// fabrik:locked:<any-user> label nor a stage:<Name>:complete/failed sibling —
+// the "bare in_progress" shape produced when a shutdown-pause's own
+// in_progress clear (R2) never landed (write failure, crash before the
+// pause-write phase ran, force-quit) while the lock label was already
+// removed by cleanupLockedIssues (or never applied at all, e.g. a worker
+// killed between the lock-add and the in_progress-add). Neither
+// runStartupCleanup (lock-gated) nor runStartupOrphanedInProgressScan
+// (terminal-sibling-gated) matches this shape — see Problem gap 2 in #1393.
+//
+// Deliberately a third, narrow pass rather than a broadened existing one:
+// the three passes' predicates are disjoint by construction (lock-gated;
+// terminal-sibling-gated; neither), so each stays self-justifying and none
+// silently absorbs another's responsibility.
+//
+// hasLock checks any fabrik:locked:<user> label, not just the current
+// process's own e.cfg.User — a bare in_progress with someone else's lock
+// label present is a different, already-handled shape (that lock label
+// itself is what runStartupCleanup's scan is keyed on, for whichever user it
+// names); this pass only owns the case where no lock label survives at all.
+//
+// Skips items with an active Worker() defensively, mirroring
+// forEachStaleUnworkedItem's guard, even though in practice Worker() is
+// always nil this early in startup — this scan runs immediately after the
+// first poll cycle populates the store, before startWorkerDetector or any
+// dispatch goroutine can populate Worker().
+//
+// Must be called after the store is populated by the first poll cycle.
+func (e *Engine) runStartupBareInProgressScan() {
+	var cleaned int
+	for _, snap := range e.store.All() {
+		if snap.Worker() != nil {
+			continue
+		}
+		labels := snap.Labels()
+
+		hasLock := false
+		terminalStages := make(map[string]bool)
+		for _, label := range labels {
+			if strings.HasPrefix(label, "fabrik:locked:") {
+				hasLock = true
+			}
+			if !strings.HasPrefix(label, "stage:") {
+				continue
+			}
+			if strings.HasSuffix(label, ":complete") {
+				terminalStages[strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":complete")] = true
+			} else if strings.HasSuffix(label, ":failed") {
+				terminalStages[strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":failed")] = true
+			}
+		}
+		if hasLock {
+			continue
+		}
+
+		owner, repoName := parseOwnerRepo(snap.Repo())
+		number := snap.Number()
+		for _, label := range labels {
+			if !strings.HasPrefix(label, "stage:") || !strings.HasSuffix(label, ":in_progress") {
+				continue
+			}
+			stageName := strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":in_progress")
+			if terminalStages[stageName] {
+				// Already handled by runStartupOrphanedInProgressScan.
+				continue
+			}
+			if err := e.client.RemoveLabelFromIssue(owner, repoName, number, label); err != nil {
+				e.logf(number, "warn", "could not remove bare in_progress label %q: %v\n", label, err)
+				continue
+			}
+			e.logf(number, "startup", "removed bare in_progress label %q (no lock, no terminal sibling)\n", label)
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
+			}
+			cleaned++
+		}
+	}
+	if cleaned > 0 {
+		e.logf(0, "startup", "bare in_progress scan: removed %d stale label(s)\n", cleaned)
+	}
+}

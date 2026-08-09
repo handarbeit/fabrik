@@ -236,6 +236,21 @@ func (e *Engine) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// drainComplete is closed when Run() is about to return, for any reason —
+	// distinct from ctx.Done(), which closes the instant the first
+	// SIGINT/SIGTERM's cancel() fires. #1393/ADR-1393 R5/AC4 fix: the
+	// second-signal (force-quit) listener below used to race against
+	// ctx.Done() instead of this channel, and since ctx.Done() is already
+	// closed by the time that listener starts (this same goroutine just
+	// called cancel()), select would immediately take the already-ready
+	// ctx.Done() case and return — the listener exited before a human could
+	// physically press Ctrl-C a second time, so force-quit was practically
+	// unreachable. Waiting on drainComplete instead means the listener stays
+	// parked on sigCh for the entire drain and only gives up once Run() is
+	// actually exiting on its own.
+	drainComplete := make(chan struct{})
+	defer close(drainComplete)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
@@ -286,7 +301,7 @@ func (e *Engine) Run() error {
 				fn()
 			}
 			os.Exit(1)
-		case <-ctx.Done():
+		case <-drainComplete:
 		}
 	}()
 
@@ -709,22 +724,10 @@ func (e *Engine) Run() error {
 		if e.wakeCh != nil {
 			select {
 			case <-ctx.Done():
-				e.cleanupLockedIssues()
-				e.wg.Wait()
-				if e.sighupRequested.Load() {
-					performSighupRestart(e, lockFile)
-					close(restartDone) // reached only on exec failure
-				}
-				return nil
+				return e.drainAndExit(lockFile, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					e.cleanupLockedIssues()
-					e.wg.Wait()
-					if e.sighupRequested.Load() {
-						performSighupRestart(e, lockFile)
-						close(restartDone) // reached only on exec failure
-					}
-					return nil
+					return e.drainAndExit(lockFile, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -742,22 +745,10 @@ func (e *Engine) Run() error {
 		} else {
 			select {
 			case <-ctx.Done():
-				e.cleanupLockedIssues()
-				e.wg.Wait()
-				if e.sighupRequested.Load() {
-					performSighupRestart(e, lockFile)
-					close(restartDone) // reached only on exec failure
-				}
-				return nil
+				return e.drainAndExit(lockFile, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					e.cleanupLockedIssues()
-					e.wg.Wait()
-					if e.sighupRequested.Load() {
-						performSighupRestart(e, lockFile)
-						close(restartDone) // reached only on exec failure
-					}
-					return nil
+					return e.drainAndExit(lockFile, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
