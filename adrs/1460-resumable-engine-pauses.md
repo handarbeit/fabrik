@@ -231,6 +231,40 @@ two paths depending on *when* the pause fires relative to stage completion:
 `escalateSettle` is a structurally separate third case (settle-scan retry, synthetic stage key), left
 untouched and out of scope.
 
+## Restart Durability
+
+A review comment on the implementing PR raised a plausible-sounding concern: `handleEngineUnpause`
+detects a stale pause purely via `snap.PausedByEngine(stage.Name)`, which is in-memory-only and "does
+not survive restart" per its own doc comment (`internal/itemstate/snapshot.go`) — so if the engine
+restarts while an item is genuinely cycle-limit-paused, wouldn't that flag come back `false`, leaving
+`handleEngineUnpause` unable to detect the stale pause, while the *durable* cycle counter stays pinned
+at the limit? That would reproduce this issue's exact bug via a restart instead of a missing
+`EnginePaused` apply.
+
+The premise doesn't hold: `ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles` are **not**
+durable either — they live in the same in-memory `StageState` map structure as `PausedByEngine`, in
+the same `itemstate.Store`, which `NewStore(nil)` (`engine/engine.go`) always constructs with empty
+maps at process start; nothing in this codebase serializes or rehydrates `itemstate.Store` from any
+prior process. There is no persistence layer for any of `StageState`'s fields — the "in-memory only,
+does not survive restart" language on `PausedByEngine`'s and `PRCreationFailed`'s doc comments happens
+to call this out explicitly, but it applies uniformly to every field in `StageState`, cycle counters
+included; those two doc comments are not marking an exception.
+
+Concretely: a restart wipes `PausedByEngine` *and* the triggering cycle counter for that stage
+together, in the same moment (a fresh `ItemState` for that key, or the whole `items` map starting
+empty). There is no interleaving in which one resets while the other survives — both are gone, or
+neither is (trivially, since the process either restarted or it didn't). Tracing the actual sequence:
+a restart before a human removes `fabrik:paused` leaves the label in place (durable, on GitHub) while
+the in-memory counter and flag both silently zero; when the label is later removed, the item reaches
+`handleEngineUnpause` with `PausedByEngine` already `false` — a no-op, exactly as the comment
+predicts — but the cycle-limit check downstream reads the *also-already-zeroed* counter, so it doesn't
+re-pause either. The net effect of a restart is indistinguishable from an early, free `handleEngineUnpause`
+having already fired for every paused item — never the split-brain (flag lost, counter retained) the
+comment described. This is unchanged by, and not specific to, this issue's fix: it is a pre-existing
+property of every `EnginePaused`-gated site, including the four already-correct ones
+(`escalateFailedStage`, `escalatePRCreationFailure`, `handleBoundaryViolation`) and `pauseForSliceLimit`
+(#1199), none of which persist `Attempts`/`SliceRetries` across a restart either.
+
 ## Alternatives Considered
 
 **A neutral marker instead of reusing `itemstate.EnginePaused`.** Would require a new `Mutation` type

@@ -2366,6 +2366,8 @@ All four now-fixed sites apply `itemstate.EnginePaused` in both their fresh-paus
 
 **Accepted side effect:** `clearFailedStage()`'s reset (reused unmodified by `handleEngineUnpause`) also zeroes `Attempts(stage.Name)` — the unrelated `MaxRetries` failure counter — via `StageRetryCleared`. A manual unpause of a cycle-limit-paused item therefore also gives that stage's failure budget a clean slate. This is deliberate ("a human unpause is 'try again'"), consistent with the same reset already applying to `escalateFailedStage`/`escalatePRCreationFailure`, and is a net-new intentional behavior for the four newly-fixed sites (they had no working "unchanged" baseline to preserve — they were broken before #1460).
 
+**Restart durability:** `handleEngineUnpause` reads `PausedByEngine`, which is in-memory-only (does not survive an engine restart — `internal/itemstate/snapshot.go`). This is not a gap: `ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles` live in the same in-memory `StageState`, constructed empty by `NewStore(nil)` on every process start with no persistence layer for any `StageState` field — so a restart clears the pause flag *and* the triggering counter together, never one without the other. A restart before a human unpauses an item is equivalent to `handleEngineUnpause` having already fired for free (both read back as zero); there is no interleaving that reproduces this section's defect via a restart. See ADR-1460's "Restart Durability" section.
+
 ### 7.3 Claude Usage-Limit Exemption
 
 When a Claude invocation exits because the account's usage limit was hit (e.g. `You've hit your
