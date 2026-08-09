@@ -499,6 +499,92 @@ func TestInvokeClaudeForComments_ExtendTurnsStillKilledAtScaledDeadline(t *testi
 	}
 }
 
+// TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime verifies #1472's
+// non-degenerate case: mergeTrainMaxTurnsOverride (engine/merge_train.go) derives
+// resolveConflictWithClaude's fabrik:extend-turns pre-grant from
+// commentMaxTurns(holdingStg), not holdingStg.MaxTurns. Unlike the ExtendTurns*
+// siblings above (whose fixture stages leave CommentMaxTurns unset, so it falls back
+// to MaxTurns and the old-buggy/new-fixed formulas coincide — exactly the vacuity
+// trap #1472 warns about), this fixture sets MaxTurns:100 and CommentMaxTurns:50 to
+// different values, mirroring this repo's real pipeline-stage convention. It also
+// calls the real mergeTrainMaxTurnsOverride function rather than hand-computing
+// opts.MaxTurnsOverride, so it fails if that function regresses to scale off
+// holdingStg.MaxTurns again:
+//   - fixed:  commentMaxTurns(holdingStg)*2 = 50*2 = 100 -> scaledWallTime(800ms,100,50)  = 1600ms (correct 2x)
+//   - buggy:  holdingStg.MaxTurns*2         = 100*2 = 200 -> scaledWallTime(800ms,200,50) = 3200ms (the old 4x bug)
+//
+// The [1400ms, 2500ms] bracket sits around the correct ~1600-1900ms (with kill-grace
+// overhead) observed elapsed time while excluding the buggy ~3200-3500ms case with
+// wide margin on both sides.
+func TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 100 * time.Millisecond
+	claudeKillGraceSigTerm = 100 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	// Mirrors .fabrik/stages' real pipeline-stage convention (max_turns: 100 /
+	// comment_max_turns: 50) rather than this repo's queued.yaml (a bare holding
+	// stage with none of these fields set, on which the bug is inert — see #1472).
+	holdingStg := &stages.Stage{
+		Name:            "Queued",
+		HoldingStage:    true,
+		MaxTurns:        100,
+		CommentMaxTurns: 50,
+		MaxWallTime:     800 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "MergeTrainOverrideScalesWallTime"}
+	comments := []gh.Comment{{Author: "user", Body: "conflict comment", CreatedAt: time.Now()}}
+	opts := InvokeOptions{MaxTurnsOverride: mergeTrainMaxTurnsOverride(holdingStg, true)}
+
+	workDir := t.TempDir()
+	start := time.Now()
+	type result struct {
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		_, completed, _, err := InvokeClaudeForComments(context.Background(), holdingStg, issue, comments, workDir, opts)
+		ch <- result{completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		elapsed := time.Since(start)
+		if res.completed {
+			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE)")
+		}
+		if elapsed < 1400*time.Millisecond {
+			t.Errorf("killed too early (elapsed=%v) — correct scaled deadline (~1600ms) was not honored", elapsed)
+		}
+		if elapsed > 2500*time.Millisecond {
+			t.Errorf("killed too late (elapsed=%v) — deadline may have used the old buggy 4x multiplier (~3200ms)", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("InvokeClaudeForComments did not return within 15s after max_wall_time kill")
+	}
+}
+
 // TestKillProcGroupGraceful_StructuredLog (SC-1) verifies that the kill escalation
 // sequence emits structured log lines for each signal sent to the process group,
 // with the correct signal name and reason code (max_wall_time in this case).
