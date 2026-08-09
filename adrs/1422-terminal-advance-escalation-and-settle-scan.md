@@ -87,12 +87,21 @@ The retry mechanism (`engine/advance_settle.go`) is a self-contained scan, **not
   already marked the item, so this scan is a harmless no-op there. It is the exclusive retry-owner
   only for the two genuine gaps: an open item admission-gated out of `runValidatePRTerminalAdvance`'s
   `deepFetchCandidates` source, and `advanceConvergedPRToDone`'s path.
-- Retries reuse the existing generic `recordSettleRetry`/`escalateSettle`/`clearSettleMarker` helpers
+- Retries reuse the existing generic `recordSettleRetry`/`clearSettleMarker` helpers
   (`engine/settle.go`), keyed by a dedicated constant, `"__awaiting_advance__"` (same
   double-underscore-wrapped, YAML-unrepresentable shape as its siblings). Once `MaxRetries` is
-  reached, `escalateAwaitingAdvanceFailure` fires: `fabrik:paused` is added, `fabrik:awaiting-advance`
-  is removed, and an explanatory comment naming the attempt count with the manual-fix instruction is
-  posted.
+  reached, `escalateAwaitingAdvanceFailure` fires: `fabrik:paused` is added and an explanatory comment
+  naming the attempt count with the manual-fix instruction is posted — but, unlike every sibling
+  settle scan, `fabrik:awaiting-advance` is **not** removed (see "Why does escalation not remove the
+  marker" below); `escalateAwaitingAdvanceFailure` therefore does not call the shared `escalateSettle`
+  helper, inlining the same pause/comment/`EnginePaused` steps without the marker removal.
+- Because the marker survives escalation, its retry counter must be reset explicitly once an operator
+  removes `fabrik:paused` — otherwise the very next failure would immediately re-escalate instead of
+  getting a fresh `MaxRetries` budget. Both retry owners do this: `advanceValidateTerminalItem`'s
+  guard, `awaitingAdvanceStuckOrReset`, resets the counter (via `StageRetryCleared`) the moment it
+  observes the item is no longer paused, before proceeding; `settleAwaitingAdvanceScan` calls the same
+  reset logic (`awaitingAdvanceResetIfUnpaused`) directly, since its own pre-filter already excludes
+  paused items.
 
 No changes to `itemMayNeedWork`, `itemNeedsWork`, or `transientLifecycleLabels` are needed or made.
 
@@ -143,6 +152,34 @@ cause (a missing board Status option) does *not* self-resolve without operator a
 of #1422 is that nothing currently tells the operator anything is wrong. R1 explicitly requires
 first-failure visibility "where the operator is already looking," not just at exhaustion.
 
+### Why does escalation not remove the marker, unlike every sibling settle scan?
+
+Every prior settle scan in this family removes its marker on escalation via the shared
+`escalateSettle` helper, whose own doc comment justifies this with "dispatch/retry suppression is no
+longer needed once `fabrik:paused` takes over." That holds for their direct call sites only because
+each one unconditionally re-creates the marker on its very next relevant poll regardless of pause
+state — e.g. `closeIssueIfNonDefaultBase` (ADR-1097) has no `fabrik:paused` guard at all, so if its
+retry fails while the issue happens to be paused for an unrelated reason, it simply re-marks the issue
+outstanding again next poll.
+
+`advanceConvergedPRToDone` (`merge_gate.go`) does not have this property: removing
+`fabrik:auto-merge-enabled` up front structurally prevents `checkAutoMergeConvergence` from ever
+re-entering it, so it fires **at most once per episode** (this is also why it does not need
+`advanceValidateTerminalItem`'s `awaitingAdvanceStuckOrReset` guard — there is no unconditional
+re-entry to loop on in the first place). For an item whose *only* driver is
+`settleAwaitingAdvanceScan` — i.e. every item that reached the stranded state through this call site
+— removing the marker at escalation would permanently strand it: nothing would ever re-create it, even
+after an operator fixes the board and removes `fabrik:paused` alone, which the escalation comment's
+own recovery instruction promises is sufficient (found in PR #1469 review, second round; the first
+round's fix — the `awaitingAdvanceStuckOrReset` guard on `advanceValidateTerminalItem` — only covers
+that one call site's direct-re-entry loop, not this settle-scan-exclusive recoverability gap).
+
+Keeping the marker in place through the pause is safe: `settleAwaitingAdvanceScan`'s own admission
+guard already skips any item carrying `fabrik:paused`, so the coexistence of both labels is inert
+until the pause is lifted — at which point the scan can see the item again with no further signal
+needed, and the counter reset (above) ensures it gets a genuinely fresh retry budget rather than
+re-escalating on the first subsequent failure.
+
 ## Consequences
 
 **Positive:**
@@ -150,12 +187,16 @@ first-failure visibility "where the operator is already looking," not just at ex
   and a one-time comment naming the missing option and the options that exist — instead of a
   log-only warning no operator is watching for.
 - Adding the missing board Status option is sufficient to unstick every stranded item on the very
-  next poll — no engine restart, no manual re-dispatch.
+  next poll — no engine restart, no manual re-dispatch — including one that was previously escalated
+  and paused: removing `fabrik:paused` alone is enough, with no manual re-labeling required (the
+  settle-scan-exclusive recoverability fix from PR #1469 review, second round).
 - Downstream dependents unblock as a direct consequence, since the underlying issue actually reaches
   its terminal board state (and, independently, its GitHub close) once the advance succeeds — closing
   the specific harm #1422 reports, not merely making the advance itself succeed.
-- Reuses the same generic settle/escalate helpers as six prior settle scans, so this is the seventh
-  structurally identical instance of the pattern, not a new mechanism.
+- Reuses the generic `recordSettleRetry`/`clearSettleMarker` helpers shared by six prior settle scans
+  for retry counting and marker clearing, so most of this remains a structurally identical instance of
+  the pattern — the one deliberate deviation (escalation not removing the marker) is isolated to
+  `escalateAwaitingAdvanceFailure`, which does not call the shared `escalateSettle` helper.
 - Does not touch `itemMayNeedWork`, `itemNeedsWork`, `transientLifecycleLabels`, or any
   dispatch-suppression code — cannot regress the terminal-skip optimization or interact with any
   other gate label, by construction.

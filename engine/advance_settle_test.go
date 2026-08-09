@@ -135,8 +135,14 @@ func TestRecordAdvanceOutcome_SuccessClearsMarker(t *testing.T) {
 }
 
 // TestRecordAdvanceOutcome_EscalatesAtMaxRetries covers R3/Acceptance #6:
-// after MaxRetries failed passes, the item is paused, the settle label
-// removed, and an escalation comment posted.
+// after MaxRetries failed passes, the item is paused and an escalation
+// comment posted. Unlike every other settle scan's escalation,
+// awaitingAdvanceLabel must NOT be removed here — see
+// escalateAwaitingAdvanceFailure's doc comment (Pruefer, PR #1469 review):
+// for a settle-scan-exclusive item (merge_gate.go's path), the marker is the
+// only remaining signal settleAwaitingAdvanceScan can use to recognize the
+// item once an operator removes fabrik:paused; removing it here would
+// permanently strand that item.
 func TestRecordAdvanceOutcome_EscalatesAtMaxRetries(t *testing.T) {
 	client := &mockGitHubClient{
 		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
@@ -168,14 +174,10 @@ func TestRecordAdvanceOutcome_EscalatesAtMaxRetries(t *testing.T) {
 		t.Error("expected fabrik:paused to be added after MaxRetries settle failures")
 	}
 
-	markerRemoved := false
 	for _, c := range client.removeLabelCalls {
 		if c.labelName == awaitingAdvanceLabel {
-			markerRemoved = true
+			t.Errorf("expected %s to remain present through escalation (settle-scan-exclusive recoverability, Pruefer PR #1469 review) — got it removed", awaitingAdvanceLabel)
 		}
-	}
-	if !markerRemoved {
-		t.Errorf("expected %s to be removed on escalation", awaitingAdvanceLabel)
 	}
 
 	found := false
@@ -464,12 +466,15 @@ func TestCheckAutoMergeConvergence_AdvanceFails_AppliesAwaitingAdvanceLabel(t *t
 }
 
 // TestRunValidatePRTerminalAdvance_SettlesIntoStablePause is the regression
-// test for Pruefer's PR #1469 review (both findings): it drives
+// test for Pruefer's PR #1469 review (both rounds): it drives
 // runValidatePRTerminalAdvance — the real, unconditionally-re-entered
-// self-heal call site — across four simulated polls with a permanently
+// self-heal call site — across five simulated polls with a permanently
 // broken board (updateProjectItemStatusFn always fails) and MaxRetries=2,
 // updating item.Labels between polls exactly as GitHub would after each
 // poll's mutations (mirroring TestAwaitingAdvance_EndToEnd's idiom).
+// stage:Review:complete/stage:Validate:complete start out already present so
+// advanceValidateTerminalItem's gate-checked completion-label fill loop is a
+// no-op throughout — it is not what this test is exercising.
 //
 // Confirmed to fail red against a revert of awaitingAdvanceStuckOrReset's
 // guard in pr_terminal_advance.go: poll 3 would show fabrik:paused stripped
@@ -491,7 +496,7 @@ func TestRunValidatePRTerminalAdvance_SettlesIntoStablePause(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 103, ItemID: "PVTI_103", Repo: "owner/repo", Status: "Validate",
-		Labels: []string{"stage:Implement:complete"},
+		Labels: []string{"stage:Implement:complete", "stage:Review:complete", "stage:Validate:complete"},
 	}
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 
@@ -524,28 +529,35 @@ func TestRunValidatePRTerminalAdvance_SettlesIntoStablePause(t *testing.T) {
 	resetClient()
 
 	// Poll 2 (second failure, hits MaxRetries=2): escalates — fabrik:paused
-	// added, awaitingAdvanceLabel removed, exactly one (escalation) comment,
-	// no duplicate first-failure comment.
+	// added, exactly one (escalation) comment, no duplicate first-failure
+	// comment. Unlike every other settle scan's escalation,
+	// awaitingAdvanceLabel must NOT be removed here — see
+	// escalateAwaitingAdvanceFailure's doc comment (Pruefer's second PR #1469
+	// review round): a settle-scan-exclusive item has no other path that
+	// would ever re-create the marker, so removing it would permanently
+	// strand that class of item even after an operator fixes the board and
+	// unpauses.
 	poll()
 	client.mu.Lock()
 	if !containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
 		t.Fatalf("poll 2: expected fabrik:paused added on escalation, got %v", addedLabelNames(client.addLabelCalls))
 	}
-	if !containsLabel(removedLabelNames(client.removeLabelCalls), awaitingAdvanceLabel) {
-		t.Fatalf("poll 2: expected %s removed on escalation, got %v", awaitingAdvanceLabel, removedLabelNames(client.removeLabelCalls))
+	if containsLabel(removedLabelNames(client.removeLabelCalls), awaitingAdvanceLabel) {
+		t.Fatalf("poll 2: expected %s to remain present through escalation, got it removed", awaitingAdvanceLabel)
 	}
 	if len(client.addCommentCalls) != 1 {
 		t.Fatalf("poll 2: expected exactly one (escalation) comment, got %d", len(client.addCommentCalls))
 	}
 	client.mu.Unlock()
-	item.Labels = []string{"stage:Implement:complete", "fabrik:paused"} // awaitingAdvanceLabel removed, fabrik:paused added
+	item.Labels = []string{"stage:Implement:complete", "stage:Review:complete", "stage:Validate:complete", awaitingAdvanceLabel, "fabrik:paused"}
 	resetClient()
 
 	// Poll 3 (still stuck, unresolved by an operator): this is Pruefer's
-	// Finding 1. Before the fix, this poll would strip fabrik:paused,
-	// retry, fail, and immediately re-escalate — producing a fresh pair of
-	// label/comment mutations. With the fix, the item is left completely
-	// untouched: no label calls, no comments, fabrik:paused stays put.
+	// first-round Finding 1. Before that fix, this poll would strip
+	// fabrik:paused, retry, fail, and immediately re-escalate — producing a
+	// fresh pair of label/comment mutations. With the fix, the item is left
+	// completely untouched: no label calls, no comments, fabrik:paused stays
+	// put.
 	poll()
 	client.mu.Lock()
 	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 {
@@ -557,23 +569,148 @@ func TestRunValidatePRTerminalAdvance_SettlesIntoStablePause(t *testing.T) {
 	}
 	client.mu.Unlock()
 	resetClient()
-	// item.Labels intentionally unchanged — still ["stage:Implement:complete", "fabrik:paused"].
+	// item.Labels intentionally unchanged — still carrying both awaitingAdvanceLabel and fabrik:paused.
 
-	// Poll 4 (operator manually removes fabrik:paused, board still not
-	// fixed): this is Pruefer's Finding 2. The item must get a fresh
-	// MaxRetries budget — a single subsequent failure must NOT immediately
-	// re-escalate.
-	item.Labels = []string{"stage:Implement:complete"}
+	// Poll 4 (operator manually removes only fabrik:paused; board still not
+	// fixed, marker still present from before): this is Pruefer's first-round
+	// Finding 2. The retry counter must get a fresh MaxRetries budget — this
+	// single subsequent failure must NOT immediately re-escalate. Since the
+	// marker was never removed, markAdvanceFailureOutstanding's "post the
+	// first-failure comment" gate is already satisfied (no duplicate stuck
+	// comment either) — this poll should be silent (no label calls, no
+	// comments) other than the internal retry-counter increment.
+	item.Labels = []string{"stage:Implement:complete", "stage:Review:complete", "stage:Validate:complete", awaitingAdvanceLabel}
+	poll()
+	client.mu.Lock()
+	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 {
+		t.Errorf("poll 4: expected zero label mutations on the first post-unpause failure (marker already present, not yet re-escalated), got added=%v removed=%v",
+			addedLabelNames(client.addLabelCalls), removedLabelNames(client.removeLabelCalls))
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("poll 4: expected zero comments on the first post-unpause failure, got %d", len(client.addCommentCalls))
+	}
+	client.mu.Unlock()
+	resetClient()
+
+	// Poll 5 (second failure of the fresh budget, hits MaxRetries=2 again):
+	// confirms the reset genuinely grants a full fresh budget rather than
+	// permanently disabling escalation — this must re-escalate exactly like
+	// poll 2 did, proving the fix doesn't trade the original loop for "never
+	// escalates again."
 	poll()
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if !containsLabel(addedLabelNames(client.addLabelCalls), awaitingAdvanceLabel) {
-		t.Errorf("poll 4: expected %s re-applied on the fresh failure, got %v", awaitingAdvanceLabel, addedLabelNames(client.addLabelCalls))
-	}
-	if containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
-		t.Error("poll 4: did not expect an immediate re-escalation (fabrik:paused) — the retry counter should have been reset to a fresh budget")
+	if !containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Errorf("poll 5: expected fabrik:paused re-applied after a fresh MaxRetries budget was exhausted, got %v", addedLabelNames(client.addLabelCalls))
 	}
 	if len(client.addCommentCalls) != 1 {
-		t.Errorf("poll 4: expected exactly one (fresh first-failure) comment, got %d", len(client.addCommentCalls))
+		t.Errorf("poll 5: expected exactly one (escalation) comment, got %d", len(client.addCommentCalls))
+	}
+}
+
+// TestSettleAwaitingAdvanceScan_RecoversAfterEscalationWithoutMarkerLoss is
+// the regression test for Pruefer's second PR #1469 review round: an item
+// whose *only* driver is this settle scan (e.g. merge_gate.go's
+// advanceConvergedPRToDone, which — per awaitingAdvanceStuckOrReset's doc
+// comment — fires at most once per episode and is never re-entered) must
+// remain recoverable by an operator removing fabrik:paused alone, with no
+// manual re-labeling. Drives settleAwaitingAdvanceScan directly across five
+// simulated polls, mirroring TestRunValidatePRTerminalAdvance_SettlesIntoStablePause's
+// shape but without any direct-call-site self-heal in play.
+//
+// Confirmed to fail red against a revert of escalateAwaitingAdvanceFailure's
+// "keep the marker" behavior (i.e. reverting to escalateSettle, which removes
+// it): pass 4 would find awaitingAdvanceLabel already gone, so the scan's own
+// admission guard would skip the item forever — it would never see the fixed
+// board and never clear.
+func TestSettleAwaitingAdvanceScan_RecoversAfterEscalationWithoutMarkerLoss(t *testing.T) {
+	optionMissing := true
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
+			if optionMissing {
+				return missingDoneOptionErr()
+			}
+			return nil
+		},
+	}
+	stgs := terminalAdvanceStages()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxRetries = 2
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 105, ItemID: "PVTI_105", Repo: "owner/repo", Status: "Validate",
+		Labels: []string{awaitingAdvanceLabel}, // as left by markAdvanceFailureOutstanding's first failure
+	}
+	board.Items = []gh.ProjectItem{item}
+
+	resetClient := func() {
+		client.mu.Lock()
+		client.addLabelCalls = nil
+		client.removeLabelCalls = nil
+		client.addCommentCalls = nil
+		client.mu.Unlock()
+	}
+	poll := func() {
+		eng.settleAwaitingAdvanceScan(board, make(map[string]bool))
+	}
+
+	// Pass 1: fails, 1 < MaxRetries=2 — not yet escalated.
+	poll()
+	resetClient()
+
+	// Pass 2: fails, hits MaxRetries=2 — escalates. awaitingAdvanceLabel must
+	// stay present (unlike every other settle scan's escalation).
+	poll()
+	client.mu.Lock()
+	if !containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Fatalf("pass 2: expected fabrik:paused added on escalation, got %v", addedLabelNames(client.addLabelCalls))
+	}
+	if containsLabel(removedLabelNames(client.removeLabelCalls), awaitingAdvanceLabel) {
+		t.Fatal("pass 2: expected awaitingAdvanceLabel to remain present through escalation — a settle-scan-exclusive item has no other path that re-creates it")
+	}
+	client.mu.Unlock()
+	board.Items[0].Labels = []string{awaitingAdvanceLabel, "fabrik:paused"}
+	resetClient()
+
+	// Pass 3: still paused — the scan's own guard must skip it untouched.
+	poll()
+	client.mu.Lock()
+	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 || len(client.addCommentCalls) != 0 {
+		t.Errorf("pass 3: expected zero mutations while still paused, got added=%v removed=%v comments=%d",
+			addedLabelNames(client.addLabelCalls), removedLabelNames(client.removeLabelCalls), len(client.addCommentCalls))
+	}
+	client.mu.Unlock()
+	resetClient()
+
+	// Operator removes fabrik:paused only — board still broken, and does NOT
+	// manually re-add anything. The marker survived escalation, so the scan
+	// can still see this item without any out-of-band nudge.
+	board.Items[0].Labels = []string{awaitingAdvanceLabel}
+
+	// Pass 4: retries with a fresh budget — fails again (board still broken)
+	// but must NOT immediately re-escalate.
+	poll()
+	client.mu.Lock()
+	if containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Error("pass 4: did not expect an immediate re-escalation — the retry counter should have been reset to a fresh budget on unpause")
+	}
+	client.mu.Unlock()
+	resetClient()
+
+	// Operator now actually fixes the board.
+	optionMissing = false
+
+	// Pass 5: the very next scan pass must complete the advance and clear
+	// the marker — no manual re-labeling was ever required.
+	poll()
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if !containsLabel(removedLabelNames(client.removeLabelCalls), awaitingAdvanceLabel) {
+		t.Errorf("pass 5: expected the advance to succeed and clear %s once the board was fixed, got added=%v removed=%v",
+			awaitingAdvanceLabel, addedLabelNames(client.addLabelCalls), removedLabelNames(client.removeLabelCalls))
+	}
+	if containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Error("pass 5: did not expect a re-escalation on the successful pass")
 	}
 }

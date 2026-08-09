@@ -54,14 +54,17 @@ const advanceAwaitingRetryStage = "__awaiting_advance__"
 //     operator — returns true so the caller skips the whole branch untouched
 //     (no relabeling, no retry, no comment).
 //   - Not paused AND counter >= MaxRetries: an operator has removed
-//     fabrik:paused since the last escalation — resets the counter so the
-//     next failure gets a fresh MaxRetries budget (mirrors clearFailedStage's
-//     StageRetryCleared, scoped to this synthetic retry key, per Pruefer's
-//     second finding), then returns false so the caller proceeds normally.
+//     fabrik:paused since the last escalation — delegates to
+//     awaitingAdvanceResetIfUnpaused for a fresh MaxRetries budget, then
+//     returns false so the caller proceeds normally.
 //   - Otherwise (counter below MaxRetries, or MaxRetries <= 0 meaning
 //     unlimited/never-escalate): returns false — nothing to do.
 func (e *Engine) awaitingAdvanceStuckOrReset(item gh.ProjectItem) bool {
 	if e.cfg.MaxRetries <= 0 {
+		return false
+	}
+	if !hasLabel(item.Labels, "fabrik:paused") {
+		e.awaitingAdvanceResetIfUnpaused(item)
 		return false
 	}
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -75,14 +78,37 @@ func (e *Engine) awaitingAdvanceStuckOrReset(item gh.ProjectItem) bool {
 		e.logf(item.Number, "warn", "awaiting-advance: could not read retry state: %v — proceeding without the stuck guard\n", err)
 		return false
 	}
-	if snap.Attempts(advanceAwaitingRetryStage) < e.cfg.MaxRetries {
-		return false
+	return snap.Attempts(advanceAwaitingRetryStage) >= e.cfg.MaxRetries
+}
+
+// awaitingAdvanceResetIfUnpaused resets the advanceAwaitingRetryStage retry
+// counter when it is already at or above MaxRetries but item is not (or is
+// no longer) carrying fabrik:paused — the signal that an operator has
+// removed the pause since the last escalation. Mirrors clearFailedStage's
+// StageRetryCleared, scoped to this synthetic retry key. No-op otherwise
+// (including MaxRetries <= 0, unlimited/never-escalate).
+//
+// Shared by awaitingAdvanceStuckOrReset (advanceValidateTerminalItem's call
+// site, which also needs the "still paused, still stuck" half above) and
+// settleAwaitingAdvanceScan directly (whose own pre-filter already excludes
+// paused items, so only this reset half is ever relevant there). Without
+// this, a settle-scan retry issued after a manual unpause would immediately
+// re-escalate on its very first failure instead of getting a fresh budget —
+// Pruefer's second PR #1469 review finding, which also applies to this
+// scan's own retries, not just the direct call sites.
+func (e *Engine) awaitingAdvanceResetIfUnpaused(item gh.ProjectItem) {
+	if e.cfg.MaxRetries <= 0 {
+		return
 	}
-	if hasLabel(item.Labels, "fabrik:paused") {
-		return true
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, err := e.store.Get(repoStr, item.Number)
+	if err != nil {
+		e.logf(item.Number, "warn", "awaiting-advance: could not read retry state: %v — leaving retry counter as-is\n", err)
+		return
 	}
-	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: advanceAwaitingRetryStage})
-	return false
+	if snap.Attempts(advanceAwaitingRetryStage) >= e.cfg.MaxRetries {
+		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: advanceAwaitingRetryStage})
+	}
 }
 
 // recordAdvanceOutcome wraps advanceToNextStage so both terminal-advance call
@@ -128,19 +154,41 @@ func (e *Engine) markAdvanceFailureOutstanding(item gh.ProjectItem, stage *stage
 }
 
 // escalateAwaitingAdvanceFailure is called when the outstanding terminal
-// advance has failed e.cfg.MaxRetries times (R3). Pauses the issue, removes
-// the awaiting-advance marker, and posts an explanatory comment — mirrors
-// escalateNonDefaultBaseCloseFailure's shape exactly.
+// advance has failed e.cfg.MaxRetries times (R3). Pauses the issue and posts
+// an explanatory comment, mirroring escalateNonDefaultBaseCloseFailure's
+// shape — but deliberately does NOT reuse the shared escalateSettle helper,
+// and deliberately does NOT remove awaitingAdvanceLabel the way every other
+// settle scan's escalation does.
+//
+// escalateSettle's doc comment justifies removing the marker on escalation
+// with "dispatch/retry suppression is no longer needed once fabrik:paused
+// takes over" — true for its other six callers only because each of THEIR
+// direct call sites unconditionally re-creates the marker on its very next
+// relevant poll regardless of pause state (e.g. closeIssueIfNonDefaultBase,
+// ADR-1097). Ours does not: advanceConvergedPRToDone (merge_gate.go) fires
+// at most once per episode — removing fabrik:auto-merge-enabled up front
+// structurally prevents checkAutoMergeConvergence from ever re-entering it
+// (see awaitingAdvanceStuckOrReset's doc comment). For an item whose *only*
+// driver is settleAwaitingAdvanceScan, removing the marker here would
+// permanently strand it: nothing would ever re-add it, even after an
+// operator fixes the board and removes fabrik:paused (Pruefer, PR #1469
+// review). Keeping the marker in place is harmless while paused —
+// settleAwaitingAdvanceScan's own guard already skips any item carrying
+// fabrik:paused — and is exactly what lets that scan pick the item back up,
+// with a fresh retry budget (awaitingAdvanceResetIfUnpaused), the moment an
+// operator removes the pause and nothing else.
 func (e *Engine) escalateAwaitingAdvanceFailure(item gh.ProjectItem) {
 	e.logf(item.Number, "escalate", "terminal advance failed %d time(s) — pausing issue\n", e.cfg.MaxRetries)
 
-	e.escalateSettle(item, awaitingAdvanceLabel, advanceAwaitingRetryStage, func(item gh.ProjectItem) {
-		comment := fmt.Sprintf(
-			"🏭 **Fabrik — terminal advance failed repeatedly**\n\nFabrik could not move this issue's project-board Status forward after %d attempt(s). The issue has been paused.\n\nCheck that every stage name in your stage config has a matching Status option on the project board, then remove the `fabrik:paused` label to resume.",
-			e.cfg.MaxRetries,
-		)
-		e.postItemComment(item, comment, true)
-	})
+	e.addLabel(item, "fabrik:paused")
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — terminal advance failed repeatedly**\n\nFabrik could not move this issue's project-board Status forward after %d attempt(s). The issue has been paused.\n\nCheck that every stage name in your stage config has a matching Status option on the project board, then remove the `fabrik:paused` label to resume.",
+		e.cfg.MaxRetries,
+	)
+	e.postItemComment(item, comment, true)
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: advanceAwaitingRetryStage})
 }
 
 // clearAwaitingAdvanceMarker removes the awaiting-advance marker and clears
@@ -182,6 +230,14 @@ func (e *Engine) settleAwaitingAdvanceScan(board *gh.ProjectBoard, advancedItems
 			e.logf(item.Number, "warn", "awaiting-advance: no stage configured for board status %q — skipping\n", item.Status)
 			continue
 		}
+		// Reset a stale post-escalation counter before retrying: an item can
+		// reach here still carrying awaitingAdvanceLabel with Attempts already
+		// at MaxRetries if an operator removed fabrik:paused after a prior
+		// escalation — escalateAwaitingAdvanceFailure deliberately leaves this
+		// marker in place (see its doc comment) so this scan can still see the
+		// item, but without this reset the retry below would immediately
+		// re-escalate instead of getting a fresh budget.
+		e.awaitingAdvanceResetIfUnpaused(item)
 		if err := e.recordAdvanceOutcome(board, item, stage); err != nil {
 			e.logf(item.Number, "awaiting-advance", "retry: could not advance: %v\n", err)
 		} else {
