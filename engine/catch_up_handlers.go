@@ -53,10 +53,109 @@ type catchUpHandler struct {
 //     (GitHub owns the merge decision)
 //   - mergeAndCIGates: merge-conflict gate runs before the CI gate (ADR-028)
 var catchUpPhase1Handlers = []catchUpHandler{
+	{name: "engineUnpause", run: (*Engine).handleEngineUnpause},
 	{name: "dependencies", run: (*Engine).handleDependencies},
 	{name: "reviewGate", run: (*Engine).handleReviewGate},
 	{name: "autoMergeConvergence", run: (*Engine).handleAutoMergeConvergence},
 	{name: "mergeAndCIGates", run: (*Engine).handleMergeAndCIGates},
+}
+
+// handleEngineUnpause is the actual resume trigger for the four cycle-limit
+// pause sites (pauseForReviewCycleLimit, pauseForCIFixCycleLimit,
+// pauseForRebaseCycleLimit, pauseForEnqueueCycleLimit — #1460 R2). It must run
+// first, unconditionally, ahead of every other Phase 1 handler, so a
+// just-reset counter is what the rest of this same pass evaluates.
+//
+// Why this can't live in processItem's existing wasPaused-gate instead
+// (engine/item.go, around the clearFailedStage call): that gate is reachable
+// only when processItem itself is dispatched for the item, and itemNeedsWork
+// returns false the moment stage:<name>:complete is already present and there
+// is no new comment — which is exactly the state all four cycle-limit pause
+// sites leave the item in. They fire from this very handler chain
+// (handleReviewGate / handleMergeAndCIGates), which — per poll.go's
+// deepFetchCandidates loop and settleAwaitingCIScan's identical loop — is
+// only reached for items that are NOT currently paused (both entry points
+// skip fabrik:paused items outright) but ARE already stage-complete. So the
+// instant a human removes fabrik:paused, the item re-enters this chain
+// directly; processItem is never invoked for it, and its unpause gate is
+// unreachable. Without a reset trigger inside this chain, the freshly
+// unpaused item hits the same stuck cycleCount >= maxCycles check on its very
+// next pass and re-pauses immediately (confirmed live on #1208: five seconds
+// from unpause to re-pause, with no comment involved).
+//
+// PausedByEngine being true here means: this item reached the handler chain
+// (so fabrik:paused is currently absent, per both admission filters above)
+// while still carrying a stale EnginePaused record from before the label was
+// removed. That is precisely "a human unpaused a cycle-limit-paused item" —
+// clearFailedStage is safe to reuse as-is: it removes stage:<name>:failed (a
+// harmless no-op, since these four sites never apply it), clears
+// PausedByEngine, resets LastAttemptAt, zeroes ReviewCycles/CIFixCycles/
+// RebaseCycles/EnqueueCycles via EngineCyclesCleared, and resets the comment
+// circuit breaker — the identical reset already used by
+// escalateFailedStage/escalatePRCreationFailure/handleBoundaryViolation via
+// processItem's gate, and by pauseForSliceLimit via that same gate (a
+// different call path — slice-limit pauses mid-stage, before completion, so
+// processItem's gate remains reachable for it; see pauseForSliceLimit's doc
+// comment).
+//
+// Always returns false: this handler only resets state, it never claims the
+// item — the rest of the chain (including the cycle-limit checks that would
+// otherwise re-pause) must still run in the same pass so a genuine resume
+// converges in one poll (AC2), not two.
+//
+// Scope note (#1460 review finding): the check below is `snap.PausedByEngine`
+// for the item's current stage, not specifically one of the four named sites
+// — it fires for *any* stage whose EnginePaused record is stale when the item
+// reaches this chain, including escalateFailedStage/escalatePRCreationFailure/
+// handleBoundaryViolation/pauseForSliceLimit's own EnginePaused applications.
+// This is currently safe, not merely idempotent-by-luck: every one of those
+// other appliers pauses strictly *before* stage:<name>:complete is set for
+// that stage (mid-invocation, on a non-terminal Claude exit), and this chain
+// is reachable only for items that are already stage-complete (or carrying
+// fabrik:awaiting-ci) — see the reachability argument above. So a stage
+// paused by one of those sites can never simultaneously be in the
+// stage-complete-or-awaiting-ci state this chain requires; by the time such a
+// stage does reach stage:<name>:complete, processItem's own gate has already
+// cleared its EnginePaused record on the resuming dispatch, well before this
+// chain would ever see it. If a future pause site ever applies EnginePaused
+// after its stage is already marked complete, it would be picked up here too
+// — which is the intended, general behavior (any stale EnginePaused record on
+// a stage-complete item should reset), not a defect to guard against.
+//
+// This safety argument is enforced by convention (every current applier's own
+// call-site ordering), not by a compile-time or runtime assertion — nothing
+// stops a future EnginePaused applier from being added after a stage's
+// completion point. That gap is deliberately not closed here: the reset
+// behavior in that case is still correct by design (see the paragraph above),
+// so there is nothing to guard against, only a scenario to keep verified.
+// TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse exercises
+// exactly that shape directly (EnginePaused applied to a stage that is
+// simultaneously stage:<name>:complete) and asserts the reset still lands
+// cleanly, regardless of which applier produced the record. A future site
+// that violates today's "pause before completion" convention would still
+// pass through this handler correctly — this doc note exists so the next
+// person adding an EnginePaused applier sees this discussion rather than
+// rediscovering it (#1460 review finding).
+//
+// Cost note (#1460 review finding): this handler adds one unconditional
+// e.store.Get per stage-complete-or-awaiting-ci item, per poll pass, ahead of
+// every other Phase 1 handler. store.Get's fast path (the overwhelming
+// majority of calls, since these items are already tracked) is an in-memory
+// RLock + map lookup + snapshot copy — no GitHub API call — and every
+// downstream handler in this same chain (handleReviewGate, handleMergeAndCIGates,
+// etc.) already performs its own store.Get calls per item per pass, so this is
+// not a new class of cost, just one more instance of an existing pattern.
+// Accounted for explicitly in ADR-1460's Consequences/Negative section, not an
+// oversight.
+func (e *Engine) handleEngineUnpause(pctx *phase1Ctx) bool {
+	repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
+	snap, err := e.store.Get(repoStr, pctx.item.Number)
+	if err != nil || !snap.PausedByEngine(pctx.stage.Name) {
+		return false
+	}
+	e.logf(pctx.item.Number, "unpause", "stale engine-pause record found for stage %q with fabrik:paused absent — clearing (#1460)\n", pctx.stage.Name)
+	e.clearFailedStage(pctx.item, pctx.stage)
+	return false
 }
 
 // handleDependencies claims the item when it has unresolved blocking
@@ -165,6 +264,9 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — this claim
+				// (dispatchWithCycleLimit always returns true) is correct whether the
+				// call posted a fresh pause or reused an existing one (#1460 R4).
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
 		)
@@ -292,6 +394,8 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchRebaseReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — same reasoning as
+				// the review-reinvoke pause callback above (#1460 R4).
 				e.pauseForRebaseCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxRebaseCycles)
 			},
 		)

@@ -1038,6 +1038,84 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 	}
 }
 
+// TestEscalateFailedStage_ClearFailedStage_ResetsAttempts is the AC5
+// regression for #1460: escalateFailedStage/clearFailedStage are untouched by
+// this issue's fix (the four cycle-limit sites are fixed via a separate,
+// additive handler — handleEngineUnpause — in catchUpPhase1Handlers, which a
+// stage-not-yet-complete item like this one never reaches; escalateFailedStage
+// itself is only ever reached from processItem's own unchanged gate). This
+// drives the REAL escalateFailedStage and REAL clearFailedStage (not
+// simulated store state), confirming stage:<name>:failed is applied then
+// removed, PausedByEngine is set then cleared, and — the part AC5 explicitly
+// calls out — Attempts(stage) is reset to 0 on unpause, exactly as before
+// this issue's change.
+//
+// Calls clearFailedStage directly (mirroring
+// TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage's existing
+// precedent) rather than driving a full processItem pass: a full pass would
+// immediately re-dispatch the now-eligible stage, and that dispatch's own
+// StageRetryIncremented would confound the very assertion this test makes
+// (Attempts == 0 right after the reset, not after a subsequent attempt).
+// TestProcessItem_ResetsOnUnpause already covers that processItem's gate
+// itself still fires clearFailedStage correctly end-to-end.
+func TestEscalateFailedStage_ClearFailedStage_ResetsAttempts(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStages())
+	eng.cfg.MaxRetries = 3
+
+	stage := &stages.Stage{Name: "Research", Order: 1}
+	item := gh.ProjectItem{Number: 12, Title: "Escalate test", Status: "Research", ItemID: "PVTI_12", Repo: "owner/repo"}
+
+	// Drive the real escalation: 3 failed attempts, then escalateFailedStage
+	// (mirrors what item.go's own MaxRetries check does at the call site).
+	for i := 0; i < eng.cfg.MaxRetries; i++ {
+		eng.store.Apply(itemstate.StageRetryIncremented{Repo: "owner/repo", Number: 12, StageName: "Research"})
+	}
+	eng.escalateFailedStage(item, stage, "")
+
+	snap, _ := eng.store.Get("owner/repo", 12)
+	if snap.Attempts("Research") != eng.cfg.MaxRetries {
+		t.Fatalf("Attempts(Research) after escalation = %d; want %d (unchanged from escalation)", snap.Attempts("Research"), eng.cfg.MaxRetries)
+	}
+	if !snap.PausedByEngine("Research") {
+		t.Fatal("expected PausedByEngine(Research) to be true after escalateFailedStage — this is the pre-existing, unchanged mechanism AC5 protects")
+	}
+	pausedApplied, failedApplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedApplied = true
+		case "stage:Research:failed":
+			failedApplied = true
+		}
+	}
+	if !pausedApplied || !failedApplied {
+		t.Fatalf("expected both fabrik:paused and stage:Research:failed to be applied by escalateFailedStage, got paused=%v failed=%v", pausedApplied, failedApplied)
+	}
+
+	// Simulate the operator investigating and removing fabrik:paused, then
+	// the real clearFailedStage reset that processItem's gate would trigger.
+	item.Labels = []string{"stage:Research:failed"}
+	eng.clearFailedStage(item, stage)
+
+	foundRemoval := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "stage:Research:failed" {
+			foundRemoval = true
+		}
+	}
+	if !foundRemoval {
+		t.Error("expected stage:Research:failed to be removed on unpause — AC5 regression")
+	}
+	snap, _ = eng.store.Get("owner/repo", 12)
+	if snap.Attempts("Research") != 0 {
+		t.Errorf("AC5: Attempts(Research) after unpause = %d; want 0 — escalateFailedStage's unpause behavior must be byte-for-byte unchanged by this issue's fix", snap.Attempts("Research"))
+	}
+	if snap.PausedByEngine("Research") {
+		t.Error("expected PausedByEngine(Research) to be cleared after unpause")
+	}
+}
+
 func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)

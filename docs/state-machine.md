@@ -685,6 +685,8 @@ This table shows the normal flow when an issue progresses through the pipeline w
 | Same column, Paused | Human removes `fabrik:paused` | — | Same column, Idle | | | Engine processes item on next poll |
 | Same column, Paused | New human comment | Not a bot login (`github.IsBotLogin`, `humanNewComments()`) | Same column, Idle → comment processing | | `fabrik:paused` | Unpause; `clearFailedStage()` also called (clears any failed label + resets retries); falls through to `processComments()`. A bot-authored comment does not match this guard and leaves the item Paused (#1083). |
 
+> **This table covers `processItem`'s own unpause gate** — reachable only for a pause that fires *before* the stage is marked `stage:<X>:complete` (`escalateFailedStage`, `escalatePRCreationFailure`, `handleBoundaryViolation`, `pauseForSliceLimit`). A pause that fires *after* the stage is already complete (the four cycle-limit pause sites: review, CI-fix, rebase, enqueue — see §7.2 "Resumable Engine Pauses") is resumed by a different mechanism, `handleEngineUnpause` in the catch-up loop's Phase 1 handler chain (§6.2, Handler 0) — `processItem` is never dispatched for a stage-complete item with no new comment, so its gate above is structurally unreachable for those four sites. See ADR-1460.
+
 #### Lock Conflict (Multi-Instance)
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
@@ -1439,6 +1441,8 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 **Phase 1 — unconditional, ordered handler list (`catchUpPhase1Handlers`):**
 
 Phase 1 is implemented as an explicit ordered slice of named handler methods (`catchUpPhase1Handlers` in `engine/catch_up_handlers.go`). Each handler returns `true` to claim the item — Phase 2 is skipped for this item this cycle — or `false` to pass through to the next handler. **Ordering is structurally enforced by slice position** (ADR-056 D3); a future reorder requires a deliberate code change and triggers a test failure, rather than occurring as an accidental side effect of a `continue` insertion.
+
+**Handler 0: `handleEngineUnpause`** (#1460 — numbered 0, not renumbering Handlers 1-4 below, to avoid an invasive cross-reference cascade) — runs first, unconditionally, ahead of every other Phase 1 handler. It is the actual resume trigger for the four cycle-limit pause sites (`pauseForReviewCycleLimit`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `pauseForEnqueueCycleLimit`; see §7.2 "Resumable Engine Pauses"): checks `snap.PausedByEngine(stage.Name)`; if true — meaning the item reached this handler chain (so `fabrik:paused` is currently absent, per both the main catch-up loop's and `settleAwaitingCIScan`'s admission filters) while still carrying a stale `itemstate.EnginePaused` record from before the label was removed — it calls `clearFailedStage()`, the same reset `processItem`'s own unpause gate already uses (zeroing `ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles`, clearing `Attempts`, resetting `LastAttemptAt`, and resetting the comment circuit breaker). Always returns `false` — it only resets state, never claims — so the rest of the chain evaluates the just-reset counters in the *same* pass, letting a genuine resume converge in one poll rather than two. See ADR-1460 for why this handler exists at all (`processItem`'s pre-existing unpause gate is structurally unreachable for these four sites — they only ever fire post-stage-completion, where `itemNeedsWork` never re-dispatches `processItem`).
 
 **Handler 1: `handleDependencies`** — thin wrapper around `checkDependencies()`. If the item has unresolved blocking dependencies, claims the item (returns true); otherwise passes through. `checkDependencies`'s own bool return **is** the Phase 1 claim signal directly (no translation layer, unlike the review/CI gates below) — so its cycle-detection branch (a bounded BFS finds the item is itself a transitive blocker of one of its own blockers) also returns `true` when it pauses the issue via `pauseIssue` (ADR-1223), rather than reusing the `false` value returned for "no open dependencies." Before this fix the cycle-detection pause fell through unclaimed, the same overloaded-return bug present in the review/CI gates.
 
@@ -2367,6 +2371,32 @@ When a stage fails `MaxRetries` times (default: configurable, 0 disables):
 - Removes `stage:<X>:failed`
 - Resets retry count (`StageRetryCleared`), engine-paused flag (`EngineUnpaused`), cooldown (`StageLastAttemptCleared`), and review cycle count (`EngineCyclesCleared`)
 
+#### 7.2.1 Resumable Engine Pauses (ADR-1460)
+
+**The invariant:** every pause comment Fabrik posts ends with "remove `fabrik:paused` to resume" — this must actually be true for every pause site, not just stage-failure escalation. Before #1460, four pause sites violated it: `pauseForReviewCycleLimit`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `pauseForEnqueueCycleLimit` never applied `itemstate.EnginePaused`, so removing `fabrik:paused` was a no-op — the triggering cycle counter (`ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles`) stayed pinned at its limit and the item re-paused on its very next evaluation (reproduced live on #1208: five seconds from unpause to re-pause, byte-identical repost comment, no comment involved in the resume attempt at all).
+
+**Two resume gates, chosen by *when* the pause fires relative to stage completion:**
+
+1. **Pre-completion pauses** (stage not yet `stage:<X>:complete`) — `escalateFailedStage`, `escalatePRCreationFailure`, `handleBoundaryViolation` (§7.2 above), `pauseForSliceLimit` (§7.12) — resume via `processItem()`'s own `wasPaused || hasFailedLabel` gate, described above. Unchanged by #1460.
+2. **Post-completion pauses** (stage already `stage:<X>:complete`, or in the `fabrik:awaiting-ci` window) — the four cycle-limit sites — resume via **`handleEngineUnpause`**, a Phase 1 catch-up-loop handler (§6.2, Handler 0) added by #1460. `processItem()` is never dispatched for a stage-complete item with no new comment (`itemNeedsWork` returns false), so gate 1 above is structurally unreachable for these four sites — this was the flaw in the issue's own originally-suggested fix. `handleEngineUnpause` runs first, unconditionally, in every Phase 1 pass: if `snap.PausedByEngine(stage.Name)` is true while the item is here at all (meaning `fabrik:paused` is currently absent, per the catch-up loop's own admission filter), it calls the identical `clearFailedStage()` reset gate 1 uses, then lets the rest of the chain re-evaluate the just-reset counter in the same pass.
+
+All four now-fixed sites apply `itemstate.EnginePaused` in both their fresh-pause branch and their reapply-existing-comment branch (see below) — the reapply branch must re-arm it too, or a *second* cycle-limit episode after a successful first resume would itself become a fresh one-way door.
+
+**No-repost on re-pause (R4):** reusing the pattern from ADR-1408 (`pauseForCITimeout`/`pauseForCIFixCycleLimit`), each of the four sites checks `hasPauseComment(item, <its own stable message fragment>)` before posting — a `mutate.go`-shared helper generalized from ADR-1408's CI-specific `hasCIGatePauseComment`. If a matching comment already exists for the episode, the labels are reapplied (`reapplyPauseLabels`) without a duplicate post.
+
+**Classification of every pause/counter site (full detail in ADR-1460):**
+
+| Category | Sites |
+|---|---|
+| Already correct (applies `EnginePaused`, resumes via gate 1) | `escalateFailedStage`, `escalatePRCreationFailure`, `handleBoundaryViolation`, `escalateSettle` (synthetic stage key, out of scope), `pauseForSliceLimit` (§7.12 — mid-stage, gate 1 reachable) |
+| Fixed by #1460 (applies `EnginePaused`, resumes via gate 2 / `handleEngineUnpause`) | `pauseForReviewCycleLimit`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `pauseForEnqueueCycleLimit` |
+| Independently resets (no fix needed) | `pauseForReviewTimeout` (strips its own `fabrik:awaiting-review` anchor before pausing), `pauseForConvergenceFailed` / `pauseForMergeGroupStall` / `checkAutoMergeConvergence`'s "auto-merge disabled" branch (all strip `fabrik:auto-merge-enabled`, their shared anchor), `tripCommentBreaker` (self-expiring window), `checkDependencies` (live-derived) |
+| Condition-driven, no counter (no fix needed) | `pauseForCITimeout` (anchored to external `fabrik:awaiting-ci` state, not an attempt budget — re-pausing while CI is genuinely still unresolved is correct), `pauseForPRClosedNotMerged`, `pauseForRequiredNeverRunningCheck`, `handleBrokenReviewLinkage`, `pauseForBrokenLinkage`, `ensureRepoReady`/`postSpawnCloneError`/`spawnChildren` |
+
+**Accepted side effect:** `clearFailedStage()`'s reset (reused unmodified by `handleEngineUnpause`) also zeroes `Attempts(stage.Name)` — the unrelated `MaxRetries` failure counter — via `StageRetryCleared`. A manual unpause of a cycle-limit-paused item therefore also gives that stage's failure budget a clean slate. This is deliberate ("a human unpause is 'try again'"), consistent with the same reset already applying to `escalateFailedStage`/`escalatePRCreationFailure`, and is a net-new intentional behavior for the four newly-fixed sites (they had no working "unchanged" baseline to preserve — they were broken before #1460).
+
+**Restart durability:** `handleEngineUnpause` reads `PausedByEngine`, which is in-memory-only (does not survive an engine restart — `internal/itemstate/snapshot.go`). This is not a gap: `ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles` live in the same in-memory `StageState`, constructed empty by `NewStore(nil)` on every process start with no persistence layer for any `StageState` field — so a restart clears the pause flag *and* the triggering counter together, never one without the other. A restart before a human unpauses an item is equivalent to `handleEngineUnpause` having already fired for free (both read back as zero); there is no interleaving that reproduces this section's defect via a restart. See ADR-1460's "Restart Durability" section.
+
 ### 7.3 Claude Usage-Limit Exemption
 
 When a Claude invocation exits because the account's usage limit was hit (e.g. `You've hit your
@@ -2898,19 +2928,22 @@ is treated the same as a genuine error rather than inferred to be a slice. This 
 
 **Recovery:** `StageRetryCleared` — applied on normal stage completion and by `clearFailedStage()` on
 manual unpause — zeroes `SliceRetries(stageName)` alongside `Attempts(stageName)`; the two counters
-share one reset point. Unlike `pauseForRebaseCycleLimit`, `pauseForSliceLimit()` **does** apply
-`itemstate.EnginePaused` (never `stage:<X>:failed`): `RebaseCycles` has an independent path back to
-progress (a human resolves the underlying merge conflict directly, which changes `settle.Status` and
-lets the poll loop advance without ever re-checking the counter), but `SliceRetries` has no such
-signal — the job simply needs more slices than the budget allowed, with nothing external to "fix."
-Without `EnginePaused`, `processItem()`'s unpause guard (`wasPaused || hasFailedLabel`, both false for
-a pure slice-limit pause) would never fire `clearFailedStage()`, `SliceRetries` would never reset, and
-removing `fabrik:paused` would be a no-op: the very next dispatch takes exactly one more slice,
-re-checks a counter already at `MaxSliceRetries`, and re-pauses immediately — the documented recovery
-path would not work. With `EnginePaused` applied, `snap.PausedByEngine(stageName)` is true on the next
-pass, so removing `fabrik:paused` genuinely triggers `clearFailedStage()` → `StageRetryCleared`, and
-the stage resumes with a fresh slice budget. `clearFailedStage()`'s `stage:<X>:failed` label removal is
-a harmless no-op on this path, since that label was never applied.
+share one reset point. `pauseForSliceLimit()` applies `itemstate.EnginePaused` (never
+`stage:<X>:failed`), and — unlike the four cycle-limit sites #1460 fixes (§7.2.1) — resumes via
+`processItem()`'s own gate directly, not via `handleEngineUnpause`: a slice-limit pause fires
+**mid-stage**, before `stage:<X>:complete` is ever applied, so the item is not yet stage-complete when
+paused and `processItem()`'s gate remains reachable. Without `EnginePaused`, `processItem()`'s unpause
+guard (`wasPaused || hasFailedLabel`, both false for a pure slice-limit pause) would never fire
+`clearFailedStage()`, `SliceRetries` would never reset, and removing `fabrik:paused` would be a no-op:
+the very next dispatch takes exactly one more slice, re-checks a counter already at `MaxSliceRetries`,
+and re-pauses immediately — the documented recovery path would not work. With `EnginePaused` applied,
+`snap.PausedByEngine(stageName)` is true on the next pass, so removing `fabrik:paused` genuinely
+triggers `clearFailedStage()` → `StageRetryCleared`, and the stage resumes with a fresh slice budget.
+`clearFailedStage()`'s `stage:<X>:failed` label removal is a harmless no-op on this path, since that
+label was never applied. (This section previously contrasted with `pauseForRebaseCycleLimit`, which at
+the time did not apply `EnginePaused` either — #1460 fixed that site too, via the separate
+`handleEngineUnpause` resume path described in §7.2.1, since a rebase-cycle-limit pause fires
+post-completion, unlike this section's mid-stage slice-limit pause.)
 
 **Regression guard:** a job that has already taken more turn-cap slices than `MaxRetries` (the old,
 accidental ceiling per #1191) is never paused as long as it stays within `MaxSliceRetries` — `Attempts`
