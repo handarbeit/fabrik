@@ -1691,6 +1691,44 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 	}
 }
 
+// ejectRedSingleton disposes of a red batch whose only member is m (#1440 R1/R2): bisection
+// exists to isolate a poisoner among two or more members, and there is nothing to isolate in
+// a batch of one — a red combined Validate on a true singleton is logically identical to that
+// PR's own Validate failing. Unlike ejectMember, this never routes through the shared
+// mergeTrainEjectionCounts counter (R3): that counter exists to bound genuine multi-member
+// bisection/one-at-a-time churn, and every red-singleton disposition for the same member
+// carries identical information, so counting them measures retries of an already-deterministic
+// outcome rather than train churn. Instead it pauses immediately, on the first occurrence,
+// which composes with groupQueuedByRepo's poison-well guard (it excludes fabrik:paused members
+// from every future batch snapshot) to stop the member from re-forming into an identical
+// singleton trial on the very next poll (R4) — no separate backoff mechanism is needed.
+//
+// The posted comment deliberately never uses "ejected" framing, never promises a retry "in a
+// future train with a different composition" (there is no different composition possible for
+// this member alone), and never attributes the failure to a conflict — it states plainly that
+// the PR's own combined Validate is failing and that the fix belongs in the PR, not the train.
+// diag is threaded through the same rendering helpers ejectMember uses (renderBatchContext,
+// renderDiagnosticBlock) so the failing check(s) are named identically to every other
+// merge-train diagnostic (ADR-1420).
+func (e *Engine) ejectRedSingleton(owner, repo string, m trainMember, diag *trainCIDiagnostic) {
+	sections := []string{
+		fmt.Sprintf("#%d's own combined Validate is failing — this is not a merge-train interaction; the same failure occurs whether or not #%d is combined with any other members.", m.item.Number, m.item.Number),
+		renderBatchContext(nil, m.item.Number),
+	}
+	if block := renderDiagnosticBlock(diag); block != "" {
+		sections = append(sections, block)
+	}
+	sections = append(sections, "This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove `fabrik:paused` to re-enter the train.")
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
+
+	if _, err := e.client.AddComment(owner, repo, m.item.Number, msg); err != nil {
+		e.logf(m.item.Number, "merge-train", "warn: could not post red-singleton comment: %v\n", err)
+	}
+
+	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — pausing without bisection\n", m.item.Number)
+	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+}
+
 // ejectMember posts an ejection comment on the member issue, increments the ejection
 // counter, and pauses the member after MaxMergeTrainEjections. diag is the combined-Validate
 // diagnostic that caused this ejection (R1) — nil for the ejection causes that aren't a
