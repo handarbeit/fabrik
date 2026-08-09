@@ -502,7 +502,7 @@ func (e *Engine) Run() error {
 			if !restRateLimitPaused {
 				e.logf(0, "warn", "REST rate limit exhausted (%d/%d remaining) — pausing all work until reset at %s\n",
 					restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
-				e.emitStructural(tui.RateLimitAlertEvent{Exhausted: true, Reset: restStats.Reset})
+				e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
 				restRateLimitPaused = true
 			}
 			ticker.Reset(time.Until(restStats.Reset) + rateLimitResetBuffer)
@@ -511,7 +511,7 @@ func (e *Engine) Run() error {
 		if restRateLimitPaused {
 			e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
 				restStats.Remaining, restStats.Limit)
-			e.emitStructural(tui.RateLimitAlertEvent{Exhausted: false})
+			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
 			restRateLimitPaused = false
 		}
 
@@ -551,7 +551,7 @@ func (e *Engine) Run() error {
 				} else {
 					e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
 				}
-				e.emitStructural(tui.RateLimitAlertEvent{Exhausted: false})
+				e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketGraphQL, Exhausted: false})
 			}
 			rateLimitLow = newRateLimitLow
 			if rateLimitLow {
