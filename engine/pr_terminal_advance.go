@@ -254,7 +254,8 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 // returns immediately with no state change, and this scan re-evaluates the item
 // every poll — one FetchLinkedPR call, indefinitely, until the PR resolves.
 // There is no timeout/escalation here comparable to settleAwaitingCIScan's
-// CIWaitTimeout backstop (ADR-1270). This exact no-escalation behavior already
+// CIBackstopTimeout backstop (ADR-1270; repurposed from CIWaitTimeout by
+// ADR-1410). This exact no-escalation behavior already
 // existed in the pre-ADR-1387 runValidatePRTerminalAdvance; ADR-1387 does not
 // introduce it, and only lowers its cost — pre-ADR-1387 the same item was also
 // being fully re-dispatched to Claude every poll (the bug this scan fixes), so

@@ -10,16 +10,17 @@ import (
 
 // TestSettleAwaitingCIScan_LabelAppliedAt_DedupesWithinSinglePass is the direct
 // regression test for the duplication #1314 was filed against: within a single
-// settleAwaitingCIScan pass, the CIWaitTimeout backstop (ci_settle.go) and
-// checkCIGate's classifyCIFromCheckRuns (ci.go) both need "when was
-// fabrik:awaiting-ci applied" for the same item. Before the record-at-write
-// cache, each queried FetchLabelAppliedAt independently — two live, fully
-// paginated REST fetches per item per poll. Now the first call (whichever
-// runs first) populates the store's LabelAppliedAt cache and the second is a
-// cache hit, so exactly one live call reaches the client.
+// settleAwaitingCIScan pass, the CIBackstopTimeout backstop (ci_settle.go —
+// CIWaitTimeout before ADR-1410's repurposing) and checkCIGate's
+// classifyCIFromCheckRuns (ci.go) both need "when was fabrik:awaiting-ci
+// applied" for the same item. Before the record-at-write cache, each queried
+// FetchLabelAppliedAt independently — two live, fully paginated REST fetches
+// per item per poll. Now the first call (whichever runs first) populates the
+// store's LabelAppliedAt cache and the second is a cache hit, so exactly one
+// live call reaches the client.
 //
 // Paired with a gate-correctness assertion (CIFixCycles advances to 1, mirroring
-// TestSettleAwaitingCIScan_CIWaitTimeoutBackstop_NoOpWithinTimeout) so this is
+// TestSettleAwaitingCIScan_CIBackstopTimeout_NoOpWithinTimeout) so this is
 // non-vacuous: a stubbed-out or accidentally-skipped labelAppliedAt call would
 // fail this assertion too, not just the call-count one.
 func TestSettleAwaitingCIScan_LabelAppliedAt_DedupesWithinSinglePass(t *testing.T) {

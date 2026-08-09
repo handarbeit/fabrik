@@ -424,6 +424,73 @@ func TestMaxEnqueueCycles_Default(t *testing.T) {
 	}
 }
 
+// TestCiWaitTimeout_DefaultUnchanged locks in ADR-1410/R8's compatibility
+// claim: CIWaitTimeout keeps its existing name, flag, env var, and ~30-minute
+// default — only its meaning changes (elapsed-time cap → liveness-stall
+// dwell), never its resolved value for an operator who never touched it.
+func TestCiWaitTimeout_DefaultUnchanged(t *testing.T) {
+	if got := ciWaitTimeout(0); got != 30*time.Minute {
+		t.Errorf("ciWaitTimeout(0) = %v, want unchanged default 30m", got)
+	}
+	if got := ciWaitTimeout(-1); got != 30*time.Minute {
+		t.Errorf("ciWaitTimeout(-1) = %v, want default 30m", got)
+	}
+	if got := ciWaitTimeout(45); got != 45*time.Minute {
+		t.Errorf("ciWaitTimeout(45) = %v, want passthrough 45m", got)
+	}
+}
+
+// TestCiBackstopTimeout_Default covers the new R5 setting: a 4-hour default,
+// independent of and much larger than CIWaitTimeout's own default — the
+// separate-justification requirement R5 asks for.
+func TestCiBackstopTimeout_Default(t *testing.T) {
+	if got := ciBackstopTimeout(0); got != 240*time.Minute {
+		t.Errorf("ciBackstopTimeout(0) = %v, want default 240m (4h)", got)
+	}
+	if got := ciBackstopTimeout(-1); got != 240*time.Minute {
+		t.Errorf("ciBackstopTimeout(-1) = %v, want default 240m (4h)", got)
+	}
+	if got := ciBackstopTimeout(60); got != 60*time.Minute {
+		t.Errorf("ciBackstopTimeout(60) = %v, want passthrough 60m", got)
+	}
+}
+
+func TestExecute_CIBackstopTimeoutFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--ci-backstop-timeout", "120"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --ci-backstop-timeout" {
+		t.Error("--ci-backstop-timeout flag not registered")
+	}
+}
+
+// TestExecute_CIBackstopTimeoutEnvDoesNotError verifies
+// FABRIK_CI_BACKSTOP_TIMEOUT is accepted by the same resolveInt/
+// explicitFlags pattern every other *_WAIT_TIMEOUT setting uses — a
+// non-numeric or otherwise-rejected env value would surface as an Execute()
+// error distinct from the expected "no stages" failure this fixture always
+// hits (mirrors TestExecute_EnvVarBeatsConfigYAML's black-box style, since
+// Execute() does not expose the resolved Config for direct inspection).
+func TestExecute_CIBackstopTimeoutEnvDoesNotError(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	t.Setenv("FABRIK_CI_BACKSTOP_TIMEOUT", "180")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if strings.Contains(err.Error(), "CI_BACKSTOP_TIMEOUT") || strings.Contains(err.Error(), "ci-backstop-timeout") {
+		t.Errorf("FABRIK_CI_BACKSTOP_TIMEOUT env resolution failed: %v", err)
+	}
+}
+
 func TestExecute_MaxSliceRetriesFlag(t *testing.T) {
 	resetFlags()
 	stagesDir := t.TempDir()
