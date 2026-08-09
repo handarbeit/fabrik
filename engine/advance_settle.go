@@ -66,7 +66,16 @@ func (e *Engine) awaitingAdvanceStuckOrReset(item gh.ProjectItem) bool {
 	}
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, err := e.store.Get(repoStr, item.Number)
-	if err != nil || snap.Attempts(advanceAwaitingRetryStage) < e.cfg.MaxRetries {
+	if err != nil {
+		// Fail open (proceed with self-heal), matching every other
+		// e.store.Get error-handling site in this package — but log it: a
+		// persistent store failure here would otherwise silently reintroduce
+		// the exact unpause/retry/re-escalate loop this guard exists to
+		// prevent (Pruefer, PR #1469 review), with no visible signal.
+		e.logf(item.Number, "warn", "awaiting-advance: could not read retry state: %v — proceeding without the stuck guard\n", err)
+		return false
+	}
+	if snap.Attempts(advanceAwaitingRetryStage) < e.cfg.MaxRetries {
 		return false
 	}
 	if hasLabel(item.Labels, "fabrik:paused") {
