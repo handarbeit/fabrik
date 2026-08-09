@@ -97,6 +97,43 @@ serialized tests make each bisection round expensive. Policy:
 - `max_batch_size` is the operator's lever: smaller batches → cheaper worst-case bisection, less N²
   savings. Tune to test cost.
 
+**Amendment (#1440): a red batch of exactly one member is not bisected.** Bisection exists to
+isolate a poisoner among two or more members; a batch of one has nothing to isolate — a red
+combined Validate on a true singleton is logically identical to that member's own Validate
+failing. Observed live on #1428 (2026-08-08): a PR with a genuinely failing check was
+re-validated as a singleton batch three times (#1432, #1435, #1438), each "isolated by halving
+bisection" and ejected with a promise to retry "in a future train with a different
+composition" — a composition that cannot exist for a batch of one. Three trial PRs and three CI
+runs re-derived an already-known, deterministic outcome, and the terminal pause comment named a
+conflict where there was none.
+
+`runMergeTrainWorker`'s `TrainCIRed` branch now checks arity ahead of calling `handleRedBatch`:
+when the red batch has exactly one survivor, it calls `ejectRedSingleton` instead, which:
+- Posts a single comment stating plainly that the PR's own combined Validate is failing —
+  never "ejected... isolated by halving bisection," never a promise of retry in a future train
+  with a different composition, never a conflict framing. The failing check(s) are still named,
+  via the same diagnostic rendering (`renderDiagnosticBlock`) every other merge-train comment
+  uses (ADR-1420).
+- Applies `fabrik:paused` + `fabrik:awaiting-input` **immediately**, on this first (and only)
+  disposition — rather than accumulating toward the shared `mergeTrainEjectionCounts` 3-strike
+  counter that governs genuine multi-member bisection/one-at-a-time churn. Every red-singleton
+  disposition for the same member carries identical information, so counting them to 3 would
+  only measure retries of a deterministic outcome, not train churn.
+- Composes with the pre-existing `groupQueuedByRepo` poison-well guard (which already excludes
+  `fabrik:paused` members from every future Queued batch snapshot) to prevent the member from
+  re-forming into an identical singleton trial on the very next poll — no separate backoff
+  mechanism is needed.
+
+`handleRedBatch` and `bisect` are unchanged and continue to govern every batch with two or more
+members exactly as before — the arity guard sits ahead of `handleRedBatch`, so bisection itself
+never sees a true singleton. `landOneAtATime`'s own red-singleton-ejection branch — reached only
+as its FR-5 fallback after bisection fails to isolate a poisoner within a genuinely multi-member
+batch's cost budget — validates its member (`m`) completely alone, which is the same true-
+singleton scenario this amendment targets, just reached by a different path; it now also calls
+`ejectRedSingleton` rather than `ejectMember`, so it gets the identical disposition (no
+"different composition" promise, no shared-counter churn) instead of leaving the exact wording
+this amendment eliminates live in a second, still-reachable code path.
+
 ### D5 — Main moved during validation → serialize the train
 `strict` requires the integration PR to be up-to-date; if `main` advances while the trial branch
 validates, the integration PR goes `behind`. Because **the train is the only thing Fabrik lands on

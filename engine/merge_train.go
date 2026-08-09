@@ -653,6 +653,17 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			return
 		default: // TrainCIRed
+			if len(survivors) == 1 {
+				// #1440 R1: a red batch of exactly one member has no poisoner to isolate —
+				// bisection's own base case would just return that member immediately, at
+				// the cost of the misleading "isolated by halving bisection" / "different
+				// composition" ejection wording. Short-circuit straight to the dedicated
+				// singleton disposition instead of calling handleRedBatch at all.
+				e.logf(survivors[0].item.Number, "merge-train", "combined Validate RED for %s with a single member (#%d) — no poisoner to isolate; disposing as a red singleton\n", repoKey, survivors[0].item.Number)
+				e.cleanupTrialArtifacts(p.wm, trialName)
+				e.ejectRedSingleton(p.owner, p.repo, survivors[0], diag)
+				return
+			}
 			e.logf(0, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", repoKey, len(survivors))
 			// The red trial's artifacts are unneeded; bisection sub-trials build fresh.
 			e.cleanupTrialArtifacts(p.wm, trialName)
@@ -942,6 +953,9 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 // guard fires inside bisect or landOneAtATime. The cost budget is per red-batch episode: it
 // starts at 1 (the initial red validation) and is capped at effectiveBisectCap().
 func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember, diag *trainCIDiagnostic) ([]trainMember, bool, bool) {
+	if e.trainRedBatchHook != nil {
+		e.trainRedBatchHook()
+	}
 	used := 1 // the initial red validation counts toward the per-episode budget
 	costCap := e.effectiveBisectCap()
 
@@ -1029,13 +1043,14 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			e.landSingleton(ctx, state, p, m, trialName)
 		case TrainCIRed:
 			e.cleanupTrialArtifacts(p.wm, trialName)
-			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — ejecting\n", m.item.Number)
-			// otherMembers is nil: this is a genuine singleton validation (no batch at
-			// all), distinct from a bisection-isolated poisoner that had batch-mates —
-			// renderBatchContext's "no other members" sentence covers this case exactly.
-			e.ejectMember(p.owner, p.repo, m.item,
-				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number),
-				diag, nil, true)
+			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — disposing as a red singleton\n", m.item.Number)
+			// #1440: this validates m completely alone ([]trainMember{m}) — structurally
+			// the same true-singleton scenario the top-level arity guard targets, just
+			// reached via the one-at-a-time fallback instead. It gets the same
+			// disposition (no "different composition" promise, no shared-counter churn)
+			// rather than ejectMember's multi-member wording, which would be equally
+			// misleading here.
+			e.ejectRedSingleton(p.owner, p.repo, m, diag)
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
@@ -1688,6 +1703,44 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 	}
 }
 
+// ejectRedSingleton disposes of a red batch whose only member is m (#1440 R1/R2): bisection
+// exists to isolate a poisoner among two or more members, and there is nothing to isolate in
+// a batch of one — a red combined Validate on a true singleton is logically identical to that
+// PR's own Validate failing. Unlike ejectMember, this never routes through the shared
+// mergeTrainEjectionCounts counter (R3): that counter exists to bound genuine multi-member
+// bisection/one-at-a-time churn, and every red-singleton disposition for the same member
+// carries identical information, so counting them measures retries of an already-deterministic
+// outcome rather than train churn. Instead it pauses immediately, on the first occurrence,
+// which composes with groupQueuedByRepo's poison-well guard (it excludes fabrik:paused members
+// from every future batch snapshot) to stop the member from re-forming into an identical
+// singleton trial on the very next poll (R4) — no separate backoff mechanism is needed.
+//
+// The posted comment deliberately never uses "ejected" framing, never promises a retry "in a
+// future train with a different composition" (there is no different composition possible for
+// this member alone), and never attributes the failure to a conflict — it states plainly that
+// the PR's own combined Validate is failing and that the fix belongs in the PR, not the train.
+// diag is threaded through the same rendering helpers ejectMember uses (renderBatchContext,
+// renderDiagnosticBlock) so the failing check(s) are named identically to every other
+// merge-train diagnostic (ADR-1420).
+func (e *Engine) ejectRedSingleton(owner, repo string, m trainMember, diag *trainCIDiagnostic) {
+	sections := []string{
+		fmt.Sprintf("#%d's own combined Validate is failing — this is not a merge-train interaction; the same failure occurs whether or not #%d is combined with any other members.", m.item.Number, m.item.Number),
+		renderBatchContext(nil, m.item.Number),
+	}
+	if block := renderDiagnosticBlock(diag); block != "" {
+		sections = append(sections, block)
+	}
+	sections = append(sections, "This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove `fabrik:paused` to re-enter the train.")
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
+
+	if _, err := e.client.AddComment(owner, repo, m.item.Number, msg); err != nil {
+		e.logf(m.item.Number, "merge-train", "warn: could not post red-singleton comment: %v\n", err)
+	}
+
+	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — pausing without bisection\n", m.item.Number)
+	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+}
+
 // ejectMember posts an ejection comment on the member issue, increments the ejection
 // counter, and pauses the member after MaxMergeTrainEjections. diag is the combined-Validate
 // diagnostic that caused this ejection (R1) — nil for the ejection causes that aren't a
@@ -1755,25 +1808,37 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 		if _, err := e.client.AddComment(owner, repo, memberItem.Number, pauseMsg); err != nil {
 			e.logf(memberItem.Number, "merge-train", "warn: could not post pause comment: %v\n", err)
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, memberItem.Number, "fabrik:paused"); err != nil {
-			e.logf(memberItem.Number, "warn", "could not add fabrik:paused: %v\n", err)
-		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:paused")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, memberItem.Number)+"+"+"fabrik:paused")
-			}
+		e.pauseMergeTrainMember(owner, repo, memberItem.Number)
+	}
+}
+
+// pauseMergeTrainMember applies fabrik:paused and fabrik:awaiting-input to a merge-train
+// member being taken out of automated circulation, updating the board cache and
+// registering the webhook echo suppression for both labels so a redundant webhook
+// delivery for this mutation doesn't double-apply. Extracted from ejectMember's
+// cap-reached escalation (unchanged behavior there) and shared with ejectRedSingleton's
+// immediate pause (#1440) — both callers pause a member outright, they just differ in
+// when they decide to (after N ejections vs. immediately for a self-inflicted red
+// singleton).
+func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
+	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:paused"); err != nil {
+		e.logf(issueNumber, "warn", "could not add fabrik:paused: %v\n", err)
+	} else {
+		if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:paused")
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, memberItem.Number, "fabrik:awaiting-input"); err != nil {
-			e.logf(memberItem.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:awaiting-input")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, memberItem.Number)+"+"+"fabrik:awaiting-input")
-			}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:paused")
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:awaiting-input"); err != nil {
+		e.logf(issueNumber, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else {
+		if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:awaiting-input")
 		}
 	}
 }
