@@ -121,6 +121,32 @@ var catchUpPhase1Handlers = []catchUpHandler{
 // after its stage is already marked complete, it would be picked up here too
 // — which is the intended, general behavior (any stale EnginePaused record on
 // a stage-complete item should reset), not a defect to guard against.
+//
+// This safety argument is enforced by convention (every current applier's own
+// call-site ordering), not by a compile-time or runtime assertion — nothing
+// stops a future EnginePaused applier from being added after a stage's
+// completion point. That gap is deliberately not closed here: the reset
+// behavior in that case is still correct by design (see the paragraph above),
+// so there is nothing to guard against, only a scenario to keep verified.
+// TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse exercises
+// exactly that shape directly (EnginePaused applied to a stage that is
+// simultaneously stage:<name>:complete) and asserts the reset still lands
+// cleanly, regardless of which applier produced the record. A future site
+// that violates today's "pause before completion" convention would still
+// pass through this handler correctly — this doc note exists so the next
+// person adding an EnginePaused applier sees this discussion rather than
+// rediscovering it (#1460 review finding).
+//
+// Cost note (#1460 review finding): this handler adds one unconditional
+// e.store.Get per stage-complete-or-awaiting-ci item, per poll pass, ahead of
+// every other Phase 1 handler. store.Get's fast path (the overwhelming
+// majority of calls, since these items are already tracked) is an in-memory
+// RLock + map lookup + snapshot copy — no GitHub API call — and every
+// downstream handler in this same chain (handleReviewGate, handleMergeAndCIGates,
+// etc.) already performs its own store.Get calls per item per pass, so this is
+// not a new class of cost, just one more instance of an existing pattern.
+// Accounted for explicitly in ADR-1460's Consequences/Negative section, not an
+// oversight.
 func (e *Engine) handleEngineUnpause(pctx *phase1Ctx) bool {
 	repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
 	snap, err := e.store.Get(repoStr, pctx.item.Number)
