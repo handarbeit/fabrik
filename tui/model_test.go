@@ -497,43 +497,202 @@ func TestTuiEventMethods(t *testing.T) {
 	ClaudeUsageLimitAlertEvent{}.tuiEvent()
 }
 
-// TestUpdate_RateLimitAlertEvent_Exhausted verifies that after receiving a
-// RateLimitAlertEvent{Exhausted: true}, the alert banner becomes visible when
-// graphqlStats show low remaining quota.
-func TestUpdate_RateLimitAlertEvent_Exhausted(t *testing.T) {
+// TestUpdate_RateLimitAlertEvent_RESTExhausted_NamesREST verifies that a
+// RateLimitAlertEvent for the REST bucket renders a banner naming REST and
+// quoting REST's own reset time — never the hardcoded "GraphQL" string, and
+// never GraphQL's reset (acceptance #1). Asserts rendered text content, not
+// just visibility: a visibility-only assertion passes even with the
+// hardcoded string bug and is explicitly called out as vacuous (#1482).
+func TestUpdate_RateLimitAlertEvent_RESTExhausted_NamesREST(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
-	// First deliver stats that put ratio at 10% (below 20% threshold).
-	next, _ := m.Update(PollCompletedEvent{
-		GraphQLStats: RateLimitStats{Limit: 100, Remaining: 10},
-	})
+	reset := time.Now().Add(18 * time.Minute)
+
+	next, _ := m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: true, Reset: reset})
+	m = next.(Model)
+	next, _ = m.Update(TickEvent{At: time.Now()})
 	m = next.(Model)
 
-	// Trigger alert — probe failure while rate limited.
-	next, _ = m.Update(RateLimitAlertEvent{Exhausted: true})
-	m = next.(Model)
-
-	if !m.alert.bannerActive {
-		t.Error("expected alert.bannerActive=true after RateLimitAlertEvent{Exhausted: true}")
+	if !m.alert.rest.active {
+		t.Error("expected alert.rest.active=true after RateLimitAlertEvent{Bucket: REST, Exhausted: true}")
 	}
 	if !m.alert.isVisible() {
-		t.Error("expected alert banner to be visible after Exhausted=true event with low quota")
+		t.Fatal("expected alert banner to be visible after REST Exhausted=true event")
+	}
+	view := m.alert.View(200)
+	if !strings.Contains(view, "REST") {
+		t.Errorf("expected banner text to name REST, got %q", view)
+	}
+	if strings.Contains(view, "GraphQL") {
+		t.Errorf("expected banner text NOT to mention GraphQL for a REST-only exhaustion, got %q", view)
+	}
+	wantCountdown := fmtBannerCountdown(reset, m.alert.now)
+	if !strings.Contains(view, wantCountdown) {
+		t.Errorf("expected banner text to quote REST's reset time (%q), got %q", wantCountdown, view)
 	}
 }
 
-// TestUpdate_RateLimitAlertEvent_Recovered verifies that after receiving a
-// RateLimitAlertEvent{Exhausted: false}, the banner's bannerActive flag is cleared.
-func TestUpdate_RateLimitAlertEvent_Recovered(t *testing.T) {
+// TestUpdate_RateLimitAlertEvent_GraphQLExhausted_NamesGraphQL is the
+// GraphQL-bucket mirror of TestUpdate_RateLimitAlertEvent_RESTExhausted_NamesREST
+// (acceptance #2).
+func TestUpdate_RateLimitAlertEvent_GraphQLExhausted_NamesGraphQL(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
-	// Manually set banner active with stats still low.
-	m.alert.bannerActive = true
-	m.alert.graphqlStats = RateLimitStats{Limit: 100, Remaining: 10}
+	reset := time.Now().Add(12 * time.Minute)
 
-	// Recovery event.
-	next, _ := m.Update(RateLimitAlertEvent{Exhausted: false})
+	next, _ := m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketGraphQL, Exhausted: true, Reset: reset})
+	m = next.(Model)
+	next, _ = m.Update(TickEvent{At: time.Now()})
 	m = next.(Model)
 
-	if m.alert.bannerActive {
-		t.Error("expected alert.bannerActive=false after RateLimitAlertEvent{Exhausted: false}")
+	if !m.alert.graphql.active {
+		t.Error("expected alert.graphql.active=true after RateLimitAlertEvent{Bucket: GraphQL, Exhausted: true}")
+	}
+	if !m.alert.isVisible() {
+		t.Fatal("expected alert banner to be visible after GraphQL Exhausted=true event")
+	}
+	view := m.alert.View(200)
+	if !strings.Contains(view, "GraphQL") {
+		t.Errorf("expected banner text to name GraphQL, got %q", view)
+	}
+	if strings.Contains(view, "REST") {
+		t.Errorf("expected banner text NOT to mention REST for a GraphQL-only exhaustion, got %q", view)
+	}
+	wantCountdown := fmtBannerCountdown(reset, m.alert.now)
+	if !strings.Contains(view, wantCountdown) {
+		t.Errorf("expected banner text to quote GraphQL's reset time (%q), got %q", wantCountdown, view)
+	}
+}
+
+// TestUpdate_RateLimitAlertEvent_BucketScopedClear verifies R2: an
+// Exhausted=false for one bucket must not dismiss a banner raised by the
+// other bucket, and must dismiss its own (acceptance #4). This is R2's
+// latent bug and is not covered by the naming tests above.
+func TestUpdate_RateLimitAlertEvent_BucketScopedClear(t *testing.T) {
+	t.Run("REST banner survives GraphQL clear, cleared only by REST clear", func(t *testing.T) {
+		m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+		next, _ := m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: true, Reset: time.Now().Add(time.Hour)})
+		m = next.(Model)
+
+		// A GraphQL recovery must not clear the REST banner.
+		next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketGraphQL, Exhausted: false})
+		m = next.(Model)
+		if !m.alert.rest.active || !m.alert.isVisible() {
+			t.Fatal("GraphQL Exhausted=false incorrectly cleared the REST banner")
+		}
+
+		// REST's own recovery does clear it.
+		next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: false})
+		m = next.(Model)
+		if m.alert.rest.active || m.alert.isVisible() {
+			t.Error("expected REST Exhausted=false to clear the REST banner")
+		}
+	})
+
+	t.Run("GraphQL banner survives REST clear, cleared only by GraphQL clear", func(t *testing.T) {
+		m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+		next, _ := m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketGraphQL, Exhausted: true, Reset: time.Now().Add(time.Hour)})
+		m = next.(Model)
+
+		// A REST recovery must not clear the GraphQL banner.
+		next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: false})
+		m = next.(Model)
+		if !m.alert.graphql.active || !m.alert.isVisible() {
+			t.Fatal("REST Exhausted=false incorrectly cleared the GraphQL banner")
+		}
+
+		// GraphQL's own recovery does clear it.
+		next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketGraphQL, Exhausted: false})
+		m = next.(Model)
+		if m.alert.graphql.active || m.alert.isVisible() {
+			t.Error("expected GraphQL Exhausted=false to clear the GraphQL banner")
+		}
+	})
+}
+
+// TestUpdate_RateLimitAlertEvent_RESTOnly_VisibleRegardlessOfGraphQLHealth
+// covers Root Cause's third defect (acceptance #6): a REST-only exhaustion
+// must render the banner even when GraphQL is comfortably healthy. Under
+// the old single-graphqlStats-field model, isVisible() gated on GraphQL's
+// ratio regardless of which bucket set the active flag, so a REST-exhausted
+// + GraphQL-healthy combination rendered nothing.
+func TestUpdate_RateLimitAlertEvent_RESTOnly_VisibleRegardlessOfGraphQLHealth(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+
+	// GraphQL comfortably healthy (90% remaining) — the historical bug's
+	// visibility gate would have suppressed the banner using this ratio.
+	next, _ := m.Update(PollCompletedEvent{
+		GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 4500},
+	})
+	m = next.(Model)
+
+	next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: true, Reset: time.Now().Add(18 * time.Minute)})
+	m = next.(Model)
+
+	if !m.alert.isVisible() {
+		t.Fatal("expected REST-only exhaustion to render the banner regardless of GraphQL's healthy ratio")
+	}
+	view := m.alert.View(200)
+	if !strings.Contains(view, "REST") {
+		t.Errorf("expected banner text to name REST, got %q", view)
+	}
+	if strings.Contains(view, "GraphQL") {
+		t.Errorf("expected banner text NOT to mention GraphQL, got %q", view)
+	}
+}
+
+// TestUpdate_RateLimitAlertEvent_DualExhaustion_CombinedMessage verifies
+// that when both buckets are exhausted simultaneously, the banner renders a
+// single combined line naming both (R2's "or names both") and quotes
+// whichever bucket's reset is sooner, while Height() stays 1.
+func TestUpdate_RateLimitAlertEvent_DualExhaustion_CombinedMessage(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	sooner := time.Now().Add(5 * time.Minute)
+	later := time.Now().Add(40 * time.Minute)
+
+	next, _ := m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: true, Reset: sooner})
+	m = next.(Model)
+	next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketGraphQL, Exhausted: true, Reset: later})
+	m = next.(Model)
+	next, _ = m.Update(TickEvent{At: time.Now()})
+	m = next.(Model)
+
+	if m.alert.Height() != 1 {
+		t.Fatalf("expected Height()=1 with both buckets exhausted, got %d", m.alert.Height())
+	}
+	view := m.alert.View(200)
+	if !strings.Contains(view, "REST") || !strings.Contains(view, "GraphQL") {
+		t.Errorf("expected combined banner text to name both buckets, got %q", view)
+	}
+	wantCountdown := fmtBannerCountdown(sooner, m.alert.now)
+	if !strings.Contains(view, wantCountdown) {
+		t.Errorf("expected combined banner to quote the sooner (REST) reset (%q), got %q", wantCountdown, view)
+	}
+}
+
+// TestBannerFooterConsistency verifies R4 (acceptance #5): the banner and
+// the footer cannot disagree. With REST exhausted and GraphQL healthy, the
+// footer must still show GraphQL's healthy remaining count while the banner
+// names only REST.
+func TestBannerFooterConsistency(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+
+	next, _ := m.Update(PollCompletedEvent{
+		GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 4500, Reset: time.Now().Add(time.Hour)},
+	})
+	m = next.(Model)
+	next, _ = m.Update(RateLimitAlertEvent{Bucket: RateLimitBucketREST, Exhausted: true, Reset: time.Now().Add(18 * time.Minute)})
+	m = next.(Model)
+
+	bannerView := m.alert.View(200)
+	if !strings.Contains(bannerView, "REST") {
+		t.Errorf("expected banner to name REST, got %q", bannerView)
+	}
+	if strings.Contains(bannerView, "GraphQL") {
+		t.Errorf("expected banner NOT to mention GraphQL, got %q", bannerView)
+	}
+
+	footerView := m.footer.View(200)
+	if !strings.Contains(footerView, "4500/5000") {
+		t.Errorf("expected footer to still show GraphQL's healthy remaining count (4500/5000), got %q", footerView)
 	}
 }
 
@@ -546,12 +705,12 @@ func TestUpdateLayout_AlertBannerHeightBudget(t *testing.T) {
 	const termHeight = 24
 
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
-	// Set stats so banner is visible (Remaining == 0).
-	m.alert.graphqlStats = RateLimitStats{Limit: 100, Remaining: 0}
+	// Set state directly so the banner is visible (REST bucket active).
+	m.alert.rest = rateLimitAlertState{active: true}
 	m.alert.now = time.Now()
 
 	if !m.alert.isVisible() {
-		t.Fatal("precondition: alert banner should be visible with Remaining==0")
+		t.Fatal("precondition: alert banner should be visible with rest.active=true")
 	}
 	if m.alert.Height() != 1 {
 		t.Fatalf("precondition: alert Height() = %d, want 1", m.alert.Height())

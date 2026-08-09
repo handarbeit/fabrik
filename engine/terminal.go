@@ -32,7 +32,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				retryStr = fmt.Sprintf("retrying after %s (local)", graphqlStats.Reset.Local().Format("15:04"))
 			}
 			e.logf(0, "warn", "rate limited — polling suspended, %s: %v\n", retryStr, err)
-			e.emitStructural(tui.RateLimitAlertEvent{Exhausted: true, Reset: graphqlStats.Reset})
+			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketGraphQL, Exhausted: true, Reset: graphqlStats.Reset})
 		} else {
 			e.logf(0, "cache", "probe refresh failed (using prior cache state): %v\n", err)
 		}

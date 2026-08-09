@@ -2931,20 +2931,36 @@ operator beyond the faster startup time.
 
 #### Rate-Limit Exhaustion Alert Banner
 
-When the GraphQL budget hits zero or drops below 20% and probe failures begin,
-Fabrik suspends polling and displays a red alert banner immediately below the TUI
-header:
+GitHub tracks two separate API budgets — REST/core and GraphQL — and Fabrik reports
+exhaustion of either one distinctly, naming the bucket that actually ran out. When the
+GraphQL budget drops below 20% and probe failures begin, or when the REST budget hits
+a hard near-zero threshold, Fabrik suspends polling and displays a red alert banner
+immediately below the TUI header:
 
 ```
 ⚠ GraphQL rate limit exhausted — polling suspended. Resumes in 12m (14:30 local time).
 ```
 
-The countdown ticks every second and shows the local time when the quota resets.
-Once the GraphQL budget recovers above 50%, the banner disappears automatically and
-polling resumes. You do not need to restart Fabrik — it recovers on its own. On
-recovery from near-zero exhaustion, Fabrik fires an immediate probe rather than
-waiting for the next scheduled poll tick, so processing resumes as soon as the
-budget is restored.
+```
+⚠ REST rate limit exhausted — polling suspended. Resumes in 18m (21:38 local time).
+```
+
+If both buckets are exhausted at the same time, the banner names both in a single
+combined line and quotes whichever bucket's reset comes sooner:
+
+```
+⚠ REST and GraphQL rate limits exhausted — polling suspended. Resumes in 5m (21:25 local time).
+```
+
+The countdown ticks every second and shows the local time when the named bucket's
+quota resets. Each bucket recovers and clears its own banner independently — a REST
+recovery never dismisses a banner raised by GraphQL exhaustion, and vice versa; if
+both are exhausted, the banner stays until both clear. You do not need to restart
+Fabrik — it recovers on its own. On recovery from near-zero GraphQL exhaustion,
+Fabrik fires an immediate probe rather than waiting for the next scheduled poll tick,
+so processing resumes as soon as the budget is restored. The footer's GraphQL
+remaining/limit readout always reflects the same underlying stats the banner uses for
+GraphQL, so the two can never disagree about GraphQL's state.
 
 ### Claude Usage-Limit Suspension
 

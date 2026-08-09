@@ -2621,7 +2621,9 @@ resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
   rate-limit `AlertBannerComponent` per the naming distinction above — both can be visible at once. The
   banner also self-clears on a `TickEvent` whose time has passed the reset, a cosmetic-only convenience
   that can run slightly ahead of the engine's own lazy check (harmless, since the engine never trusts
-  the banner's state).
+  the banner's state) — `AlertBannerComponent` mirrors this same self-clear-on-reset behavior
+  independently per REST/GraphQL bucket (#1482), so both banner components now share the identical
+  active/reset model.
 - **Updated comment copy:** the per-issue explanatory comment posted by `handleUsageLimitExit` no
   longer says "Fabrik will keep retrying on the normal poll cooldown" — it now describes the
   account-wide suspension and automatic resume at the reset time (or as soon as any invocation
@@ -2778,7 +2780,7 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
   - **No idle cap**: the rate-limit component has no 5-minute ceiling; it is capped only at `rateLimitMaxBackoffMultiplier × configuredInterval`.
   - **Independence from idle backoff**: activity detection (items dispatched) resets idle backoff but does NOT reset rate-limit backoff.
 
-**REST/core exhaustion is a hard pause, not a slowdown** (`shouldPauseForRESTRateLimit` in `engine/backoff.go`): the interval adjustment above conserves the **GraphQL** budget (spent by the poll read), but the **REST/core** budget is spent by per-item mutations (reactions, labels, comments, merges) and janitor fetches, which interval-stretching does not throttle. So when REST remaining drops to near zero (≤1% of limit, `isRateLimitNearZero`), `doPollCycle` skips the **entire** work phase — fetch, dispatch, and mutations — until GitHub's hourly reset (`reset + rateLimitResetBuffer`), emitting `RateLimitAlertEvent{Exhausted: true}`. The independent worktree-janitor goroutine (`runWorktreeJanitor`) applies the same gate on entry, so it does not keep spending REST while the poll loop is paused. REST stats are refreshed from the headers of every REST response (including 403s), so the reset timestamp is authoritative even at zero budget. Introduced to stop a 403 retry storm after the REST budget was drained (#1118/#1121).
+**REST/core exhaustion is a hard pause, not a slowdown** (`shouldPauseForRESTRateLimit` in `engine/backoff.go`): the interval adjustment above conserves the **GraphQL** budget (spent by the poll read), but the **REST/core** budget is spent by per-item mutations (reactions, labels, comments, merges) and janitor fetches, which interval-stretching does not throttle. So when REST remaining drops to near zero (≤1% of limit, `isRateLimitNearZero`), `doPollCycle` skips the **entire** work phase — fetch, dispatch, and mutations — until GitHub's hourly reset (`reset + rateLimitResetBuffer`), emitting `RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true}`. The independent worktree-janitor goroutine (`runWorktreeJanitor`) applies the same gate on entry, so it does not keep spending REST while the poll loop is paused. REST stats are refreshed from the headers of every REST response (including 403s), so the reset timestamp is authoritative even at zero budget. Introduced to stop a 403 retry storm after the REST budget was drained (#1118/#1121). `RateLimitAlertEvent.Bucket` (`tui.RateLimitBucketREST` | `tui.RateLimitBucketGraphQL`) identifies which of the two independent budgets an emit/clear event concerns, so `AlertBannerComponent` (`tui/alert.go`) tracks each bucket's active/reset state separately and never lets one bucket's `Exhausted: false` clear a banner the other bucket raised — see #1482.
 
 **Idle cap selection** (`effectiveIdleCap` in `engine/backoff.go`):
 
