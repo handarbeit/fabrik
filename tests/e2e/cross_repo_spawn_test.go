@@ -86,11 +86,11 @@ func TestCrossRepoSpawn(t *testing.T) {
 	SetIssueStatus(t, env, childItemID, "Specify")
 
 	// Wait for child to close (its PR merges).
-	WaitForIssueClosed(t, env, env.RepoBeta, child, 45*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoBeta, child, 45*time.Minute)
 	t.Logf("child closed — parent should resume")
 
 	// Parent unblocks, runs Implement → Review → Validate → closes.
-	WaitForIssueClosed(t, env, env.RepoAlpha, parent, 30*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, parent, 30*time.Minute)
 	t.Logf("parent closed — cross-repo flow complete")
 
 	// fabrik:children-spawned only proves Plan emitted a spawn block — it

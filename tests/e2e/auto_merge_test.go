@@ -128,7 +128,7 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 		// of auto-merge being enabled — so we don't poll for the transient
 		// fabrik:auto-merge-enabled label here. We let the issue close and then
 		// audit the timeline.
-		WaitForIssueClosed(t, env, env.RepoAlpha, num, 45*time.Minute)
+		WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 45*time.Minute)
 		t.Logf("%s#%d closed — checking the auto-merge path was taken", env.RepoAlpha, num)
 
 		// Race-free verification that auto-merge enablement happened: scan the

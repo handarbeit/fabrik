@@ -107,7 +107,7 @@ func TestCruiseFullPipeline(t *testing.T) {
 	// R5: after the human merge, the engine detects the terminal PR state,
 	// advances the board to Done, and the issue closes (via GitHub's
 	// Closes #N auto-close on merge).
-	WaitForIssueClosed(t, env, env.RepoAlpha, num, 45*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 45*time.Minute)
 	t.Logf("%s#%d closed after human merge — R5 verified (full cruise contract confirmed)", env.RepoAlpha, num)
 }
 
