@@ -16,6 +16,11 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 PKG=./tests/sim/simgh
 DIR=tests/sim/simgh
 FAILED_TO_CATCH=()
+# A skipped mutation proves nothing: its edit never applied, so the test it
+# targets was never challenged. Track skips separately and fail on them too,
+# or a typo in a perl expression silently erodes coverage forever while the
+# sweep still reports success.
+SKIPPED=()
 
 # The sweep restores sources with `git checkout`, which would silently discard
 # uncommitted work in this directory. Refuse to run rather than eat it.
@@ -46,6 +51,7 @@ _mutate() {
     local script="${expr#*::}"
     if ! perl -0777 -pi -e "$script" "$DIR/$file"; then
       echo "SKIP  $name (perl edit failed on $file)"
+      SKIPPED+=("$name (perl edit failed on $file)")
       return
     fi
   done
@@ -53,6 +59,7 @@ _mutate() {
   local out
   if ! out=$(go build "$PKG" 2>&1); then
     echo "SKIP  $name (mutation does not compile: $(echo "$out" | head -1))"
+    SKIPPED+=("$name (does not compile)")
     return
   fi
 
@@ -218,11 +225,11 @@ mutate "the runtime board API accepts a PR card the seeding API refuses" \
 
 mutate "a nonexistent blocker is accepted at runtime" \
   'TestAddBlockedByIssueRejectsUnknownBlocker' \
-  'deps.go::s{if _, ok := br\.issues\[blockerNum\]; !ok \{}{if false {}'
+  'deps.go::s{if _, ok := br\.issues\[blockerNum\]; !ok \{}{if _, ok := br.issues[blockerNum]; !ok && false \{}'
 
 mutate "a nonexistent blocker is accepted at seed time" \
   'TestSeedBlockedByRejectsUnknownBlocker' \
-  'seed.go::s{if _, ok := br\.issues\[blockerNumber\]; !ok \{}{if false {}'
+  'seed.go::s{if _, ok := br\.issues\[blockerNumber\]; !ok \{}{if _, ok := br.issues[blockerNumber]; !ok && false \{}'
 
 # --- precedence ordering ------------------------------------------------
 # The single-condition tests above prove each branch is reachable; only these
@@ -257,10 +264,18 @@ mutate "per-repo git serialisation is removed" \
 
 
 echo
-if [ ${#FAILED_TO_CATCH[@]} -eq 0 ]; then
-  echo "All mutations were caught. No vacuous tests found."
-else
+status=0
+if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
   echo "Mutations NOT caught by the suite:"
   printf '  - %s\n' "${FAILED_TO_CATCH[@]}"
-  exit 1
+  status=1
 fi
+if [ ${#SKIPPED[@]} -ne 0 ]; then
+  echo "Mutations that never ran (they prove nothing — fix the expression):"
+  printf '  - %s\n' "${SKIPPED[@]}"
+  status=1
+fi
+if [ "$status" -eq 0 ]; then
+  echo "All mutations were caught. No vacuous tests found."
+fi
+exit "$status"
