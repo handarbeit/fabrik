@@ -358,6 +358,191 @@ func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) 
 	}
 }
 
+// ── R6 (ADR-1441): pollForMergeable check-run classification ────────────────
+//
+// pollForMergeable previously read only mergeable_state and treated
+// gh.MergeableStateAccepted (clean/unstable) as an unconditional green light
+// — the same defect ADR-1153 fixed for pollTrainCI, left unfixed here and
+// explicitly flagged as a "candidate fast-follow" that never got its own
+// issue. These are the direct regression tests for that fix at this call
+// site (AC7), mirroring the pr_settle.go/ci.go fixtures for AC1 — the
+// non-vacuousness requirement (AC8) is that these must independently fail if
+// only the pr_settle.go/ci.go site were fixed and this one were not.
+
+// TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse is the direct
+// AC7 regression test: an integration PR reporting mergeable_state=unstable
+// with a concluded failure check run on its head SHA must not be judged
+// landable. Must fail against pre-ADR-1441 pollForMergeable, which never
+// called FetchCheckRuns at all.
+func TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "unstable", HeadSHA: "sha-unstable-failed"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+			}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false for mergeable_state=unstable with a failed check run")
+	}
+}
+
+// TestPollForMergeable_UnstableWithPendingCheckRun_KeepsPollingThenDegrades
+// covers R2's failing-vs-pending discrimination at this call site: a
+// still-running non-required check under mergeable_state=unstable must not
+// be treated as a confirmed failure (which would return false immediately
+// for the wrong reason) nor as green — it keeps polling until
+// CIBackstopTimeout, then degrades like any other unresolved landing (a
+// timeout comment is posted, matching TestPollForMergeable_
+// BackstopTimeout_ReturnsFalseAndDegrades's shape).
+func TestPollForMergeable_UnstableWithPendingCheckRun_KeepsPollingThenDegrades(t *testing.T) {
+	var commentPosted bool
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			time.Sleep(10 * time.Millisecond)
+			return &gh.PRDetails{Number: prNumber, MergeableState: "unstable", HeadSHA: "sha-unstable-pending"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Test and vet", Status: "in_progress"},
+			}, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			CIBackstopTimeout:      1 * time.Millisecond,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false — a pending non-required check must not be judged landable")
+	}
+	if !commentPosted {
+		t.Error("expected a landing-timeout comment once CIBackstopTimeout elapses with the check still pending")
+	}
+}
+
+// TestPollForMergeable_Dirty_ReturnsFalseImmediately confirms the pre-existing
+// dirty short-circuit survives the R6 rewrite unchanged: a merge conflict is
+// an immediate, definitive rejection — no check-run fetch, no timeout
+// comment (distinguishing it from the degrade-on-timeout path above).
+func TestPollForMergeable_Dirty_ReturnsFalseImmediately(t *testing.T) {
+	checkRunsFetched := false
+	commentPosted := false
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "dirty", HeadSHA: "sha-dirty"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			checkRunsFetched = true
+			return nil, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false immediately for mergeable_state=dirty")
+	}
+	if checkRunsFetched {
+		t.Error("FetchCheckRuns must NOT be called when mergeable_state=dirty — the conflict is dispositive on its own")
+	}
+	if commentPosted {
+		t.Error("a definitive dirty rejection is not a timeout — no landing-timeout comment should be posted")
+	}
+}
+
+// TestPollForMergeable_CleanZeroCheckRuns_ReturnsTrue confirms ADR-033/
+// ADR-1441's fast path is preserved at this call site: mergeable_state=clean
+// with no check-run footprint at all still lands immediately (mirrors
+// settlePRMergeState's own zero-check-runs "no CI configured" branch).
+func TestPollForMergeable_CleanZeroCheckRuns_ReturnsTrue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean", HeadSHA: "sha-clean"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // GitHub Actions disabled — no check-run footprint
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if !result {
+		t.Error("expected pollForMergeable to return true for mergeable_state=clean with zero check runs")
+	}
+}
+
+// TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse mirrors
+// TestPollTrainCI_EmptyCheckRuns_RequiredContextFailedViaCommitStatus_ReturnsRed
+// for the landing path: a confirmed required-context failure via a classic
+// commit status (zero check runs — the local-CI-takeover case #933 was filed
+// for) must block landing even though mergeable_state alone would otherwise
+// be the only signal available.
+func TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "blocked", HeadSHA: "sha-rc-failed"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // no check runs at all — GitHub Actions disabled
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return []gh.CommitStatus{{Context: "fantasy/local-test", State: "failure"}}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false for a required context confirmed-failed via classic commit status with zero check runs")
+	}
+}
+
 // TestPollTrainCI_AllSkippedRequiredContext_NotGreen covers the #933
 // regression for the merge-train path: an all-skipped/neutral check-run set
 // on the trial head must NOT read as TrainCIGreen when a required context is
