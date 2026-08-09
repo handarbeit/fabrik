@@ -18,9 +18,8 @@ func TestLandSingleton_MemberIssueCloseFailure_MarksOutstanding(t *testing.T) {
 	m := makeQueuedMember(7, 70, "Issue Seven")
 	client := &mockGitHubClient{
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 900, nil },
-		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
-			tr := true
-			return &tr, "clean", nil
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
@@ -68,9 +67,8 @@ func TestLandSingleton_MemberIssueCloseSuccess_NoMarker(t *testing.T) {
 	m := makeQueuedMember(8, 80, "Issue Eight")
 	client := &mockGitHubClient{
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 900, nil },
-		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
-			tr := true
-			return &tr, "clean", nil
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
@@ -300,9 +298,8 @@ func TestLandMergeTrainBatch_MemberIssueCloseFailure_DoesNotMarkOutstanding(t *t
 	client := &mockGitHubClient{
 		listPRsFn:  func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 300, nil },
-		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
-			tr := true
-			return &tr, "clean", nil
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },

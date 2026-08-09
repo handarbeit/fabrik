@@ -471,13 +471,26 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 }
 
 // MergeableStateAccepted reports whether GitHub's mergeable_state value
-// indicates the PR is mergeable per branch protection rules. "clean" means
-// fully ready; "unstable" means non-required checks have failed but the PR
-// is still mergeable. Other values ("blocked", "behind", "dirty", "draft",
-// "has_hooks", "unknown", "") fall through to the per-check classification.
+// indicates the PR is mergeable per branch protection rules alone. "clean"
+// means fully ready; "unstable" means non-required checks have failed but
+// GitHub itself still considers the PR mergeable. Other values ("blocked",
+// "behind", "dirty", "draft", "has_hooks", "unknown", "") fall through to the
+// per-check classification.
 //
 // "has_hooks" is treated as not-accepted here because pre-merge hooks may
 // modify the merge outcome; conservative to use the per-check path.
+//
+// ADR-1441: since that issue, this predicate is no longer consulted by the CI
+// *advance* gate (settlePRMergeState/checkCIGate, engine/pr_settle.go +
+// engine/ci.go) — "unstable" there now falls through to full check-run/
+// required-context classification instead of a green shortcut, so a
+// confirmed failure on a non-required check blocks the advance regardless of
+// what this function reports. Its remaining callers are all on the *merge*
+// side of ADR-1441's R3 split, which deliberately keeps deferring to branch
+// protection alone (ADR-072's operator note): MergePR's own ADR-072
+// self-gate, pollForMergeable's zero-check-runs fallback and pollTrainCI's
+// dirty pre-check + zero-check-runs green arm (engine/merge_train.go) — the
+// same "no per-check signal to fall back on" case in all three.
 func MergeableStateAccepted(mergeableState string) bool {
 	return mergeableState == "clean" || mergeableState == "unstable"
 }
