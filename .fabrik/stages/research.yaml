@@ -5,7 +5,7 @@ comment_skill: fabrik-research-comment
 model: sonnet
 max_turns: 100
 comment_max_turns: 50
-max_wall_time: "60m"
+max_wall_time: "30m"
 read_only: true
 allowed_tools:
   - Read
