@@ -143,6 +143,15 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainRedBatchHook, when non-nil, is called as the first line of handleRedBatch — a
+	// test-only call-observation seam (#1440 AC1/AC6) proving handleRedBatch (multi-member
+	// bisection) is never reached for a red batch of exactly one member, which
+	// runMergeTrainWorker's arity guard now intercepts before handleRedBatch is called.
+	// A trial-count-only assertion doesn't distinguish this: bisect's own base case for a
+	// single red member already makes zero extra validate calls, so without this hook a
+	// test proving the guard exists would pass unmodified against pre-#1440 code too.
+	// Nil in production (zero cost).
+	trainRedBatchHook func()
 	// generatedFilesOverride overrides the package-level generatedFiles mapping when
 	// non-nil. Tests inject a synthetic path + fake regen command, since the throwaway
 	// repos built by setupTrainRepo have none of docs/llms-full.txt's real source files

@@ -942,6 +942,9 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 // guard fires inside bisect or landOneAtATime. The cost budget is per red-batch episode: it
 // starts at 1 (the initial red validation) and is capped at effectiveBisectCap().
 func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember, diag *trainCIDiagnostic) ([]trainMember, bool, bool) {
+	if e.trainRedBatchHook != nil {
+		e.trainRedBatchHook()
+	}
 	used := 1 // the initial red validation counts toward the per-episode budget
 	costCap := e.effectiveBisectCap()
 
