@@ -462,3 +462,118 @@ func TestCheckAutoMergeConvergence_AdvanceFails_AppliesAwaitingAdvanceLabel(t *t
 		t.Errorf("expected exactly one explanatory comment, got %d", len(client.addCommentCalls))
 	}
 }
+
+// TestRunValidatePRTerminalAdvance_SettlesIntoStablePause is the regression
+// test for Pruefer's PR #1469 review (both findings): it drives
+// runValidatePRTerminalAdvance — the real, unconditionally-re-entered
+// self-heal call site — across four simulated polls with a permanently
+// broken board (updateProjectItemStatusFn always fails) and MaxRetries=2,
+// updating item.Labels between polls exactly as GitHub would after each
+// poll's mutations (mirroring TestAwaitingAdvance_EndToEnd's idiom).
+//
+// Confirmed to fail red against a revert of awaitingAdvanceStuckOrReset's
+// guard in pr_terminal_advance.go: poll 3 would show fabrik:paused stripped
+// and re-added (plus a spurious extra comment pair) instead of the item
+// resting untouched, and poll 4 would show fabrik:paused re-applied after a
+// single failure instead of getting a fresh MaxRetries budget.
+func TestRunValidatePRTerminalAdvance_SettlesIntoStablePause(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
+			return missingDoneOptionErr()
+		},
+	}
+	stgs := terminalAdvanceStages()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxRetries = 2
+
+	item := gh.ProjectItem{
+		Number: 103, ItemID: "PVTI_103", Repo: "owner/repo", Status: "Validate",
+		Labels: []string{"stage:Implement:complete"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	resetClient := func() {
+		client.mu.Lock()
+		client.addLabelCalls = nil
+		client.removeLabelCalls = nil
+		client.addCommentCalls = nil
+		client.mu.Unlock()
+	}
+	poll := func() {
+		eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, make(map[string]bool))
+	}
+
+	// Poll 1 (first failure): marker applied, one explanatory comment, not yet
+	// escalated (1 < MaxRetries=2).
+	poll()
+	client.mu.Lock()
+	if !containsLabel(addedLabelNames(client.addLabelCalls), awaitingAdvanceLabel) {
+		t.Fatalf("poll 1: expected %s added, got %v", awaitingAdvanceLabel, addedLabelNames(client.addLabelCalls))
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("poll 1: expected exactly one comment, got %d", len(client.addCommentCalls))
+	}
+	if containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Fatal("poll 1: did not expect fabrik:paused yet (only 1 of 2 retries used)")
+	}
+	client.mu.Unlock()
+	item.Labels = append(item.Labels, awaitingAdvanceLabel)
+	resetClient()
+
+	// Poll 2 (second failure, hits MaxRetries=2): escalates — fabrik:paused
+	// added, awaitingAdvanceLabel removed, exactly one (escalation) comment,
+	// no duplicate first-failure comment.
+	poll()
+	client.mu.Lock()
+	if !containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Fatalf("poll 2: expected fabrik:paused added on escalation, got %v", addedLabelNames(client.addLabelCalls))
+	}
+	if !containsLabel(removedLabelNames(client.removeLabelCalls), awaitingAdvanceLabel) {
+		t.Fatalf("poll 2: expected %s removed on escalation, got %v", awaitingAdvanceLabel, removedLabelNames(client.removeLabelCalls))
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("poll 2: expected exactly one (escalation) comment, got %d", len(client.addCommentCalls))
+	}
+	client.mu.Unlock()
+	item.Labels = []string{"stage:Implement:complete", "fabrik:paused"} // awaitingAdvanceLabel removed, fabrik:paused added
+	resetClient()
+
+	// Poll 3 (still stuck, unresolved by an operator): this is Pruefer's
+	// Finding 1. Before the fix, this poll would strip fabrik:paused,
+	// retry, fail, and immediately re-escalate — producing a fresh pair of
+	// label/comment mutations. With the fix, the item is left completely
+	// untouched: no label calls, no comments, fabrik:paused stays put.
+	poll()
+	client.mu.Lock()
+	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 {
+		t.Errorf("poll 3: expected zero label mutations while still stuck-paused, got added=%v removed=%v",
+			addedLabelNames(client.addLabelCalls), removedLabelNames(client.removeLabelCalls))
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("poll 3: expected zero comments while still stuck-paused, got %d", len(client.addCommentCalls))
+	}
+	client.mu.Unlock()
+	resetClient()
+	// item.Labels intentionally unchanged — still ["stage:Implement:complete", "fabrik:paused"].
+
+	// Poll 4 (operator manually removes fabrik:paused, board still not
+	// fixed): this is Pruefer's Finding 2. The item must get a fresh
+	// MaxRetries budget — a single subsequent failure must NOT immediately
+	// re-escalate.
+	item.Labels = []string{"stage:Implement:complete"}
+	poll()
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if !containsLabel(addedLabelNames(client.addLabelCalls), awaitingAdvanceLabel) {
+		t.Errorf("poll 4: expected %s re-applied on the fresh failure, got %v", awaitingAdvanceLabel, addedLabelNames(client.addLabelCalls))
+	}
+	if containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Error("poll 4: did not expect an immediate re-escalation (fabrik:paused) — the retry counter should have been reset to a fresh budget")
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("poll 4: expected exactly one (fresh first-failure) comment, got %d", len(client.addCommentCalls))
+	}
+}

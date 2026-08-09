@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -29,6 +30,51 @@ const awaitingAdvanceLabel = "fabrik:awaiting-advance"
 // Double-underscore-wrapped so it can never collide with a configured
 // stage's own retry count.
 const advanceAwaitingRetryStage = "__awaiting_advance__"
+
+// awaitingAdvanceStuckOrReset guards advanceValidateTerminalItem's merged-PR
+// branch against the loop Pruefer flagged in PR #1469 review: that branch
+// unconditionally strips fabrik:paused/fabrik:awaiting-input and retries the
+// terminal advance every single poll, regardless of *why* fabrik:paused is
+// present — including a pause escalateAwaitingAdvanceFailure itself just
+// applied. Without this guard, the very next poll strips the pause right
+// back off, retries the still-failing advance, fails, and re-escalates —
+// posting a fresh pair of comments and re-pausing every poll, forever,
+// instead of settling into a stable paused state.
+//
+// Detects the specific "still escalated, not yet resolved by an operator"
+// state via the advanceAwaitingRetryStage attempt counter (nothing else
+// touches it) rather than fabrik:paused alone — a merged item can
+// legitimately carry fabrik:paused for an unrelated, stale reason (e.g. a
+// review/rebase-cycle-limit pause the merge itself supersedes), which this
+// self-heal path is deliberately designed to clear and retry through. A
+// blanket "skip whenever paused" guard would regress that pre-existing,
+// tested behavior.
+//
+//   - Paused AND counter >= MaxRetries: still escalated, unresolved by an
+//     operator — returns true so the caller skips the whole branch untouched
+//     (no relabeling, no retry, no comment).
+//   - Not paused AND counter >= MaxRetries: an operator has removed
+//     fabrik:paused since the last escalation — resets the counter so the
+//     next failure gets a fresh MaxRetries budget (mirrors clearFailedStage's
+//     StageRetryCleared, scoped to this synthetic retry key, per Pruefer's
+//     second finding), then returns false so the caller proceeds normally.
+//   - Otherwise (counter below MaxRetries, or MaxRetries <= 0 meaning
+//     unlimited/never-escalate): returns false — nothing to do.
+func (e *Engine) awaitingAdvanceStuckOrReset(item gh.ProjectItem) bool {
+	if e.cfg.MaxRetries <= 0 {
+		return false
+	}
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, err := e.store.Get(repoStr, item.Number)
+	if err != nil || snap.Attempts(advanceAwaitingRetryStage) < e.cfg.MaxRetries {
+		return false
+	}
+	if hasLabel(item.Labels, "fabrik:paused") {
+		return true
+	}
+	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: advanceAwaitingRetryStage})
+	return false
+}
 
 // recordAdvanceOutcome wraps advanceToNextStage so both terminal-advance call
 // sites (advanceValidateTerminalItem's merged-PR path, and
