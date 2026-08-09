@@ -132,7 +132,7 @@ func TestCIFixReinvoke(t *testing.T) {
 	}
 
 	// Issue must close (Validate completes and yolo auto-merges the PR).
-	WaitForIssueClosed(t, env, env.RepoAlpha, num, 30*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 30*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "stage:Validate:complete")
 	t.Logf("%s#%d closed with stage:Validate:complete", env.RepoAlpha, num)
 

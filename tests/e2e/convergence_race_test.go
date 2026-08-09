@@ -113,7 +113,7 @@ func TestConvergenceRace(t *testing.T) {
 		closeWg.Add(1)
 		go func(num int) {
 			defer closeWg.Done()
-			WaitForIssueClosed(t, env, env.RepoAlpha, num, 90*time.Minute)
+			WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 90*time.Minute)
 			t.Logf("%s#%d closed", env.RepoAlpha, num)
 		}(num)
 	}
