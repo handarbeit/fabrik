@@ -340,7 +340,7 @@ mutate "UpdateComment does not bump the parent issue's updatedAt" \
 
 mutate "FetchItemDetails matches either ID, so the board is picked by map order" \
   'TestFetchItemDetailsPrefersItemIDAcrossProjects' \
-  'board.go::s{return it\.itemID == item\.ItemID \}\)}{return it.contentNodeID() == item.ID || it.itemID == item.ItemID })}'
+  'board.go::s|return it\.itemID == item\.ItemID \}\)|return it.contentNodeID() == item.ID \|\| it.itemID == item.ItemID })|'
 
 
 echo
