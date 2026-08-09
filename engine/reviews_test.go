@@ -3682,3 +3682,133 @@ func TestCheckReviewGate_DefaultBranch_DoesNotCallRESTReviewFetch(t *testing.T) 
 		t.Errorf("expected no REST review-fetch calls on a default-branch item, got reviews=%d requests=%d", restReviewCalls, restRequestCalls)
 	}
 }
+
+// ---- #1460 R2/AC1/AC2: pauseForReviewCycleLimit resumability ----
+
+// TestReviewCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles is the
+// AC1/AC2 regression for #1460's confirmed site #1: before this fix,
+// pauseForReviewCycleLimit never applied itemstate.EnginePaused, so removing
+// fabrik:paused was a no-op — ReviewCycles stayed pinned at the limit and the
+// very next catch-up pass re-paused immediately (reproduced live on #1208).
+//
+// Drives through the real catchUpPhase1Handlers chain (runPhase1Chain, not
+// clearFailedStage directly), and — critically — drives the pause itself
+// through the real dispatchWithCycleLimit/pauseForReviewCycleLimit call
+// (cycleCount pre-set to exactly the limit, with actionable feedback present
+// so the gate actually reaches the pause branch) rather than seeding
+// itemstate.EnginePaused directly in the test. Seeding it directly would
+// validate handleEngineUnpause's own reset logic (already covered by
+// TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse) but prove
+// nothing about whether pauseForReviewCycleLimit itself applies EnginePaused
+// — the actual R2 fix.
+//
+// AC3: reverting pauseForReviewCycleLimit's two itemstate.EnginePaused apply
+// lines back to their pre-fix (absent) form turns this test red: Step 1's
+// PausedByEngine assertion fails immediately (confirmed by neutralizing both
+// lines and re-running — see PR description).
+func TestReviewCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 2
+	stage := stgs[0]
+	board := &gh.ProjectBoard{}
+	const repo = "owner/repo"
+	const number = 30
+
+	// Step 1: drive a REAL pause through the actual code path. ReviewCycles
+	// pre-set to exactly the limit, with actionable feedback present, so
+	// handleReviewGate's dispatchWithCycleLimit reaches the pause branch
+	// (cycleCount >= maxCycles) and calls the real pauseForReviewCycleLimit.
+	for i := 0; i < eng.cfg.MaxReviewCycles; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repo, Number: number, StageName: "Implement"})
+	}
+	item := gh.ProjectItem{
+		Number: number, Repo: repo, Labels: []string{"stage:Implement:complete"},
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_initial", DatabaseID: 199, Author: "copilot", Body: "fix this", ReviewThreadID: "RT_initial"},
+		},
+	}
+	pctx := &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+	claimed := runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected the cycle-limit pause branch to claim the item")
+	}
+
+	client.mu.Lock()
+	pausedApplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedApplied = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedApplied {
+		t.Fatal("expected fabrik:paused to be applied by the real cycle-limit pause")
+	}
+	snap, _ := eng.store.Get(repo, number)
+	if !snap.PausedByEngine("Implement") {
+		t.Fatal("R2: pauseForReviewCycleLimit must apply itemstate.EnginePaused so wasPaused becomes true on resume — PausedByEngine(Implement) is false after the real pause")
+	}
+
+	// Step 2 (AC1): simulate the operator removing fabrik:paused (the item's
+	// own label set no longer carries it) and run a pass with nothing new
+	// actionable — isolates the reset itself from any same-pass re-dispatch.
+	item.Labels = []string{"stage:Implement:complete"}
+	item.LinkedPRReviewThreadComments = nil
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+	runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+
+	snap, _ = eng.store.Get(repo, number)
+	if got := snap.ReviewCycles("Implement"); got != 0 {
+		t.Fatalf("AC1: ReviewCycles(Implement) after unpause = %d; want 0 — the counter must actually reset, not just the label go away", got)
+	}
+	if snap.PausedByEngine("Implement") {
+		t.Error("PausedByEngine(Implement) must be cleared after the reset pass")
+	}
+
+	// Step 3 (AC2): the item must now perform more than one subsequent cycle
+	// without re-pausing. Feed fresh actionable review feedback across two
+	// more passes (distinct comment/thread IDs per pass, simulating new
+	// reviewer activity each time — buildReviewThreadComments excludes an
+	// already-processed comment ID, so reusing one ID would silently stop
+	// being "actionable" rather than proving anything about the cycle limit)
+	// and confirm ReviewCycles climbs while fabrik:paused is never re-added.
+	// baseline records the addLabelCalls count so far (Step 1's genuine pause
+	// legitimately added fabrik:paused once — only re-additions AFTER the
+	// reset are the regression this checks for).
+	client.mu.Lock()
+	baseline := len(client.addLabelCalls)
+	client.mu.Unlock()
+	for cycle := 1; cycle <= 2; cycle++ {
+		item.LinkedPRReviewThreadComments = []gh.Comment{
+			{
+				ID: fmt.Sprintf("PRRC_cycle_%d", cycle), DatabaseID: 200 + cycle,
+				Author: "copilot", Body: "fix this", ReviewThreadID: fmt.Sprintf("RT_cycle_%d", cycle),
+			},
+		}
+		pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+		claimed := runPhase1Chain(eng, pctx)
+		eng.wg.Wait()
+		if !claimed {
+			t.Fatalf("cycle %d: expected the review-reinvoke dispatch to claim the item", cycle)
+		}
+		snap, _ = eng.store.Get(repo, number)
+		if got := snap.ReviewCycles("Implement"); got != cycle {
+			t.Errorf("cycle %d: ReviewCycles(Implement) = %d; want %d — a genuinely reset counter must permit more than one further cycle", cycle, got, cycle)
+		}
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls[baseline:] {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("AC2: fabrik:paused must not be re-added across 2 subsequent cycles, both well below MaxReviewCycles=%d", eng.cfg.MaxReviewCycles)
+		}
+	}
+}
