@@ -4,12 +4,17 @@ import "fmt"
 
 // CreateIssue creates a new GitHub issue via the REST API and returns the issue
 // number and GraphQL node ID. The node ID is required for project board and
-// blockedBy mutations.
-func (c *Client) CreateIssue(owner, repo, title, body string) (number int, nodeID string, err error) {
+// blockedBy mutations. assignees is sent as the REST "assignees" field when
+// non-empty, assigning the issue atomically with creation — a single failure
+// point rather than a separate post-creation assignment call.
+func (c *Client) CreateIssue(owner, repo, title, body string, assignees []string) (number int, nodeID string, err error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues", c.baseURL, owner, repo)
 	payload := map[string]interface{}{
 		"title": title,
 		"body":  body,
+	}
+	if len(assignees) > 0 {
+		payload["assignees"] = assignees
 	}
 	var raw struct {
 		Number int    `json:"number"`

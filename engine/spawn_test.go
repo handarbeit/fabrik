@@ -583,6 +583,14 @@ func TestResolveSpecifyOptionID_UnmanagedAndDoneOnly(t *testing.T) {
 func spawnTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
 	t.Helper()
 	eng := testEngine(t, client, &mockClaudeInvoker{})
+	// These tests exercise cross-repo spawning ("owner/repo" parent spawning
+	// into "owner/child"), which only a multi-repo instance (cfg.Repo == "")
+	// is configured to serve — testEngine's default cfg.Repo ("repo") would
+	// now make spawnTargetServedByThisInstance refuse every one of them.
+	// This is exactly the issue's own "Instance A processes multiple repos on
+	// board 5 without issue" shape; the repo-scoped-mismatch shape (Instance
+	// B / reproduction 1) is covered by its own dedicated tests below.
+	eng.cfg.Repo = ""
 	// Register "owner/repo" and "owner/child" as managed repos.
 	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
 	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
@@ -689,7 +697,7 @@ FABRIK_SPAWN_CHILD_END
 			}
 			return nil
 		},
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 300 + childCounter, fmt.Sprintf("I_recovered%d", childCounter), nil
 		},
@@ -856,7 +864,7 @@ func TestPreImplement_NoOp_NoBlocks(t *testing.T) {
 func TestPreImplement_HappyPath(t *testing.T) {
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 100 + childCounter, fmt.Sprintf("I_child%d", childCounter), nil
 		},
@@ -1025,7 +1033,7 @@ func TestPreImplement_OnDemandClone_Success(t *testing.T) {
 
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 200 + childCounter, fmt.Sprintf("I_newchild%d", childCounter), nil
 		},
@@ -1077,7 +1085,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_DependsOnChain_WiresSiblingEdges(t *testing.T) {
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 400 + childCounter, fmt.Sprintf("I_chain%d", childCounter), nil
 		},
@@ -1165,7 +1173,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_NoDependsOn_MatchesTodaysCallsExactly(t *testing.T) {
 	childCounter := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 500 + childCounter, fmt.Sprintf("I_star%d", childCounter), nil
 		},
@@ -1307,7 +1315,7 @@ func TestPreImplement_SiblingWireFailure_PausesAfterChildrenCreated(t *testing.T
 	childCounter := 0
 	blockedByCalls := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			childCounter++
 			return 600 + childCounter, fmt.Sprintf("I_wirefail%d", childCounter), nil
 		},
@@ -1372,7 +1380,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_PartialFailure(t *testing.T) {
 	callCount := 0
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			callCount++
 			if callCount == 2 {
 				return 0, "", fmt.Errorf("github: 500 internal server error")
@@ -1449,7 +1457,7 @@ func spawnTestEngineWithSpecify(t *testing.T, client *mockGitHubClient) *Engine 
 
 func TestPreImplement_SetsSpecifyStatus(t *testing.T) {
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			return 101, "I_child101", nil
 		},
 		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
@@ -1495,7 +1503,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_StatusSetNilField(t *testing.T) {
 	client := &mockGitHubClient{
-		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
 			return 102, "I_child102", nil
 		},
 		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
