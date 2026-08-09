@@ -44,7 +44,32 @@ When you encounter a review thread comment:
    ```
    to see the full list of review comments with their positions.
 
-Comments without `**File:**` / `**Diff context:**` headers are regular PR body or issue comments; handle them as before.
+Comments without `**File:**` / `**Diff context:**` headers are regular PR body or issue comments — handle them as before, **unless** they carry a `[Bot Review Finding]` marker (see below).
+
+## Bot-Authored Findings (Not a User Decision)
+
+A comment marked `[Bot Review Finding]` — e.g. `**@copilot-pull-request-reviewer[bot]** (2026-01-15 10:30) [Bot Review Finding]:` — is **not** a human's decision on a prior finding. It is a bot review's own content, surfaced to you in one of two ways:
+
+- A plain PR body or issue comment with no formal review submission at all (e.g. `@copilot review` posting its findings as a regular comment instead of a review).
+- The body of a `COMMENTED` or `APPROVED` review from a reviewer whose body carries substantive findings (e.g. Pruefer).
+
+The rest of this skill's "act on the user's decision" framing — fix / dismiss / defer / clarify — does not apply to these. There is no user decision to act on yet; the bot's content **is** the finding. Treat it the same way you treat an inline review thread comment:
+
+1. **Evaluate each finding on its merits** — read the bot's comment and judge whether it identifies a real, actionable problem.
+2. **Fix valid findings autonomously** — apply the minimal targeted fix, the same as you would for a `**File:**`-tagged thread comment. Do not wait for a human to confirm the bot is right first; that is the gap this marker exists to close (a prior version of this skill refused with "this is new feedback from a bot, not an explicit decision from you," which left real findings unaddressed until the review gate timed out).
+3. **No actionable findings → see the No-Op Contract below.** A generic "Pull request overview" or "LGTM" summary with nothing concrete to act on is common from some bots (Copilot, Gemini) — recognize it as such and do not manufacture a response.
+
+This carve-out is scoped to comments carrying the `[Bot Review Finding]` marker only. A comment from a human, or a bot comment without the marker (older engine builds, or a delivery path that doesn't apply it), still follows the ordinary "act on the user's decision" rules above.
+
+## No-Op Contract
+
+If, after evaluating a bot review's findings (marked or unmarked) or a user's comment, you conclude there is **nothing actionable** — no valid finding to fix, no change the codebase needs — then **change nothing and complete**. Do not:
+
+- Invent a plausible-sounding fix for feedback that didn't actually ask for one.
+- Make a speculative change "just in case" it's what the reviewer meant.
+- Push a commit to demonstrate activity when the correct action is no action.
+
+A confabulated commit on a PR that's about to merge is worse than doing nothing: it can draw a fresh bot review with a new `DatabaseID`, which bypasses dedup and consumes another review cycle on feedback that was never real in the first place. "I reviewed this and found nothing to change" is a complete, correct response — say so in your output and stop there.
 
 ## What You Do
 
@@ -132,7 +157,8 @@ Prefer committing incremental progress over trying to finish everything in one s
 ## What You Do NOT Do
 
 - **Do not signal stage completion** — never output `FABRIK_STAGE_COMPLETE`
-- **Do not apply fixes the user did not request** — act only on what was explicitly decided
+- **Do not apply fixes the user did not request** — act only on what was explicitly decided. This does not apply to `[Bot Review Finding]`-marked content (see the "Bot-Authored Findings" section above): those are evaluated and fixed autonomously on their merits, not gated on a user decision.
+- **Do not confabulate a fix for a bot comment with no actionable findings** — see the No-Op Contract above; change nothing and say so.
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full review** — focus on the specific findings the user addressed
 - **Do not make unrelated changes** while applying fixes

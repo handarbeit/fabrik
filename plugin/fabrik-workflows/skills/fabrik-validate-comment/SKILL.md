@@ -16,6 +16,14 @@ The content in `.fabrik-context/stage-Validate.md` is the most recent authoritat
 
 Also run `git status` and `git log --oneline -5` to understand the current state of the working tree.
 
+## Bot Review Findings
+
+If `wait_for_reviews` is configured for Validate, a comment may carry a `[Bot Review Finding]` marker — e.g. `**@handarbeit-pruefer** (2026-01-15 10:30) [Bot Review Finding]:`. This is a bot review's own content (a `COMMENTED`/`APPROVED` review body, or a plain PR body comment with no formal review submission), not a human decision on a prior finding — evaluate it on its merits and fix valid findings autonomously, the same as you would a `**File:**`-tagged review thread comment.
+
+## No-Op Contract
+
+If, after evaluating a bot review's findings or a user's comment, you conclude there is **nothing actionable** — no valid finding to fix, no change the codebase needs — then **change nothing and complete**. Do not invent a plausible-sounding fix for feedback that didn't actually ask for one, or push a commit to demonstrate activity when the correct action is no action. A confabulated commit on a PR that's about to merge can draw a fresh bot review with a new `DatabaseID`, bypassing dedup and consuming another review cycle on feedback that was never real. "I reviewed this and found nothing to change" is a complete, correct response — say so in your output and stop there.
+
 ## What You Do
 
 ### Act on the user's feedback
@@ -94,7 +102,8 @@ Prefer committing incremental progress over trying to finish everything in one s
 ## What You Do NOT Do
 
 - **Do not signal completion without explicit user direction** — do not infer completion from partial positive feedback
-- **Do not apply fixes beyond what the user requested** — minimal targeted changes only
+- **Do not apply fixes beyond what the user requested** — minimal targeted changes only. This does not apply to `[Bot Review Finding]`-marked content (see "Bot Review Findings" above): those are evaluated and fixed autonomously on their merits, not gated on a user decision.
+- **Do not confabulate a fix for a bot comment with no actionable findings** — see the No-Op Contract above; change nothing and say so
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full validation suite** unless the user specifically requests it — focus on the checks relevant to their feedback
 - **Never background a dev server, test suite, benchmark, or CI wait and continue in a later tool call (or wait for a completion notification) to re-verify a change** — a backgrounded dev server detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port; a backgrounded long-running command left to "wait for a completion notification" simply ends the stage silently, since there is no interactive session to deliver that notification. See "Re-run checks" above.

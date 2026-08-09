@@ -1226,14 +1226,17 @@ func TestBuildReviewBodyComments_SkipsZeroDatabaseID(t *testing.T) {
 // buildReviewBodyComments must skip APPROVED reviews (a body there is
 // typically "LGTM", not something to act on) and DISMISSED reviews (no
 // longer an active verdict).
-func TestBuildReviewBodyComments_SkipsApprovedAndDismissed(t *testing.T) {
+// buildReviewBodyComments must skip a DISMISSED review — it is no longer an
+// active verdict, mirroring reviewGateOutstanding's hasReviews computation
+// (#1045, superseding #1375's broader APPROVED+DISMISSED exclusion — APPROVED
+// is now actionable, see TestBuildReviewBodyComments_ApprovedIsActionable).
+func TestBuildReviewBodyComments_SkipsDismissed(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(t, client)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
 		LinkedPRReviews: []gh.PRReview{
-			{Author: "alice", State: "APPROVED", Body: "LGTM!", DatabaseID: 601},
 			{Author: "bob", State: "DISMISSED", Body: "please fix this", DatabaseID: 602},
 		},
 	}
@@ -1241,42 +1244,88 @@ func TestBuildReviewBodyComments_SkipsApprovedAndDismissed(t *testing.T) {
 	comments := eng.buildReviewBodyComments(item)
 
 	if len(comments) != 0 {
-		t.Fatalf("expected 0 comments (APPROVED/DISMISSED skipped), got %d", len(comments))
+		t.Fatalf("expected 0 comments (DISMISSED skipped), got %d", len(comments))
 	}
 }
 
-// buildReviewBodyComments must skip COMMENTED reviews even though they carry
-// a non-empty body (Pruefer review finding, #1375). Automated reviewers like
-// Copilot routinely submit a COMMENTED review whose body is a generic
-// "Pull request overview" summary with zero inline comments — treating that
-// as actionable feedback would trigger a reinvoke/Claude invocation on every
-// wait_for_reviews stage (advisory included, not just authoritative), far
-// beyond a CHANGES_REQUESTED verdict's scope. reviewGateAuthorityVerdict draws
-// the identical line — only CHANGES_REQUESTED blocks its fallback verdict.
-func TestBuildReviewBodyComments_SkipsCommented(t *testing.T) {
+// An APPROVED review's body is now treated as actionable (#1045) —
+// approve-with-nits is real feedback, and the filter no longer discriminates
+// by state beyond DISMISSED/PENDING.
+func TestBuildReviewBodyComments_ApprovedIsActionable(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(t, client)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
 		LinkedPRReviews: []gh.PRReview{
-			{Author: "copilot-pull-request-reviewer", State: "COMMENTED", Body: "## Pull request overview\n\nLGTM.", DatabaseID: 603},
+			{Author: "alice", State: "APPROVED", Body: "LGTM, minor nit: rename foo to bar", DatabaseID: 601},
 		},
 	}
 
 	comments := eng.buildReviewBodyComments(item)
 
-	if len(comments) != 0 {
-		t.Fatalf("expected 0 comments (COMMENTED skipped), got %d", len(comments))
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (APPROVED body is actionable), got %d", len(comments))
+	}
+}
+
+// buildReviewBodyComments must admit a COMMENTED review's body as actionable
+// (#1045, AC1) — superseding #1375's CHANGES_REQUESTED-only filter, which
+// silently dropped the entire finding set of a reviewer (e.g. Pruefer, #1251)
+// that submits exclusively COMMENTED reviews whose bodies are substantive
+// findings, not a generic overview. AC2: neutralizing this change (restoring
+// `if r.State != "CHANGES_REQUESTED" { continue }`) must turn this test red.
+func TestBuildReviewBodyComments_CommentedIsActionable(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "handarbeit-pruefer", State: "COMMENTED", Body: "**File:** engine/foo.go\nMissing nil check on line 42.", DatabaseID: 603},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (COMMENTED body is actionable), got %d", len(comments))
+	}
+	if comments[0].Body != "**File:** engine/foo.go\nMissing nil check on line 42." {
+		t.Errorf("comment body = %q, want the review's actual body preserved verbatim", comments[0].Body)
+	}
+}
+
+// A COMMENTED review's body must be admitted regardless of whether the
+// author is a "declared" reviewer — buildReviewBodyCommentsFromReviews
+// consults only r.State/r.Body/r.DatabaseID, never expected_reviewers or any
+// other author-based allow-list. This guards against reintroducing the
+// author-discriminator design explicitly proposed and withdrawn in #1045's
+// issue history (see adrs/1045-*.md): gate correctness must not depend on an
+// operator having declared every substantive reviewer.
+func TestBuildReviewBodyComments_CommentedActionableRegardlessOfAuthor(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "some-undeclared-bot-nobody-configured", State: "COMMENTED", Body: "Found a real bug here.", DatabaseID: 605},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (undeclared author's COMMENTED body still actionable), got %d", len(comments))
 	}
 }
 
 // buildReviewBodyComments must skip a PENDING review — a draft review not yet
-// submitted (Pruefer review finding, #1375). The actionable-state check is an
-// allow-list (State == "CHANGES_REQUESTED" only, not a APPROVED/DISMISSED
-// deny-list), so PENDING — and any other state neither data source is
-// documented to return here — is excluded structurally, not by relying on it
-// never occurring in practice.
+// submitted (Pruefer review finding, #1375). The actionable-state check
+// excludes DISMISSED and PENDING explicitly (#1045), so PENDING — and any
+// other state neither data source is documented to return here — is excluded
+// structurally, not by relying on it never occurring in practice.
 func TestBuildReviewBodyComments_SkipsPending(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(t, client)
