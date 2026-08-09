@@ -482,7 +482,27 @@ func tryPRReviewState(env *Env, repo string, prNumber int) (isDraft bool, create
 // poll observed isDraft==true (a real draft→ready transition happened
 // in-window), or to the PR's createdAt if it was never seen as a draft
 // (opened ready from the start; the ~poll-interval error this introduces is
-// negligible against a 10-minute window).
+// negligible against a 10-minute window). If a later poll observes
+// isDraft==true again (a PR re-drafted after going ready — unusual but
+// possible), readyAt resets to zero so the zero-review clock doesn't keep
+// running through a period the PR genuinely wasn't reviewable.
+//
+// Once a review is observed (reviewCount > 0), the PR-review-state poll is
+// skipped for the remainder of the wait — reviewFailFastDue can never fire
+// again once a review exists, so there's no reason to keep paying the extra
+// `gh pr view` call every cycle (see tests/e2e/README.md's GraphQL-budget
+// note, which assumes exactly this bound).
+//
+// Contract for callers: this helper only trusts readyAt's createdAt fallback
+// to be within poll-interval error of "actually ready" if the wait begins at
+// or near PR creation (true of all current call sites — either no PR exists
+// yet, or, per the "opt-in" note below, a review has already organically
+// landed via the Review stage's own gate before this helper is ever called).
+// A future call site that invokes this well after a long-idle, never-drafted,
+// still-unreviewed PR was created would see readyAt anchored to that stale
+// createdAt and could fail on its very first poll — that's a real risk for a
+// hypothetical caller, not a mitigated one; verify it doesn't apply before
+// adopting this helper at a new site.
 //
 // Not wired into every WaitForIssueClosed call site — see the Plan stage's
 // "Opt-in helper, not a default-on change" decision (handarbeit/fabrik#1396):
@@ -496,6 +516,7 @@ func WaitForIssueClosedWithReviewCheck(t *testing.T, env *Env, repo string, issu
 	deadline := time.Now().Add(timeout)
 	var sawDraft bool
 	var readyAt time.Time
+	var reviewLanded bool
 	for time.Now().Before(deadline) {
 		state, err := tryIssueState(env, repo, issueNumber)
 		if err != nil {
@@ -504,21 +525,26 @@ func WaitForIssueClosedWithReviewCheck(t *testing.T, env *Env, repo string, issu
 			return
 		}
 
-		if prNumber, prErr := tryLinkedPRNumber(env, repo, issueNumber); prErr == nil {
-			if isDraft, createdAt, reviewCount, rsErr := tryPRReviewState(env, repo, prNumber); rsErr == nil {
-				if isDraft {
-					sawDraft = true
-				} else if readyAt.IsZero() {
-					if sawDraft {
-						readyAt = time.Now()
-					} else {
-						readyAt = createdAt
+		if !reviewLanded {
+			if prNumber, prErr := tryLinkedPRNumber(env, repo, issueNumber); prErr == nil {
+				if isDraft, createdAt, reviewCount, rsErr := tryPRReviewState(env, repo, prNumber); rsErr == nil {
+					if isDraft {
+						sawDraft = true
+						readyAt = time.Time{}
+					} else if readyAt.IsZero() {
+						if sawDraft {
+							readyAt = time.Now()
+						} else {
+							readyAt = createdAt
+						}
 					}
-				}
-				if reviewFailFastDue(readyAt, reviewCount, time.Now(), reviewFailFastWindow()) {
-					t.Fatalf("%s#%d: PR #%d has been ready for review for over %s with zero reviews — "+
-						"likely a dropped bot-review dispatch, not a Fabrik engine defect (see handarbeit/fabrik#1396)",
-						repo, issueNumber, prNumber, reviewFailFastWindow())
+					if reviewCount > 0 {
+						reviewLanded = true
+					} else if reviewFailFastDue(readyAt, reviewCount, time.Now(), reviewFailFastWindow()) {
+						t.Fatalf("%s#%d: PR #%d has been ready for review for over %s with zero reviews — "+
+							"likely a dropped bot-review dispatch, not a Fabrik engine defect (see handarbeit/fabrik#1396)",
+							repo, issueNumber, prNumber, reviewFailFastWindow())
+					}
 				}
 			}
 		}
