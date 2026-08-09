@@ -334,13 +334,55 @@ func (e *Engine) reapplyPauseLabels(item gh.ProjectItem) {
 	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
 }
 
-// pauseIssueMutex returns (creating on first use) a per-issue mutex used to
-// serialize concurrent pauseInterruptedIssue calls for the same issue. See
-// pauseInterruptedIssue's doc comment for why this exists.
-func (e *Engine) pauseIssueMutex(item gh.ProjectItem) *sync.Mutex {
+// pauseIssueMuEntry is one entry in Engine.pauseIssueMu: the per-issue mutex
+// pauseInterruptedIssue serializes on, plus a reference count so the entry
+// can be deleted the instant no caller holds it — see acquirePauseIssueMutex/
+// releasePauseIssueMutex.
+type pauseIssueMuEntry struct {
+	mu   sync.Mutex
+	refs int // guarded by Engine.pauseIssueMuGuard, not mu
+}
+
+// acquirePauseIssueMutex returns the per-issue mutex entry for item, creating
+// it on first use, and increments its reference count under
+// pauseIssueMuGuard. Pair with releasePauseIssueMutex once the caller is done
+// with entry.mu (locked or not) so the map entry can be reclaimed.
+//
+// Refcounting (rather than leaving entries in place forever, as an earlier
+// sync.Map-based version did) keeps Engine.pauseIssueMu bounded by the number
+// of issues *currently* being paused concurrently — never by the total
+// number of issues ever paused over the daemon's lifetime (review finding on
+// #1393). Map mutation (creation, refcount, deletion) is guarded by the
+// separate pauseIssueMuGuard mutex, distinct from entry.mu itself: the two
+// serve different critical sections — pauseIssueMuGuard protects the map,
+// entry.mu protects one issue's pauseInterruptedIssue body — so a second
+// caller for the same issue can register its reference (and thus prevent
+// deletion) while the first caller still holds entry.mu.
+func (e *Engine) acquirePauseIssueMutex(item gh.ProjectItem) *pauseIssueMuEntry {
 	key := issueKey(item, e.defaultRepo())
-	actual, _ := e.pauseIssueMu.LoadOrStore(key, &sync.Mutex{})
-	return actual.(*sync.Mutex)
+	e.pauseIssueMuGuard.Lock()
+	defer e.pauseIssueMuGuard.Unlock()
+	entry, ok := e.pauseIssueMu[key]
+	if !ok {
+		entry = &pauseIssueMuEntry{}
+		e.pauseIssueMu[key] = entry
+	}
+	entry.refs++
+	return entry
+}
+
+// releasePauseIssueMutex drops the caller's reference to entry, deleting it
+// from Engine.pauseIssueMu once no reference remains. Must be called exactly
+// once per acquirePauseIssueMutex call, after the caller is done with
+// entry.mu (i.e. after Unlock).
+func (e *Engine) releasePauseIssueMutex(item gh.ProjectItem, entry *pauseIssueMuEntry) {
+	key := issueKey(item, e.defaultRepo())
+	e.pauseIssueMuGuard.Lock()
+	defer e.pauseIssueMuGuard.Unlock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(e.pauseIssueMu, key)
+	}
 }
 
 // pauseInterruptedIssue is the shared R3 primitive (#1393/ADR-1393) behind
@@ -354,9 +396,9 @@ func (e *Engine) pauseIssueMutex(item gh.ProjectItem) *sync.Mutex {
 //
 // The AC2 idempotency guard (skip the comment if this pause episode is
 // already recorded) is computed *inside* this function, under a per-issue
-// mutex (pauseIssueMutex) — not from a caller-supplied snapshot taken before
-// the call. A caller-supplied bool was found in review to be racy: if a TUI
-// stop (handleStopRequest) and a daemon-wide shutdown pause
+// mutex (acquirePauseIssueMutex) — not from a caller-supplied snapshot taken
+// before the call. A caller-supplied bool was found in review to be racy: if
+// a TUI stop (handleStopRequest) and a daemon-wide shutdown pause
 // (pauseIssueForDaemonShutdown) land on the same in-flight issue at nearly
 // the same moment, both would read "not yet paused" from their own
 // pre-call snapshot and both proceed to post a comment — two audit comments
@@ -370,9 +412,12 @@ func (e *Engine) pauseIssueMutex(item gh.ProjectItem) *sync.Mutex {
 // handleStopRequest's pre-existing ordering (Pattern C in pauseOpts' doc
 // comment) — this refactor changes who writes the labels/comment, not when.
 func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, comment string) {
-	mu := e.pauseIssueMutex(item)
-	mu.Lock()
-	defer mu.Unlock()
+	entry := e.acquirePauseIssueMutex(item)
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+		e.releasePauseIssueMutex(item, entry)
+	}()
 
 	alreadyPaused := false
 	if snap, err := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); err == nil {

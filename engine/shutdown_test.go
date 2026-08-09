@@ -368,6 +368,22 @@ func TestPauseInterruptedIssue_ConcurrentCallers_NoDuplicateComment(t *testing.T
 			t.Errorf("issue #%d: expected at most 1 audit comment from the concurrent TUI-stop/daemon-shutdown race, got %d", number, count)
 		}
 	}
+
+	// Regression check for a review finding on #1393: the earlier
+	// implementation kept pauseIssueMu as a sync.Map that a per-issue
+	// *sync.Mutex was LoadOrStore'd into and never removed — an unbounded,
+	// permanent leak (one entry per distinct issue ever paused, for the
+	// life of the daemon). pauseIssueMu is now a refcounted map
+	// (acquirePauseIssueMutex/releasePauseIssueMutex) that deletes an
+	// entry once no caller holds a reference to it. All 200 distinct
+	// issues above have long since finished both their TUI-stop and
+	// daemon-shutdown calls, so nothing should remain.
+	eng.pauseIssueMuGuard.Lock()
+	remaining := len(eng.pauseIssueMu)
+	eng.pauseIssueMuGuard.Unlock()
+	if remaining != 0 {
+		t.Errorf("pauseIssueMu: expected 0 entries after all %d issues finished pausing, got %d — entries are leaking instead of being reclaimed", iterations, remaining)
+	}
 }
 
 // TestRunShutdownPause_IdleQueue_NoWrites_AC5 verifies that a clean stop with

@@ -117,30 +117,31 @@ type Engine struct {
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
 	stalenessCompareFn          func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
-	lastProjectUpdatedAt        time.Time              // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	wakeCh                      chan struct{}          // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh                      chan tui.StopRequest   // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                         chan struct{}          // semaphore bounding concurrent workers across poll cycles
-	wg                          sync.WaitGroup         // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
-	cloneInFlight               sync.Map               // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
-	mergeTrainInFlight          sync.Map               // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
-	mergeTrainEjectionsMu       sync.Mutex             // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts    map[string]int         // key: "owner/repo#N", ejection count per member
-	mergeTrainTrialsMu          sync.Mutex             // guards mergeTrainTrials
-	mergeTrainTrials            map[string][]time.Time // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
-	queuedReviewEjectsMu        sync.Mutex             // guards queuedReviewEjects
-	queuedReviewEjects          map[string]map[int]int // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
-	issueCtxs                   sync.Map               // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
-	pauseIssueMu                sync.Map               // key: issueKey string, value: *sync.Mutex; serializes concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue)
-	baseBranchWarnedSet         sync.Map               // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
-	ciGateCoverageWarnedSet     sync.Map               // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
-	mergeTrainBatchSnapshotSeen sync.Map               // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
-	claudeSuspendMu             sync.Mutex             // guards claudeSuspendedUntil
-	claudeSuspendedUntil        time.Time              // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
-	events                      chan tui.Event         // nil in tests / plain-text mode; TUI goroutine consumes
-	logFile                     *os.File               // persistent log file at .fabrik/fabrik.log; nil if not opened
-	logMu                       sync.Mutex             // serializes concurrent writes to logFile
-	webhookMgr                  *webhookManager        // nil when webhooks are disabled
+	lastProjectUpdatedAt        time.Time                     // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	wakeCh                      chan struct{}                 // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh                      chan tui.StopRequest          // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                         chan struct{}                 // semaphore bounding concurrent workers across poll cycles
+	wg                          sync.WaitGroup                // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
+	cloneInFlight               sync.Map                      // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	mergeTrainInFlight          sync.Map                      // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
+	mergeTrainEjectionsMu       sync.Mutex                    // guards mergeTrainEjectionCounts
+	mergeTrainEjectionCounts    map[string]int                // key: "owner/repo#N", ejection count per member
+	mergeTrainTrialsMu          sync.Mutex                    // guards mergeTrainTrials
+	mergeTrainTrials            map[string][]time.Time        // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
+	queuedReviewEjectsMu        sync.Mutex                    // guards queuedReviewEjects
+	queuedReviewEjects          map[string]map[int]int        // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
+	issueCtxs                   sync.Map                      // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
+	pauseIssueMuGuard           sync.Mutex                    // guards pauseIssueMu itself (creation, refcounting, deletion) — distinct from the per-issue *sync.Mutex each entry embeds
+	pauseIssueMu                map[string]*pauseIssueMuEntry // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
+	baseBranchWarnedSet         sync.Map                      // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
+	ciGateCoverageWarnedSet     sync.Map                      // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
+	mergeTrainBatchSnapshotSeen sync.Map                      // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
+	claudeSuspendMu             sync.Mutex                    // guards claudeSuspendedUntil
+	claudeSuspendedUntil        time.Time                     // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
+	events                      chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile                     *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu                       sync.Mutex                    // serializes concurrent writes to logFile
+	webhookMgr                  *webhookManager               // nil when webhooks are disabled
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
@@ -273,6 +274,7 @@ func New(cfg Config) (*Engine, error) {
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
 		queuedReviewEjects:       make(map[string]map[int]int),
+		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -331,6 +333,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
 		queuedReviewEjects:       make(map[string]map[int]int),
+		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
