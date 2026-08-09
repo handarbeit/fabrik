@@ -653,6 +653,17 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			return
 		default: // TrainCIRed
+			if len(survivors) == 1 {
+				// #1440 R1: a red batch of exactly one member has no poisoner to isolate —
+				// bisection's own base case would just return that member immediately, at
+				// the cost of the misleading "isolated by halving bisection" / "different
+				// composition" ejection wording. Short-circuit straight to the dedicated
+				// singleton disposition instead of calling handleRedBatch at all.
+				e.logf(survivors[0].item.Number, "merge-train", "combined Validate RED for %s with a single member (#%d) — no poisoner to isolate; disposing as a red singleton\n", repoKey, survivors[0].item.Number)
+				e.cleanupTrialArtifacts(p.wm, trialName)
+				e.ejectRedSingleton(p.owner, p.repo, survivors[0], diag)
+				return
+			}
 			e.logf(0, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", repoKey, len(survivors))
 			// The red trial's artifacts are unneeded; bisection sub-trials build fresh.
 			e.cleanupTrialArtifacts(p.wm, trialName)
