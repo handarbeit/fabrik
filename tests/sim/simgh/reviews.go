@@ -86,6 +86,7 @@ func (s *Sim) AddReviewRequest(owner, repo string, prNumber int, reviewers []str
 	if err != nil {
 		return err
 	}
+	changed := false
 	for _, login := range reviewers {
 		already := false
 		for _, existing := range pr.reviewRequests {
@@ -101,8 +102,14 @@ func (s *Sim) AddReviewRequest(owner, repo string, prNumber int, reviewers []str
 			Login: login,
 			IsBot: gh.IsBotLogin(login),
 		})
+		changed = true
 	}
-	pr.updatedAt = s.now()
+	// A true no-op must not bump the timestamp, following AddLabelToIssue's
+	// convention: engine gates anchor on observable change, so a spurious bump
+	// is a change a scenario cannot distinguish from a real one.
+	if changed {
+		pr.updatedAt = s.now()
+	}
 	return nil
 }
 
@@ -120,6 +127,10 @@ func (s *Sim) DeleteReviewRequest(owner, repo string, prNumber int, reviewers []
 			kept = append(kept, existing)
 		}
 	}
+	if len(kept) == len(pr.reviewRequests) {
+		// Nothing was outstanding; same no-op rule as AddReviewRequest.
+		return nil
+	}
 	pr.reviewRequests = kept
 	pr.updatedAt = s.now()
 	return nil
@@ -135,7 +146,8 @@ func (s *Sim) DeleteReviewRequest(owner, repo string, prNumber int, reviewers []
 // and falls back to its own no-CHANGES_REQUESTED computation otherwise. A
 // model that always returned a decision would hide that fallback entirely.
 //
-// Only each reviewer's latest review counts, matching GitHub's own rollup.
+// Only each reviewer's latest review counts, matching GitHub's own rollup —
+// via the same reduction FetchPRReviews uses, so the two cannot disagree.
 func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -150,26 +162,23 @@ func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, e
 		return "", nil
 	}
 
-	latest := make(map[string]string)
-	var order []string
-	for _, rev := range pr.reviews {
-		if rev.State != "APPROVED" && rev.State != "CHANGES_REQUESTED" {
-			// COMMENTED and DISMISSED reviews do not participate in the
-			// decision rollup.
-			continue
-		}
-		if _, seen := latest[rev.Author]; !seen {
-			order = append(order, rev.Author)
-		}
-		latest[rev.Author] = rev.State
-	}
-
+	// Reduce first, then roll up — deliberately sharing latestReviewsByAuthor
+	// with FetchPRReviews rather than reducing inline. Filtering the raw history
+	// down to APPROVED/CHANGES_REQUESTED before collapsing would let a later
+	// DISMISSED be skipped instead of superseding that author's earlier verdict,
+	// leaving a dismissed approval counted in the tally. That is not a rounding
+	// error: reviewGateAuthorityVerdict (engine/reviews.go) trusts an APPROVED
+	// decision outright, so a scenario that dismisses an approval and expects
+	// the landing gate to hold would see it clear. Sharing the reduction is what
+	// stops this read and FetchPRReviews describing two different PRs.
 	approvals := 0
-	for _, author := range order {
-		if latest[author] == "CHANGES_REQUESTED" {
+	for _, rev := range latestReviewsByAuthor(pr.reviews) {
+		// A collapsed entry that is COMMENTED or DISMISSED is that author's
+		// current state and simply carries no verdict.
+		if rev.State == "CHANGES_REQUESTED" {
 			return "CHANGES_REQUESTED", nil
 		}
-		if latest[author] == "APPROVED" {
+		if rev.State == "APPROVED" {
 			approvals++
 		}
 	}

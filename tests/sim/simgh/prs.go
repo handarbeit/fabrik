@@ -171,6 +171,10 @@ func (s *Sim) createPR(owner, repo, title, head, base, body string, issueNumber 
 	if !baseOK {
 		return 0, fmt.Errorf("simgh: cannot create PR: base branch %q does not exist in %s", base, repoKey(owner, repo))
 	}
+	// GitHub refuses a PR whose head is its base ("No commits between ...").
+	if head == base {
+		return 0, fmt.Errorf("simgh: cannot create PR: head and base are both %q in %s", base, repoKey(owner, repo))
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,7 +317,10 @@ func (s *Sim) gitFacts(r *repoState, base, head string) (gitFactsResult, error) 
 	r.gitMu.Lock()
 	defer r.gitMu.Unlock()
 
-	headSHA := r.headSHA(head)
+	headSHA, err := r.headSHA(head)
+	if err != nil {
+		return gitFactsResult{}, err
+	}
 	if headSHA == "" {
 		return gitFactsResult{}, fmt.Errorf("simgh: PR head branch %q no longer exists in %s/%s", head, r.owner, r.repo)
 	}

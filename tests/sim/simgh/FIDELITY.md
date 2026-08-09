@@ -122,6 +122,34 @@ scenario that mutates a repo concurrently with its own `MergePR` call. A
 scenario that wants to exercise "a required check went red mid-merge" cannot do
 it here; that needs the server-side re-check the sim does not model.
 
+### Trial merges leave unreachable objects — **Simplified**
+
+A read-only mergeability probe runs a real `git merge --no-ff` and then discards
+the result by not moving any ref, so the merge commit it wrote stays in the
+object store with nothing pointing at it. Nothing here runs `git gc`, and
+mergeability is recomputed on every read, so a long multi-poll scenario
+accumulates orphaned objects for the life of the test process.
+
+**Risk:** low, and it is disk and inode cost rather than a wrong answer — the
+objects are unreachable, so no read can observe them. The backing repos live
+under `t.TempDir()` and vanish with the test. Worth revisiting only if a
+scenario in #1449 grows long enough for it to matter.
+
+### A PR whose head branch is gone errors — **Simplified**
+
+`gitFacts` fails outright when a PR's head branch no longer exists in the
+backing repo, so `FetchPRMergeableFields`, `FetchPRMergeableState`,
+`FetchPRDetails`, and `MergePR` all return an error rather than resolving to a
+determinate `mergeable_state`.
+
+**Unverified:** what real GitHub reports for a PR whose head ref was deleted is
+not captured here — plausibly `unknown`, plausibly the PR is closed first. The
+model errors rather than guessing a state, which is loud rather than silently
+wrong, but it means a scenario cannot exercise the deleted-head-branch path at
+all. Note the deliberate asymmetry: `headSHA` itself treats a missing branch as
+a legitimate state (empty string, no error) — it is `gitFacts` that decides
+mergeability cannot be computed without one.
+
 ### Commits behind — **Modelled**
 
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
@@ -303,6 +331,15 @@ reviews do not participate.
 
 **Simplified:** code-owner requirements, review dismissal on push, and stale-review
 invalidation are **absent**. `DISMISSED` is not a state the model produces.
+
+**The decision shares one reduction with `FetchPRReviews`.** Both roll up
+through `latestReviewsByAuthor`, so a `DISMISSED` submission supersedes that
+author's earlier verdict in the decision exactly as it does in the review list.
+Filtering the raw history down to `APPROVED`/`CHANGES_REQUESTED` *before*
+collapsing would skip a dismissal instead, leaving a dismissed approval counted
+— and `reviewGateAuthorityVerdict` trusts an `APPROVED` decision outright, so a
+scenario that dismisses an approval and expects the landing gate to hold would
+watch it clear.
 
 **A zero approval requirement is refused, not modelled.** `SeedRequiredApprovals`
 rejects a non-positive count. With zero, the approvals-satisfied branch is
@@ -714,8 +751,18 @@ globally across a GitHub instance, and nothing ties them to creation time.
 
 ### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
 
-`SeedPR` refuses a merged draft, and a PR that is merged *and* open (a merged PR
-is always closed; `Merged` with the state unspecified resolves to closed).
+`SeedPR` refuses a merged draft, a PR that is merged *and* open (a merged PR is
+always closed; `Merged` with the state unspecified resolves to closed), and a PR
+whose head is its base — GitHub answers the last with "No commits between …",
+and the shape is degenerate here too, collapsing the trial merge to the
+nothing-to-merge path. `createPR` refuses head-equals-base on the runtime path
+for the same reason.
+
+Both also check the state string against GitHub's own enum (`OPEN`/`CLOSED` for
+issues, `open`/`closed` for PRs) rather than merely for emptiness: every
+downstream read compares it exactly, so `"closed"` on an issue would be stored
+verbatim and then never match, silently leaving it classified open.
+
 `SeedIssue` and `SeedPR` both refuse a negative explicit number — `reserveNumber`
 is a no-op below `nextNumber`, so one would otherwise be accepted silently and
 embedded in node IDs and every projection.
@@ -822,6 +869,15 @@ the format.
 succeeds. Real GitHub creates the label implicitly in some paths and errors in
 others. The engine's own `ensureLabel` behaviour is therefore not exercised.
 
+### Removing an absent label errors — **Modelled**
+
+`RemoveLabelFromIssue` returns a wrapped `gh.ErrNotFound` when the label was not
+applied, because GitHub answers the DELETE with a 404 and production propagates
+it. Roughly a dozen engine call sites branch on `errors.Is(err, gh.ErrNotFound)`
+from this exact call; returning nil would make every one of them unreachable in
+a sim-backed test. That the engine *tolerates* the error is not a reason to hide
+it — tolerating it is the behaviour under test.
+
 ### Label applied-at — **Modelled**
 
 `FetchLabelAppliedAt` returns the instant the label was applied, from the
@@ -907,7 +963,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 86 mutations, and
+   package cannot back up. The sweep currently catches all 94 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

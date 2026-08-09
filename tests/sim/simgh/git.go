@@ -381,16 +381,17 @@ func (r *repoState) createBranch(branch, fromBranch string) error {
 	return err
 }
 
-// headSHA resolves a branch tip, returning "" when the branch does not exist
-// (a PR whose head branch was deleted is a real state, not an error).
-// Caller must hold gitMu.
-func (r *repoState) headSHA(branch string) string {
+// headSHA resolves a branch tip, returning "" when the branch does not exist —
+// a PR whose head branch was deleted is a real state, not an error.
+//
+// That empty string models exactly one condition, so a resolveRef failure is
+// *not* folded into it: branchExists confirmed the ref a moment earlier, so a
+// failure here is a genuine git error (a corrupt object, a ref pointing at a
+// non-commit) and must surface as one rather than be miscategorised as
+// legitimate simulated GitHub state. Caller must hold gitMu.
+func (r *repoState) headSHA(branch string) (string, error) {
 	if !r.branchExists(branch) {
-		return ""
+		return "", nil
 	}
-	sha, err := r.resolveRef("refs/heads/" + branch)
-	if err != nil {
-		return ""
-	}
-	return sha
+	return r.resolveRef("refs/heads/" + branch)
 }

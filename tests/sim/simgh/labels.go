@@ -3,6 +3,8 @@ package simgh
 import (
 	"fmt"
 	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // FetchLabels returns the labels currently applied to an issue.
@@ -43,8 +45,21 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	return nil
 }
 
-// RemoveLabelFromIssue removes a label. Removing an absent label is a no-op
-// rather than an error, matching how the engine's ensure/remove helpers use it.
+// RemoveLabelFromIssue removes a label, returning a wrapped gh.ErrNotFound when
+// the label was not applied.
+//
+// The error is the point. Production issues a DELETE that GitHub answers with a
+// 404 for a label the issue does not carry, and restDelete propagates it — so
+// roughly a dozen engine call sites branch on errors.Is(err, gh.ErrNotFound)
+// from this exact call (engine/settle.go, stages.go, item.go, mutate.go,
+// poll.go, dependencies.go and others; mutate.go's comment distinguishes an
+// ErrNotFound removal's echo behaviour from a real one). Returning nil would
+// make every one of those branches permanently unreachable in a sim-backed
+// test: a bug in the ErrNotFound-specific handling would pass green here and
+// fail against real GitHub.
+//
+// The engine tolerating this error is not a reason for the model to hide it —
+// tolerating it is the behaviour under test.
 func (s *Sim) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -54,7 +69,8 @@ func (s *Sim) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelNam
 	}
 	updated, removed := removeString(iss.labels, labelName)
 	if !removed {
-		return nil
+		return fmt.Errorf("removing label %q from %s#%d: %w",
+			labelName, repoKey(owner, repo), issueNumber, gh.ErrNotFound)
 	}
 	iss.labels = updated
 	delete(iss.labelAppliedAt, labelName)

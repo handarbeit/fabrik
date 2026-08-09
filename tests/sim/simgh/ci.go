@@ -88,7 +88,7 @@ func (s *Sim) resolveRefSHA(owner, repo, ref string) (string, error) {
 	}
 	r.gitMu.Lock()
 	defer r.gitMu.Unlock()
-	return r.headSHA(ref), nil
+	return r.headSHA(ref)
 }
 
 // checkVerdict maps a check run's status/conclusion pair onto a verdict.

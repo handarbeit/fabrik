@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -972,4 +973,213 @@ func TestSeedIssueRefusesNegativeNumber(t *testing.T) {
 	if !strings.Contains(err.Error(), "not valid") {
 		t.Fatalf("error = %v, want a 'not valid' refusal", err)
 	}
+}
+
+// TestRemoveAbsentLabelReturnsErrNotFound pins that removing a label the issue
+// does not carry is an error, not a no-op.
+//
+// Production issues a DELETE that GitHub answers 404 for an absent label, and
+// roughly a dozen engine call sites branch on errors.Is(err, gh.ErrNotFound)
+// from this exact call. Returning nil would make every one of those branches
+// unreachable in a sim-backed test — a bug in the ErrNotFound-specific handling
+// would pass green here and fail against real GitHub.
+func TestRemoveAbsentLabelReturnsErrNotFound(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+
+	err := s.RemoveLabelFromIssue("acme", "widgets", 7, "fabrik:never-applied")
+	if err == nil {
+		t.Fatal("removing an absent label reported success; the engine's ErrNotFound branches are unreachable")
+	}
+	if !errors.Is(err, gh.ErrNotFound) {
+		t.Fatalf("error = %v, want it to wrap gh.ErrNotFound so errors.Is works as the engine expects", err)
+	}
+
+	// A real removal still succeeds — otherwise the assertion above would be
+	// satisfied by a method that simply always fails.
+	if err := s.AddLabelToIssue("acme", "widgets", 7, "fabrik:awaiting-ci"); err != nil {
+		t.Fatalf("AddLabelToIssue: %v", err)
+	}
+	if err := s.RemoveLabelFromIssue("acme", "widgets", 7, "fabrik:awaiting-ci"); err != nil {
+		t.Fatalf("removing a present label: %v", err)
+	}
+}
+
+// TestDismissedReviewDoesNotCountTowardApproval pins that a dismissal
+// supersedes the author's earlier verdict in the decision rollup.
+//
+// Filtering the raw history down to APPROVED/CHANGES_REQUESTED before
+// collapsing skips a later DISMISSED instead of letting it supersede, leaving a
+// dismissed approval counted. That reaches the authoritative review gate
+// directly: reviewGateAuthorityVerdict trusts an APPROVED decision outright, so
+// a scenario that dismisses an approval and expects the landing gate to hold
+// would see it clear.
+func TestDismissedReviewDoesNotCountTowardApproval(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"}).
+		SeedRequiredApprovals(repoName, "main", 1).
+		SeedReview(repoName, 42, gh.PRReview{Author: "carol", State: "APPROVED", Body: "lgtm"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	decision, err := s.FetchPRReviewDecision("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewDecision: %v", err)
+	}
+	if decision != "APPROVED" {
+		t.Fatalf("decision = %q before dismissal, want APPROVED", decision)
+	}
+
+	s.SeedReview(repoName, 42, gh.PRReview{Author: "carol", State: "DISMISSED", Body: "stale"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding dismissal: %v", err)
+	}
+
+	decision, err = s.FetchPRReviewDecision("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewDecision after dismissal: %v", err)
+	}
+	if decision != "REVIEW_REQUIRED" {
+		t.Fatalf("decision = %q after the approval was dismissed, want REVIEW_REQUIRED; "+
+			"a dismissed approval is still being counted", decision)
+	}
+
+	// The two reads must describe the same PR: FetchPRReviews already lets a
+	// dismissal supersede, so a decision computed by a different reduction
+	// would put the package in contradiction with itself.
+	reviews, err := s.FetchPRReviews("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 1 || reviews[0].State != "DISMISSED" {
+		t.Fatalf("FetchPRReviews = %+v, want carol's single DISMISSED entry", reviews)
+	}
+}
+
+// TestSeedRefusesNonCanonicalState pins that a state string outside GitHub's
+// own enum is refused rather than stored verbatim. Every downstream read
+// compares it exactly, so "closed" on an issue (or "Open" on a PR) would never
+// match and the record would be silently misclassified.
+func TestSeedRefusesNonCanonicalState(t *testing.T) {
+	t.Run("issue", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		s.SeedIssue("acme/widgets", IssueSeed{Number: 8, Title: "x", State: "closed"})
+		err := s.Err()
+		if err == nil {
+			t.Fatal(`SeedIssue accepted State "closed"; GitHub's issue enum is OPEN/CLOSED`)
+		}
+		if !strings.Contains(err.Error(), "not valid") {
+			t.Fatalf("error = %v, want a 'not valid' refusal", err)
+		}
+	})
+
+	t.Run("pr", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		seedCleanDivergence(t, s)
+		s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", State: "Open"})
+		err := s.Err()
+		if err == nil {
+			t.Fatal(`SeedPR accepted State "Open"; GitHub's PR enum is open/closed`)
+		}
+		if !strings.Contains(err.Error(), "not valid") {
+			t.Fatalf("error = %v, want a 'not valid' refusal", err)
+		}
+	})
+
+	// The canonical values must still be accepted, or the refusals above would
+	// be satisfied by an API that rejects every explicit state.
+	t.Run("canonical values accepted", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		seedCleanDivergence(t, s)
+		s.SeedIssue("acme/widgets", IssueSeed{Number: 8, Title: "x", State: "CLOSED"}).
+			SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", State: "closed"})
+		if err := s.Err(); err != nil {
+			t.Fatalf("canonical states rejected: %v", err)
+		}
+	})
+}
+
+// TestPRHeadEqualBaseIsRefused pins that a PR whose head is its base is refused
+// on both paths. GitHub answers "No commits between ...", and the shape is
+// degenerate here too — the trial merge collapses to the nothing-to-merge path.
+func TestPRHeadEqualBaseIsRefused(t *testing.T) {
+	t.Run("runtime", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		seedCleanDivergence(t, s)
+		if _, err := s.CreateDraftPR("acme", "widgets", "t", "main", "main", "body", 7); err == nil {
+			t.Fatal("CreateDraftPR accepted head == base")
+		} else if !strings.Contains(err.Error(), "head and base") {
+			t.Fatalf("error = %v, want a head-equals-base refusal", err)
+		}
+	})
+
+	t.Run("seeding", func(t *testing.T) {
+		s, _ := seedBasicBoard(t)
+		seedCleanDivergence(t, s)
+		s.SeedPR(repoName, PRSeed{Number: 42, Head: "main", Base: "main"})
+		err := s.Err()
+		if err == nil {
+			t.Fatal("SeedPR accepted head == base")
+		}
+		if !strings.Contains(err.Error(), "head and base") {
+			t.Fatalf("error = %v, want a head-equals-base refusal", err)
+		}
+	})
+}
+
+// TestReviewRequestNoOpDoesNotBumpUpdatedAt pins that a request that changes
+// nothing leaves the PR's updated-at alone, following AddLabelToIssue's
+// convention: engine gates anchor on observable change, so a spurious bump is a
+// change a scenario cannot distinguish from a real one.
+func TestReviewRequestNoOpDoesNotBumpUpdatedAt(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	if err := s.AddReviewRequest("acme", "widgets", 42, []string{"carol"}); err != nil {
+		t.Fatalf("AddReviewRequest: %v", err)
+	}
+
+	before := prUpdatedAt(t, s, 42)
+	// Time must move, or an unbumped timestamp is indistinguishable from a
+	// bumped one.
+	clk.Advance(time.Hour)
+
+	if err := s.AddReviewRequest("acme", "widgets", 42, []string{"carol"}); err != nil {
+		t.Fatalf("re-AddReviewRequest: %v", err)
+	}
+	if got := prUpdatedAt(t, s, 42); !got.Equal(before) {
+		t.Fatalf("re-requesting an outstanding reviewer bumped updated-at from %v to %v", before, got)
+	}
+
+	if err := s.DeleteReviewRequest("acme", "widgets", 42, []string{"dave"}); err != nil {
+		t.Fatalf("DeleteReviewRequest: %v", err)
+	}
+	if got := prUpdatedAt(t, s, 42); !got.Equal(before) {
+		t.Fatalf("withdrawing a reviewer who was not outstanding bumped updated-at from %v to %v", before, got)
+	}
+
+	// A real change must still bump, or the assertions above would be satisfied
+	// by a method that never bumps at all.
+	if err := s.DeleteReviewRequest("acme", "widgets", 42, []string{"carol"}); err != nil {
+		t.Fatalf("DeleteReviewRequest(carol): %v", err)
+	}
+	if got := prUpdatedAt(t, s, 42); !got.After(before) {
+		t.Fatalf("a real withdrawal did not bump updated-at (%v -> %v)", before, got)
+	}
+}
+
+// prUpdatedAt reads a PR's updated-at from the model.
+func prUpdatedAt(t *testing.T, s *Sim, prNumber int) time.Time {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, pr, err := s.prLocked("acme", "widgets", prNumber)
+	if err != nil {
+		t.Fatalf("prLocked: %v", err)
+	}
+	return pr.updatedAt
 }

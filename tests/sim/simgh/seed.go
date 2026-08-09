@@ -233,7 +233,10 @@ func (s *Sim) HeadSHA(ownerRepo, branch string) (string, error) {
 	}
 	r.gitMu.Lock()
 	defer r.gitMu.Unlock()
-	sha := r.headSHA(branch)
+	sha, err := r.headSHA(branch)
+	if err != nil {
+		return "", err
+	}
 	if sha == "" {
 		return "", fmt.Errorf("simgh: branch %q not found in %s", branch, ownerRepo)
 	}
@@ -265,11 +268,20 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 		s.fail("simgh: %s#%d already exists", ownerRepo, num)
 		return s
 	}
-	r.reserveNumber(num)
+	// Only GitHub's own enum, not merely "non-empty". Every downstream read
+	// compares this by exact string (board projections, IsClosed, the PR
+	// auto-close path), so "closed" or "Open" would be stored verbatim and then
+	// silently misclassify the issue as open forever.
 	state := seed.State
-	if state == "" {
+	switch state {
+	case "":
 		state = "OPEN"
+	case "OPEN", "CLOSED":
+	default:
+		s.fail("simgh: issue state %q is not valid; use \"OPEN\" or \"CLOSED\"", state)
+		return s
 	}
+	r.reserveNumber(num)
 	now := s.now()
 	iss := &issueRecord{
 		number:         num,
@@ -325,6 +337,13 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 		s.fail("simgh: PR base branch %q does not exist in %s", base, ownerRepo)
 		return s
 	}
+	// GitHub refuses a PR whose head is its base ("No commits between ..."), and
+	// the shape is degenerate here too: the trial merge collapses to the
+	// nothing-to-merge path.
+	if seed.Head == base {
+		s.fail("simgh: PR head and base are both %q; GitHub refuses a PR with no commits between them", base)
+		return s
+	}
 
 	num := seed.Number
 	switch {
@@ -342,7 +361,17 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	// Refuse shapes GitHub cannot produce. A merged PR is always closed, and a
 	// draft can never have been merged — accepting either would let a scenario
 	// drive the engine from a state production can never deliver, and pass.
+	//
+	// The state string is checked against GitHub's REST enum rather than merely
+	// for emptiness, for the reason SeedIssue states: downstream reads compare
+	// it exactly, so "Open" would be stored and then never match.
 	state := seed.State
+	switch state {
+	case "", "open", "closed":
+	default:
+		s.fail("simgh: PR state %q is not valid; use \"open\" or \"closed\"", state)
+		return s
+	}
 	if seed.Merged {
 		if seed.Draft {
 			s.fail("simgh: PR %s#%d cannot be both merged and draft", ownerRepo, num)

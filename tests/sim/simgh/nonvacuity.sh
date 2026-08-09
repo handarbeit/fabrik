@@ -442,6 +442,38 @@ mutate "a negative explicit PR number is accepted" \
   'TestSeedPRRefusesImpossibleShapes' \
   'seed.go::s{case num < 0:\n\t\ts\.fail\("simgh: PR number}{case num < 0 \&\& false:\n\t\ts.fail("simgh: PR number}'
 
+mutate "removing an absent label is a silent no-op" \
+  'TestRemoveAbsentLabelReturnsErrNotFound' \
+  'labels.go::s{return fmt\.Errorf\("removing label %q from %s#%d: %w",\n\t\t\tlabelName, repoKey\(owner, repo\), issueNumber, gh\.ErrNotFound\)}{_ = gh.ErrNotFound; return nil}'
+
+mutate "the review decision filters before collapsing, so a dismissal is skipped" \
+  'TestDismissedReviewDoesNotCountTowardApproval' \
+  'reviews.go::s{for _, rev := range latestReviewsByAuthor\(pr\.reviews\) \{}{for _, rev := range pr.reviews \{\n\t\tif rev.State != "APPROVED" \&\& rev.State != "CHANGES_REQUESTED" \{ continue \}}'
+
+mutate "a non-canonical issue state is stored verbatim" \
+  'TestSeedRefusesNonCanonicalState' \
+  'seed.go::s{s\.fail\("simgh: issue state %q is not valid; use \\"OPEN\\" or \\"CLOSED\\"", state\)\n\t\treturn s}{state = "OPEN"}'
+
+mutate "a non-canonical PR state is stored verbatim" \
+  'TestSeedRefusesNonCanonicalState' \
+  'seed.go::s{s\.fail\("simgh: PR state %q is not valid; use \\"open\\" or \\"closed\\"", state\)\n\t\treturn s}{state = "open"}'
+
+mutate "a PR may have head equal to base (runtime)" \
+  'TestPRHeadEqualBaseIsRefused' \
+  'prs.go::s{if head == base \{}{if false \&\& head == base \{}'
+
+mutate "a PR may have head equal to base (seeding)" \
+  'TestPRHeadEqualBaseIsRefused' \
+  'seed.go::s{if seed\.Head == base \{}{if false \&\& seed.Head == base \{}'
+
+mutate "a no-op review request still bumps updatedAt" \
+  'TestReviewRequestNoOpDoesNotBumpUpdatedAt' \
+  'reviews.go::s{if changed \{\n\t\tpr\.updatedAt = s\.now\(\)\n\t\}}{_ = changed\n\tpr.updatedAt = s.now()}'
+
+mutate "a no-op review withdrawal still bumps updatedAt" \
+  'TestReviewRequestNoOpDoesNotBumpUpdatedAt' \
+  'reviews.go::s{if len\(kept\) == len\(pr\.reviewRequests\) \{}{if false \&\& len(kept) == len(pr.reviewRequests) \{}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
