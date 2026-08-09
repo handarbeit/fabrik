@@ -2621,7 +2621,9 @@ resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
   rate-limit `AlertBannerComponent` per the naming distinction above — both can be visible at once. The
   banner also self-clears on a `TickEvent` whose time has passed the reset, a cosmetic-only convenience
   that can run slightly ahead of the engine's own lazy check (harmless, since the engine never trusts
-  the banner's state).
+  the banner's state) — `AlertBannerComponent` mirrors this same self-clear-on-reset behavior
+  independently per REST/GraphQL bucket (#1482), so both banner components now share the identical
+  active/reset model.
 - **Updated comment copy:** the per-issue explanatory comment posted by `handleUsageLimitExit` no
   longer says "Fabrik will keep retrying on the normal poll cooldown" — it now describes the
   account-wide suspension and automatic resume at the reset time (or as soon as any invocation
