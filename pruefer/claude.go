@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // reviewAllowedTools is the fixed, read-only tool allowlist for every review
@@ -63,6 +65,12 @@ type ReviewRequest struct {
 	Effort      string
 	WorkDir     string        // ephemeral clone directory; claude's cwd
 	MaxWallTime time.Duration // 0 = no wall-time cap
+	// ReviewThreads carries existing review threads (resolved and
+	// unresolved) on the PR, fetched by ReviewPR via
+	// GitHubReviewer.FetchPRReviewThreads (R1). nil when the fetch failed
+	// (non-fatal degrade) or the PR genuinely has no threads yet —
+	// buildReviewPrompt renders no thread-context section in either case.
+	ReviewThreads []gh.PRReviewThread
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce

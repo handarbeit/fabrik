@@ -22,6 +22,8 @@ type fakeReviewer struct {
 	filesErr    error
 	reviews     []gh.PRReview
 	reviewsErr  error
+	threads     []gh.PRReviewThread
+	threadsErr  error
 	submitErr   error
 	token       string
 
@@ -71,6 +73,13 @@ func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PR
 		return nil, f.reviewsErr
 	}
 	return f.reviews, nil
+}
+
+func (f *fakeReviewer) FetchPRReviewThreads(owner, repo string, prNumber int) ([]gh.PRReviewThread, error) {
+	if f.threadsErr != nil {
+		return nil, f.threadsErr
+	}
+	return f.threads, nil
 }
 
 func (f *fakeReviewer) SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error) {
@@ -593,6 +602,60 @@ func TestReviewPR_GenericDiffFetchError_StillReturnsErr(t *testing.T) {
 	}
 	if client.filesCallCount() != 0 {
 		t.Error("the files-API fallback must only be attempted for gh.ErrDiffTooLarge, not generic errors")
+	}
+}
+
+// TestReviewPR_FetchedThreadsReachReviewRequest pins R1's data-plumbing
+// chain: a thread returned by FetchPRReviewThreads must reach
+// ReviewRequest.ReviewThreads unchanged.
+func TestReviewPR_FetchedThreadsReachReviewRequest(t *testing.T) {
+	client := newFakeReviewer()
+	client.threads = []gh.PRReviewThread{
+		{ID: "t1", Path: "a.go", Line: 10, IsResolved: false, Comments: []gh.PRReviewThreadComment{{Author: "reviewer", Body: "prior finding"}}},
+	}
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if len(calls[0].ReviewThreads) != 1 || calls[0].ReviewThreads[0].ID != "t1" {
+		t.Errorf("ReviewRequest.ReviewThreads = %+v, want the fetched thread", calls[0].ReviewThreads)
+	}
+}
+
+// TestReviewPR_ThreadFetchError_DegradesWithoutFailingReview pins the
+// non-fatal degrade decision: a FetchPRReviewThreads error must not fail the
+// review — it proceeds with nil threads, mirroring today's cold-read
+// behavior for that one pass.
+func TestReviewPR_ThreadFetchError_DegradesWithoutFailingReview(t *testing.T) {
+	client := newFakeReviewer()
+	client.threadsErr = fmt.Errorf("graphql timeout")
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Errorf("outcome.Reviewed = false, want true (a thread-fetch error must not fail the review)")
+	}
+	if outcome.Err != nil {
+		t.Errorf("outcome.Err = %v, want nil", outcome.Err)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if calls[0].ReviewThreads != nil {
+		t.Errorf("ReviewRequest.ReviewThreads = %+v, want nil on fetch error", calls[0].ReviewThreads)
 	}
 }
 
