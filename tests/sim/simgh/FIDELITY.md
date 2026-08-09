@@ -237,7 +237,7 @@ never merges anything, and dequeuing does not renumber the PRs behind it.
 `EnqueuePullRequest` resolves the head SHA under `gitMu`, releases it, then takes
 `mu` to record membership — so a concurrent push landing between the two would
 let the enqueue proceed against a head that no longer matches. GitHub performs
-that compare-and-swap server-side and cannot.
+that compare-and-swap server-side, atomically; the sim cannot.
 
 This is deliberate rather than overlooked. Closing it would mean holding `gitMu`
 and `mu` simultaneously, which the package's locking invariant forbids outright
@@ -248,11 +248,18 @@ the merge itself: its trial merge and its real merge run the same `tryMerge`
 helper, so if the tree changed underneath it the merge fails and the model
 reports the conflict rather than recording a merge that did not happen.
 
-**Risk:** low — a scenario would have to push to a PR's head branch from one
-goroutine while enqueuing it from another.
+Two risk ratings apply here, at different scopes — the narrower one sits inside
+the broader one, so they do not compete:
 
-**Risk:** high for any merge-queue scenario. Treat merge-queue coverage here as
-absent.
+**Risk — merge-queue coverage generally: high.** The queue is bookkeeping only,
+so treat merge-queue coverage here as **absent**. Any scenario whose outcome
+depends on the queue advancing, reordering itself, or merging anything cannot be
+written against this model, and a green sim-backed test says nothing about it.
+
+**Risk — the `expectedHeadOID` race specifically: low.** This is a strictly
+narrower window *within* that already-absent surface, so it adds little on top:
+to hit it, a scenario would have to push to a PR's head branch from one goroutine
+while enqueuing it from another.
 
 ---
 
