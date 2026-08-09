@@ -40,7 +40,12 @@ func (e *Engine) maybeCheckSourceStaleness() {
 		e.pollsUntilStalenessCheck--
 		return
 	}
-	e.pollsUntilStalenessCheck = stalenessCheckPollInterval
+	// stalenessCheckPollInterval-1, not stalenessCheckPollInterval: this call
+	// itself is the first of the next interval's calls, so only
+	// stalenessCheckPollInterval-1 more decrementing calls remain before the
+	// next fire. Setting it to the full interval would make the actual gap
+	// between fires stalenessCheckPollInterval+1 calls.
+	e.pollsUntilStalenessCheck = stalenessCheckPollInterval - 1
 	e.checkSourceStaleness()
 }
 

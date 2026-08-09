@@ -102,6 +102,44 @@ func TestMaybeCheckSourceStaleness_ReachableWhileBusy(t *testing.T) {
 	}
 }
 
+// TestMaybeCheckSourceStaleness_FiresExactlyEveryInterval pins the gate's
+// exact cadence: it must fire on call 1 (startup coverage) and again exactly
+// stalenessCheckPollInterval calls later — not stalenessCheckPollInterval+1,
+// which was the off-by-one a prior version of this gate had (the reset value
+// left after a fire needs to be stalenessCheckPollInterval-1, since the fire
+// call itself already counts as the first call of the next interval).
+func TestMaybeCheckSourceStaleness_FiresExactlyEveryInterval(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "dev(abc1234)"
+	eng.stalenessCompareFn = func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error) {
+		return selfupgrade.DevBuildStatus{Applicable: true, NeedsRebuild: false}, nil
+	}
+
+	var fireCalls []int
+	for call := 1; call <= 2*stalenessCheckPollInterval+1; call++ {
+		before := eng.pollsUntilStalenessCheck
+		eng.maybeCheckSourceStaleness()
+		// A fire is distinguishable from a decrement by the gate resetting
+		// the counter instead of decrementing it by exactly one.
+		if before == 0 {
+			fireCalls = append(fireCalls, call)
+		}
+	}
+
+	want := []int{1, 1 + stalenessCheckPollInterval, 1 + 2*stalenessCheckPollInterval}
+	if len(fireCalls) != len(want) {
+		t.Fatalf("fired on calls %v, want %v", fireCalls, want)
+	}
+	for i, w := range want {
+		if fireCalls[i] != w {
+			t.Errorf("fire %d happened on call %d, want call %d (gap between fires must be exactly stalenessCheckPollInterval=%d calls)", i, fireCalls[i], w, stalenessCheckPollInterval)
+		}
+	}
+}
+
 // TestCheckSourceStaleness_ClearsOnUpToDate verifies R5's self-clearing
 // behavior: a pre-existing warning is removed once the comparison reports
 // the checkout is current.
