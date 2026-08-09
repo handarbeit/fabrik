@@ -1,0 +1,411 @@
+# simgh fidelity contract
+
+This document is a deliverable, not a footnote. `simgh` is a fake, and the
+failure mode a fake introduces is not a red test — it is a **green** one: a
+scenario that passes because the model is wrong in the same direction the code
+is wrong, or because the model never produces the state that would have exposed
+the bug.
+
+So every place `simgh` knowingly departs from real GitHub is recorded here,
+with what the divergence costs. If you are about to rely on a sim-backed test
+to cover a subtle behaviour, check this file first. If you change the model,
+update this file in the same commit.
+
+Each entry is labelled:
+
+- **Modelled** — reproduced faithfully enough to test against.
+- **Simplified** — present, but coarser than GitHub. The listed risk is real.
+- **Absent** — not modelled at all. A test cannot cover it here.
+
+---
+
+## Git-derived answers
+
+### Mergeability — **Modelled**
+
+`FetchPRMergeable` / `FetchPRMergeableFields` run a real `git merge` of the head
+branch into the base branch, in a throwaway detached worktree, and report the
+result. There is no way for a test to declare that a PR conflicts; it must
+construct commits that genuinely do.
+
+The same `tryMerge` helper serves both the read-only probe and `MergePR`, so the
+two cannot disagree — a model that could report a PR mergeable and then fail to
+merge it would be worse than useless.
+
+**Risk:** low. The main residual gap is that GitHub's merge is computed
+server-side against its own snapshot of both refs, whereas the sim recomputes on
+every read. In the sim a probe is always current; on GitHub it can be stale.
+That is covered separately by the recompute window below.
+
+### Merge commits — **Modelled**
+
+`MergePR` writes a real two-parent merge commit onto the base ref, with `--no-ff`
+so the merge commit exists even when the head is a strict descendant of the
+base. That matches GitHub's default *Create a merge commit* strategy.
+
+**Simplified:** squash and rebase merge strategies are **absent**. `MergePR`
+takes no strategy argument (production's does not either), so every merge is a
+merge commit. A scenario that depends on squash-merge history shape cannot be
+written here.
+
+### Commits behind — **Modelled**
+
+`FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
+commits on the base that the head lacks. This matches production, which reads
+`behind_by` from the REST compare endpoint (`compare/base...head`,
+`github/prs.go`).
+
+### Head SHAs — **Modelled**
+
+A PR's head SHA is resolved from the backing repo on every read, never frozen at
+PR creation. Seeding a new commit on the head branch changes it immediately, the
+way a push does. This matters because check runs are keyed by SHA: a stale head
+SHA would silently read the wrong CI results.
+
+---
+
+## `mergeable_state`
+
+### The six derived values — **Modelled, with a stated precedence**
+
+`FetchPRMergeableState` derives `clean`, `unstable`, `blocked`, `behind`,
+`dirty`, and `draft` from the whole model, in this order:
+
+1. `unknown` — the PR is merged or closed, or a recompute window is pending
+2. `draft` — the PR is a draft
+3. `dirty` — the trial merge genuinely conflicts
+4. `behind` — the base requires up-to-date heads *and* has advanced
+5. `blocked` — a required context is missing, pending, or failing
+6. `unstable` — a non-required context is pending or failing
+7. `clean` — none of the above
+
+All six matter because the engine branches hard on them:
+`github.MergeableStateAccepted` admits only `{clean, unstable}`, and
+`github.ErrNotMergeableCI` fires specifically on `blocked`/`unknown` and must
+**not** be routed into the `fabrik:rebase-needed` path. A model that could only
+say dirty-or-clean would make four values unreachable and ADR-072's merge-safety
+incident unreproducible here.
+
+**Simplified:** this precedence is the sim's own deliberate choice, **not** a
+reverse-engineering of GitHub's internal algorithm for every combination of
+conditions. A draft PR that also conflicts resolves to `draft`, not `dirty`. If
+a scenario depends on a specific combination, verify the real behaviour against
+a recorded GitHub response rather than trusting the sim's ordering.
+
+**Risk:** medium, and concentrated in untested combinations. Single-condition
+cases are each covered by a test; combinations are not.
+
+### `has_hooks` and `unknown`-from-slowness — **Absent**
+
+`has_hooks` is never produced. Production treats it as not-accepted
+(conservatively falling through to per-check classification), and no scenario
+needs to distinguish it from `blocked`. `unknown` is produced only for
+merged/closed PRs and during a seeded recompute window — never spontaneously,
+the way GitHub emits it while it is simply slow.
+
+### `behind` requires branch protection — **Modelled, deliberately**
+
+This is the model's most consequential judgement call, so it is called out
+explicitly.
+
+Real GitHub reports `behind` **only** where branch protection's *"Require
+branches to be up to date before merging"* is enabled. Without that setting, a
+conflict-free but out-of-date PR is `clean`. `simgh` mirrors this: `behind`
+requires `SeedRequireUpToDate(repo, branch, true)`.
+
+A model that reported `behind` whenever `commitsBehind > 0` would be simpler,
+but would make `clean` nearly unreachable for any scenario where the base
+branch moves, and would push the engine into the rebase path constantly — a
+confidently-wrong test bed for exactly the logic most likely to have bugs.
+
+### `mergeable: null` — the recompute window — **Modelled, seeded**
+
+Production's `FetchPRMergeable` returns `*bool`, and GitHub returns `null` while
+it is still recomputing mergeability — typically shortly after a push or PR
+creation. `MergePR` returns `ErrNotMergeable` on a null read, and that window is
+what once made a healthy issue (#1087) appear wedged.
+
+`simgh` makes the window reachable rather than merely documented:
+`PRSeed.MergeableRecomputeReads` (or `SeedMergeableRecomputePending`) opens it
+for a given number of reads. While open, `mergeable` reports nil and
+`mergeableState` reports `unknown` — together, as GitHub reports them. Each read
+drains one; afterwards the real git-derived answer surfaces.
+
+**Simplified:** the window is a **read counter, not a timer**, and it opens only
+when seeded. The sim never opens one spontaneously after a commit is pushed to a
+head branch, which is when GitHub actually does. A scenario that pushes and then
+immediately reads will see a resolved answer here and might not on GitHub.
+
+---
+
+## Check runs and commit statuses
+
+### Two separate collections — **Modelled**
+
+Check runs (`FetchCheckRuns`) and classic commit statuses (`FetchCombinedStatus`)
+are genuinely distinct SHA-keyed collections. Production distinguishes them: a
+required context can be posted through the classic Statuses API rather than as
+an Actions check run, and `FetchCombinedStatus` is Fabrik's only visibility into
+that case (ADR-933). Both feed the `mergeable_state` derivation.
+
+### Required contexts — **Simplified**
+
+Branch protection's required-check configuration is modelled as a per-branch
+list of context names (`SeedRequiredContexts`). Real branch protection is richer:
+required checks can be scoped to an app ID, wildcards and rulesets exist, and
+the configuration is readable only with elevated permissions (which is why
+Fabrik has its own `RequiredStatusContexts` config in the first place).
+
+**Risk:** low for the engine's purposes — it only ever asks "is this context
+required", which the list answers.
+
+### Verdict mapping — **Simplified**
+
+A check run's `neutral` and `skipped` conclusions are treated as success,
+matching GitHub's treatment of them as non-blocking. A context reported more
+than once for a SHA takes its worst verdict. A non-required context that is
+merely *pending* yields `unstable`, not `clean`.
+
+---
+
+## Reviews
+
+### `reviewDecision` under branch protection — **Simplified**
+
+`FetchPRReviewDecision` returns `""` unless the base branch has a seeded
+approval requirement (`SeedRequiredApprovals`). This is the important part:
+GraphQL's `reviewDecision` is **null** unless branch protection actually
+requires reviews, which is exactly why the engine's authoritative review gate
+(ADR-1250) prefers `reviewDecision` where it exists and falls back to its own
+no-`CHANGES_REQUESTED` computation otherwise. A model that always returned a
+decision would hide that fallback entirely.
+
+With a requirement configured, the decision is computed from each reviewer's
+**latest** `APPROVED`/`CHANGES_REQUESTED` review; `COMMENTED` and dismissed
+reviews do not participate.
+
+**Simplified:** code-owner requirements, review dismissal on push, and stale-review
+invalidation are **absent**. `DISMISSED` is not a state the model produces.
+
+### Review requests and self-submitting bots — **Modelled**
+
+`FetchPRReviewRequests` returns only reviewers actually requested. The model
+never synthesises an entry for a self-submitting bot (Pruefer, Gemini,
+CodeRabbit, Copilot), because real GitHub never lists them either — they are
+never formally requested. That absence is load-bearing: it is the whole reason
+stages must declare `expected_reviewers` (ADR-1283).
+
+Bot classification reuses production's own `github.IsBotLogin`, rather than
+reimplementing the heuristic.
+
+---
+
+## Auto-merge and merge queue
+
+### Native auto-merge — **Simplified (flag only)**
+
+`EnablePullRequestAutoMerge` / `DisablePullRequestAutoMerge` set and clear a
+flag, surfaced as `PRDetails.AutoMergeEnabled`. Enabling it is refused when the
+repo's `AllowAutoMerge` is false, as GitHub refuses it.
+
+**The sim never acts on the flag.** It does not watch checks and merge the PR
+when they go green. A scenario that enables auto-merge and then turns CI green
+will find the PR still open; it must call `MergePR` to make the merge happen.
+
+**Risk:** medium. Any engine behaviour that depends on GitHub completing an
+auto-merge asynchronously cannot be tested here.
+
+### Merge queue — **Simplified (bookkeeping only)**
+
+`EnqueuePullRequest` / `DequeuePullRequest` record queue membership and assign a
+position, and `EnqueuePullRequest` rejects a stale `expectedHeadOID` (as GitHub
+does, which is how a race with a concurrent push is caught).
+
+**The queue never advances.** It does not run checks, never reorders itself,
+never merges anything, and dequeuing does not renumber the PRs behind it.
+`MergeQueueEntry.State` is always `QUEUED`; `AWAITING_CHECKS`, `MERGEABLE`, and
+`UNMERGEABLE` are never produced.
+
+**Risk:** high for any merge-queue scenario. Treat merge-queue coverage here as
+absent.
+
+---
+
+## Rate limits and transport
+
+### Rate limiting — **Absent**
+
+`RateLimitStats` reports static budgets that never deplete. No method ever fails
+with a rate-limit or secondary-rate-limit error, and there is no retry-after
+behaviour. The engine's backoff and rate-limit-exhaustion paths
+(`engine/backoff.go`, `engine/terminal.go`) **cannot** be exercised through this
+layer.
+
+Timestamps (`Reset`, `UpdatedAt`) still come from the injected clock, so a test
+controlling time sees coherent values.
+
+Fault injection generally — including rate-limit error kinds — is deferred to
+the follow-on instrumentation layer (#1457).
+
+### HTTP / GraphQL / REST wire behaviour — **Absent**
+
+`simgh` sits at the `engine.GitHubClient` Go interface, not on the wire. Query
+documents, mutation names, JSON field mappings, pagination, and status-code
+handling are all invisible to it. This is a permanent, structural blind spot,
+not a gap to be filled later — see [`../README.md`](../README.md).
+
+### Webhooks — **Absent**
+
+There is no webhook subsystem. `DeleteForwardingHooks` always succeeds for a
+seeded repo because there is never anything to delete; a test cannot use it to
+prove hooks were cleaned up. `boardcache`'s webhook delta functions are not
+driven by this layer.
+
+---
+
+## Issues, PRs, and the board
+
+### PR-to-issue linkage — **Modelled**
+
+`FindPRForIssue` and `FetchLinkedPR` match on the head branch `fabrik/issue-<N>`,
+which is exactly how production discovers the link (a `pulls?head=owner:branch`
+query). The `issueNumber` argument to `CreateDraftPR` is accepted and ignored for
+linkage, as production ignores it.
+
+Matching on a stored back-reference instead would be laxer than production, and
+would let a test pass on linkage GitHub would never find.
+
+### `FetchLinkedPR` omits `mergeable_state` — **Modelled, deliberately**
+
+`FetchLinkedPR` returns `MergeableState: ""` and no mergeable flag, because
+production reaches it through the pulls *list* endpoint, which omits the field.
+Returning a computed value would let a test pass on a signal production never
+receives.
+
+**Simplified:** the list endpoint's `merged` field is also unreliable on real
+GitHub — it reports `merged: false` for several seconds after a merge, which is
+why `FetchPRMerged` exists as a separate single-PR call. The sim reports `merged`
+truthfully from `FetchLinkedPR`. A regression that depends on that lag would not
+be caught here.
+
+### Closing keywords — **Simplified**
+
+`FetchPRClosingIssues` scans the PR body with a regex covering
+`close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved` followed by
+`#N`, plus the issue number passed to `CreateDraftPR`. Cross-repo references
+(`owner/repo#N`) and full issue URLs are **not** matched, and GitHub's full
+closing-keyword grammar is not reproduced.
+
+### Merge auto-close — **Modelled**
+
+Merging a PR closes the issues it references with a closing keyword, but **only**
+when the merge lands on the repo's default branch — mirroring GitHub, and
+mirroring why Fabrik must close issues itself on a non-default base (ADR-1096).
+
+### Issue state casing — **Modelled**
+
+The model stores GraphQL's uppercase enum (`OPEN`/`CLOSED`) and `FetchIssue`
+converts to REST's lowercase (`open`/`closed`), matching the shapes production
+reads from each API.
+
+### Project identity — **Modelled**
+
+Projects are keyed by `(owner, number)`, because Projects v2 is owner-scoped, not
+repo-scoped. The `repo` argument on a board fetch is a query input, not part of
+the project's identity.
+
+### `ownerType` — **Simplified**
+
+`FetchProjectBoard` accepts `ownerType` and echoes it back but does not use it.
+Production uses it to choose between the `organization` and `user` GraphQL
+roots, and falls back from one to the other when it is empty. The sim resolves
+the project by owner regardless, so that fallback path is not exercised.
+
+### Node IDs — **Simplified**
+
+Node IDs are readable synthesised strings (`issue:owner/repo#42`,
+`project:acme:2`) rather than opaque base64 blobs. Production never parses a node
+ID it receives — it only round-trips them — so this is an implementation
+convenience with no behavioural consequence. Do not write a test that depends on
+the format.
+
+### Label vocabulary — **Simplified**
+
+`SeedLabels` records which labels exist in the repo, but `AddLabelToIssue` does
+**not** enforce the vocabulary: applying a label that was never created
+succeeds. Real GitHub creates the label implicitly in some paths and errors in
+others. The engine's own `ensureLabel` behaviour is therefore not exercised.
+
+### Label applied-at — **Modelled**
+
+`FetchLabelAppliedAt` returns the instant the label was applied, from the
+injected clock. Re-applying an already-present label does **not** refresh it,
+matching GitHub (which emits no new `labeled` event for a label already there).
+This is load-bearing: the review-gate timeout and bot re-prompt ladder
+(`engine/reviews.go`), the CI settle scan (`engine/ci_settle.go`), and the
+Done-archive scan (`engine/archive_done_settle.go`) all anchor deadlines on it.
+
+An absent label returns the zero time rather than an error, mirroring
+production's "no such event found".
+
+---
+
+## Time
+
+### Clock — **Modelled**
+
+Every time-bearing value the model produces reads from the `Clock` injected at
+construction: label applied-at, comment `CreatedAt`, `FetchProjectUpdatedAt`, and
+`RateLimitStats`. `time.Now` is never called outside the default clock. A test
+can therefore drive the engine's time-anchored gates without wall-clock waiting.
+
+### Ordering and timestamps of concurrent writes — **Simplified**
+
+Two writes made in the same clock instant are indistinguishable by timestamp.
+The model preserves insertion order for comments and board items, but a scenario
+that depends on distinguishable timestamps must advance the clock between
+writes.
+
+---
+
+## Concurrency
+
+### Model state — **Modelled**
+
+All in-memory state is guarded by a single mutex; the package is `-race` clean
+under concurrent access from multiple goroutines, which is what the engine's
+worker dispatch produces.
+
+### Git — **Modelled**
+
+Git subprocess calls are serialised per repository. This is genuinely necessary,
+not defensive: `MergePR` performs a read-modify-write on the base ref (check it
+out, merge onto it, move the ref), so two interleaved merges onto one base both
+fork from the same tip and the first is silently lost — with every call still
+returning nil. `TestConcurrentMergesOntoOneBase` pins this.
+
+Read-only trial merges are independently safe, since each runs in its own
+throwaway worktree and moves no ref.
+
+**Simplified:** serialisation is per repository, so cross-repo operations run
+concurrently. That matches the isolation real repositories have.
+
+---
+
+## Verifying this document
+
+Two mechanisms keep it from drifting into fiction:
+
+1. **The interface assertion.** `var _ engine.GitHubClient = (*Sim)(nil)` breaks
+   the build the moment `engine.GitHubClient` grows a method. A new method must
+   get a real implementation and, if it diverges, an entry here.
+
+2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
+   each modelled behaviour in turn and asserts the suite goes red. A behaviour
+   claimed as **Modelled** above that survives its mutation is a claim this
+   package cannot back up. The sweep currently catches all 34 mutations.
+
+Neither mechanism can tell you whether a **Modelled** entry matches *real
+GitHub* — only that the model does what this document says. For anything subtle
+and load-bearing, prefer deriving the behaviour from a recorded real response
+over reasoning about it.
