@@ -275,6 +275,30 @@ linkage, as production ignores it.
 Matching on a stored back-reference instead would be laxer than production, and
 would let a test pass on linkage GitHub would never find.
 
+When more than one PR shares the head branch, the **most recently created** one
+wins. Production's query is `pulls?head=owner:branch&state=all&per_page=1`, and
+that endpoint defaults to created-descending, so GitHub returns the newest. This
+is not a hypothetical: Fabrik reuses `fabrik/issue-<N>`, so a PR closed without
+merging leaves a stale record on the branch its successor reuses, and
+`engine/prcreate.go` decides whether to open a PR on exactly this answer. The
+board projection (`findPRByHeadLocked`) applies the same rule, so the two reads
+can never report different linked PRs for one issue.
+
+### Issue and PR numbers share one sequence — **Modelled**
+
+GitHub allocates issue and pull-request numbers from a single per-repo counter,
+so `#7` is either an issue or a PR and never both. The model uses one shared
+sequence, and seeding an explicit number that the other kind already holds is a
+seeding error.
+
+This is load-bearing rather than cosmetic. GitHub's issue-comment endpoint is
+itself shared between issues and PRs — which is why `AddComment` resolves a
+number against both collections — so two independent sequences would let issue
+`#1` and PR `#1` coexist and silently route a PR comment onto the same-numbered
+issue. The engine posts stage output that way (`engine/pr.go`,
+`engine/comments.go`), so the output would vanish from the PR while a test still
+observed "a comment was posted" and passed.
+
 ### `FetchLinkedPR` omits `mergeable_state` — **Modelled, deliberately**
 
 `FetchLinkedPR` returns `MergeableState: ""` and no mergeable flag, because
@@ -403,7 +427,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 34 mutations.
+   package cannot back up. The sweep currently catches all 38 mutations.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real
 GitHub* — only that the model does what this document says. For anything subtle

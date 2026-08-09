@@ -190,6 +190,24 @@ mutate "FetchLinkedPR leaks a computed mergeable_state" \
   'TestPRCreateReadyMergeIsObservable' \
   'prs.go::s{MergeableState:      "", // omitted by the list endpoint — see doc comment}{MergeableState:      "clean",}'
 
+mutate "linked PR resolution picks the oldest on a reused branch" \
+  'TestFetchLinkedPRPrefersNewestOnReusedBranch' \
+  'board.go::s{for i := len\(nums\) - 1; i >= 0; i-- \{}{for i := 0; i < len(nums); i++ \{}'
+
+mutate "issue and PR numbers come from independent sequences" \
+  'TestIssueAndPRShareNumberSpace' \
+  'model.go::s{^\tnextNumber int$}{\tnextNumber int\n\tnextPRNumber int}m' \
+  'seed.go::s{^\t\tnextNumber:        1,$}{\t\tnextNumber:        1,\n\t\tnextPRNumber:      1,}m' \
+  'prs.go::s{^\tnum := r\.allocNumber\(\)$}{\tnum := r.nextPRNumber\n\tr.nextPRNumber++}m'
+
+mutate "auto-assigned numbers collide with explicitly seeded ones" \
+  'TestAutoAssignedNumberSkipsSeededHoles' \
+  'model.go::s{for r\.numberTaken\(r\.nextNumber\) \{}{for false \{}'
+
+mutate "seeding does not enforce the shared number space" \
+  'TestSeedRejectsNumberHeldByOtherKind' \
+  'seed.go::s{\} else if r\.numberTaken\(num\) \{}{\} else if false \{}g'
+
 mutate "timestamps come from wall time, not the injected clock" \
   'TestLabelAddRemoveIsObservable' \
   'sim.go::s{func \(s \*Sim\) now\(\) time\.Time \{ return s\.clock\.Now\(\) \}}{func (s *Sim) now() time.Time { return time.Now() }}'
