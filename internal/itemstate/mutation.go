@@ -699,8 +699,9 @@ func (m PREnqueueRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number
 // CIFixNoOpRecorded sets LinkedPRState.LastCIFixNoOpSHA to the head SHA at which a
 // CI-fix reinvoke (engine.dispatchCIFixReinvoke) completed without pushing a new
 // commit (#958 leg 2). While the head SHA stays at this value, handleMergeAndCIGates
-// skips further CI-fix dispatch/cycle-increment for it — CIWaitTimeout remains the
-// backstop if CI never resolves on this SHA.
+// skips further CI-fix dispatch/cycle-increment for it — settleAwaitingCIScan's
+// CIBackstopTimeout remains the backstop if CI never resolves on this SHA
+// (ADR-1410 — a confirmed CI failure never consults CIWaitTimeout).
 type CIFixNoOpRecorded struct {
 	Repo   string
 	Number int

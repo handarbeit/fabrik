@@ -187,17 +187,22 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			continue
 		}
 
-		// #1303: unconditional CIWaitTimeout backstop, evaluated ahead of the
-		// Phase 1 handler chain below and independent of what any gate would
-		// classify or claim. checkCIGate's own identical CIWaitTimeout guard
-		// (classifyCIFromCheckRuns etc., ci.go) only fires once checkCIGate is
-		// actually reached — but any silent claim earlier in the chain
-		// (confirmed possible via a stale cached CheckRunsPending read, closed
-		// by RefreshCheckRunsLive below for that specific cause, but not
+		// #1303: unconditional CIBackstopTimeout backstop (ADR-1410, R5),
+		// evaluated ahead of the Phase 1 handler chain below and independent of
+		// what any gate would classify or claim. checkCIGate's own liveness
+		// guards (classifyCIFromCheckRuns et al., ci.go) only fire once
+		// checkCIGate is actually reached — but any silent claim earlier in the
+		// chain (confirmed possible via a stale cached CheckRunsPending read,
+		// closed by RefreshCheckRunsLive below for that specific cause, but not
 		// provably the only way it can happen) makes checkCIGate unreachable,
-		// leaving that inner timeout dead. This check does not depend on the
+		// leaving those inner guards dead. This check does not depend on the
 		// handler chain at all, so it bounds the whole class rather than just
-		// the one confirmed cause.
+		// the one confirmed cause. Deliberately anchored on the same
+		// labelAppliedAt (total elapsed time since fabrik:awaiting-ci was
+		// applied), not on CI-progress liveness: this backstop's entire purpose
+		// is to bound per-poll cost regardless of what CI is doing, so it must
+		// stay elapsed-time-based even though the classifiers below no longer
+		// are — see CIBackstopTimeout's doc comment (ci.go).
 		//
 		// #1408: this backstop must not treat "a pause comment already exists
 		// for this episode" the same as "a fresh pause was just posted" — the
@@ -222,12 +227,12 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// gate-driven path unchanged.
 		owner, repoName := itemOwnerRepo(item, e.defaultRepo())
 		if appliedAt, err := e.labelAppliedAt(item, owner, repoName, "fabrik:awaiting-ci"); err != nil {
-			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIWaitTimeout backstop: %v\n", err)
-		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
+			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIBackstopTimeout backstop: %v\n", err)
+		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciBackstopTimeout() {
 			if hasCIGatePauseComment(item, stage) {
-				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) but a pause comment already exists for this episode — deferring to the live-data-informed handler chain instead of re-escalating blind\n", e.ciWaitTimeout())
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but a pause comment already exists for this episode — deferring to the live-data-informed handler chain instead of re-escalating blind\n", e.ciBackstopTimeout())
 			} else {
-				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIWaitTimeout (%s) while never reaching the CI gate — escalating\n", e.ciWaitTimeout())
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) while never reaching the CI gate — escalating\n", e.ciBackstopTimeout())
 				e.pauseForCITimeout(board, item, stage)
 				continue
 			}

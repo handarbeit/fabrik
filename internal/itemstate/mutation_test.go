@@ -953,6 +953,136 @@ func TestApplyCheckRunCompleted(t *testing.T) {
 	}
 }
 
+// ---- LastCIProgressAt (ADR-1410: CI-gate liveness detection) ----
+
+// TestApplyCheckRunCompleted_SetsLastCIProgressAt verifies a new check-run ID
+// is recorded as observable progress.
+func TestApplyCheckRunCompleted_SetsLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.LinkedPRNumber = 10
+	s.Apply(IssueOpened{Item: pi})
+	s.mu.Lock()
+	key := itemKeyFor(testRepo, 1)
+	item := s.items[key]
+	item.LinkedPR = &LinkedPRState{Number: 10, HeadSHA: "abc123"}
+	s.shaToKey["abc123"] = key
+	s.mu.Unlock()
+
+	if lpr := getItem(t, s, testRepo, 1).LinkedPR; lpr == nil || !lpr.LastCIProgressAt.IsZero() {
+		t.Fatal("expected LastCIProgressAt to start zero")
+	}
+
+	run := gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: run})
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR.LastCIProgressAt.IsZero() {
+		t.Error("expected LastCIProgressAt to be set after a new check-run ID appeared")
+	}
+}
+
+// TestApplyCheckRunCompleted_StatusTransition_UpdatesLastCIProgressAt
+// verifies an existing check run's Status/Conclusion transitioning is also
+// recorded as progress, not just a brand-new ID appearing.
+func TestApplyCheckRunCompleted_StatusTransition_UpdatesLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.LinkedPRNumber = 10
+	s.Apply(IssueOpened{Item: pi})
+	s.mu.Lock()
+	key := itemKeyFor(testRepo, 1)
+	item := s.items[key]
+	item.LinkedPR = &LinkedPRState{Number: 10, HeadSHA: "abc123"}
+	s.shaToKey["abc123"] = key
+	s.mu.Unlock()
+
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: gh.CheckRun{ID: 1, Name: "CI", Status: "queued"}})
+	first := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if first.IsZero() {
+		t.Fatal("expected LastCIProgressAt set after the first observation")
+	}
+
+	time.Sleep(2 * time.Millisecond) // ensure a distinguishable timestamp
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}})
+	second := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if !second.After(first) {
+		t.Error("expected LastCIProgressAt to advance after a Status transition on the same check-run ID")
+	}
+}
+
+// TestApplyCheckRunCompleted_IdenticalDuplicate_DoesNotUpdateLastCIProgressAt
+// is the negative case the liveness-stall dwell depends on: re-observing the
+// exact same check-run content (e.g. a repeated poll while CI is genuinely
+// stalled) must NOT look like progress.
+func TestApplyCheckRunCompleted_IdenticalDuplicate_DoesNotUpdateLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.LinkedPRNumber = 10
+	s.Apply(IssueOpened{Item: pi})
+	s.mu.Lock()
+	key := itemKeyFor(testRepo, 1)
+	item := s.items[key]
+	item.LinkedPR = &LinkedPRState{Number: 10, HeadSHA: "abc123"}
+	s.shaToKey["abc123"] = key
+	s.mu.Unlock()
+
+	run := gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: run})
+	first := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if first.IsZero() {
+		t.Fatal("expected LastCIProgressAt set after the first observation")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: run}) // identical duplicate
+	second := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if !second.Equal(first) {
+		t.Errorf("expected LastCIProgressAt unchanged on an identical duplicate observation, got %v want %v", second, first)
+	}
+}
+
+// TestApplyPRHeadSHAUpdated_SHAChange_SetsLastCIProgressAt verifies a head
+// SHA advancing (a fresh push, which resets CI entirely) is itself counted as
+// progress — this is what removes #342's dependence on when the wait started:
+// a rebase-triggered head change needs no special handling because it's
+// already progress.
+func TestApplyPRHeadSHAUpdated_SHAChange_SetsLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	s.Apply(IssueOpened{Item: pi})
+
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, SHA: "sha-initial"})
+	if lpr := getItem(t, s, testRepo, 1).LinkedPR; lpr == nil || !lpr.LastCIProgressAt.IsZero() {
+		t.Fatal("expected LastCIProgressAt to remain zero on the first-ever link (no prior SHA to change from)")
+	}
+
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, SHA: "sha-new"})
+	if lpr := getItem(t, s, testRepo, 1).LinkedPR; lpr == nil || lpr.LastCIProgressAt.IsZero() {
+		t.Error("expected LastCIProgressAt to be set once the head SHA actually changes")
+	}
+}
+
+// TestApplyPRHeadSHAUpdated_DrainedPendingRuns_SetsLastCIProgressAt verifies
+// that check runs buffered before SHA linkage (the pendingCheckRuns path) are
+// counted as progress once drained into the newly-linked item.
+func TestApplyPRHeadSHAUpdated_DrainedPendingRuns_SetsLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	s.Apply(IssueOpened{Item: pi})
+
+	// Arrives before the SHA is linked to any item — buffered.
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha-prelink", Run: gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}})
+
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, SHA: "sha-prelink"})
+	lpr := getItem(t, s, testRepo, 1).LinkedPR
+	if lpr == nil || lpr.LastCIProgressAt.IsZero() {
+		t.Error("expected LastCIProgressAt to be set when the drain actually adds buffered runs")
+	}
+	if len(lpr.CheckRuns) != 1 {
+		t.Fatalf("expected 1 drained check run, got %d", len(lpr.CheckRuns))
+	}
+}
+
 // ---- ChangeFlags coverage: every flag must be exercised ----
 
 func TestChangeFlagsCoverage(t *testing.T) {
