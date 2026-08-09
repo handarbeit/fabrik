@@ -174,7 +174,7 @@ set was migrated):
 
 **REST surface not in R5's named list**: `FetchLatestRelease`,
 `FetchRepoAccess`, `FetchInstalledVersion` (`github/client.go`),
-`FetchIssueBody`, and the various label/comment CRUD REST calls in
+`GetIssueBody`, and the various label/comment CRUD REST calls in
 `github/labels.go`/`github/comments.go` beyond `AddLabelToIssue` — none of
 these have a single chokepoint to enumerate from mechanically (see the ADR's
 discussion of R6), and remain covered only by their existing hand-authored
