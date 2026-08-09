@@ -638,6 +638,14 @@ changed. The two differ in exactly one respect, deliberately:
 `AddProjectV2ItemById` leaves status alone, since re-adding a card already on a
 board does not move it between columns.
 
+**Re-adding a card that is already live is a true no-op** — neither timestamp
+moves. `FetchProjectUpdatedAt` gates whether the engine's idle poll looks at the
+board at all, so bumping here would be a wake signal real GitHub does not
+produce, and one a scenario cannot tell from a real change. The seeding path
+treats a *column move* as a change (it moves the card; the runtime API does
+not), so it bumps for that and not for a re-seed into the same column. Same
+convention as `AddLabelToIssue` and `AddReviewRequest`.
+
 **Risk:** low, but note this is the sim's own choice rather than a behaviour
 derived from a recorded real response — GitHub's `addProjectV2ItemById` against
 an already-archived item has not been captured here. A scenario that turns on
@@ -963,7 +971,7 @@ Two mechanisms keep it from drifting into fiction:
 2. **The non-vacuity sweep.** `bash tests/sim/simgh/nonvacuity.sh` neutralises
    each modelled behaviour in turn and asserts the suite goes red. A behaviour
    claimed as **Modelled** above that survives its mutation is a claim this
-   package cannot back up. The sweep currently catches all 94 mutations, and
+   package cannot back up. The sweep currently catches all 96 mutations, and
    fails on any mutation that never applied — an unrun mutation proves nothing.
 
 Neither mechanism can tell you whether a **Modelled** entry matches *real

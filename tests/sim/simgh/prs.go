@@ -422,8 +422,6 @@ func (s *Sim) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, e
 	}, nil
 }
 
-// worseVerdict returns the more severe of two verdicts, ordering
-// failure > pending > success.
 // worseVerdict returns the more blocking of two verdicts.
 //
 // Both arguments must already be normalised to exactly "success", "pending", or

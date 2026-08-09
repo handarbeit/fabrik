@@ -484,3 +484,81 @@ func TestReAddingArchivedCardRevivesItOnBothPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestReAddingLiveCardIsANoOp pins that re-adding a card that is already on the
+// board and unarchived bumps nothing.
+//
+// FetchProjectUpdatedAt is what gates whether the engine's idle poll looks at
+// the board at all, so a bump here is a wake signal real GitHub would not have
+// produced — and one a scenario cannot distinguish from a real change. Same
+// convention AddLabelToIssue and AddReviewRequest already follow.
+//
+// The archived-card revival path is covered separately by
+// TestReAddingArchivedCardRevivesItOnBothPaths; this is its complement, which
+// is where the two APIs could silently diverge again.
+func TestReAddingLiveCardIsANoOp(t *testing.T) {
+	setup := func(t *testing.T) (*Sim, *fakeClock, string) {
+		t.Helper()
+		s, clk := seedBasicBoard(t)
+		board, err := s.FetchProjectBoard("acme", "widgets", 2, "organization")
+		if err != nil {
+			t.Fatalf("FetchProjectBoard: %v", err)
+		}
+		return s, clk, board.ProjectID
+	}
+
+	projectAt := func(t *testing.T, s *Sim, projectID string) time.Time {
+		t.Helper()
+		at, err := s.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			t.Fatalf("FetchProjectUpdatedAt: %v", err)
+		}
+		return at
+	}
+
+	t.Run("runtime re-add of a live card", func(t *testing.T) {
+		s, clk, projectID := setup(t)
+		before := projectAt(t, s, projectID)
+		// Time must move, or an unbumped timestamp is indistinguishable from a
+		// bumped one.
+		clk.Advance(time.Hour)
+
+		if _, err := s.AddProjectV2ItemById(projectID, "issue:acme/widgets#7"); err != nil {
+			t.Fatalf("AddProjectV2ItemById: %v", err)
+		}
+		if got := projectAt(t, s, projectID); !got.Equal(before) {
+			t.Fatalf("re-adding a live card bumped the project updated-at from %v to %v; "+
+				"the engine's poll would wake for a no-op", before, got)
+		}
+	})
+
+	t.Run("re-seeding a card into the column it already occupies", func(t *testing.T) {
+		s, clk, projectID := setup(t)
+		before := projectAt(t, s, projectID)
+		clk.Advance(time.Hour)
+
+		s.SeedProjectItem("acme", 2, "acme/widgets", 7, false, "Implement")
+		if err := s.Err(); err != nil {
+			t.Fatalf("SeedProjectItem: %v", err)
+		}
+		if got := projectAt(t, s, projectID); !got.Equal(before) {
+			t.Fatalf("re-seeding a card into its current column bumped updated-at from %v to %v", before, got)
+		}
+	})
+
+	// A genuine column move must still bump, or the assertions above would be
+	// satisfied by a seeding path that never bumps at all.
+	t.Run("a real column move still bumps", func(t *testing.T) {
+		s, clk, projectID := setup(t)
+		before := projectAt(t, s, projectID)
+		clk.Advance(time.Hour)
+
+		s.SeedProjectItem("acme", 2, "acme/widgets", 7, false, "Review")
+		if err := s.Err(); err != nil {
+			t.Fatalf("SeedProjectItem: %v", err)
+		}
+		if got := projectAt(t, s, projectID); !got.After(before) {
+			t.Fatalf("a real column move did not bump updated-at (%v -> %v)", before, got)
+		}
+	})
+}

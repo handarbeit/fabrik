@@ -458,8 +458,14 @@ func (s *Sim) placeOnProjectLocked(p *projectState, ownerRepo string, number int
 	}
 	id := itemNodeID(p.owner, p.num, ownerRepo, number)
 	if existing, ok := p.items[id]; ok {
+		// Unlike AddProjectV2ItemById this *does* move the card, so a column
+		// change counts as a change alongside an un-archive. Re-seeding a card
+		// into the column it already occupies is a no-op and must not bump.
+		changed := existing.archived || existing.status != status
 		existing.status = status
-		s.reviveCardLocked(p, existing)
+		if changed {
+			s.reviveCardLocked(p, existing)
+		}
 		return
 	}
 	now := s.now()

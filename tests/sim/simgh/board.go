@@ -608,7 +608,16 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 	if existing, ok := p.items[id]; ok {
 		// Deliberately does not touch status: re-adding a card that is already
 		// on the board does not move it between columns.
-		s.reviveCardLocked(p, existing)
+		//
+		// And when the card is already live, this is a true no-op — so it must
+		// not bump either timestamp. FetchProjectUpdatedAt is what gates
+		// whether the engine's poll looks at the board at all, so a bump here
+		// is a wake signal real GitHub would not have produced, and one a
+		// scenario cannot distinguish from a real change. Same rule as
+		// AddLabelToIssue and AddReviewRequest.
+		if existing.archived {
+			s.reviveCardLocked(p, existing)
+		}
 		return existing.itemID, nil
 	}
 	// A card added by this mutation has no Status until one is set — GitHub
@@ -639,6 +648,11 @@ func (s *Sim) AddProjectV2ItemById(projectID, contentNodeID string) (string, err
 // board did not advance FetchProjectUpdatedAt and the engine's poll could miss
 // it. Keeping one helper is what stops the two APIs disagreeing again about
 // what re-adding a card means.
+//
+// Call it only when the re-add actually changes something — an un-archive, or
+// a column move. Calling it on a card that was already live would bump
+// timestamps for a no-op, which is the separate convention AddLabelToIssue
+// documents.
 //
 // Caller must hold mu.
 func (s *Sim) reviveCardLocked(p *projectState, existing *itemState) {

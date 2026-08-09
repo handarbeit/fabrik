@@ -474,6 +474,14 @@ mutate "a no-op review withdrawal still bumps updatedAt" \
   'TestReviewRequestNoOpDoesNotBumpUpdatedAt' \
   'reviews.go::s{if len\(kept\) == len\(pr\.reviewRequests\) \{}{if false \&\& len(kept) == len(pr.reviewRequests) \{}'
 
+mutate "re-adding a live card bumps timestamps (runtime)" \
+  'TestReAddingLiveCardIsANoOp' \
+  'board.go::s{if existing\.archived \{\n\t\t\ts\.reviveCardLocked\(p, existing\)\n\t\t\}}{s.reviveCardLocked(p, existing)}'
+
+mutate "re-seeding a card into its current column bumps timestamps" \
+  'TestReAddingLiveCardIsANoOp' \
+  'seed.go::s{changed := existing\.archived \|\| existing\.status != status}{changed := true; _ = existing.archived}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
