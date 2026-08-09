@@ -197,6 +197,143 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	return result.Data.Repository.PullRequest.ReviewDecision, nil
 }
 
+// FetchPRReviewThreads returns every review thread on a pull request —
+// resolved and unresolved alike — via GraphQL, keyed on PR number (same
+// base-independent shape as FetchPRReviewDecision, since Pruefer reviews PRs
+// directly with no linked issue in scope).
+//
+// Unlike applyLinkedPRs' engine-facing fetch (which discards resolved-thread
+// bodies and only counts them, since only unresolved feedback is actionable
+// for a reinvoke), this returns full thread content — including resolved
+// threads — because Pruefer's prompt-assembly use case needs to see how a
+// prior finding was addressed, not just that it was. See
+// adrs/1497-pruefer-prior-review-thread-context.md.
+//
+// Threads are capped at 50 (GraphQL's reviewThreads(first: 50), matching the
+// existing fetchItemDetailsQuery fragment's ceiling) and comments per thread
+// at 20; neither is paginated. A PR with more threads than that loses the
+// excess at this layer — out of scope for the caller's own prompt-level cap
+// (a much smaller number) — but not silently: the second return value,
+// threadsTruncated, is set from the reviewThreads connection's totalCount so
+// a caller can say so rather than presenting a partial thread list as
+// complete, mirroring PRReviewThread.CommentsTruncated's per-thread signal
+// for the same "tell the reviewer/log rather than silently drop" pattern.
+// Nodes arrive in the connection's default (creation) order with no orderBy
+// argument to bias toward unresolved threads, so on a truncated fetch the
+// dropped threads are the newest — disproportionately likely to be OPEN.
+//
+// comments(first: 20) has no orderBy argument — GitHub's schema doesn't
+// expose one for PullRequestReviewThread.comments (confirmed via
+// introspection), so which 20 of a longer thread are returned relies on the
+// connection's own default order, not something this query can pin
+// explicitly. Observed behavior returns them oldest-first (thread creation
+// order), which is what CommentsTruncated's doc comment and callers'
+// omission notes assume; if GitHub ever changes that default, the "oldest
+// 20" framing here would need revisiting.
+//
+// Returns an error (not an empty slice) when the query resolves with no
+// pullRequest node, matching FetchPRReviewDecision's convention.
+func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, bool, error) {
+	query := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50) {
+        totalCount
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 20) {
+            totalCount
+            nodes {
+              author { login }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	vars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest *struct {
+					ReviewThreads struct {
+						TotalCount int `json:"totalCount"`
+						Nodes      []struct {
+							ID           string `json:"id"`
+							IsResolved   bool   `json:"isResolved"`
+							IsOutdated   bool   `json:"isOutdated"`
+							Path         string `json:"path"`
+							Line         *int   `json:"line"`
+							OriginalLine *int   `json:"originalLine"`
+							Comments     struct {
+								TotalCount int `json:"totalCount"`
+								Nodes      []struct {
+									Author *struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									Body      string `json:"body"`
+									CreatedAt string `json:"createdAt"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return nil, false, fmt.Errorf("fetching PR #%d review threads: %w", prNumber, err)
+	}
+	if result.Data.Repository.PullRequest == nil {
+		return nil, false, fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	var threads []PRReviewThread
+	for _, n := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		line := 0
+		if n.Line != nil {
+			line = *n.Line
+		} else if n.OriginalLine != nil {
+			line = *n.OriginalLine
+		}
+		t := PRReviewThread{
+			ID:                n.ID,
+			Path:              n.Path,
+			Line:              line,
+			IsResolved:        n.IsResolved,
+			IsOutdated:        n.IsOutdated,
+			CommentsTruncated: n.Comments.TotalCount > len(n.Comments.Nodes),
+		}
+		for _, cm := range n.Comments.Nodes {
+			tc := PRReviewThreadComment{Body: cm.Body}
+			if cm.Author != nil {
+				tc.Author = cm.Author.Login
+			}
+			if ts, err := parseTime(cm.CreatedAt); err == nil {
+				tc.CreatedAt = ts
+			}
+			t.Comments = append(t.Comments, tc)
+		}
+		threads = append(threads, t)
+	}
+	rt := result.Data.Repository.PullRequest.ReviewThreads
+	threadsTruncated := rt.TotalCount > len(rt.Nodes)
+	return threads, threadsTruncated, nil
+}
+
 // FetchPRReviewRequests returns the outstanding requested reviewers for a pull
 // request via the REST API, keyed on PR number — the base-independent counterpart
 // to the GraphQL-nested reviewRequests field. Team review requests are ignored,

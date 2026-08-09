@@ -23,6 +23,13 @@ type GitHubReviewer interface {
 	// gh.ErrDiffTooLarge (see R3, adrs/1427-pruefer-diff-too-large-degrade-not-block.md).
 	FetchPRFiles(owner, repo string, prNumber int) ([]string, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	// FetchPRReviewThreads returns existing review threads (resolved and
+	// unresolved) on the PR, for buildReviewPrompt's prior-thread context
+	// (R1), plus whether the PR has more threads than the fetch's own page
+	// size returned (the fetch-layer cap, distinct from buildReviewPrompt's
+	// smaller prompt-level cap). A fetch error here is non-fatal to the
+	// review — see ReviewPR.
+	FetchPRReviewThreads(owner, repo string, prNumber int) (threads []gh.PRReviewThread, threadsTruncated bool, err error)
 	SubmitPRReview(owner, repo string, prNumber int, commitSHA, body string, event gh.ReviewEvent, comments []gh.ReviewComment) (int, error)
 	Token() string
 }
@@ -137,6 +144,18 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		}
 	}
 
+	// Thread context is purely advisory prompt content (R1) — a transient
+	// GraphQL error here must not block a review that would otherwise
+	// succeed, so this degrades to a cold-read (nil threads) rather than
+	// failing the outcome, unlike FetchPRReviews above whose result gates
+	// eligibility.
+	threads, threadsTruncated, err := client.FetchPRReviewThreads(owner, repo, pr.Number)
+	if err != nil {
+		logf(pr.Number, "warn", "fetching review threads on %s/%s#%d: %v — proceeding without prior-thread context\n", owner, repo, pr.Number, err)
+		threads = nil
+		threadsTruncated = false
+	}
+
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("cloning PR head: %w", err)}
@@ -146,7 +165,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	result, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
-		WorkDir: dir, MaxWallTime: cfg.MaxWallTime,
+		WorkDir: dir, MaxWallTime: cfg.MaxWallTime, ReviewThreads: threads, ReviewThreadsTruncated: threadsTruncated,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -154,6 +173,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 
 	summary, findings := parseReviewFindings(result.Text)
+	findings = dedupeFindings(findings)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
 	body := buildReviewBody(summary, demoted)

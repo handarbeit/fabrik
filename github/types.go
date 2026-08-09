@@ -186,6 +186,36 @@ type Comment struct {
 	IsOutdated bool
 }
 
+// PRReviewThread is a single review thread on a pull request, grouped as
+// thread -> ordered comments rather than the flat per-comment shape Comment
+// uses — Pruefer needs to render "original finding, then author's reply" as
+// a coherent unit (see FetchPRReviewThreads, adrs/1497-pruefer-prior-review-thread-context.md).
+type PRReviewThread struct {
+	ID         string
+	Path       string
+	Line       int // GraphQL "line", falling back to "originalLine" when line is null (e.g. an outdated thread)
+	IsResolved bool
+	IsOutdated bool
+	Comments   []PRReviewThreadComment
+	// CommentsTruncated is true when the thread has more comments than
+	// FetchPRReviewThreads' per-thread page size (20) fetched — Comments
+	// holds only the oldest 20 (GitHub's comments connection has no orderBy
+	// argument to pin this explicitly; "oldest 20" reflects the connection's
+	// observed default order, see FetchPRReviewThreads), so a later reply
+	// (e.g. the one that actually resolved the thread) may be missing.
+	// Callers rendering thread content should surface this rather than
+	// presenting Comments as the complete history.
+	CommentsTruncated bool
+}
+
+// PRReviewThreadComment is a single comment within a PRReviewThread, in
+// thread order (the original finding first, followed by any replies).
+type PRReviewThreadComment struct {
+	Author    string
+	Body      string
+	CreatedAt time.Time
+}
+
 // ReviewComment is a single line-anchored inline comment to submit as part of
 // a pull_request_review's comments[] array (outbound request shape only —
 // narrower than Comment, which carries response-only fields like ID/Author/

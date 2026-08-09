@@ -58,6 +58,68 @@ func parseReviewFindings(text string) (summary string, findings []ReviewFinding)
 	return summary, parsed
 }
 
+// dedupeFindings collapses findings that share the same (Path, Line) into a
+// single entry, implementing R3's within-pass deduplication in code (not
+// just as a prompt instruction — Claude has already been observed producing
+// exactly this kind of duplicate without being told not to, on #1477).
+// (Path, Line) is the same anchor identity partitionFindings uses, so two
+// findings that would collide as inline comments at the same anchor are
+// exactly the ones collapsed here.
+//
+// (Path, Line) collision is a positional signal, not proof the two findings
+// describe the same underlying defect — a genuinely distinct second finding
+// can legitimately land on the same line as an unrelated one, and unlike
+// dedupeFindings, partitionFindings itself never collapses same-anchor
+// findings (GitHub's review-comments API supports multiple comments per
+// line). So a collision here merges rather than picks a winner: both bodies
+// survive, concatenated, under the higher-ranked Severity (via
+// severityRank — collapsing must never accidentally weaken a
+// REQUEST_CHANGES threshold decision). This costs a merged comment reading
+// slightly awkwardly when the two really were the same restated point, but
+// never silently discards a distinct finding. Output order matches
+// first-seen order of each surviving (Path, Line) key.
+func dedupeFindings(findings []ReviewFinding) []ReviewFinding {
+	if len(findings) == 0 {
+		return findings
+	}
+	type key struct {
+		Path string
+		Line int
+	}
+	kept := make(map[key]int, len(findings)) // key -> index into result
+	var result []ReviewFinding
+	for _, f := range findings {
+		k := key{f.Path, f.Line}
+		if idx, ok := kept[k]; ok {
+			result[idx] = mergeFindings(result[idx], f)
+			continue
+		}
+		kept[k] = len(result)
+		result = append(result, f)
+	}
+	return result
+}
+
+// mergeFindings combines two findings colliding on the same (Path, Line)
+// anchor: existing's fields form the base, with incoming's body appended
+// (skipped if byte-identical, since that's the literal-restatement case
+// dedupeFindings originally targeted) and Severity raised if incoming ranks
+// higher.
+func mergeFindings(existing, incoming ReviewFinding) ReviewFinding {
+	merged := existing
+	if severityRank(incoming.Severity) > severityRank(merged.Severity) {
+		merged.Severity = incoming.Severity
+	}
+	if incoming.Body != "" && incoming.Body != existing.Body {
+		if merged.Body == "" {
+			merged.Body = incoming.Body
+		} else {
+			merged.Body = merged.Body + "\n\n---\n\n" + incoming.Body
+		}
+	}
+	return merged
+}
+
 // buildReviewBody assembles the final review body from the prose summary
 // plus any findings that could not be anchored to the diff. Demoted
 // findings are appended under an explicit heading, each rendered as
