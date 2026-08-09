@@ -730,6 +730,12 @@ func TestProbeReadsCardStateLive(t *testing.T) {
 	t.Run("a status move after the snapshot is reported", func(t *testing.T) {
 		s, _ := seedBasicBoard(t)
 		projectID, itemID := mustLookupItem(t, s)
+
+		s.mu.Lock()
+		p := s.projects[projectKey("acme", 2)]
+		ref := p.liveItemRefs()[0]
+		s.mu.Unlock()
+
 		field, err := s.FetchStatusField(projectID)
 		if err != nil {
 			t.Fatalf("FetchStatusField: %v", err)
@@ -738,31 +744,37 @@ func TestProbeReadsCardStateLive(t *testing.T) {
 			t.Fatalf("UpdateProjectItemStatus: %v", err)
 		}
 
-		probe, _, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+		probe, err := s.buildProbeItem(p, ref)
 		if err != nil {
-			t.Fatalf("ProbeProjectBoard: %v", err)
+			t.Fatalf("buildProbeItem: %v", err)
 		}
-		if len(probe) != 1 {
-			t.Fatalf("probe items = %d, want 1", len(probe))
+		if probe == nil {
+			t.Fatal("buildProbeItem dropped a live card")
 		}
-		if probe[0].Status != "Review" {
-			t.Fatalf("probe Status = %q, want %q", probe[0].Status, "Review")
+		if probe.Status != "Review" {
+			t.Fatalf("probe Status = %q, want %q; the probe used the stale snapshot", probe.Status, "Review")
 		}
 	})
 
 	t.Run("an archived card is absent", func(t *testing.T) {
 		s, _ := seedBasicBoard(t)
 		projectID, itemID := mustLookupItem(t, s)
+
+		s.mu.Lock()
+		p := s.projects[projectKey("acme", 2)]
+		ref := p.liveItemRefs()[0]
+		s.mu.Unlock()
+
 		if err := s.ArchiveProjectItem(projectID, itemID); err != nil {
 			t.Fatalf("ArchiveProjectItem: %v", err)
 		}
 
-		probe, _, err := s.ProbeProjectBoard("acme", "widgets", 2, "organization")
+		probe, err := s.buildProbeItem(p, ref)
 		if err != nil {
-			t.Fatalf("ProbeProjectBoard: %v", err)
+			t.Fatalf("buildProbeItem: %v", err)
 		}
-		if len(probe) != 0 {
-			t.Fatalf("probe still reports %d archived card(s)", len(probe))
+		if probe != nil {
+			t.Fatalf("probe still reports an archived card: %+v", probe)
 		}
 	})
 }

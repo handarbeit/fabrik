@@ -232,7 +232,7 @@ mutate "an explicitly seeded number is not reserved against auto-assignment" \
 
 mutate "seeding does not enforce the shared number space" \
   'TestSeedRejectsNumberHeldByOtherKind' \
-  'seed.go::s{\} else if r\.numberTaken\(num\) \{}{\} else if false \{}g'
+  'seed.go::s{case r\.numberTaken\(num\):}{case false:}g'
 
 mutate "a PR card is accepted and silently dropped" \
   'TestSeedProjectItemRejectsPRCard' \

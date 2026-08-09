@@ -241,65 +241,85 @@ func (s *Sim) ProbeProjectBoard(owner, repo string, projectNum int, ownerType st
 
 	out := make([]gh.BoardProbeItem, 0, len(refs))
 	for _, ref := range refs {
-		owner, repoName, err := splitOwnerRepo(ref.ownerRepo)
+		probe, err := s.buildProbeItem(p, ref)
 		if err != nil {
 			return nil, "", err
 		}
-
-		s.mu.Lock()
-		// Re-read the card live, for the same reason buildProjectItem does:
-		// the refs above were snapshotted under an earlier lock acquisition,
-		// so a status move or an archive landing in between would otherwise be
-		// invisible here — a stale column, or an archived card still in the
-		// probe output. The probe feeds the engine's idle poll, so a stale
-		// answer here is a poll that does not notice work it should.
-		live, ok := p.items[ref.itemID]
-		if !ok || live.archived {
-			s.mu.Unlock()
+		if probe == nil {
 			continue
 		}
-		r, ok := s.repos[ref.ownerRepo]
-		if !ok {
-			s.mu.Unlock()
-			return nil, "", fmt.Errorf("simgh: repo %s not seeded", ref.ownerRepo)
-		}
-		iss, ok := r.issues[ref.number]
-		if !ok {
-			s.mu.Unlock()
-			continue
-		}
-		probe := gh.BoardProbeItem{
-			ItemID:    ref.itemID,
-			ContentID: iss.nodeID(ref.ownerRepo),
-			Number:    iss.number,
-			IsPR:      live.isPR,
-			IsClosed:  iss.state == "CLOSED" && !live.isPR,
-			State:     iss.state,
-			Repo:      ref.ownerRepo,
-			Status:    live.status,
-		}
-		// effectiveUpdatedAt is max(content, project item, linked PR).
-		probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, live.updatedAt)
-		linked := findPRByHeadLocked(r, issueBranch(iss.number))
-		var linkedHead string
-		if linked != nil {
-			linkedHead = linked.head
-			probe.LinkedPRNumber = linked.number
-			probe.LinkedPRUpdatedAt = linked.updatedAt
-			probe.EffectiveUpdatedAt = laterOf(probe.EffectiveUpdatedAt, linked.updatedAt)
-		}
-		s.mu.Unlock()
-
-		if linkedHead != "" {
-			sha, err := s.resolveRefSHA(owner, repoName, linkedHead)
-			if err != nil {
-				return nil, "", err
-			}
-			probe.LinkedPRHeadSHA = sha
-		}
-		out = append(out, probe)
+		out = append(out, *probe)
 	}
 	return out, projectID, nil
+}
+
+// buildProbeItem assembles the probe shape for one card. It is the scalar-only
+// sibling of buildProjectItem and takes the same contract: the ref identifies
+// the card, it does not supply the card's state. Returns nil when the card no
+// longer belongs on the board.
+//
+// Split out for the same reason buildProjectItem is a function: it is where the
+// live re-read happens, and keeping it callable with a deliberately stale ref is
+// what lets a test pin that the re-read actually occurs. Inside a single
+// ProbeProjectBoard call the snapshot and the re-read are indistinguishable.
+func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, error) {
+	owner, repoName, err := splitOwnerRepo(ref.ownerRepo)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	// Re-read the card live, for the same reason buildProjectItem does: the ref
+	// was snapshotted under an earlier lock acquisition, so a status move or an
+	// archive landing in between would otherwise be invisible here — a stale
+	// column, or an archived card still in the probe output. The probe feeds
+	// the engine's idle poll, so a stale answer here is a poll that does not
+	// notice work it should.
+	live, ok := p.items[ref.itemID]
+	if !ok || live.archived {
+		s.mu.Unlock()
+		return nil, nil
+	}
+	r, ok := s.repos[ref.ownerRepo]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("simgh: repo %s not seeded", ref.ownerRepo)
+	}
+	iss, ok := r.issues[ref.number]
+	if !ok {
+		s.mu.Unlock()
+		return nil, nil
+	}
+	probe := gh.BoardProbeItem{
+		ItemID:    ref.itemID,
+		ContentID: iss.nodeID(ref.ownerRepo),
+		Number:    iss.number,
+		IsPR:      live.isPR,
+		IsClosed:  iss.state == "CLOSED" && !live.isPR,
+		State:     iss.state,
+		Repo:      ref.ownerRepo,
+		Status:    live.status,
+	}
+	// effectiveUpdatedAt is max(content, project item, linked PR).
+	probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, live.updatedAt)
+	linked := findPRByHeadLocked(r, issueBranch(iss.number))
+	var linkedHead string
+	if linked != nil {
+		linkedHead = linked.head
+		probe.LinkedPRNumber = linked.number
+		probe.LinkedPRUpdatedAt = linked.updatedAt
+		probe.EffectiveUpdatedAt = laterOf(probe.EffectiveUpdatedAt, linked.updatedAt)
+	}
+	s.mu.Unlock()
+
+	if linkedHead != "" {
+		sha, err := s.resolveRefSHA(owner, repoName, linkedHead)
+		if err != nil {
+			return nil, err
+		}
+		probe.LinkedPRHeadSHA = sha
+	}
+	return &probe, nil
 }
 
 // FetchItemDetails backfills a partially-populated item in place, keyed by its
