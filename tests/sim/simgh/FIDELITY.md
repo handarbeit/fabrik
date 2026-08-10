@@ -108,14 +108,22 @@ Two consequences, and they differ in direction:
   Real GitHub re-enforces branch protection server-side at merge time and would
   refuse.
 
-**This mirrors production's own exposure, and deliberately stops short of
-fixing it.** `github.Client.MergePR` (`github/prs.go:1114`) reads `mergeable`,
+**Decision: document, do not model.** Closing this gap would mean modelling
+GitHub's server-side re-check — the sim recomputing `mergeable_state`
+atomically at merge time the way GitHub's merge endpoint does. That is a
+deliberate non-goal, not an oversight: **this mirrors production's own
+exposure.** `github.Client.MergePR` (`github/prs.go:1114`) reads `mergeable`,
 then `FetchPRMergeableFields`, then `PUT .../merge` with only a `merge_method`
 — GitHub's merge endpoint accepts an optional `sha` for exactly this
 compare-and-swap and production does not send one. So the engine's gate verdict
 is equally stale against real GitHub; what saves it there is GitHub's own
 server-side re-check, which the sim has no equivalent of. Making the sim stricter
-would model a guarantee production does not actually have.
+would model a guarantee production does not actually have, which would make it
+*less* faithful, not more — the same reasoning applied to the recompute-window
+double-drain below. If a future scenario genuinely needs "a required check went
+red mid-merge" modelled (#1452's own authorship is the most likely source), that
+is new work to scope separately, not a silent reopening of this decision. See
+#1498.
 
 **Risk:** low, and bounded by construction — the window only exists for a
 scenario that mutates a repo concurrently with its own `MergePR` call. A
