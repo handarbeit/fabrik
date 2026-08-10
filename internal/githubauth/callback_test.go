@@ -3,6 +3,7 @@ package githubauth
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -378,5 +379,59 @@ func TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly(t
 	}
 	if !strings.Contains(string(body), "already completed") {
 		t.Errorf("duplicate callback body = %q, want it to explicitly say the flow already completed", body)
+	}
+}
+
+// TestRunManifestCallbackServer_ShutdownForceClosesAfterGraceTimeout is the
+// regression test for a review finding: shutdownFn discarded
+// http.Server.Shutdown's error with no fallback, so a connection that
+// doesn't drain within the grace window (e.g. a stalled local connection
+// ReadHeaderTimeout hasn't yet caught) could leave the server's Serve
+// goroutine running for the rest of the process's life. shutdownFn must
+// now force-close (srv.Close()) when the graceful deadline is exceeded, so
+// shutdown always actually stops the server.
+func TestRunManifestCallbackServer_ShutdownForceClosesAfterGraceTimeout(t *testing.T) {
+	oldGrace := manifestShutdownGraceTimeout
+	manifestShutdownGraceTimeout = 50 * time.Millisecond
+	defer func() { manifestShutdownGraceTimeout = oldGrace }()
+
+	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	if err != nil {
+		t.Fatalf("runManifestCallbackServer: %v", err)
+	}
+
+	u, err := url.Parse(startURL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", startURL, err)
+	}
+	addr := u.Host
+
+	// Open a raw connection and never send a request — held open (not yet
+	// idle from the server's perspective) so a graceful Shutdown within the
+	// shrunk grace window can't drain it, forcing the force-close fallback
+	// to be what actually ends the server.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dialing loopback server: %v", err)
+	}
+	defer conn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		shutdown()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown() did not return within 3s — force-close fallback did not kick in")
+	}
+
+	// The listener must actually be gone: a fresh connection attempt to the
+	// same address should now fail.
+	if c2, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
+		c2.Close()
+		t.Error("expected the listener to be closed after shutdown(), but a new connection succeeded")
 	}
 }

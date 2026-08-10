@@ -43,6 +43,18 @@ func Execute() error {
 		return fmt.Errorf("no watched repos configured (set watched_repos, PRUEFER_REPOS, or --repos)")
 	}
 
+	// Wire the package-level Logf hook (per cfg.LogFile/useTUI) before
+	// anything below logs a line — including githubauth.Reconcile's own
+	// first-run/self-heal auth output (setup URLs, guided-install
+	// instructions). NewDaemon normally does this, but NewDaemon can't run
+	// until Reconcile has produced auth.BotLogin() and clients below, by
+	// which point Reconcile's own log lines would already have been emitted
+	// through log.go's raw-stderr fallback (bypassing cfg.LogFile
+	// entirely) had this call been left at its old, later position.
+	// wireLogf is idempotent — NewDaemon's own internal call becomes a
+	// no-op once Logf is already set here, so the file isn't opened twice.
+	closeLog := wireLogf(cfg, useTUI(cfg))
+
 	// Wire the github package's diagnostic logger so pagination-cap warnings
 	// (e.g. FetchAppInstallations/FetchInstallationRepositories hitting the
 	// 100-result page limit) reach Pruefer's own logf instead of being
@@ -112,7 +124,11 @@ func Execute() error {
 		clients[strings.ToLower(owner)] = client
 	}
 
-	daemon, closeLog := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, auth.BotLogin())
+	// NewDaemon's own wireLogf call is a no-op here (Logf was already wired
+	// above, before Reconcile) — its returned close func is discarded in
+	// favor of the one already captured, which is what actually owns the
+	// open log file.
+	daemon, _ := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, auth.BotLogin())
 	// waitRefreshLoops must run before closeLog: the refresh-loop goroutines
 	// spawned above are unmanaged by Daemon.Run's own lifecycle (unlike its
 	// internal poll/review goroutines, which Run joins before returning), so

@@ -853,11 +853,16 @@ func TestReconcile_AppIDChange_ClearsStaleSecretsAndCache(t *testing.T) {
 	statePath := filepath.Join(dir, "app-state.json")
 
 	// Seed app-state.json as if a prior App (ID 42) had completed a manifest
-	// flow and left behind webhook/client secrets and a populated cache.
+	// flow and left behind webhook/client secrets, a populated cache, and a
+	// PrivateKeyFingerprint belonging to that old App's own (different) key
+	// — deliberately NOT keyPath's fingerprint, so a bug that either leaves
+	// this stale value in place or blanks it to "" is distinguishable from
+	// the correct behavior (recomputed fresh from the currently-active PEM).
 	if err := saveCredentials(statePath, Credentials{
 		AppID: 42, Slug: "old-app", WebhookSecret: "old-hook-secret",
 		ClientID: "old-client-id", ClientSecret: "old-client-secret",
 		InstallationRepoCache: map[string][]string{"someorg": {"someorg/repo-one"}},
+		PrivateKeyFingerprint: "stale-fingerprint-from-a-different-app-entirely",
 	}); err != nil {
 		t.Fatalf("seeding app-state.json: %v", err)
 	}
@@ -889,6 +894,21 @@ func TestReconcile_AppIDChange_ClearsStaleSecretsAndCache(t *testing.T) {
 	}
 	if len(saved.InstallationRepoCache["someorg"]) != 1 || saved.InstallationRepoCache["someorg"][0] != "someorg/repo-one" {
 		t.Errorf("InstallationRepoCache[someorg] = %v, want the newly-reconciled [someorg/repo-one], not stale data from the previous App", saved.InstallationRepoCache["someorg"])
+	}
+	// Regression check for a review finding: saveInstallationRepoCache's
+	// AppID-mismatch discard previously wiped PrivateKeyFingerprint to ""
+	// alongside the documented secrets, silently disabling
+	// loadOrBootstrapCredentials' crash-window consistency check for this
+	// state file going forward. It must instead be recomputed fresh from
+	// the currently-active (already-authenticated) PEM — neither left
+	// blank nor carrying forward the old App's stale value.
+	pemBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("reading test private key: %v", err)
+	}
+	wantFingerprint := privateKeyFingerprint(pemBytes)
+	if saved.PrivateKeyFingerprint != wantFingerprint {
+		t.Errorf("saved PrivateKeyFingerprint = %q, want it recomputed to match the active PEM (%q) — not blank and not the old App's stale value", saved.PrivateKeyFingerprint, wantFingerprint)
 	}
 }
 

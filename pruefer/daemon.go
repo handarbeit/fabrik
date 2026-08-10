@@ -133,7 +133,19 @@ func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker
 // parameter purely so this decision table is unit-testable without a real
 // terminal, which useTUI itself requires). Returns the close function
 // NewDaemon should defer.
+//
+// Idempotent: if Logf is already non-nil (execute.go now calls this
+// directly, before githubauth.Reconcile, so first-run/self-heal auth log
+// lines land in cfg.LogFile too, rather than falling back to raw stderr for
+// the entire pre-NewDaemon portion of Execute — see execute.go), a second
+// call from NewDaemon's own construction is a no-op rather than re-opening
+// the log file a second time (leaking the first handle) or discarding the
+// already-wired hook. Callers that want a fresh wire (every existing test)
+// reset Logf to nil first, so this guard changes nothing for them.
 func wireLogf(cfg Config, tui bool) func() error {
+	if Logf != nil {
+		return func() error { return nil }
+	}
 	discardLog := func(int, string, string, ...any) {}
 	closeLog := func() error { return nil }
 

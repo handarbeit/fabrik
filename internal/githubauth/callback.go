@@ -22,6 +22,11 @@ import (
 // process. Var so tests can shrink it.
 var manifestCallbackTimeout = 10 * time.Minute
 
+// manifestShutdownGraceTimeout bounds how long shutdownFn (below) waits for
+// http.Server.Shutdown to drain in-flight connections gracefully before
+// force-closing instead. Var so tests can shrink it.
+var manifestShutdownGraceTimeout = 5 * time.Second
+
 // callbackResult is what the loopback listener captures from GitHub's
 // manifest-flow redirect: either a usable code, or an error describing why
 // the redirect wasn't usable (state mismatch, missing code).
@@ -204,9 +209,18 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	go srv.Serve(ln)
 
 	shutdownFn := func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), manifestShutdownGraceTimeout)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// Graceful shutdown didn't complete within the deadline — most
+			// plausibly a stalled local connection ReadHeaderTimeout hasn't
+			// caught yet. Force-close so the srv.Serve goroutine above is
+			// guaranteed to exit rather than leaking for the rest of the
+			// process's life; the manifest flow is already over by the
+			// time shutdownFn runs; nothing more this listener could do
+			// waiting.
+			srv.Close()
+		}
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d/start", port), resultCh, shutdownFn, nil
 }

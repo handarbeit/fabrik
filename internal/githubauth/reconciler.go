@@ -439,7 +439,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			}
 		}
 		r.auths = []*Auth{a}
-		saveInstallationRepoCache(opts.AppStatePath, appID, slug, repoCache, logf)
+		saveInstallationRepoCache(opts.AppStatePath, opts.AppPrivateKeyPath, appID, slug, repoCache, logf)
 		logf("✓ using pinned installation %d for all watched repos", opts.AppInstallationID)
 		return r, nil
 	}
@@ -565,7 +565,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		}
 	}
 
-	saveInstallationRepoCache(opts.AppStatePath, appID, slug, repoCache, logf)
+	saveInstallationRepoCache(opts.AppStatePath, opts.AppPrivateKeyPath, appID, slug, repoCache, logf)
 
 	return r, nil
 }
@@ -611,7 +611,21 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 // only ever a previous, now-inactive identity's, which is correct to drop
 // regardless of how the mismatch arose (self-heal, manual config change, or
 // a restored/stale AppStatePath backup).
-func saveInstallationRepoCache(statePath string, appID int64, slug string, repoCache map[string][]string, logf func(string, ...any)) {
+//
+// PrivateKeyFingerprint is handled separately from the wholesale-discard
+// above, and deliberately recomputed on every call (mismatch or not) from
+// privateKeyPath's current on-disk contents, rather than either carried
+// forward unconditionally or wiped to "" alongside the other fields: the
+// old value belongs to whichever App's PEM was active last time this ran,
+// which is wrong for a mismatch (would fail loadOrBootstrapCredentials'
+// fingerprint check against the *new* App's own already-authenticated
+// PEM) and stale-but-usually-still-correct otherwise — recomputing fresh
+// here keeps the crash-window consistency check loadOrBootstrapCredentials
+// performs (comparing this field against the PEM at reconciler-restart
+// time) accurate for whichever App is actually active, instead of either
+// wrong or (an earlier version of this function) silently disabled by
+// leaving it blank.
+func saveInstallationRepoCache(statePath, privateKeyPath string, appID int64, slug string, repoCache map[string][]string, logf func(string, ...any)) {
 	existing, err := loadCredentials(statePath)
 	if err != nil {
 		// loadOrBootstrapCredentials already validated AppStatePath is
@@ -635,6 +649,16 @@ func saveInstallationRepoCache(statePath string, appID int64, slug string, repoC
 	existing.AppID = appID
 	existing.Slug = slug
 	existing.InstallationRepoCache = merged
+	if pemBytes, err := os.ReadFile(privateKeyPath); err == nil {
+		existing.PrivateKeyFingerprint = privateKeyFingerprint(pemBytes)
+	} else {
+		// Best-effort, diagnostics-only: Reconcile already successfully
+		// authenticated with this PEM earlier in this same call, so a read
+		// failure here would be surprising (e.g. removed mid-run) — leave
+		// PrivateKeyFingerprint as whatever loadCredentials returned above
+		// rather than failing reconciliation over it.
+		logf("could not recompute private key fingerprint for the installation-repo cache: %v", err)
+	}
 	if err := saveCredentials(statePath, existing); err != nil {
 		logf("could not persist installation-repo cache: %v", err)
 	}
