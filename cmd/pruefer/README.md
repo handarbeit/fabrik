@@ -122,6 +122,8 @@ Each line looks like:
 
 The log file is append-only across restarts — it is never truncated on daemon startup, unlike Fabrik engine's own `fabrik.log` — so a restart doesn't erase the history an incident investigation needs. Growth is bounded by size-triggered rotation: once the file reaches 10 MB it's renamed to `pruefer.log.1` (existing numbered backups shift up, `pruefer.log.3` is dropped), and a fresh file is opened. Up to 3 rotated backups are retained.
 
+A `warn`-tagged line fires when a review's summary doesn't follow the `PRUEFER_SUMMARY_BEGIN`/`PRUEFER_SUMMARY_END` delimiter contract: either the markers were missing (or malformed) entirely, or a well-formed pair was found but some preamble text ahead of the opening marker had to be discarded. Neither is fatal — the review still submits — but either is a sign the model drifted from the prompt's output contract and is worth a look.
+
 ## On-demand re-review
 
 Comment `/pruefer review` on any watched PR to force a fresh review of the current head, even if that SHA was already reviewed. Pruefer acknowledges the command with a 👀 reaction when it picks it up and a 🚀 reaction once the review has been submitted — the same idempotency convention Fabrik uses for its own comment processing.
