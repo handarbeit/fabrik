@@ -63,11 +63,23 @@ func (s *Sim) CloseIssue(owner, repo string, issueNumber int) error {
 // on a spawned child's assignee reads a real value rather than nil.
 func (s *Sim) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	r, err := s.lookupRepo(owner, repo)
+	s.mu.Unlock()
 	if err != nil {
 		return 0, "", err
 	}
+
+	// See repoState.numberMu's doc comment (model.go): this call's own
+	// critical section never releases Sim.mu, but SeedPR{Merged: true}'s
+	// does, and an auto-assigned candidate it peeked off nextNumber is
+	// invisible to allocNumber's bookkeeping until that call's merge
+	// succeeds. Without this lock, allocNumber below could claim that exact
+	// peeked number while a concurrent SeedPR is mid-merge on this repo.
+	r.numberMu.Lock()
+	defer r.numberMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	num := r.allocNumber()
 	now := s.now()
 	iss := &issueRecord{

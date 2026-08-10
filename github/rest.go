@@ -110,7 +110,16 @@ func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*ht
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token())
+	// An empty token means "deliberately unauthenticated" (e.g. pruefer's
+	// release-check client against the public fabrik repo) — omit the header
+	// rather than sending "Bearer " with nothing after it. GitHub's REST API
+	// treats a blank bearer token as invalid credentials (401 Bad
+	// credentials), not as equivalent to no Authorization header at all
+	// (verified against the real API), so setting it unconditionally would
+	// break every unauthenticated caller.
+	if token := c.Token(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

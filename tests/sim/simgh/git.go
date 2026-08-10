@@ -31,6 +31,14 @@ const (
 // engine tests against; see tryMerge and MergePR.
 var errNothingToMerge = errors.New("head is already contained in base, so there is no merge commit to write")
 
+// probeGCThreshold bounds how many read-only mergeability probes a repo runs
+// before tryMerge runs a housekeeping `git gc`. Chosen to keep a pinning test
+// fast rather than to model anything about real GitHub — there is no
+// real-GitHub correlate for this at all, since GitHub never leaves a trial
+// merge's commit object lying around in the first place. See
+// FIDELITY.md, "Trial merges leave unreachable objects".
+const probeGCThreshold = 25
+
 // gitEnv returns a non-interactive environment for git subprocesses, mirroring
 // engine/worktree.go's nonInteractiveGitEnv. The sim never talks to a network
 // remote, but a stray credential or SSH prompt would hang a test rather than
@@ -165,9 +173,19 @@ func (r *repoState) withWorktree(ref string, fn func(wt string) error) (err erro
 	// git worktree add insists on creating the directory itself.
 	wt := filepath.Join(tmp, "wt")
 
-	if _, err := runGit(r.bareDir, "worktree", "add", "--detach", wt, ref); err != nil {
-		os.RemoveAll(tmp)
-		return err
+	if _, addErr := runGit(r.bareDir, "worktree", "add", "--detach", wt, ref); addErr != nil {
+		// `worktree add` can register its administrative entry under
+		// <bare>/worktrees/<name> and *then* fail (disk pressure, a stale
+		// lock from a killed prior run). The deferred cleanup below prunes
+		// unconditionally for exactly this reason — a stale entry here would
+		// otherwise be free to trip a later worktree operation on this same
+		// bare repo, and this path must not be the one exception to that.
+		rmErr := os.RemoveAll(tmp)
+		_, _, _ = runGitAllowFail(r.bareDir, "worktree", "prune")
+		if rmErr != nil {
+			return fmt.Errorf("simgh: worktree add: %w; also failed removing its temp dir %s: %w", addErr, tmp, rmErr)
+		}
+		return addErr
 	}
 	defer func() {
 		// Prune unconditionally: the worktree removal can legitimately fail if
@@ -249,6 +267,34 @@ func (r *repoState) tryMerge(base, head string, commit bool, msg string) (sha st
 	if err != nil {
 		return "", false, err
 	}
+
+	// A read-only probe (commit=false) never moves a ref, so any merge commit
+	// it just wrote is orphaned in the object store the instant this call
+	// returns. Left unchecked that grows without bound across a long,
+	// poll-heavy scenario (merge-train bisection is the worst case — see
+	// FIDELITY.md). Bounding it with a periodic `git gc` is pure sim-internal
+	// housekeeping: it runs on already-unreferenced objects, so it is
+	// invisible to every read and cannot change an answer, only reclaim disk
+	// and inodes. A GC failure is swallowed rather than surfaced — the same
+	// "best effort, does not fail the caller" treatment withWorktree's own
+	// defensive prune gets — because a probe's job is answering a
+	// mergeability question, not guaranteeing housekeeping succeeded.
+	if !commit {
+		r.probesSinceGC++
+		if r.probesSinceGC >= probeGCThreshold {
+			// --prune=now: plain `git gc` only expires unreachable objects
+			// older than a 2-week grace period, meant to protect a concurrent
+			// writer elsewhere in the same repo from having an object pulled
+			// out from under it. That race cannot happen here — gitMu
+			// serialises every git subprocess call against this bare repo,
+			// so nothing else can be mid-write when this runs — and every
+			// object this reclaims was orphaned the instant its probe
+			// returned, not "possibly still wanted".
+			_, _, _ = runGitAllowFail(r.bareDir, "gc", "--quiet", "--prune=now")
+			r.probesSinceGC = 0
+		}
+	}
+
 	if conflict {
 		return "", true, nil
 	}

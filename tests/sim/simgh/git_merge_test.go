@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -481,5 +482,332 @@ func TestSeedBranchRefusesExistingBranch(t *testing.T) {
 	// ref had already moved would still have lost the commits.
 	if after := mustHeadSHA(t, s, repoName, headBranch); after != before {
 		t.Fatalf("refused SeedBranch still moved %s from %s to %s", headBranch, before, after)
+	}
+}
+
+// TestSeedPRMergedTruePerformsRealMerge pins item 4's fix: SeedPR{Merged: true}
+// must not merely flip a bookkeeping flag. It has to write the same merge
+// commit MergePR would, and run the same closing-keyword auto-close, or a
+// merge-train scenario asserting "this member already landed" would be
+// asserting against git history and issue state that never actually
+// happened. See FIDELITY.md, "SeedPR{Merged: true}", and #1498.
+func TestSeedPRMergedTruePerformsRealMerge(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+
+	baseBefore := mustHeadSHA(t, s, repoName, "main")
+	headSHA := mustHeadSHA(t, s, repoName, headBranch)
+
+	// Linked via IssueNumber, the same as CreateDraftPR would link it — issue
+	// #7 is the one seedBasicBoard already seeds.
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "already landed", IssueNumber: 7, Merged: true})
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedPR(Merged: true): %v", err)
+	}
+
+	baseAfter := mustHeadSHA(t, s, repoName, "main")
+	if baseAfter == baseBefore {
+		t.Fatal("SeedPR(Merged: true) did not move the base branch — no merge commit was written")
+	}
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	r.gitMu.Lock()
+	parents, gitErr := runGit(r.bareDir, "rev-list", "--parents", "-n", "1", "refs/heads/main")
+	r.gitMu.Unlock()
+	if gitErr != nil {
+		t.Fatalf("rev-list --parents: %v", gitErr)
+	}
+	fields := strings.Fields(parents)
+	if len(fields) != 3 {
+		t.Fatalf("main tip has %d parents (%q), want a two-parent merge commit", len(fields)-1, parents)
+	}
+	if fields[1] != baseBefore || fields[2] != headSHA {
+		t.Fatalf("merge commit parents = %v, want [%s %s]", fields[1:], baseBefore, headSHA)
+	}
+
+	merged, err := s.FetchPRMerged("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRMerged: %v", err)
+	}
+	if !merged {
+		t.Fatal("PR reports merged = false after SeedPR(Merged: true)")
+	}
+
+	// The linked issue must be auto-closed, exactly as MergePR's own
+	// closing-keyword loop would do it.
+	iss, err := s.FetchIssue("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchIssue: %v", err)
+	}
+	if iss.State != "closed" {
+		t.Fatalf("linked issue #7 state = %q, want %q after SeedPR(Merged: true) on the default branch", iss.State, "closed")
+	}
+}
+
+// TestSeedPRMergedTrueRefusesConflict pins the other half of item 4: seeding
+// is authoritative about *state*, not about git history it cannot represent.
+// Merged: true against branches that genuinely conflict is refused rather
+// than silently recorded — GitHub could never have produced that PR as
+// merged either.
+func TestSeedPRMergedTrueRefusesConflict(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedConflict(t, s)
+
+	baseBefore := mustHeadSHA(t, s, repoName, "main")
+
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "conflicting", Merged: true})
+
+	err := s.Err()
+	if err == nil {
+		t.Fatal("SeedPR(Merged: true) accepted branches that genuinely conflict")
+	}
+	if !strings.Contains(err.Error(), "does not merge cleanly") {
+		t.Fatalf("error = %v, want it to name the conflict", err)
+	}
+
+	// The refusal must leave no trace: no moved ref, and no PR record at all.
+	if after := mustHeadSHA(t, s, repoName, "main"); after != baseBefore {
+		t.Fatalf("a refused SeedPR(Merged: true) still moved main from %s to %s", baseBefore, after)
+	}
+	if _, ferr := s.FetchPRMerged("acme", "widgets", 42); ferr == nil {
+		t.Fatal("a refused SeedPR(Merged: true) still recorded a PR")
+	}
+}
+
+// TestSeedPRRefusedMergeDoesNotBurnTheNumber pins a review finding on #1498:
+// reserveNumber must not run before a Merged: true seed's git-side merge is
+// attempted. Before the fix, an explicit PR number survived a refused merge
+// (conflict, or nothing to merge) as permanently reserved in the shared
+// issue/PR sequence even though no PR record was ever created — a leak real
+// GitHub has no equivalent of, since a failed create never consumes a number
+// there either, and unlike every other validation failure in SeedPR, which
+// fails before the sequence moves at all.
+func TestSeedPRRefusedMergeDoesNotBurnTheNumber(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedConflict(t, s)
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	s.mu.Lock()
+	before := r.nextNumber
+	s.mu.Unlock()
+
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "conflicting", Merged: true})
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedPR(Merged: true) accepted branches that genuinely conflict")
+	}
+
+	s.mu.Lock()
+	after := r.nextNumber
+	s.mu.Unlock()
+	if after != before {
+		t.Fatalf("nextNumber = %d after a refused Merged: true seed, want unchanged %d — "+
+			"explicit number 42 was burned despite no PR record being created", after, before)
+	}
+}
+
+// TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber pins a follow-up review
+// finding on #1498: the fix above only covered an explicitly-seeded number.
+// For an auto-assigned one (Number left at 0), SeedPR previously called
+// allocNumber — which commits the number by advancing nextNumber immediately
+// — before the Merged+Draft/Merged+open validation checks even ran, so a
+// validation failure (not just a refused merge) permanently burned an
+// auto-assigned number for a PR that was never created. Uses a clean
+// divergence rather than a conflict, so the refusal is unambiguously the
+// Merged+Draft validation check, not tryMerge.
+func TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	s.mu.Lock()
+	before := r.nextNumber
+	s.mu.Unlock()
+
+	s.SeedPR(repoName, PRSeed{Head: headBranch, Base: "main", Title: "auto-assigned but invalid", Merged: true, Draft: true})
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedPR(Merged: true, Draft: true) with an auto-assigned number was accepted; want refusal")
+	}
+
+	s.mu.Lock()
+	after := r.nextNumber
+	s.mu.Unlock()
+	if after != before {
+		t.Fatalf("nextNumber = %d after a refused auto-assigned Merged+Draft seed, want unchanged %d — "+
+			"the auto-assigned number was burned despite no PR record being created", after, before)
+	}
+}
+
+// countLooseObjects parses `git count-objects -v`'s "count:" line — the
+// number of loose objects sitting outside any pack, which is exactly where an
+// orphaned probe merge commit lives before it is packed or pruned. Caller
+// must hold gitMu.
+func countLooseObjects(t *testing.T, bareDir string) int {
+	t.Helper()
+	out, err := runGit(bareDir, "count-objects", "-v")
+	if err != nil {
+		t.Fatalf("count-objects: %v", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if name, val, ok := strings.Cut(line, ": "); ok && name == "count" {
+			n, convErr := strconv.Atoi(val)
+			if convErr != nil {
+				t.Fatalf("parsing count-objects line %q: %v", line, convErr)
+			}
+			return n
+		}
+	}
+	t.Fatalf("count-objects -v output %q has no \"count:\" line", out)
+	return 0
+}
+
+// TestMergeableProbeBoundsUnreferencedObjects pins item 5's fix: a read-only
+// mergeability probe runs a real `git merge --no-ff` and discards the result
+// without moving a ref, so the merge commit it wrote is orphaned in the
+// object store the instant the call returns. Left unchecked that grows
+// without bound across a long, poll-heavy scenario — merge-train bisection
+// is the worst case, since it re-probes mergeability across a bisection
+// sequence on top of a per-trial-SHA FetchCheckRuns poll. tryMerge now runs a
+// periodic `git gc --prune=now` to reclaim them. See FIDELITY.md, "Trial
+// merges leave unreachable objects", and #1498.
+func TestMergeableProbeBoundsUnreferencedObjects(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+
+	// probeGCThreshold-1 distinct probes, each merging a genuinely different
+	// branch into main. Distinct branches matter: repeating one identical
+	// probe would recreate byte-identical commit content each time (same
+	// tree, same parents, same message), and git's content-addressable store
+	// would just recognise the object already exists rather than writing a
+	// new one — which would prove nothing about accumulation.
+	for i := 0; i < probeGCThreshold-1; i++ {
+		branch := fmt.Sprintf("feature-%d", i)
+		s.SeedCommit(repoName, branch, map[string]string{fmt.Sprintf("f%d.txt", i): "x"}, fmt.Sprintf("commit %d", i))
+		if err := s.Err(); err != nil {
+			t.Fatalf("seeding branch %d: %v", i, err)
+		}
+		r.gitMu.Lock()
+		_, conflict, mergeErr := r.tryMerge("main", branch, false, "simgh trial merge")
+		r.gitMu.Unlock()
+		if mergeErr != nil {
+			t.Fatalf("probe %d: %v", i, mergeErr)
+		}
+		if conflict {
+			t.Fatalf("probe %d: unexpected conflict", i)
+		}
+	}
+
+	r.gitMu.Lock()
+	beforeGC := countLooseObjects(t, r.bareDir)
+	counterBeforeThreshold := r.probesSinceGC
+	r.gitMu.Unlock()
+	if beforeGC == 0 {
+		t.Fatal("no loose objects accumulated from probeGCThreshold-1 distinct probes; the probe path may not be writing real merge commits")
+	}
+	if counterBeforeThreshold != probeGCThreshold-1 {
+		t.Fatalf("probesSinceGC = %d before the threshold-crossing probe, want %d", counterBeforeThreshold, probeGCThreshold-1)
+	}
+
+	// One more probe crosses the threshold and must trigger the housekeeping
+	// gc within this same call.
+	branch := fmt.Sprintf("feature-%d", probeGCThreshold-1)
+	s.SeedCommit(repoName, branch, map[string]string{"last.txt": "x"}, "final commit")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding final branch: %v", err)
+	}
+	r.gitMu.Lock()
+	_, conflict, mergeErr := r.tryMerge("main", branch, false, "simgh trial merge")
+	r.gitMu.Unlock()
+	if mergeErr != nil {
+		t.Fatalf("threshold-crossing probe: %v", mergeErr)
+	}
+	if conflict {
+		t.Fatal("threshold-crossing probe: unexpected conflict")
+	}
+
+	r.gitMu.Lock()
+	afterGC := countLooseObjects(t, r.bareDir)
+	counterAfterThreshold := r.probesSinceGC
+	r.gitMu.Unlock()
+	if afterGC >= beforeGC {
+		t.Fatalf("loose object count after crossing the gc threshold = %d, want fewer than the %d accumulated before it — "+
+			"the housekeeping gc did not reclaim the unreferenced merge commits", afterGC, beforeGC)
+	}
+	if counterAfterThreshold != 0 {
+		t.Fatalf("probesSinceGC = %d after crossing the threshold, want 0 (reset by the gc)", counterAfterThreshold)
+	}
+
+	// The gc must not have disturbed anything reachable: main's tip is
+	// unaffected — a probe never moves it in the first place, and the gc
+	// prunes only what nothing points at.
+	r.gitMu.Lock()
+	_, mainErr := r.resolveRef("refs/heads/main")
+	r.gitMu.Unlock()
+	if mainErr != nil {
+		t.Fatalf("main is unreadable after the housekeeping gc: %v", mainErr)
+	}
+}
+
+// TestWithWorktreePrunesAfterFailedAdd pins item 1's fix: `git worktree add`
+// can register its administrative entry under <bare>/worktrees/<name> and
+// *then* fail — disk pressure or a stale lock from a killed prior run in
+// production, but reproduced here deterministically with a `post-checkout`
+// hook that exits non-zero after the checkout itself has already succeeded
+// and the entry is fully registered. Without the fix, the error path removed
+// only the physical temp dir and never ran `worktree prune`, leaving a stale
+// administrative entry behind to trip a later worktree operation on the same
+// bare repo — exactly the cross-test contamination #1451's deliberate fault
+// injection would hit hardest. See FIDELITY.md and #1498.
+func TestWithWorktreePrunesAfterFailedAdd(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+
+	hookPath := filepath.Join(r.bareDir, "hooks", "post-checkout")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("creating hooks dir: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("seeding failing post-checkout hook: %v", err)
+	}
+
+	var called bool
+	r.gitMu.Lock()
+	wtErr := r.withWorktree("refs/heads/main", func(wt string) error {
+		called = true
+		return nil
+	})
+	r.gitMu.Unlock()
+	if wtErr == nil {
+		t.Fatal("withWorktree reported success despite the post-checkout hook failing the underlying worktree add")
+	}
+	if called {
+		t.Fatal("fn ran despite worktree add having failed")
+	}
+
+	// No stale administrative entry may survive: `git worktree list` must
+	// report only the bare repo itself.
+	r.gitMu.Lock()
+	out, listErr := runGit(r.bareDir, "worktree", "list")
+	r.gitMu.Unlock()
+	if listErr != nil {
+		t.Fatalf("worktree list: %v", listErr)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("worktree list =\n%s\nwant only the bare repo entry — a failed worktree add left a stale administrative entry unpruned", out)
 	}
 }

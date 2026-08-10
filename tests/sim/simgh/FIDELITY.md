@@ -108,32 +108,66 @@ Two consequences, and they differ in direction:
   Real GitHub re-enforces branch protection server-side at merge time and would
   refuse.
 
-**This mirrors production's own exposure, and deliberately stops short of
-fixing it.** `github.Client.MergePR` (`github/prs.go:1114`) reads `mergeable`,
+**Decision: document, do not model.** Closing this gap would mean modelling
+GitHub's server-side re-check — the sim recomputing `mergeable_state`
+atomically at merge time the way GitHub's merge endpoint does. That is a
+deliberate non-goal, not an oversight: **this mirrors production's own
+exposure.** `github.Client.MergePR` (`github/prs.go:1114`) reads `mergeable`,
 then `FetchPRMergeableFields`, then `PUT .../merge` with only a `merge_method`
 — GitHub's merge endpoint accepts an optional `sha` for exactly this
 compare-and-swap and production does not send one. So the engine's gate verdict
 is equally stale against real GitHub; what saves it there is GitHub's own
 server-side re-check, which the sim has no equivalent of. Making the sim stricter
-would model a guarantee production does not actually have.
+would model a guarantee production does not actually have, which would make it
+*less* faithful, not more — the same reasoning applied to the recompute-window
+double-drain below. If a future scenario genuinely needs "a required check went
+red mid-merge" modelled (#1452's own authorship is the most likely source), that
+is new work to scope separately, not a silent reopening of this decision. See
+#1498.
 
 **Risk:** low, and bounded by construction — the window only exists for a
 scenario that mutates a repo concurrently with its own `MergePR` call. A
 scenario that wants to exercise "a required check went red mid-merge" cannot do
 it here; that needs the server-side re-check the sim does not model.
 
-### Trial merges leave unreachable objects — **Simplified**
+### Trial merges leave unreachable objects, bounded by a periodic gc — **Modelled, bounded**
 
 A read-only mergeability probe runs a real `git merge --no-ff` and then discards
 the result by not moving any ref, so the merge commit it wrote stays in the
-object store with nothing pointing at it. Nothing here runs `git gc`, and
-mergeability is recomputed on every read, so a long multi-poll scenario
-accumulates orphaned objects for the life of the test process.
+object store with nothing pointing at it. Mergeability is recomputed on every
+read, so a long multi-poll scenario would otherwise accumulate orphaned
+objects for the life of the test process — worst exactly where merge-train
+bisection lives (#1452), which re-probes mergeability across a bisection
+sequence on top of a per-trial-SHA `FetchCheckRuns` poll.
 
-**Risk:** low, and it is disk and inode cost rather than a wrong answer — the
-objects are unreachable, so no read can observe them. The backing repos live
-under `t.TempDir()` and vanish with the test. Worth revisiting only if a
-scenario in #1449 grows long enough for it to matter; tracked in #1498.
+**Decision:** bound it with a periodic housekeeping `git gc`, not by
+restructuring the probe to avoid writing a commit object in the first place
+(e.g. `git merge-tree`). The latter would be more faithful in the sense of
+"no garbage at all," but requires git ≥ 2.38 (no version floor exists in this
+codebase today) and has no precedent here — and, more importantly, it would
+touch `tryMerge`'s single shared implementation, which is deliberately used by
+both the probe and `MergePR` so the two can never disagree about whether a PR
+merges cleanly. Periodic `git gc` is pure post-hoc housekeeping on
+already-unreferenced objects instead: it runs on every 25th probe
+(`probeGCThreshold`), under the same `gitMu` already held, and is invisible to
+every read — it cannot change an answer, only reclaim disk and inodes. The
+threshold has no real-GitHub correlate to model against; it is a bookkeeping
+judgement call, tuned low enough that `TestMergeableProbeBoundsUnreferencedObjects`
+runs in seconds.
+
+It runs `git gc --quiet --prune=now` rather than plain `git gc`, which by
+default only expires unreachable objects older than a 2-week grace period —
+protection against pruning something a concurrent writer elsewhere in the repo
+might still need. That race cannot happen here: `gitMu` serialises every git
+subprocess call against one bare repo, so nothing else can be mid-write when
+the gc runs, and every object it reclaims was orphaned the instant its own
+probe returned, never "possibly still wanted."
+
+**Risk:** low. Bounded rather than unbounded, and it is disk and inode cost
+rather than a wrong answer either way — the objects are unreachable, so no
+read can observe them regardless of when (or whether) the gc runs. Fixed in
+#1498; `TestMergeableProbeBoundsUnreferencedObjects` pins that the loose-object
+count is reclaimed after crossing the threshold and that the counter resets.
 
 ### A PR whose head branch is gone errors — **Simplified**
 
@@ -249,6 +283,7 @@ immediately reads will see a resolved answer here and might not on GitHub.
 
 ## Check runs and commit statuses
 
+### The recompute window double-drains across `FetchPRMergeable` and `FetchPRMergeableState` — **Simplified, deliberately not shared**
 
 **Each read drains one unit, including the two single-field accessors.**
 `FetchPRMergeable` and `FetchPRMergeableState` are independent calls into
@@ -257,12 +292,29 @@ thing to want, and what `FetchPRDetails` sanctions for itself — burns two unit
 rather than one, and can see the flag and the state resolve at different points.
 Real GitHub reports both from a single response, so they resolve together.
 
+**Decision: document, do not model.** Sharing a drain between the two
+accessors would require them to know they are part of one logical read — a
+concept the `engine.GitHubClient` interface does not express, and inventing
+one here would be sim-only semantics with no real-GitHub analogue. It would
+also not buy back much fidelity: production's own `FetchPRMergeable` and
+`FetchPRMergeableState` (`github/prs.go:466-514`) *each independently hit*
+`/pulls/{number}` too — calling both is two separate REST round-trips in real
+GitHub as well, not one shared read. Only `FetchPRMergeableFields` is the
+genuinely single-call path, and no current engine or `boardcache` call site
+calls the two single-field accessors back-to-back for one PR — only
+`FetchPRMergeableFields` is used when a caller wants both. The same reasoning
+applies here as to `MergePR`'s retarget compare-and-swap under
+[Merge commits](#merge-commits) above: modelling a guarantee neither the sim's
+interface nor production's own call pattern actually provides would make the
+sim *less* faithful, not more.
+
 **Risk:** low but real for a scenario that seeds a *short* window (1–2 reads) and
-then reads both fields; the window drains faster than the scenario intends. The
-sim does not share a drain between them because doing so would require the two
-accessors to know they are part of one logical read, which the interface does not
-express. Prefer `FetchPRMergeableFields` when a scenario needs both, exactly as
-production's single-PR endpoint does. See #1498.
+then reads both fields; the window drains faster than the scenario intends. Prefer
+`FetchPRMergeableFields` when a scenario needs both, exactly as production's
+single-PR endpoint does — this is a stated recommendation, not merely a
+suggestion: no current engine code path is exposed to this gap because it
+already follows it. See #1498.
+
 ### Two separate collections — **Modelled**
 
 Check runs (`FetchCheckRuns`) and classic commit statuses (`FetchCombinedStatus`)
@@ -329,15 +381,33 @@ collections at one SHA.
 
 ## Reviews
 
-### `ResolveReviewThread` marks only the first comment on a thread — **Simplified**
+### `ResolveReviewThread` marks every comment on a thread — **Modelled**
 
-A thread is modelled as comments sharing a `reviewThreadID`, and resolving it
-flips `threadResolved` on the first match rather than on every comment in the
-thread. Board projections surface unresolved thread comments individually, so a
-thread with more than one comment reads as partially unresolved after being
-resolved. **Risk:** low — the engine's progress detection reads the resolved
-*count*, and no scenario in the downstream chain seeds multi-comment threads —
-but a scenario that does would see the wrong shape. See #1498.
+A thread is modelled as comments sharing a `reviewThreadID`. Resolving it now
+flips `threadResolved` on every comment sharing that ID, not just the first
+match — board projections surface unresolved thread comments individually
+(`buildProjectItem` appends every review-thread comment with
+`!c.threadResolved`), so leaving a sibling comment unmarked left a
+multi-comment thread reading as partially unresolved after being resolved.
+
+`resolvedThreads` — the count the engine's progress detection reads — still
+bumps by exactly **one per call**, not once per comment: it counts *threads*,
+not comments. Idempotency is preserved at the thread level too: resolving an
+already-fully-resolved thread again is a no-op rather than a second increment.
+
+Seeding a second comment onto an existing thread needs `SeedReviewThreadReply`
+(`seed.go`) — added alongside this fix, since `SeedReviewThreadComment` alone
+cannot construct a multi-comment thread: a thread ID is derived from its first
+comment's own database ID, so there is no way to declare "these comments share
+a thread" before that first comment exists. It requires the target thread ID
+already exist, refusing loudly on a typo'd or not-yet-seeded one — matching
+this file's "loud failure over silent no-op" seeding convention.
+
+**Risk:** low. Fixed in #1498;
+`TestReviewThreadResolutionMarksEveryCommentOnTheThread` pins the multi-comment
+resolution, the exactly-once count, and the idempotent repeat-resolve;
+`TestSeedReviewThreadReplyRefusesUnknownThread` pins the new seed method's
+refusal.
 
 
 ### `reviewDecision` under branch protection — **Simplified**
@@ -948,20 +1018,92 @@ be classified off the *failed* run with nothing to indicate why.
 **Simplified:** IDs are assigned from a single counter per `Sim` rather than
 globally across a GitHub instance, and nothing ties them to creation time.
 
-### `SeedPR{Merged: true}` sets the flag without merging — **Simplified**
+### `SeedPR{Merged: true}` performs the real merge — **Modelled**
 
-A directly-seeded merged PR sets the `merged` bookkeeping flag only. It does
-**not** write a merge commit onto the base branch, and it does **not** run the
-closing-keyword auto-close loop `MergePR` performs, so linked issues stay open
-and the base branch's git history shows no merge.
+**Decision:** model it, not merely flag it. A directly-seeded merged PR now
+writes the same real merge commit onto the base branch `MergePR` would (via
+the same `tryMerge` helper), and runs the same closing-keyword auto-close loop
+— including its default-branch restriction (ADR-1096) — so a seeded "already
+landed" PR is not a different world from one merged at runtime.
 
-That is a different world from one reached by calling `MergePR`, and the
-divergence is silent: a scenario that seeds a pre-merged PR and then asserts on
-git history or a linked issue's closed state gets a confidently wrong answer.
-**Risk:** medium — it is the one seeding shape whose *consequences* are not
-modelled rather than merely coarse. Seed the pre-merge state and call `MergePR`
-when a scenario depends on either consequence; use `Merged: true` only as an
-inert "this PR is already done" marker. Tracked in #1498.
+Seeding stays authoritative about *state*, not about git history it cannot
+represent: `Merged: true` against branches that genuinely conflict, or where
+the head is already fully contained in the base (nothing left to merge), is
+refused via the sticky error rather than silently recorded — GitHub could
+never have produced that PR as merged either. This mirrors the existing
+"Seeded PRs and issues must be shapes GitHub can produce" precedent below.
+
+A refused merge leaves no trace at all, including in the shared issue/PR
+number sequence: `reserveNumber` runs only once the merge has actually
+succeeded, not before the attempt. Reserving an explicit number earlier and
+then refusing the merge would have burned that number from `nextNumber`'s
+free-above invariant for a PR that was never created — unlike every other
+validation failure in `SeedPR`, which fails before the sequence moves at all,
+and unlike real GitHub, where a failed create never consumes a number either.
+The same holds for an auto-assigned number (`Number` left at `0`): `SeedPR`
+peeks the candidate off `nextNumber` rather than allocating it, so a
+subsequent validation failure (an invalid state, or `Merged` combined with
+`Draft` or an open state) or a refused merge never advances the sequence
+either — a review finding on #1498 caught this asymmetry between the two
+paths after the explicit-number fix above had already landed.
+
+Peeking rather than allocating opened a second, narrower gap a follow-up
+review finding caught: the peeked candidate is not actually reserved
+(`nextNumber` advanced) until the merge succeeds and `mu` is re-acquired, and
+during that window every other numbering path — `CreateIssue`, `CreatePR`,
+and `SeedIssue`, each otherwise atomic under `mu` alone with no release in
+the middle — could commit the exact same number, silently violating the
+shared issue-and-PR number space (`numberTaken`, node IDs, `AddComment`'s
+shared REST endpoint). `numberMu` (renamed and widened from the
+explicit-number fix's original `seedPRMu`) now serialises all four paths
+against each other for the full span from "the candidate is decided" to "the
+record naming it is published," not just `SeedPR` against itself.
+
+A subsequent review finding caught that `numberMu` had been placed on `Sim`
+rather than `repoState`: the invariant it protects (`nextNumber`,
+`numberTaken`) is entirely per-repo, so a `Sim`-wide lock serialised
+numbering operations — and, transitively, the real git subprocesses
+`CreatePR`'s branch check and `SeedPR`'s merge run while holding it — against
+every unrelated repo in the same `Sim`, not just the one whose number
+sequence was actually at risk. It now lives on `repoState`, alongside
+`gitMu`, scoped the same way for the same reason.
+
+The same review round also caught that only `SeedIssue`'s specific lock
+acquisition was independently pinned; `CreateIssue`'s and `CreatePR`'s (the
+two paths the engine itself calls, not just test scenarios) were claimed but
+unverified — a regression dropping either would have passed the full suite
+and the mutation sweep silently.
+`TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers` closes that gap for
+`CreateIssue`, whose in-memory-only critical section races a `SeedPR` merge's
+release window the same way `SeedIssue`'s does. `CreatePR` is exercised
+concurrently in the same test (proving it does not corrupt state under load)
+but is not independently pinned by its own mutation: its own critical section
+is gated behind the same per-repo `gitMu` a `SeedPR` merge holds for the
+entire exploitable window, and structurally always loses the race to
+`SeedPR`'s reserve-and-publish step, which requests `mu` the instant it
+releases `gitMu` with no intervening work — manual testing against a
+deliberately reverted lock, scaled up to 40 hammer goroutines and 30
+concurrent merges, produced zero catches. Registering a mutation that cannot
+reliably turn red would add flakiness to the sweep rather than real coverage;
+`CreatePR`'s correctness instead rests on code symmetry with `CreateIssue`
+and `SeedIssue`, which share the identical "look up the repo, then
+`r.numberMu.Lock()` before touching `nextNumber`" shape.
+
+**Risk:** low. `TestSeedPRMergedTruePerformsRealMerge` pins the merge commit
+and the auto-close together; `TestSeedPRMergedTrueRefusesConflict` pins the
+refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` and
+`TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber` pin that a refused
+explicit-number merge and a validation-refused auto-assigned seed both leave
+`nextNumber` untouched; `TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers`
+pins that a concurrent auto-assigning `SeedIssue` and `SeedPR{Merged: true}`
+never land on the same number;
+`TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers` pins the same
+invariant for `CreateIssue` and `CreatePR`. Fixed in #1498 — this was
+previously the one seeding shape whose *consequences* went unmodelled (medium
+risk), which made a merge-train scenario's "this member already landed" seed
+assert against unmerged git history and open issues that `assembleTrialBranch`
+(pure real git) would then faithfully build on top of, passing for the wrong
+reason.
 
 ### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
 
@@ -1060,6 +1202,30 @@ the backstop.
 attacker-controlled input, so this is a sandbox-hygiene guarantee — everything
 this package creates stays inside the `baseDir` you gave it — rather than a
 security boundary. Do not treat `simgh` as safe against hostile input.
+
+### `withWorktree` prunes on every exit path, including a failed `add` — **Modelled**
+
+`git worktree add --detach` can register its administrative entry under
+`<bare>/worktrees/<name>` and *then* fail — disk pressure, a stale lock from a
+killed prior run. Every ordinary exit path already ran an unconditional
+`worktree prune` in the deferred cleanup for exactly this reason (the worktree
+*removal* can legitimately fail if `fn` left the tree conflicted, and a stale
+administrative entry left behind would trip a later operation on the same bare
+repo); the failed-`add` path was the one exception, removing only the physical
+temp dir and returning early before that defer was even registered. A stale
+entry surviving there is plausible cross-test contamination, and hardest to
+diagnose in exactly the fault-injection scenarios #1451 exists to run.
+
+**Decision:** close it, not merely document it — this is now the same
+unconditional prune every other exit path already gets, plus a genuine
+`os.RemoveAll` error is now wrapped into the returned error instead of
+discarded. `TestWithWorktreePrunesAfterFailedAdd` pins it, reproducing
+"registered, then failed" deterministically with a `post-checkout` hook that
+exits non-zero after the checkout itself has already succeeded (rather than
+relying on genuine disk pressure, which non-vacuity mutation testing cannot
+provoke on demand).
+
+**Risk:** low. Fixed in #1498.
 
 ### `ownerType` — **Simplified**
 
