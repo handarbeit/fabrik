@@ -50,6 +50,15 @@ type Daemon struct {
 
 	// FabrikDir is the directory containing .pruefer/pruefer.lock. Defaults
 	// to "." (cwd) when empty.
+	//
+	// For the dev-build self-upgrade path (checkAndUpgrade → devBuildDir in
+	// upgrade.go) to work, FabrikDir must also be the root of the Fabrik
+	// source checkout — devBuildDir resolves <FabrikDir>/cmd/pruefer as the
+	// package to rebuild. This is not enforced: Execute() never sets this
+	// field explicitly, relying on the "" → cwd default, so it's on the
+	// operator to run Pruefer with its working directory at the checkout
+	// root for dev-mode auto-upgrade to work. A mismatch fails closed —
+	// selfupgrade.IsSourceCheckout simply returns false — rather than erroring.
 	FabrikDir string
 
 	// Emit, when non-nil, receives TUI observability events for poll cycles,
@@ -202,7 +211,18 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 		// requirement — it exists to bound git-fetch/GitHub-Releases-API
 		// chatter (Pruefer's own poll interval defaults to 120s, which would
 		// otherwise mean checking upstream roughly every 2 minutes).
-		if d.Config.AutoUpgrade && time.Since(lastUpgradeCheck) >= upgradeCheckInterval {
+		//
+		// ctx.Err() == nil guards against racing a shutdown signal: neither
+		// selfupgrade.CheckAndRebuildDev nor PerformReleaseUpgrade take a
+		// context, and a successful upgrade ends in syscall.Exec — once
+		// started, nothing can abort it. Without this guard, a SIGINT/SIGTERM
+		// arriving while d.poll(ctx) is still finishing could be immediately
+		// followed by a full git-fetch/build/re-exec or download/replace/
+		// re-exec cycle instead of the loop reaching the <-ctx.Done() case
+		// below, silently discarding the shutdown request. Mirrors
+		// engine/poll.go's equivalent guard on its own checkAndUpgrade call
+		// sites.
+		if d.Config.AutoUpgrade && ctx.Err() == nil && time.Since(lastUpgradeCheck) >= upgradeCheckInterval {
 			lastUpgradeCheck = time.Now()
 			d.checkAndUpgrade()
 		}

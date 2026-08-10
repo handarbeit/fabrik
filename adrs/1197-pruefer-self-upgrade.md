@@ -42,7 +42,7 @@ The 30-minute throttle (`upgradeCheckInterval`, tracked via a local `time.Time` 
 
 ### 6. Darwin codesign requires no new call site
 
-`resignDarwinBinary` (`internal/selfupgrade/release.go`) already runs unconditionally inside `PerformReleaseUpgrade` itself, generic since ADR-1196. Wiring Pruefer to `PerformReleaseUpgrade` automatically exercises it on darwin/arm64 — confirmed by reading the call graph; no separate call site or Pruefer-specific wiring was needed.
+`resignDarwinBinary` (`internal/selfupgrade/release.go`) already runs unconditionally inside `PerformReleaseUpgrade` itself, generic since ADR-1196. Wiring Pruefer to `PerformReleaseUpgrade` automatically exercises it on darwin/arm64 — confirmed by reading the call graph; no separate call site or Pruefer-specific wiring was needed. The dev-rebuild path (`CheckAndRebuildDev`) never calls `resignDarwinBinary` — by design: it builds the binary locally with `go build`, which never hits the AMFI trust-cache issue that ad-hoc resigning a *downloaded* binary is there to work around.
 
 ### 7. Release cadence: one shared tag ships both `fabrik` and `pruefer`
 

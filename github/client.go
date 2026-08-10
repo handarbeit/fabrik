@@ -178,7 +178,11 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token())
+	// See doWithAccept in rest.go for why an empty token omits the header
+	// rather than sending a blank bearer credential.
+	if token := c.Token(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
