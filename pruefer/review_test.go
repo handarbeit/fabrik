@@ -378,6 +378,15 @@ func TestReviewPR_ForceReview_BypassesAlreadyReviewed(t *testing.T) {
 	}
 }
 
+// TestReviewPR_DiffTooLarge_Skipped covers the pathological-exhaustion case:
+// "x diff content" has no "diff --git" header at all, so splitDiffFiles
+// puts every byte into the unattributed preamble — nothing to exclude,
+// nothing to trim away. Per trimToFit's contract, an oversized preamble can
+// never be trimmed to fit, so this still hits the terminal SkipDiffTooLarge
+// disposition even after the R1-R4 gate reorder/widening — see
+// TestReviewPR_HugeExcludedFile_RemainderReviewed and
+// TestReviewPR_SizeOnlyTrim_NoExcludedPaths_ReviewsSurvivors below for the
+// realistic multi-file cases those changes actually widen.
 func TestReviewPR_DiffTooLarge_Skipped(t *testing.T) {
 	client := newFakeReviewer()
 	client.diff = "x diff content"
@@ -393,6 +402,9 @@ func TestReviewPR_DiffTooLarge_Skipped(t *testing.T) {
 	}
 	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
 		t.Error("oversized diff must skip before cloning or invoking claude")
+	}
+	if client.addCommentCount() != 1 {
+		t.Errorf("addCommentCount = %d, want 1 (a genuine too-large skip must post the notice, R5)", client.addCommentCount())
 	}
 }
 
@@ -838,5 +850,490 @@ func TestReviewPR_UnanchorableFinding_NeverPassedToSubmit(t *testing.T) {
 	}
 	if !strings.Contains(call.body, "line does not exist in this diff") {
 		t.Errorf("body = %q, want the unanchorable finding demoted into it", call.body)
+	}
+}
+
+// --- #1462: exclude-before-measure, per-file exclusion, trim-to-fit ---
+
+// hugeExcludedFileDiff builds a two-file diff: one enormous file
+// (data/corpus.jsonl, the fantasy#1640 shape) and one small, genuinely
+// reviewable file (pkg/code.go). The huge file alone pushes the raw total
+// well past any of this file's test max_diff_bytes values; the small file
+// alone is comfortably under all of them.
+func hugeExcludedFileDiff() string {
+	huge := strings.Repeat("x", 5000)
+	return "diff --git a/data/corpus.jsonl b/data/corpus.jsonl\n" +
+		"--- a/data/corpus.jsonl\n" +
+		"+++ b/data/corpus.jsonl\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+" + huge + "\n" +
+		"diff --git a/pkg/code.go b/pkg/code.go\n" +
+		"--- a/pkg/code.go\n" +
+		"+++ b/pkg/code.go\n" +
+		"@@ -1,2 +1,3 @@\n" +
+		" line1\n" +
+		" line2\n" +
+		"+line3\n"
+}
+
+// threeFileDiffOneVendored builds a three-file diff: one excludable vendor
+// file and two ordinary source files, for proving R2's partial (not
+// all-or-nothing) exclusion.
+func threeFileDiffOneVendored() string {
+	return "diff --git a/vendor/lib.go b/vendor/lib.go\n" +
+		"--- a/vendor/lib.go\n" +
+		"+++ b/vendor/lib.go\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n" +
+		"diff --git a/pkg/a.go b/pkg/a.go\n" +
+		"--- a/pkg/a.go\n" +
+		"+++ b/pkg/a.go\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n" +
+		"diff --git a/pkg/b.go b/pkg/b.go\n" +
+		"--- a/pkg/b.go\n" +
+		"+++ b/pkg/b.go\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n"
+}
+
+// twoDocsFileDiff builds a two-file diff where both files match a single
+// exclusion glob, for proving R3's terminal all-excluded disposition still
+// applies once exclusion is per-file rather than all-or-nothing.
+func twoDocsFileDiff() string {
+	return "diff --git a/docs/a.md b/docs/a.md\n" +
+		"--- a/docs/a.md\n" +
+		"+++ b/docs/a.md\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n" +
+		"diff --git a/docs/b.md b/docs/b.md\n" +
+		"--- a/docs/b.md\n" +
+		"+++ b/docs/b.md\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n"
+}
+
+// threeFileExcludeSmallTrimHuge builds a three-file diff where one small
+// file is excluded by glob and a separate huge file survives exclusion but
+// must still be trimmed to fit — proving exclusion and trimming can both
+// apply to the same diff, at different files, in the same pass.
+func threeFileExcludeSmallTrimHuge() string {
+	huge := strings.Repeat("x", 5000)
+	return "diff --git a/vendor/small.go b/vendor/small.go\n" +
+		"--- a/vendor/small.go\n" +
+		"+++ b/vendor/small.go\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n" +
+		"diff --git a/huge.jsonl b/huge.jsonl\n" +
+		"--- a/huge.jsonl\n" +
+		"+++ b/huge.jsonl\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+" + huge + "\n" +
+		"diff --git a/pkg/code.go b/pkg/code.go\n" +
+		"--- a/pkg/code.go\n" +
+		"+++ b/pkg/code.go\n" +
+		"@@ -1,2 +1,3 @@\n" +
+		" line1\n" +
+		" line2\n" +
+		"+line3\n"
+}
+
+// hugeNoExclusionDiff mirrors hugeExcludedFileDiff's shape but with an
+// ordinary (not glob-excludable-by-convention) huge file, for proving
+// trim-to-fit engages on size alone with no excluded_paths configured.
+func hugeNoExclusionDiff() string {
+	huge := strings.Repeat("x", 5000)
+	return "diff --git a/huge.jsonl b/huge.jsonl\n" +
+		"--- a/huge.jsonl\n" +
+		"+++ b/huge.jsonl\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+" + huge + "\n" +
+		"diff --git a/pkg/code.go b/pkg/code.go\n" +
+		"--- a/pkg/code.go\n" +
+		"+++ b/pkg/code.go\n" +
+		"@@ -1,2 +1,3 @@\n" +
+		" line1\n" +
+		" line2\n" +
+		"+line3\n"
+}
+
+// TestReviewPR_HugeExcludedFile_RemainderReviewed is the direct regression
+// test for the fantasy#1640 scenario the issue is filed against (AC1): a
+// diff whose raw total exceeds max_diff_bytes purely because of one
+// enormous excluded file must be reviewed on its non-excluded remainder,
+// not skipped outright. Before the #1462 gate reorder, the size gate ran
+// before exclusion and this PR would have hit SkipDiffTooLarge regardless
+// of excluded_paths — verified by temporarily reverting review.go to the
+// pre-#1462 gate order and re-running this test, which fails as expected
+// (outcome.Skipped=true, Reason=SkipDiffTooLarge) confirming AC8's
+// non-vacuousness requirement.
+func TestReviewPR_HugeExcludedFile_RemainderReviewed(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = hugeExcludedFileDiff()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed the small file; the corpus file was excluded."}, nil
+	}}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"data/corpus.jsonl"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true — the excluded huge file must not suppress review of the rest (AC1)", outcome)
+	}
+	if outcome.Err != nil {
+		t.Fatalf("outcome.Err = %v, want nil", outcome.Err)
+	}
+	if cloneCalls.Load() != 1 {
+		t.Errorf("cloneCalls = %d, want 1", cloneCalls.Load())
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if len(calls[0].OmittedExcludedPaths) != 1 || calls[0].OmittedExcludedPaths[0] != "data/corpus.jsonl" {
+		t.Errorf("OmittedExcludedPaths = %+v, want [data/corpus.jsonl]", calls[0].OmittedExcludedPaths)
+	}
+	if len(calls[0].OmittedTrimmedPaths) != 0 {
+		t.Errorf("OmittedTrimmedPaths = %+v, want none — exclusion alone brought the diff under budget", calls[0].OmittedTrimmedPaths)
+	}
+}
+
+// TestReviewPR_PartialExclusion_ReviewsSurvivors pins AC2: a diff with one
+// excluded and two non-excluded files yields a review covering exactly the
+// two — no max_diff_bytes involvement at all, isolating R2 from R4.
+func TestReviewPR_PartialExclusion_ReviewsSurvivors(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = threeFileDiffOneVendored()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed a.go and b.go."}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"vendor/**"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (AC2)", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if len(calls[0].OmittedExcludedPaths) != 1 || calls[0].OmittedExcludedPaths[0] != "vendor/lib.go" {
+		t.Errorf("OmittedExcludedPaths = %+v, want [vendor/lib.go]", calls[0].OmittedExcludedPaths)
+	}
+	if len(calls[0].OmittedTrimmedPaths) != 0 {
+		t.Errorf("OmittedTrimmedPaths = %+v, want none (no size gate in play)", calls[0].OmittedTrimmedPaths)
+	}
+}
+
+// TestReviewPR_AllPathsExcluded_MultiFile_StillSkips pins AC3: a
+// multi-file diff where every path matches an exclusion glob still returns
+// SkipExcludedPath, asserted on the outcome — not inferred from logs — even
+// though exclusion is now per-file rather than all-or-nothing.
+func TestReviewPR_AllPathsExcluded_MultiFile_StillSkips(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = twoDocsFileDiff()
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"docs/*"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
+		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath (AC3)", outcome)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("all-excluded multi-file diff must skip before cloning or invoking claude")
+	}
+}
+
+// ambiguousPathSingleFileDiff builds a single-file diff whose path itself
+// contains the literal substring " b/" (a directory named "weird b"
+// containing "file.go") — the shape that makes the "diff --git a/X b/Y"
+// header's greedy capture ambiguous. Used to pin the bot-review fix that
+// unified the terminal all-excluded check's path resolution with the
+// per-file filter's, so the two can no longer disagree about which file an
+// exclusion glob matches.
+func ambiguousPathSingleFileDiff(path string) string {
+	return "diff --git a/" + path + " b/" + path + "\n" +
+		"--- a/" + path + "\n" +
+		"+++ b/" + path + "\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n"
+}
+
+// TestReviewPR_AmbiguousPath_TerminalCheckAgreesWithPerFileFilter pins the
+// bot-review finding: ParseChangedPaths (previously used for the terminal
+// all-excluded check) always takes the "diff --git a/X b/Y" header's
+// greedy, ambiguous b/-side capture, while resolveFilePath (used by the
+// per-file filter) prefers the unambiguous "+++ b/<path>" content line. For
+// an ordinary file whose path contains the literal substring " b/", the two
+// resolvers used to disagree: ParseChangedPaths would extract only the
+// truncated suffix after the last " b/" (here, "file.go"), which does not
+// match an exclusion glob written against the real path ("weird b/*"), so
+// the terminal check would wrongly let the PR proceed — only for the
+// per-file filter (using the correct "weird b/file.go" resolution) to then
+// exclude the diff's only file anyway, leaving nothing to review. That is
+// exactly the "review that presents as complete but reviewed nothing"
+// failure mode R4 warns against, reached via a different door than R4's own
+// trim-to-fit exhaustion path. After the fix (both checks resolve paths
+// from the same splitDiffFiles/resolveFilePath pass), the terminal check
+// catches this case directly and returns SkipExcludedPath before ever
+// cloning or invoking claude — the correct, cheap disposition.
+func TestReviewPR_AmbiguousPath_TerminalCheckAgreesWithPerFileFilter(t *testing.T) {
+	const path = "weird b/file.go"
+	client := newFakeReviewer()
+	client.diff = ambiguousPathSingleFileDiff(path)
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"weird b/*"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
+		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath — the terminal check must resolve %q the same way the per-file filter does", outcome, path)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("an all-excluded diff (correctly resolved) must skip before cloning or invoking claude — not fall through to a claude call over an empty diff")
+	}
+}
+
+// TestReviewPR_SizeOnlyTrim_NoExcludedPaths_ReviewsSurvivors proves
+// trim-to-fit engages on size alone: no excluded_paths configured, one huge
+// file forces the diff over max_diff_bytes, and trimming it away lets the
+// remainder be reviewed rather than skipping the whole PR.
+func TestReviewPR_SizeOnlyTrim_NoExcludedPaths_ReviewsSurvivors(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = hugeNoExclusionDiff()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed the small file only."}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 1000} // no ExcludedPaths at all
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (size-only trim, no excluded_paths configured)", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls[0].OmittedExcludedPaths) != 0 {
+		t.Errorf("OmittedExcludedPaths = %+v, want none (no excluded_paths configured)", calls[0].OmittedExcludedPaths)
+	}
+	if len(calls[0].OmittedTrimmedPaths) != 1 || calls[0].OmittedTrimmedPaths[0] != "huge.jsonl" {
+		t.Errorf("OmittedTrimmedPaths = %+v, want [huge.jsonl]", calls[0].OmittedTrimmedPaths)
+	}
+}
+
+// TestReviewPR_OmittedPaths_DisclosedInPromptAndNotice pins AC4: when files
+// are dropped, both the prompt the model receives and the posted notice
+// name them.
+func TestReviewPR_OmittedPaths_DisclosedInPromptAndNotice(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = hugeExcludedFileDiff()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed."}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"data/corpus.jsonl"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	prompt := buildReviewPrompt(calls[0])
+	if !strings.Contains(prompt, "data/corpus.jsonl") {
+		t.Errorf("prompt does not name the omitted file, prompt = %s", prompt)
+	}
+	if client.addCommentCount() != 1 {
+		t.Fatalf("addCommentCount = %d, want 1 (a genuinely oversized diff must post the too-large notice, R5)", client.addCommentCount())
+	}
+	if !strings.Contains(client.addedBodies[0], "data/corpus.jsonl") {
+		t.Errorf("notice body does not name the omitted file: %s", client.addedBodies[0])
+	}
+}
+
+// TestReviewPR_CrossPathNoticeIdempotency pins AC5: at most one notice
+// exists per head SHA across both the diff-unavailable (#1427) and
+// diff-too-large-after-fetch (#1462) paths. A PR that hits the
+// diff-unavailable path on one poll and the diff-too-large-after-fetch path
+// on a later poll (still the same head SHA) must never accumulate two
+// notices.
+func TestReviewPR_CrossPathNoticeIdempotency(t *testing.T) {
+	client := newFakeReviewer()
+	client.diffErr = fmt.Errorf("406 too_large: %w", gh.ErrDiffTooLarge)
+	client.filesErr = fmt.Errorf("files API also unavailable")
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome1 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	if !outcome1.Skipped || outcome1.Reason != SkipDiffTooLarge {
+		t.Fatalf("first outcome = %+v, want Skipped SkipDiffTooLarge (diff-unavailable path)", outcome1)
+	}
+	if client.addCommentCount() != 1 {
+		t.Fatalf("after first call, addCommentCount = %d, want 1", client.addCommentCount())
+	}
+
+	// Second poll: GitHub now renders the diff (still oversized, nothing
+	// left after the pathological-exhaustion path), same head SHA — the
+	// diff-too-large-after-fetch path must recognize the diff-unavailable
+	// notice's marker and post nothing further.
+	client.diffErr = nil
+	client.diff = "x diff content that is definitely over the cap for this test"
+	cfg := Config{MaxDiffBytes: 5}
+	outcome2 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	if !outcome2.Skipped || outcome2.Reason != SkipDiffTooLarge {
+		t.Fatalf("second outcome = %+v, want Skipped SkipDiffTooLarge (diff-too-large-after-fetch path)", outcome2)
+	}
+	if client.addCommentCount() != 1 {
+		t.Errorf("after second call, addCommentCount = %d, want still 1 (R5: at most one notice per head SHA across both paths)", client.addCommentCount())
+	}
+}
+
+// TestReviewPR_FindingOnExcludedFile_DemotedNotAnchored pins AC6: a finding
+// Claude reports on an excluded file's line can never anchor as an inline
+// comment, since review.go rebinds diff to the filtered subset before
+// validRightAnchors runs — it must demote into the review body like any
+// other unanchorable finding, not fail the submission.
+func TestReviewPR_FindingOnExcludedFile_DemotedNotAnchored(t *testing.T) {
+	client := newFakeReviewer()
+	client.diff = threeFileDiffOneVendored()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Findings below.\n\n```json\n" +
+			`[{"path": "vendor/lib.go", "line": 1, "body": "should not be anchored, it was excluded"}]` +
+			"\n```\n"}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"vendor/**"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
+	}
+	call := client.submitCalls[0]
+	if len(call.comments) != 0 {
+		t.Fatalf("comments = %+v, want none — a finding on an excluded file must never anchor inline (AC6)", call.comments)
+	}
+	if !strings.Contains(call.body, "should not be anchored") {
+		t.Errorf("body = %q, want the finding demoted into it", call.body)
+	}
+}
+
+// TestReviewPR_SizeSkip_LogsSelfDiagnosingMessage pins R7/AC10: a
+// max_diff_bytes skip must report the post-exclusion measured size, an
+// excluded-count-out-of-total, and explicitly name the "no excluded_paths
+// configured" case — not the pre-R7 message, which was byte-identical
+// whether or not exclusion was configured or did anything.
+func TestReviewPR_SizeSkip_LogsSelfDiagnosingMessage(t *testing.T) {
+	resetLogf(t)
+	var lines []string
+	Logf = func(prNumber int, tag, format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+
+	client := newFakeReviewer()
+	client.diff = "x diff content"
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 5}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
+		t.Fatalf("outcome = %+v, want Skipped SkipDiffTooLarge", outcome)
+	}
+
+	var skipLine string
+	for _, l := range lines {
+		if strings.Contains(l, "skipping") && strings.Contains(l, "max_diff_bytes") {
+			skipLine = l
+		}
+	}
+	if skipLine == "" {
+		t.Fatalf("no size-related skip log line found among: %v", lines)
+	}
+	if !strings.Contains(skipLine, "after excluding 0 of 0 files") {
+		t.Errorf("log line %q does not report the excluded-count-out-of-total", skipLine)
+	}
+	if !strings.Contains(skipLine, "no excluded_paths configured") {
+		t.Errorf("log line %q does not explicitly name the zero-excluded-configured case", skipLine)
+	}
+	if !strings.Contains(skipLine, "exceeds max_diff_bytes=5") {
+		t.Errorf("log line %q does not report the configured max_diff_bytes", skipLine)
+	}
+}
+
+// TestReviewPR_TrimSuccess_LogsSelfDiagnosingMessage pins R7/AC10 for the
+// trim-and-review (not skip) case: a successful trim must also report the
+// post-exclusion size and excluded-count-out-of-total, distinguishing a
+// "trimming" log line from a "skipping" one.
+func TestReviewPR_TrimSuccess_LogsSelfDiagnosingMessage(t *testing.T) {
+	resetLogf(t)
+	var lines []string
+	Logf = func(prNumber int, tag, format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+
+	client := newFakeReviewer()
+	client.diff = threeFileExcludeSmallTrimHuge()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Reviewed."}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"vendor/**"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls[0].OmittedExcludedPaths) != 1 || calls[0].OmittedExcludedPaths[0] != "vendor/small.go" {
+		t.Fatalf("OmittedExcludedPaths = %+v, want [vendor/small.go]", calls[0].OmittedExcludedPaths)
+	}
+	if len(calls[0].OmittedTrimmedPaths) != 1 || calls[0].OmittedTrimmedPaths[0] != "huge.jsonl" {
+		t.Fatalf("OmittedTrimmedPaths = %+v, want [huge.jsonl]", calls[0].OmittedTrimmedPaths)
+	}
+
+	var trimLine string
+	for _, l := range lines {
+		if strings.Contains(l, "trimming") {
+			trimLine = l
+		}
+	}
+	if trimLine == "" {
+		t.Fatalf("no trimming log line found among: %v", lines)
+	}
+	if !strings.Contains(trimLine, "after excluding 1 of 3 files") {
+		t.Errorf("log line %q does not report the excluded-count-out-of-total", trimLine)
+	}
+	if !strings.Contains(trimLine, "excluded_paths=[vendor/**]") {
+		t.Errorf("log line %q does not name the configured excluded_paths", trimLine)
 	}
 }

@@ -45,7 +45,7 @@ type Config struct {
 	// convention: absent/zero = uncapped.
 	MaxWallTime     time.Duration
 	ExcludedAuthors []string
-	ExcludedPaths   []string // glob patterns; a PR is skipped only if ALL touched paths match
+	ExcludedPaths   []string // glob patterns, applied per file before max_diff_bytes is measured (#1462); a PR is skipped whole only if ALL touched paths match
 	ExcludedLabels  []string // a PR is skipped if ANY label matches
 
 	// RequestChangesThreshold gates Pruefer's severity-based REQUEST_CHANGES
@@ -160,7 +160,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.maxDiffBytes, "max-diff-bytes", 0, "Skip PRs whose diff exceeds this many bytes")
 	fs.IntVar(&fv.maxWallTimeSec, "max-wall-time", 0, "Wall-clock cap in seconds for a single claude review invocation (0 = no cap)")
 	fs.StringVar(&fv.excludedAuthors, "excluded-authors", "", "Comma-separated PR authors to skip")
-	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs to skip (all touched paths must match)")
+	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs, filtered per file before max_diff_bytes is measured; a PR is skipped whole only if all touched paths match")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")

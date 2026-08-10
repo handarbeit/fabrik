@@ -52,9 +52,9 @@ type ReviewOutcome struct {
 }
 
 // ReviewPR runs the full per-PR pipeline: on-demand-comment detection,
-// eligibility check, diff-size guard, ephemeral clone, Claude invocation,
-// and — on success — formal review submission pinned to the PR's current
-// head SHA.
+// eligibility check, path exclusion, diff-size guard, ephemeral clone,
+// Claude invocation, and — on success — formal review submission pinned to
+// the PR's current head SHA.
 //
 // On any failure it posts nothing (per the issue's explicit "on invocation
 // failure, post nothing rather than a stub" requirement) and returns a
@@ -75,9 +75,30 @@ type ReviewOutcome struct {
 // anchoring naturally demotes every finding into the review body — see
 // adrs/1427-pruefer-diff-too-large-degrade-not-block.md). Only when the
 // fallback also fails does this return the terminal SkipDiffTooLarge
-// disposition (R2), after posting a single idempotent PR notice (R4) so a
-// human can see why the PR was never reviewed rather than a hot retry every
-// poll with nothing to show for it.
+// disposition, after posting a single idempotent PR notice so a human can
+// see why the PR was never reviewed rather than a hot retry every poll with
+// nothing to show for it. This fallback branch has no diff text at all, so
+// none of the per-file filtering/trimming below ever applies to it — its
+// own all-or-nothing path-exclusion check is unchanged from before #1462.
+//
+// When a diff *is* obtained, path exclusion now runs before the size gate
+// (R1): excluded_paths is applied per file to the parsed diff blocks
+// (splitDiffFiles/filterExcludedPaths) before max_diff_bytes is ever
+// compared, so an excluded file can never contribute to a size verdict.
+// "every changed path is excluded" is still checked first as its own
+// terminal disposition (R3, allPathsExcluded, unchanged). If the
+// post-exclusion diff still exceeds max_diff_bytes, trimToFit drops
+// additional files (largest first) until it fits (R4) rather than skipping
+// outright; only when nothing usable survives (R4's "review of a partial
+// diff that presents as a review of the whole diff is worse than a skip")
+// does this fall through to SkipDiffTooLarge. Either way, whatever was
+// dropped — by exclusion or by trimming — is disclosed to the reviewing
+// model (ReviewRequest.OmittedExcludedPaths/OmittedTrimmedPaths, see
+// claude.go's renderOmittedPaths) and, when the raw diff was actually
+// oversized, named in an idempotent PR notice (postDiffTooLargeAfterFetchNoticeOnce,
+// R5). diff is rebound to the filtered/trimmed text before validRightAnchors
+// is called below, so R6 (a finding can never anchor to an omitted file)
+// holds with no separate anchor-scrubbing logic.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
 	forceReview, err := PendingForceReview(client, owner, repo, pr.Number)
 	if err != nil {
@@ -105,6 +126,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
 	var changedPaths []string
+	var omittedExcludedPaths, omittedTrimmedPaths []string
 	if err != nil {
 		if !errors.Is(err, gh.ErrDiffTooLarge) {
 			return ReviewOutcome{Err: fmt.Errorf("fetching diff: %w", err)}
@@ -124,18 +146,88 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		// max_diff_bytes anyway. diff stays "" for the rest of this call;
 		// validRightAnchors("") returns no anchors, so every finding
 		// demotes cleanly into the review body instead of risking an
-		// invalid inline-comment anchor.
+		// invalid inline-comment anchor. This fallback path list has no
+		// per-file split to filter — excluded_paths' existing all-or-nothing
+		// check is the only exclusion applied here (see doc comment above).
 		changedPaths = files
-	} else {
-		if cfg.MaxDiffBytes > 0 && int64(len(diff)) > cfg.MaxDiffBytes {
-			logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes, exceeds max_diff_bytes=%d\n", owner, repo, pr.Number, len(diff), cfg.MaxDiffBytes)
-			return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
+		if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(changedPaths, cfg.ExcludedPaths) {
+			logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
+			return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
 		}
-		changedPaths = ParseChangedPaths(diff)
-	}
-	if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(changedPaths, cfg.ExcludedPaths) {
-		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
-		return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
+	} else {
+		// Both the terminal all-excluded check below and the per-file
+		// filter (R2) must resolve each block's path identically — splitting
+		// once here and deriving changedPaths from the same blocks (rather
+		// than a second, independent ParseChangedPaths(diff) call) is what
+		// guarantees that. ParseChangedPaths and resolveFilePath used to
+		// disagree on an ordinary file whose path contains the literal
+		// substring " b/": ParseChangedPaths always takes the "diff --git
+		// a/X b/Y" header's greedy, ambiguous b/-side capture, while
+		// resolveFilePath prefers the unambiguous "+++ b/<path>" content
+		// line and only falls back to that same ambiguous header capture
+		// when no such line exists. Two independent resolvers reaching
+		// different verdicts for the same file would let the terminal
+		// all-excluded gate and the per-file filter disagree about whether
+		// that file was excluded at all — resolving once, here, closes that
+		// divergence structurally rather than requiring the two call sites
+		// to be kept in sync by hand.
+		blocks, preamble := splitDiffFiles(diff)
+		changedPaths = pathsOf(blocks)
+
+		// R1/R3: path exclusion is checked before the size gate. The
+		// terminal "every changed path is excluded" disposition is
+		// unchanged — just reordered ahead of max_diff_bytes so an excluded
+		// file can never contribute to a size verdict.
+		if len(cfg.ExcludedPaths) > 0 && allPathsExcluded(changedPaths, cfg.ExcludedPaths) {
+			logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipExcludedPath)
+			return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
+		}
+
+		rawBytes := int64(len(diff))
+		rawOversized := cfg.MaxDiffBytes > 0 && rawBytes > cfg.MaxDiffBytes
+
+		// R2: per-file exclusion, applied to the parsed diff blocks —
+		// widens the all-or-nothing terminal check above into a partial
+		// filter: a diff with some (but not all) excluded files proceeds on
+		// the survivors instead of being skipped whole.
+		kept, excludedBlocks := filterExcludedPaths(blocks, cfg.ExcludedPaths)
+		measuredBytes := blocksLen(preamble, kept)
+
+		var trimmedBlocks []diffFileBlock
+		if cfg.MaxDiffBytes > 0 && measuredBytes > cfg.MaxDiffBytes {
+			preTrimBytes := measuredBytes
+			var fits bool
+			kept, trimmedBlocks, fits = trimToFit(kept, int64(len(preamble)), cfg.MaxDiffBytes)
+			if !fits {
+				// R4: nothing usable survived exclusion+trimming — a
+				// genuine skip, not a partial review that presents as
+				// complete.
+				logf(pr.Number, "select", "skipping %s/%s#%d: diff is %d bytes after excluding %d of %d files (%s), exceeds max_diff_bytes=%d\n",
+					owner, repo, pr.Number, preTrimBytes, len(excludedBlocks), len(blocks), excludedPathsNote(cfg.ExcludedPaths), cfg.MaxDiffBytes)
+				if noticeErr := postDiffTooLargeAfterFetchNoticeOnce(client, owner, repo, pr.Number, pr.HeadSHA, rawBytes, cfg.MaxDiffBytes, pathsOf(excludedBlocks), pathsOf(trimmedBlocks), false); noticeErr != nil {
+					logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, noticeErr)
+				}
+				return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
+			}
+			logf(pr.Number, "select", "trimming %s/%s#%d: diff is %d bytes after excluding %d of %d files (%s), exceeds max_diff_bytes=%d — dropped %d additional file(s) to fit\n",
+				owner, repo, pr.Number, preTrimBytes, len(excludedBlocks), len(blocks), excludedPathsNote(cfg.ExcludedPaths), cfg.MaxDiffBytes, len(trimmedBlocks))
+		}
+
+		// R6: rebind diff to exactly the subset the model is told about
+		// below, so validRightAnchors (called further down) can never
+		// validate an anchor on an omitted file.
+		diff = joinDiff(preamble, kept)
+		omittedExcludedPaths = pathsOf(excludedBlocks)
+		omittedTrimmedPaths = pathsOf(trimmedBlocks)
+
+		// R5: only announce a notice when the raw diff was actually
+		// oversized — a routine vendor/** exclusion on an otherwise-small
+		// PR must not spam a notice on every PR.
+		if rawOversized && (len(omittedExcludedPaths) > 0 || len(omittedTrimmedPaths) > 0) {
+			if noticeErr := postDiffTooLargeAfterFetchNoticeOnce(client, owner, repo, pr.Number, pr.HeadSHA, rawBytes, cfg.MaxDiffBytes, omittedExcludedPaths, omittedTrimmedPaths, true); noticeErr != nil {
+				logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, noticeErr)
+			}
+		}
 	}
 
 	if forceReview {
@@ -166,6 +258,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
 		WorkDir: dir, MaxWallTime: cfg.MaxWallTime, ReviewThreads: threads, ReviewThreadsTruncated: threadsTruncated,
+		OmittedExcludedPaths: omittedExcludedPaths, OmittedTrimmedPaths: omittedTrimmedPaths,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -208,6 +301,19 @@ func logSummaryParseInfo(prNumber int, info SummaryParseInfo) {
 	if info.DiscardedBytes > 0 {
 		logf(prNumber, "warn", "discarded %d byte(s) of preamble before PRUEFER_SUMMARY_BEGIN\n", info.DiscardedBytes)
 	}
+}
+
+// excludedPathsNote renders the R7 parenthetical distinguishing "no
+// excluded_paths configured at all" — the state every operator starts in —
+// from "excluded_paths is configured (but perhaps not matching what you
+// expected)", so a size-related skip/trim log line is self-diagnosing about
+// whether the exclusion lever was even in play, rather than looking
+// byte-identical in both cases as it did before this issue.
+func excludedPathsNote(patterns []string) string {
+	if len(patterns) == 0 {
+		return "no excluded_paths configured"
+	}
+	return fmt.Sprintf("excluded_paths=%v", patterns)
 }
 
 // decideEvent computes the review event to submit, deterministically, from
