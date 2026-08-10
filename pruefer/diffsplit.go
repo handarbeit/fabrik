@@ -39,8 +39,7 @@ func splitDiffFiles(diff string) (blocks []diffFileBlock, preamble string) {
 		if !inFile {
 			return
 		}
-		body := strings.Join(curLines, "\n") + "\n"
-		blocks = append(blocks, diffFileBlock{Path: resolveFilePath(curLines), Raw: body})
+		blocks = append(blocks, diffFileBlock{Path: resolveFilePath(curLines), Raw: strings.Join(curLines, "\n")})
 	}
 
 	for _, line := range lines {
@@ -59,8 +58,32 @@ func splitDiffFiles(diff string) (blocks []diffFileBlock, preamble string) {
 	flush()
 
 	if len(preambleLines) > 0 {
-		preamble = strings.Join(preambleLines, "\n") + "\n"
+		preamble = strings.Join(preambleLines, "\n")
 	}
+
+	// Every segment boundary inside the original diff (preamble-to-first-block,
+	// block-to-next-block) was a real "\n" in the source text and must always
+	// be restored, regardless of whether the diff as a whole ended in one.
+	// Only the very last segment — the last block if any exist, else the
+	// preamble itself — should gain a trailing "\n", and only when the
+	// original diff had one: joinDiff must reconstruct the raw fetched diff
+	// byte-for-byte (blocksLen/measuredBytes and the diff rebound for
+	// validRightAnchors depend on it), so a source diff lacking a trailing
+	// newline must not silently gain a phantom one here.
+	if len(blocks) > 0 {
+		for i := range blocks[:len(blocks)-1] {
+			blocks[i].Raw += "\n"
+		}
+		if preamble != "" {
+			preamble += "\n"
+		}
+		if trailingNewline {
+			blocks[len(blocks)-1].Raw += "\n"
+		}
+	} else if preamble != "" && trailingNewline {
+		preamble += "\n"
+	}
+
 	return blocks, preamble
 }
 

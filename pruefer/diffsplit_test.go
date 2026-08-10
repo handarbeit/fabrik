@@ -39,6 +39,64 @@ index 333..444 100644
 	}
 }
 
+// TestSplitDiffFiles_NoTrailingNewline_SingleBlock pins the bot-review fix:
+// splitDiffFiles/joinDiff must round-trip a diff byte-for-byte even when the
+// source text has no trailing "\n" — the prior implementation unconditionally
+// appended "\n" when flushing the last block, silently growing the diff by
+// one byte and desyncing blocksLen/the anchored diff from what was actually
+// fetched.
+func TestSplitDiffFiles_NoTrailingNewline_SingleBlock(t *testing.T) {
+	diff := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-old\n+new"
+	if strings.HasSuffix(diff, "\n") {
+		t.Fatal("test fixture must not end in a newline")
+	}
+	blocks, preamble := splitDiffFiles(diff)
+	if got := joinDiff(preamble, blocks); got != diff {
+		t.Errorf("joinDiff round-trip = %q, want %q (exact byte match, no phantom trailing newline)", got, diff)
+	}
+	if got := blocksLen(preamble, blocks); got != int64(len(diff)) {
+		t.Errorf("blocksLen = %d, want %d", got, len(diff))
+	}
+}
+
+// TestSplitDiffFiles_NoTrailingNewline_MultiBlock proves the fix holds
+// across a block boundary too: the newline between the first block and the
+// second header must still be restored (it was a real "\n" in the source),
+// while the final block — the one actually missing a trailing newline in
+// the source — must not gain one.
+func TestSplitDiffFiles_NoTrailingNewline_MultiBlock(t *testing.T) {
+	diff := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-old\n+new\n" +
+		"diff --git a/b.go b/b.go\n--- a/b.go\n+++ b/b.go\n@@ -1,1 +1,1 @@\n-old2\n+new2"
+	blocks, preamble := splitDiffFiles(diff)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %+v, want 2 entries", blocks)
+	}
+	if !strings.HasSuffix(blocks[0].Raw, "\n") {
+		t.Errorf("blocks[0].Raw = %q, want a trailing newline — a real line boundary preceded the next header", blocks[0].Raw)
+	}
+	if strings.HasSuffix(blocks[1].Raw, "\n") {
+		t.Errorf("blocks[1].Raw = %q, want no trailing newline — the source diff did not end in one", blocks[1].Raw)
+	}
+	if got := joinDiff(preamble, blocks); got != diff {
+		t.Errorf("joinDiff round-trip = %q, want %q", got, diff)
+	}
+}
+
+// TestSplitDiffFiles_NoTrailingNewline_PreambleOnly covers the no-blocks-at-
+// all case (a headerless/garbage diff) with no trailing newline — the same
+// phantom-byte bug applied here too, since preamble followed the identical
+// unconditional-append pattern.
+func TestSplitDiffFiles_NoTrailingNewline_PreambleOnly(t *testing.T) {
+	diff := "not a diff at all\njust some text"
+	blocks, preamble := splitDiffFiles(diff)
+	if len(blocks) != 0 {
+		t.Fatalf("blocks = %+v, want none", blocks)
+	}
+	if preamble != diff {
+		t.Errorf("preamble = %q, want %q (exact byte match, no phantom trailing newline)", preamble, diff)
+	}
+}
+
 func TestSplitDiffFiles_RenameKeyedByDestinationPath(t *testing.T) {
 	diff := `diff --git a/old_name.go b/new_name.go
 similarity index 100%
