@@ -54,6 +54,37 @@ func TestGraphqlRequest_Success(t *testing.T) {
 	}
 }
 
+// TestGraphqlRequest_EmptyTokenOmitsAuthHeader is the GraphQL-path
+// counterpart to TestRestPost_EmptyTokenOmitsAuthHeader in rest_test.go —
+// graphqlRequest must omit the Authorization header entirely when the token
+// is empty, not send "Bearer " with nothing after it, which GitHub's API
+// treats as invalid credentials rather than as unauthenticated.
+func TestGraphqlRequest_EmptyTokenOmitsAuthHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, present := r.Header["Authorization"]; present {
+			t.Errorf("Authorization header present with value %q, want header entirely absent", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":{"viewer":{"login":"anon"}}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("", srv.URL)
+
+	var result struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+		} `json:"data"`
+	}
+
+	err := c.graphqlRequest("{ viewer { login } }", nil, &result)
+	if err != nil {
+		t.Fatalf("graphqlRequest: %v", err)
+	}
+}
+
 func TestGraphqlRequest_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)

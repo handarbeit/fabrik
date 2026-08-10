@@ -483,3 +483,35 @@ func TestDaemonRun_UpgradeCheckSkippedWhenDisabled(t *testing.T) {
 		t.Errorf("release-check hits = %d, want 0 (AutoUpgrade is false)", got)
 	}
 }
+
+// TestDaemonRun_UpgradeCheckSkippedWhenContextAlreadyCancelled guards the
+// ctx.Err() == nil guard in Run's loop: neither selfupgrade helper takes a
+// context and a successful upgrade ends in syscall.Exec, so once started
+// nothing can abort it. This reproduces the shutdown race the guard exists
+// for — a cancellation that has already landed by the time poll() returns —
+// and asserts the upgrade check is suppressed rather than firing and
+// silently discarding the pending shutdown.
+func TestDaemonRun_UpgradeCheckSkippedWhenContextAlreadyCancelled(t *testing.T) {
+	srv, hits := releaseCheckCounter(t)
+
+	origBase := releaseAPIBaseURL
+	releaseAPIBaseURL = srv.URL
+	t.Cleanup(func() { releaseAPIBaseURL = origBase })
+	setVersion(t, "v0.0.1")
+
+	d := &Daemon{
+		Config:    Config{PollInterval: 15 * time.Millisecond, AutoUpgrade: true},
+		FabrikDir: t.TempDir(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before Run's first poll() even starts
+
+	if err := d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := hits(); got != 0 {
+		t.Errorf("release-check hits = %d, want 0 (ctx was already cancelled before the poll boundary)", got)
+	}
+}

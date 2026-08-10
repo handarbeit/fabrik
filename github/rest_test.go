@@ -33,6 +33,28 @@ func TestRestPost_Success(t *testing.T) {
 	}
 }
 
+// TestRestPost_EmptyTokenOmitsAuthHeader guards the fix for a production 401:
+// doWithAccept must omit the Authorization header entirely when the token is
+// empty ("deliberately unauthenticated", e.g. pruefer's release-check client
+// against the public fabrik repo), rather than sending "Bearer " with nothing
+// after it — GitHub's REST API treats a blank bearer token as invalid
+// credentials, not as equivalent to no Authorization header at all.
+func TestRestPost_EmptyTokenOmitsAuthHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, present := r.Header["Authorization"]; present {
+			t.Errorf("Authorization header present with value %q, want header entirely absent", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("", srv.URL)
+	err := c.restPost(srv.URL+"/test", map[string]string{"key": "value"})
+	if err != nil {
+		t.Fatalf("restPost: %v", err)
+	}
+}
+
 func TestRestPost_4xxError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(422)
