@@ -456,7 +456,7 @@ mutate "a non-canonical issue state is stored verbatim" \
 
 mutate "a non-canonical PR state is stored verbatim" \
   'TestSeedRefusesNonCanonicalState' \
-  'seed.go::s{s\.fail\("simgh: PR state %q is not valid; use \\"open\\" or \\"closed\\"", state\)\n\t\treturn s}{state = "open"}'
+  'seed.go::s{s\.fail\("simgh: PR state %q is not valid; use \\"open\\" or \\"closed\\"", state\)\n\t\ts\.mu\.Unlock\(\)\n\t\treturn s}{state = "open"}'
 
 mutate "a PR may have head equal to base (runtime)" \
   'TestPRHeadEqualBaseIsRefused' \
