@@ -407,6 +407,72 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	}
 }
 
+// TestDaemonRun_PreAcquiredLockNotReacquiredOrReleased covers the hand-off
+// execute.go relies on: it acquires the lock itself (mirroring Execute's
+// call to acquireLock before githubauth.Reconcile), hands it to Daemon via
+// preAcquiredLock, and confirms Run neither tries to acquire its own lock
+// (which would fail — flock is per-open-file-description, so a second
+// os.OpenFile+Flock from the same process on the same path blocks/fails
+// exactly as it would from a second process) nor releases the caller's
+// lock when it returns (releasing it is the caller's responsibility, since
+// the caller may need the lock to stay held past Run's own lifetime — e.g.
+// Execute's defer runs after Run returns). Without this, a Daemon built the
+// way Execute builds it (preAcquiredLock set) could either fail to start
+// (if Run ignored the field) or leave the lock unexpectedly released out
+// from under a caller still relying on it.
+func TestDaemonRun_PreAcquiredLockNotReacquiredOrReleased(t *testing.T) {
+	dir := t.TempDir()
+	lockFile, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+	defer func() {
+		if lockFile != nil {
+			releaseLock(lockFile)
+		}
+	}()
+
+	client := newFakeLister()
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	d := &Daemon{
+		Clients:         map[string]GitHubLister{"owner": client},
+		Claude:          claude,
+		Clone:           clone,
+		Config:          Config{PollInterval: time.Hour},
+		FabrikDir:       dir,
+		preAcquiredLock: lockFile,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+
+	// Give Run a moment to reach its first poll (proving it didn't fail
+	// trying to reacquire the lock we already hold) before cancelling.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run with a pre-acquired lock returned an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit after context cancellation")
+	}
+
+	// The lock must still be held by us — Run must not have released it.
+	if !lockHeld(t, d.lockPath()) {
+		t.Error("lock was released by Run, but releasing a preAcquiredLock is the caller's responsibility")
+	}
+
+	if err := releaseLock(lockFile); err != nil {
+		t.Fatalf("releaseLock: %v", err)
+	}
+	lockFile = nil // released; skip the deferred double-release
+}
+
 // lockHeld reports whether some other process/goroutine currently holds an
 // exclusive flock on path, by attempting (and immediately releasing) a
 // non-blocking flock of our own.
