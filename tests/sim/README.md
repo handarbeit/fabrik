@@ -85,8 +85,131 @@ the engine and rebuild against exactly the state GitHub would have retained.
 
 The seam this layer targets is `engine.NewWithDeps(cfg, GitHubClient,
 ClaudeInvoker, *WorktreeManager)`, which accepts substituted dependencies.
-Wiring `simgh` into it, along with a `ClaudeInvoker` and a scenario harness, is
-follow-on work — this package currently ships standalone with its own tests.
+`simgh` alone only fills the first of those three — the sections below cover
+the rest: a scripted `ClaudeInvoker` (`simclaude/`) and the scenario harness
+(`tests/sim`, this package's own top-level files) that wires everything
+together and drives it with deterministic poll advancement (#1449).
+
+## Wiring a real Engine against it (`tests/sim`, `simclaude/`)
+
+`simgh` is a faithful GitHub stand-in; the other live dependency
+`engine.NewWithDeps` takes is the Claude worker, and a Claude worker does not
+merely return a string — it runs inside a real worktree, writes files,
+commits, and returns marker-bearing output the engine parses. **`simclaude`**
+(`simclaude/invoker.go`) is a scripted `engine.ClaudeInvoker` that does the
+real thing: `Invoke`/`InvokeForComments` calls dispatch to a `Script`,
+selected by stage name and invocation count, that runs inside the real
+`workDir` it's handed. `simclaude.DefaultScript` — used for any stage a
+scenario doesn't script — writes a small per-stage marker file, commits it
+for real via the `git` binary, and signals completion; `simclaude.ForStage`/
+`ForStageComments` let a scenario override that for the stage(s) it cares
+about. `simclaude/scripts.go` supplies constructors for the failure shapes
+the engine treats specially — `TurnLimitExhausted`, `UsageLimitExit`,
+`APIErrorExit`, `PartialOutputThenKilled`, `CommentReviewCompleted` — each
+returning the exact `(output, completed, usage, err)` contract
+`RealClaudeInvoker` documents for that exit condition, reachable from this
+external test package only because `internal/claudeerr` (below) exports the
+four error types the engine classifies via `errors.As`.
+
+**`Env`/`NewEnv`** (`env.go`) is the harness: it seeds a repo and project in
+`simgh`, wraps it with `simgh.Instrument` (load-bearing for `AdvanceUntil`'s
+mutation-log diagnostics below, not just for scenarios that inject faults),
+reproduces production's git topology by cloning `simgh`'s backing repo as a
+local "origin" — exactly as `ensureBareClone` bare-clones the real GitHub
+remote, just with a local filesystem path standing in for the network URL —
+and boots a real `engine.Engine` via `NewWithDeps` plus the two production
+seams below.
+
+**`RunPoll`/`RunPolls`/`AdvanceUntil`** (`poll.go`) drive the engine
+deterministically: each call advances a shared `Clock` by one poll interval,
+then calls the engine's `PollOnce` seam. `AdvanceUntil(t, env, cond,
+maxPolls)` polls until `cond` holds or `maxPolls` is exhausted, in which case
+it fails with the board state and the `simgh.Instrumented` mutation log
+attached — a failing scenario is diagnosable from CI output alone, no
+re-run needed.
+
+**`FileIssue`/`WaitForProjectStatus`/`WaitForIssueLabel`/`IssueLabels`/
+`WaitForLabelAbsent`** (`assertions.go`) are named after
+[`tests/e2e/harness.go`](../e2e/harness.go)'s vocabulary — see the mapping
+table below for where they diverge.
+
+### Two production seams, both additive
+
+Neither changes any existing call site's behavior; both are documented test
+seams, not new capabilities:
+
+- **`Engine.PollOnce(ctx) error`** (`engine/poll.go`) — a thin delegation to
+  the existing unexported `poll`, added because the only other driver,
+  `Engine.Run()`, loops on a real ticker until its context is cancelled.
+  Looping `Run()` against a tiny `PollSeconds` and cancelling after a while
+  would reintroduce the wall-clock nondeterminism this harness exists to
+  eliminate. `PollOnce` deliberately does not replicate `Run()`'s preamble
+  (the cross-process `.fabrik/fabrik.lock` flock, the `pollLogFile` package
+  global, startup drift warnings) — see its doc comment for why each of
+  those would actively break a parallel test run rather than help one.
+- **`internal/claudeerr`** — the four Claude failure-classification error
+  types (`UsageLimitError`, `TurnLimitError`, `APIErrorExit`,
+  `ResumeFailureError`), moved out of `engine/claude.go` into a leaf package
+  that `engine` and `tests/sim` both import and that imports neither —
+  mirroring `simgh/ghfault`'s precedent. `engine/claude.go` keeps unexported
+  type aliases to the moved types, so every existing construction site and
+  every existing `errors.As` assertion in `engine`'s own tests keeps
+  compiling and behaving unchanged.
+
+Plus one **engine-local clock seam** (`Engine.Clock`/`SetClock`/`now()`,
+`engine/clock.go`), structurally identical to `simgh.Clock` so a scenario can
+share one `tests/sim.Clock` instance across both via `simgh.WithClock` and
+`Engine.SetClock`. Its scope is narrow and specific: most timing gates
+(`FABRIK_REVIEW_WAIT_TIMEOUT`, the CI settle scan, the Done-archive scan) are
+anchored on a `GitHubClient`-read timestamp (`FetchLabelAppliedAt`) that
+`simgh` already controls with no engine change — this seam covers only the
+genuinely in-memory timing `simgh` cannot reach: `itemstate.CooldownAt`
+(dispatch-suppression cooldowns) and the `#1314` label-applied-at
+write-through cache (`recordLabelAppliedAtNow`, discovered while building the
+AC6 review-timeout scenario — see `engine/clock.go`'s doc comment for the
+full story). See `adrs/1449-sim-harness-engine-seams.md` for the complete
+rationale on all three seams.
+
+### What this harness cannot avoid: real wall-clock time
+
+Not everything is clock-controllable. `poll()` dispatches each item's work to
+a background goroutine and returns immediately — part of that goroutine's
+real behavior is genuinely real-time-bound, independent of the injected
+Clock:
+
+- **The multi-instance lock-verify delay** (`engine/item.go`'s
+  `lockVerifyDelay`, a real 2s `time.Sleep`) exists to let a *different
+  Fabrik process* observe a competing lock — there is nothing for a Clock
+  seam to represent here, since it's about wall-clock scheduling across
+  processes, not simulated time.
+- **The stage retry cooldown** (`processItem`'s `time.Since(lastAttempt) <
+  cooldown` check, `cfg.PollSeconds*10` = 10s at this package's default) is
+  stamped via real `time.Now()`, deliberately outside the Clock seam's scope
+  (see `failure_shapes_test.go`'s `retryCooldownPolls`).
+
+`RunPoll` pauses for a small, fixed real duration (`workerYield`, 100ms)
+after every `PollOnce` call so these background goroutines get real wall-clock
+time to progress — see `poll.go`'s doc comment. This is the dominant
+contributor to this package's own runtime; see Runtime below.
+
+## Vocabulary mapping: `tests/e2e` ↔ `tests/sim` (R5)
+
+The goal is that a reader of a live scenario can read a sim scenario without
+relearning. Names and parameter order match [`tests/e2e/harness.go`](../e2e/harness.go)
+wherever the semantics permit; every place they don't is listed here, once,
+rather than re-explained per function.
+
+| `tests/e2e` | `tests/sim` | What differs and why |
+|---|---|---|
+| `FileIssue(t, env, repo, title, body, labels...) int` | `FileIssue(t, env, title, body, status string, labels...) int` | No `repo` param — a sim `Env` manages exactly one repo (`env.OwnerRepo`), where the live harness's `Env` manages two (`RepoAlpha`/`RepoBeta`) and must be told which. Folds in `status` — `simgh.SeedIssue`'s `Status` field places the issue on the board in one seeding call, where live `FileIssue` only creates the issue and needs two more calls (`AddIssueToProject`, `SetIssueStatus`) to place it. |
+| `AddIssueToProject(t, env, repo, issueNumber) string` | *(none)* | Folded into `FileIssue` above — no separate step needed. |
+| `SetIssueStatus(t, env, itemID, columnName)` | *(none)* | Folded into `FileIssue` above. |
+| `WaitForProjectStatus(t, env, repo, issueNumber, columnName, timeout time.Duration)` | `WaitForProjectStatus(t, env, issueNumber, status string, maxPolls int)` | No `repo` param (as above). `timeout time.Duration` → `maxPolls int`: the live harness waits on real GitHub's own clock; the sim harness waits on `AdvanceUntil`'s poll count, driven by the shared `Clock` and `workerYield`, not wall-clock deadlines. |
+| `WaitForIssueLabel(t, env, repo, issueNumber, label, timeout)` | `WaitForIssueLabel(t, env, issueNumber, label, maxPolls int)` | Same two divergences as above. |
+| `WaitForLabelAbsent(t, env, repo, issueNumber, label, timeout)` | `WaitForLabelAbsent(t, env, issueNumber, label, maxPolls int)` | Same. |
+| `IssueLabels(t, env, repo, issueNumber) []string` | `IssueLabels(t, env, issueNumber) []string` | No `repo` param (as above); otherwise identical. |
+| *(none)* | `WaitForIssueClosed(t, env, issueNumber, maxPolls int)` | New — no live-harness equivalent. Added because AC1 requires driving to "a closed issue in the Done column," and every scenario in this package needs to assert that explicitly rather than infer it from a label. |
+| *(none)* | `RunPoll(t, env)` / `RunPolls(t, env, n)` / `AdvanceUntil(t, env, cond, maxPolls)` | New — the live harness has no equivalent because it never drives poll cycles itself; it waits on wall-clock timeouts against a daemon it doesn't control. This is R4's deterministic poll-advancement vocabulary. |
 
 ## Two things make it worth having
 
@@ -125,11 +248,33 @@ Two things close that gap, and neither is replaced by this layer:
 Do not read "the sim scenarios pass" as "this works". Read it as "the state
 machine behaves, assuming the wire layer does what we think".
 
+## Runtime and the `sim` tag decision (R8/AC9)
+
+`go test -race ./tests/sim/` (this package alone — `Env`, `simclaude`, and
+the scenarios in "What this layer is permanently blind to" above) measures at
+**~21–23s** on a development machine, dominated by the real-time costs
+documented above (`lockVerifyDelay`, the stage retry cooldown, `workerYield`
+pacing) rather than by CPU work — every scenario in this package uses
+`t.Parallel()` for exactly this reason, since none of them contend on CPU or
+shared state and the dominant cost is wall-clock waiting, which parallelizes
+almost for free. `tests/sim/simclaude` alone is ~2–3s.
+
+Comfortably under the ~90s line R8 sets, so **no `sim` build tag** — this
+package is part of the default `go test ./...` (and CI's `go test -race
+-timeout 5m ./...`), guarded only by the existing `skipIfNoGit` idiom, exactly
+like `tests/sim/simgh` already is.
+
+`tests/sim/simgh`'s own pre-existing suite (~65–76s, unaffected by this
+issue) runs as a separate package and is not part of this measurement, though
+`go test -race ./tests/sim/...` runs both concurrently — Go parallelizes
+across packages by default — so the wall-clock cost this issue actually adds
+to a full run is closer to "the slower of the two," not their sum.
+
 ## Running it
 
 ```bash
-go test -race ./tests/sim/...          # the suite
-bash tests/sim/simgh/nonvacuity.sh     # the mutation sweep (needs a clean tree)
+go test -race ./tests/sim/...          # the suite (this package + simgh + simclaude)
+bash tests/sim/simgh/nonvacuity.sh     # the simgh mutation sweep (needs a clean tree)
 ```
 
 The tests use the real `git` binary and skip when it is unavailable, following
