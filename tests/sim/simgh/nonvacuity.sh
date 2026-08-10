@@ -301,10 +301,14 @@ mutate_race "SeedRepo's creation lock is removed (concurrent callers race in git
   'sim.go::s|\tseedRepoMu sync\.Mutex|\tseedRepoMu noopSeedMutex|' \
   'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
 
-mutate_race "SeedPR's creation lock is removed (concurrent callers for one explicit number race and clobber)" \
+mutate_race "the numbering lock is removed entirely (concurrent callers for one explicit PR number race and clobber)" \
   'TestConcurrentSeedPRDoesNotClobber' \
-  'sim.go::s|\tseedPRMu sync\.Mutex|\tseedPRMu noopSeedMutex|' \
+  'sim.go::s|\tnumberMu sync\.Mutex|\tnumberMu noopSeedMutex|' \
   'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
+
+mutate_race "SeedIssue does not take the numbering lock (races a concurrent auto-assigning SeedPR merge and clobbers)" \
+  'TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers' \
+  'seed.go::s{\ts\.numberMu\.Lock\(\)\n\tdefer s\.numberMu\.Unlock\(\)\n\n\tr, ok := s\.repoForSeed\(ownerRepo\)\n\tif !ok \{\n\t\treturn s\n\t\}\n\n\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n}{\tr, ok := s.repoForSeed(ownerRepo)\n\tif !ok {\n\t\treturn s\n\t}\n\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n}'
 
 # The two halves of the re-add drift are neutralised separately, because each
 # path had been missing a different one and a single mutation could not show

@@ -256,6 +256,15 @@ func (s *Sim) HeadSHA(ownerRepo, branch string) (string, error) {
 
 // SeedIssue creates an issue, optionally placing it on the default project.
 func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
+	// See numberMu's doc comment (sim.go): this call's own critical section
+	// never releases mu, but SeedPR{Merged: true}'s does, and its
+	// auto-assigned candidate is only a peek at nextNumber until the merge
+	// succeeds — invisible to allocNumber's bookkeeping in the meantime.
+	// Without this lock, this call's own allocNumber() below could claim
+	// that exact peeked number while a concurrent SeedPR is mid-merge.
+	s.numberMu.Lock()
+	defer s.numberMu.Unlock()
+
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
 		return s
@@ -331,13 +340,15 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 // merge, is refused rather than silently recorded — GitHub could never have
 // produced that PR as merged either.
 func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
-	// Serialise SeedPR end to end. See seedPRMu's doc comment (sim.go): the
-	// Merged: true path below releases mu around the git-side merge, opening a
-	// check-then-publish window for an explicitly-seeded number that this lock
-	// closes — mirroring seedRepoMu's role for SeedRepo. Cheap, since seeding
-	// is setup, not a hot path.
-	s.seedPRMu.Lock()
-	defer s.seedPRMu.Unlock()
+	// Serialise the whole numbering decision. See numberMu's doc comment
+	// (sim.go): the Merged: true path below releases mu around the git-side
+	// merge, opening a check-then-publish window — for an explicitly-seeded
+	// number against a concurrent SeedPR call, and for an auto-assigned one
+	// against any numbering path at all (CreateIssue, CreatePR, SeedIssue,
+	// or another SeedPR) — that this lock closes. Cheap, since seeding is
+	// setup, not a hot path.
+	s.numberMu.Lock()
+	defer s.numberMu.Unlock()
 
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
@@ -437,11 +448,14 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	// The git-side merge, when requested, runs with mu released — mirroring
 	// MergePR's own mu -> release -> gitMu -> release sequencing, since the
 	// two locks must never be held at once (see the package doc comment in
-	// git.go). seedPRMu (held for the whole function, see above) is what
-	// keeps this release safe for an explicitly-seeded number: without it, a
-	// concurrent SeedPR call could pass its own numberTaken check and insert
-	// its record while mu is released here. A failed merge means the PR
-	// record below is never inserted — there is no partial state to unwind.
+	// git.go). numberMu (held for the whole function, see above) is what
+	// keeps this release safe: without it, a concurrent SeedPR call could
+	// pass its own numberTaken check and insert its record for the same
+	// explicit number while mu is released here, or any numbering path
+	// (CreateIssue, CreatePR, SeedIssue, another SeedPR) could claim the
+	// auto-assigned number peeked above before this call reserves it. A
+	// failed merge means the PR record below is never inserted — there is no
+	// partial state to unwind.
 	// reserveNumber is deliberately deferred past this point (below, right
 	// before the record is built) rather than called here: reserving num now
 	// and then refusing the merge would burn the number from the shared

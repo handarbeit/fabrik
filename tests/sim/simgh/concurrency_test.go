@@ -450,11 +450,11 @@ func TestConcurrentSeedRepoDoesNotClobber(t *testing.T) {
 // TestConcurrentSeedPRDoesNotClobber drives the window SeedPR{Merged: true}'s
 // git-side merge opens. numberTaken is checked under mu, mu is then released
 // for the merge (mu and gitMu must never be held at once — see git.go), and
-// mu is retaken to reserve the number and publish — so, without seedPRMu,
+// mu is retaken to reserve the number and publish — so, without numberMu,
 // concurrent callers for one explicit number could all clear the check before
 // any of them publishes.
 //
-// Without seedPRMu, the last writer to reach the final locked section
+// Without numberMu, the last writer to reach the final locked section
 // replaces r.prs[num] outright, discarding an earlier caller's PR with no
 // error from either call — silent corruption, not a race the tool would even
 // flag, since both writes are individually mu-guarded. A start barrier makes
@@ -529,5 +529,120 @@ func TestConcurrentSeedPRDoesNotClobber(t *testing.T) {
 	}
 	if !pr.merged {
 		t.Fatalf("surviving PR %d is not marked merged", prNum)
+	}
+}
+
+// TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers drives numberMu against
+// two different numbering APIs racing on one repo, not two calls to the same
+// one. SeedPR{Merged: true} releases mu for its git-side merge while holding
+// only a peeked, not-yet-reserved, auto-assigned candidate — a window
+// SeedIssue's own allocNumber (atomic under mu alone, with no release in the
+// middle) could otherwise slip through, claiming the exact number SeedPR
+// peeked and silently violating the shared issue-and-PR number space this
+// package is built around (numberTaken, node IDs, AddComment's shared REST
+// endpoint).
+//
+// SeedIssue's own critical section is memory-only and finishes in
+// nanoseconds, while SeedPR's peek is only reachable after a real git
+// subprocess call (the branch-existence check) that takes orders of
+// magnitude longer — so a single SeedIssue call racing a single SeedPR call
+// almost always finishes (and claims its number) before SeedPR ever reaches
+// its peek at all, never entering the vulnerable window by sheer timing
+// rather than by being correctly excluded from it. Proving numberMu is what
+// keeps the window shut therefore needs *repeated* SeedIssue attempts spread
+// across the *entire* duration several real merges are in flight, so at
+// least one attempt is very likely to land inside a release window rather
+// than merely before or after every one of them.
+//
+// Unlike TestConcurrentSeedPRDoesNotClobber, every call here is expected to
+// succeed — an auto-assigned number is never asked for explicitly, so two
+// auto-assigning calls have no reason to be refused against each other. The
+// failure mode under test is silent (the same number handed to an issue and
+// a PR), not loud, so the assertion is on the resulting state rather than on
+// s.Err().
+func TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers(t *testing.T) {
+	s, _ := newSim(t)
+
+	const (
+		repo      = "acme/widgets"
+		prCallers = 5 // concurrent SeedPR{Merged: true} calls, each a real merge
+		hammers   = 4 // goroutines that repeatedly auto-assign a SeedIssue
+	)
+	s.SeedRepo(repo).SeedCommit(repo, "main", map[string]string{"base.txt": "base\n"}, "base")
+	heads := make([]string, prCallers)
+	for i := 0; i < prCallers; i++ {
+		heads[i] = fmt.Sprintf("feature-%d", i)
+		s.SeedCommit(repo, heads[i], map[string]string{fmt.Sprintf("f%d.txt", i): "feature\n"}, "feature")
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var start, prDone, hammerDone sync.WaitGroup
+	start.Add(1)
+
+	for i := 0; i < prCallers; i++ {
+		prDone.Add(1)
+		go func(head string) {
+			defer prDone.Done()
+			start.Wait()
+			s.SeedPR(repo, PRSeed{Head: head, Base: "main", Merged: true, Title: "concurrent pr"})
+		}(heads[i])
+	}
+	// Each hammer keeps auto-assigning issues for as long as any SeedPR call
+	// above is still in flight, so the attempts span every merge's release
+	// window rather than racing it just once.
+	for i := 0; i < hammers; i++ {
+		hammerDone.Add(1)
+		go func() {
+			defer hammerDone.Done()
+			start.Wait()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					s.SeedIssue(repo, IssueSeed{Title: "concurrent issue"})
+				}
+			}
+		}()
+	}
+	start.Done()
+	prDone.Wait()
+	close(stop)
+	hammerDone.Wait()
+
+	// Every call should have succeeded: none of them asked for a specific
+	// number, so there is nothing for any of them to be refused against.
+	if err := s.Err(); err != nil {
+		t.Fatalf("concurrent auto-assigning SeedIssue/SeedPR calls: %v", err)
+	}
+
+	r, rerr := s.repoByKey(repo)
+	if rerr != nil {
+		t.Fatalf("repoByKey: %v", rerr)
+	}
+	s.mu.Lock()
+	var overlap []int
+	for num := range r.issues {
+		if _, ok := r.prs[num]; ok {
+			overlap = append(overlap, num)
+		}
+	}
+	issueCount, prCount := len(r.issues), len(r.prs)
+	s.mu.Unlock()
+
+	if len(overlap) != 0 {
+		t.Fatalf("number(s) %v claimed by both an issue and a PR — the shared number space was violated", overlap)
+	}
+	// Every hammer attempt succeeds (auto-assign never refuses), so the issue
+	// count is however many landed before stop fired — only the PR count and
+	// the overlap check above are deterministic.
+	if prCount != prCallers {
+		t.Fatalf("want %d PRs (one per caller, none clobbered by a concurrent SeedIssue), got %d", prCallers, prCount)
+	}
+	if issueCount == 0 {
+		t.Fatal("no hammer SeedIssue call landed at all; the test did not exercise any overlap")
 	}
 }

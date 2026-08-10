@@ -163,17 +163,34 @@ type Sim struct {
 	// holding mu or gitMu.
 	seedRepoMu sync.Mutex
 
-	// seedPRMu serialises SeedPR end to end, mirroring seedRepoMu's reasoning.
-	// SeedPR{Merged: true} releases mu around the git-side merge (mu and gitMu
-	// must never be held at once — see git.go's locking invariant), so an
+	// numberMu serialises every path that allocates or reserves a number from
+	// a repo's shared issue-and-PR sequence — CreateIssue, CreatePR,
+	// SeedIssue, and SeedPR — end to end, for the full span from "the
+	// candidate number is decided" to "the record naming it is published".
+	//
+	// SeedPR{Merged: true} is the one path that releases mu in the middle of
+	// that span, to run the git-side merge without mu held (mu and gitMu must
+	// never be held at once — see git.go's locking invariant): an
 	// explicitly-numbered PR is only checked against numberTaken before that
-	// release and not actually reserved until after the merge completes and mu
-	// is re-acquired. Without this lock, a concurrent SeedPR call for the same
-	// explicit number could pass its own numberTaken check and insert its
-	// record during that window, and this call's later unconditional
-	// r.prs[num] = pr would silently clobber it. Taken at the outermost level
-	// only; never acquired while holding mu or gitMu.
-	seedPRMu sync.Mutex
+	// release and not actually reserved until after the merge completes and
+	// mu is re-acquired, and an auto-assigned number (Number: 0) is only
+	// peeked off nextNumber, not reserved, until the same point. Without this
+	// lock, any other numbering path — every one of which is otherwise
+	// atomic under mu alone, with no release in the middle — could allocate
+	// and commit the exact same number during that window: a peeked number
+	// does not advance nextNumber, so it is invisible to allocNumber's own
+	// bookkeeping, and a concurrent SeedPR call for the same explicit number
+	// could pass its own numberTaken check and insert its record before this
+	// call resumes. Either way the later unconditional r.prs[num] = pr (or
+	// r.issues[num] = iss) would silently clobber, or coexist with, a record
+	// the rest of this package treats the shared number space as ruling out.
+	//
+	// Every numbering path takes this lock, even the three whose own critical
+	// section never releases mu, so the race is closed symmetrically rather
+	// than only hardening the one caller found to need the long window.
+	// Taken at the outermost level, before mu; never acquired while holding
+	// mu or gitMu.
+	numberMu sync.Mutex
 
 	// mu guards every field below it. See the package doc's locking invariant.
 	mu sync.Mutex

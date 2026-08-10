@@ -1047,14 +1047,28 @@ subsequent validation failure (an invalid state, or `Merged` combined with
 either — a review finding on #1498 caught this asymmetry between the two
 paths after the explicit-number fix above had already landed.
 
+Peeking rather than allocating opened a second, narrower gap a follow-up
+review finding caught: the peeked candidate is not actually reserved
+(`nextNumber` advanced) until the merge succeeds and `mu` is re-acquired, and
+during that window every other numbering path — `CreateIssue`, `CreatePR`,
+and `SeedIssue`, each otherwise atomic under `mu` alone with no release in
+the middle — could commit the exact same number, silently violating the
+shared issue-and-PR number space (`numberTaken`, node IDs, `AddComment`'s
+shared REST endpoint). `numberMu` (renamed and widened from the
+explicit-number fix's original `seedPRMu`) now serialises all four paths
+against each other for the full span from "the candidate is decided" to "the
+record naming it is published," not just `SeedPR` against itself.
+
 **Risk:** low. `TestSeedPRMergedTruePerformsRealMerge` pins the merge commit
 and the auto-close together; `TestSeedPRMergedTrueRefusesConflict` pins the
 refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` and
 `TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber` pin that a refused
 explicit-number merge and a validation-refused auto-assigned seed both leave
-`nextNumber` untouched. Fixed in #1498 — this was previously the one seeding
-shape whose *consequences* went unmodelled (medium risk), which made a
-merge-train scenario's "this member already landed" seed assert against
+`nextNumber` untouched; `TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers`
+pins that a concurrent auto-assigning `SeedIssue` and `SeedPR{Merged: true}`
+never land on the same number. Fixed in #1498 — this was previously the one
+seeding shape whose *consequences* went unmodelled (medium risk), which made
+a merge-train scenario's "this member already landed" seed assert against
 unmerged git history and open issues that `assembleTrialBranch` (pure real
 git) would then faithfully build on top of, passing for the wrong reason.
 
