@@ -52,8 +52,14 @@ type Env struct {
 	Repo      string
 	OwnerRepo string
 
-	ProjectOwner string
-	ProjectNum   int
+	// ProjectNum identifies the project board, always under Owner — unlike
+	// tests/e2e's Env, there is no independent ProjectOwner: engine.Config
+	// has no such field, and production always resolves the project board
+	// via e.cfg.Owner (engine/poll.go, engine/startup.go). A field that let
+	// a scenario set a different project owner from Owner would silently
+	// desync simgh's seeded project key from what every PollOnce call
+	// queries — see ADR-1449 and the #1449 Validate review thread.
+	ProjectNum int
 
 	// PollInterval is how far RunPoll advances Clock before each poll cycle
 	// — the engine-local mirror of R3's GitHub-anchored gates: dispatch
@@ -80,9 +86,10 @@ type EnvOptions struct {
 	Owner string
 	Repo  string
 
-	// ProjectOwner/ProjectNum identify the project board. Default Owner/1.
-	ProjectOwner string
-	ProjectNum   int
+	// ProjectNum identifies the project board, always owned by Owner —
+	// see Env.ProjectNum's doc comment for why there is no separate
+	// ProjectOwner. Default 1.
+	ProjectNum int
 
 	// Stages is the pipeline the engine runs. Required — there is no
 	// sensible default shape (see smoke_test.go's SmokeStages for the R7
@@ -156,10 +163,6 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	}
 	ownerRepo := owner + "/" + repo
 
-	projectOwner := opts.ProjectOwner
-	if projectOwner == "" {
-		projectOwner = owner
-	}
 	projectNum := opts.ProjectNum
 	if projectNum == 0 {
 		projectNum = 1
@@ -181,7 +184,7 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 
 	simModel := simgh.New(t.TempDir(), simgh.WithClock(clk)).
 		SeedRepo(ownerRepo).
-		SeedProject(projectOwner, projectNum, "Engineering", columns)
+		SeedProject(owner, projectNum, "Engineering", columns)
 	if err := simModel.Err(); err != nil {
 		t.Fatalf("sim.NewEnv: seeding: %v", err)
 	}
@@ -232,7 +235,6 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		Owner:        owner,
 		Repo:         repo,
 		OwnerRepo:    ownerRepo,
-		ProjectOwner: projectOwner,
 		ProjectNum:   projectNum,
 		PollInterval: time.Duration(cfg.PollSeconds) * time.Second,
 	}

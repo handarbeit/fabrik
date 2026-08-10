@@ -99,7 +99,7 @@ func diagnostics(env *Env) string {
 
 // boardSummary renders every item's number, status column, and labels.
 func boardSummary(env *Env) string {
-	board, err := env.Sim.FetchProjectBoard(env.ProjectOwner, env.Repo, env.ProjectNum, "User")
+	board, err := env.Sim.FetchProjectBoard(env.Owner, env.Repo, env.ProjectNum, "User")
 	if err != nil {
 		return fmt.Sprintf("(could not fetch board: %v)", err)
 	}
