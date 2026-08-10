@@ -20,7 +20,7 @@ import (
 // PollSeconds: 1) elapses in real wall-clock time regardless of the
 // injected Clock, and a WaitFor call spanning it needs
 // retryCooldownPolls*workerYield (poll.go) to comfortably exceed 10s.
-const retryCooldownPolls = 150
+const retryCooldownPolls = 200
 
 // failureShapeStages is a minimal single-stage pipeline — these scenarios
 // only care about one stage's response to one scripted invocation, not a
@@ -40,6 +40,7 @@ func failureShapeStages() []*stages.Stage {
 // exercised here through real poll cycles against the sim instead of a
 // direct processItem call.
 func TestFailureShape_TurnLimitExhausted(t *testing.T) {
+	t.Parallel() // real-time-bound (retryCooldownPolls) — see poll.go's workerYield doc comment
 	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
 	env.Claude.ForStage("Specify", simclaude.TurnLimitExhausted(50), simclaude.DefaultScript)
 
@@ -49,7 +50,7 @@ func TestFailureShape_TurnLimitExhausted(t *testing.T) {
 	// genuine failure.
 	AdvanceUntil(t, env, func(env *Env) bool {
 		return env.Claude.StageCallCount("Specify") >= 1
-	}, 40)
+	}, 80)
 	WaitForLabelAbsent(t, env, num, "stage:Specify:failed", 5)
 	labels := IssueLabels(t, env, num)
 	if hasLabel(labels, "stage:Specify:failed") {
@@ -74,12 +75,13 @@ func TestFailureShape_TurnLimitExhausted(t *testing.T) {
 // stage:Specify:failed or fabrik:paused, per CLAUDE.md's documented
 // contract for this label.
 func TestFailureShape_UsageLimitExit(t *testing.T) {
+	t.Parallel() // real-time-bound (retryCooldownPolls) — see poll.go's workerYield doc comment
 	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
 	env.Claude.ForStage("Specify", simclaude.UsageLimitExit(), simclaude.DefaultScript)
 
 	num := FileIssue(t, env, "Usage-limit exit", "body", "Specify")
 
-	WaitForIssueLabel(t, env, num, "fabrik:claude-limit", 40)
+	WaitForIssueLabel(t, env, num, "fabrik:claude-limit", 80)
 	labels := IssueLabels(t, env, num)
 	if hasLabel(labels, "stage:Specify:failed") {
 		t.Error("a usage-limit exit must not apply stage:Specify:failed — the stage never ran")
@@ -111,6 +113,7 @@ func TestFailureShape_UsageLimitExit(t *testing.T) {
 // be applied — a common mistake would be routing this through the same
 // handler as UsageLimitExit, since both are "did-not-run" exits.
 func TestFailureShape_APIErrorExit(t *testing.T) {
+	t.Parallel() // real-time-bound (retryCooldownPolls) — see poll.go's workerYield doc comment
 	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
 	env.Claude.ForStage("Specify", simclaude.APIErrorExit(), simclaude.DefaultScript)
 
@@ -118,7 +121,7 @@ func TestFailureShape_APIErrorExit(t *testing.T) {
 
 	AdvanceUntil(t, env, func(env *Env) bool {
 		return env.Claude.StageCallCount("Specify") >= 1
-	}, 40)
+	}, 80)
 	labels := IssueLabels(t, env, num)
 	if hasLabel(labels, "fabrik:claude-limit") {
 		t.Error("an api_error exit is not an account usage-limit exit — must not apply fabrik:claude-limit")
@@ -139,12 +142,13 @@ func TestFailureShape_APIErrorExit(t *testing.T) {
 // (engine/claude.go's stageCompleteRE branch) — the stage completes on the
 // very first invocation, with no retry needed.
 func TestFailureShape_PartialOutputThenKilled(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
 	env.Claude.ForStage("Specify", simclaude.PartialOutputThenKilled())
 
 	num := FileIssue(t, env, "Partial output then killed", "body", "Specify")
 
-	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 40)
+	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 80)
 	if got := env.Claude.StageCallCount("Specify"); got != 1 {
 		t.Errorf("StageCallCount(Specify) = %d, want 1 — the marker-bearing output should complete the stage on the first attempt, no retry needed", got)
 	}
@@ -162,6 +166,7 @@ func TestFailureShape_PartialOutputThenKilled(t *testing.T) {
 // InvokeForComments path is wired end to end, not just unit-tested in
 // isolation (invoker_test.go).
 func TestFailureShape_CommentReviewInvocation(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
 
 	// First (and only, until unblocked) Invoke call emits FABRIK_BLOCKED_ON_INPUT
@@ -174,14 +179,14 @@ func TestFailureShape_CommentReviewInvocation(t *testing.T) {
 
 	num := FileIssue(t, env, "Comment review invocation", "body", "Specify")
 
-	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 40)
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 80)
 
 	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "a-human-operator", "Here's the answer to your question.")
 	if err := env.Sim.Sim().Err(); err != nil {
 		t.Fatalf("SeedComment: %v", err)
 	}
 
-	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-input", 40)
+	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-input", 80)
 
 	// CommentReviewCompleted's real commit should have unblocked and
 	// completed the stage. Checked before CommentCallCount below: the label
@@ -190,7 +195,7 @@ func TestFailureShape_CommentReviewInvocation(t *testing.T) {
 	// worker goroutine, so WaitForLabelAbsent returning is not itself proof
 	// the call has completed yet — waiting for the stage's own completion
 	// label is.
-	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 40)
+	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 80)
 
 	if got := env.Claude.CommentCallCount("Specify"); got != 1 {
 		t.Errorf("CommentCallCount(Specify) = %d, want 1 — InvokeForComments should have been invoked exactly once to process the human's reply", got)

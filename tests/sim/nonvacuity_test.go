@@ -47,6 +47,7 @@ import (
 // regressed to this shape, that exact assertion — unchanged, no test edit
 // needed — would fail exactly as this one now deliberately does.
 func TestNonVacuous_MarkerOnlyScript_ProducesEmptyDiff(t *testing.T) {
+	t.Parallel()
 	stgs := []*stages.Stage{
 		{Name: "Implement", Order: 1, CreateDraftPR: true},
 		{Name: "Done", Order: 2, CleanupWorktree: true},
@@ -68,7 +69,7 @@ func TestNonVacuous_MarkerOnlyScript_ProducesEmptyDiff(t *testing.T) {
 	}
 
 	num := FileIssue(t, env, "Non-vacuity probe", "body", "Implement")
-	WaitForIssueLabel(t, env, num, "stage:Implement:complete", 40)
+	WaitForIssueLabel(t, env, num, "stage:Implement:complete", 80)
 
 	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
 	if err != nil {

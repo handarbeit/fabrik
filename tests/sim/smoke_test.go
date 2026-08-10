@@ -35,6 +35,7 @@ func smokeStages() []*stages.Stage {
 // draft-PR-before-Implement + mark-ready-on-complete against the sim
 // model's own PR state (AC4).
 func TestSmoke_FullPipelineToDone(t *testing.T) {
+	t.Parallel() // R8: this package's dominant real-time cost — see poll.go's workerYield doc comment
 	env := NewEnv(t, EnvOptions{Stages: smokeStages()})
 
 	// Force the deterministic direct-merge fallback in attemptMergeOnValidate
@@ -59,15 +60,15 @@ func TestSmoke_FullPipelineToDone(t *testing.T) {
 
 	stageOrder := []string{"Specify", "Research", "Plan", "Implement", "Review", "Validate"}
 	for _, name := range stageOrder {
-		WaitForIssueLabel(t, env, num, "stage:"+name+":complete", 40)
+		WaitForIssueLabel(t, env, num, "stage:"+name+":complete", 80)
 		labels := IssueLabels(t, env, num)
 		if hasLabel(labels, "stage:"+name+":in_progress") {
 			t.Errorf("stage %q: in_progress label should have been cleared once complete, labels=%v", name, labels)
 		}
 	}
 
-	WaitForProjectStatus(t, env, num, "Done", 40)
-	WaitForIssueClosed(t, env, num, 40)
+	WaitForProjectStatus(t, env, num, "Done", 80)
+	WaitForIssueClosed(t, env, num, 80)
 
 	// AC4: draft PR created before Implement, marked ready on completion —
 	// asserted against the sim model's own PR state, not the invoker's script.
