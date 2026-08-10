@@ -757,6 +757,57 @@ func (s *Sim) SeedReviewThreadComment(ownerRepo string, prNumber int, author, bo
 	return s
 }
 
+// SeedReviewThreadReply attaches a further comment to an existing review
+// thread, sharing threadID with the comment(s) already on it — the shape of
+// more than one comment landing in one conversation, which
+// SeedReviewThreadComment alone cannot construct: a thread ID is derived from
+// its first comment's own database ID, so there is no way to declare "these
+// comments share a thread" before that first comment exists.
+//
+// threadID must already exist on the PR — read it back the same way
+// SeedComment's doc comment directs for a plain comment's database ID, via
+// FetchProjectItem or FetchLinkedPR's review-thread comments. A typo'd or
+// not-yet-seeded thread ID fails loudly rather than silently building a
+// thread of one.
+func (s *Sim) SeedReviewThreadReply(ownerRepo string, prNumber int, threadID, author, body, path string, line int) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		s.fail("simgh: PR %s#%d not found", ownerRepo, prNumber)
+		return s
+	}
+	found := false
+	for _, c := range pr.reviewThreadComment {
+		if c.reviewThreadID == threadID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.fail("simgh: SeedReviewThreadReply: thread %q not found on %s#%d; seed its first comment with SeedReviewThreadComment", threadID, ownerRepo, prNumber)
+		return s
+	}
+	id := s.nextCommentDatabaseID
+	s.nextCommentDatabaseID++
+	pr.reviewThreadComment = append(pr.reviewThreadComment, &commentRecord{
+		databaseID:     id,
+		author:         author,
+		body:           body,
+		createdAt:      s.now(),
+		reactions:      make(map[string]int),
+		fromPR:         prNumber,
+		reviewThreadID: threadID,
+		path:           path,
+		line:           line,
+	})
+	return s
+}
+
 // SeedComment adds a comment to an issue. Returns the Sim for chaining; use
 // FetchProjectItem or FetchLinkedPR to read the assigned database ID back.
 func (s *Sim) SeedComment(ownerRepo string, issueNumber int, author, body string) *Sim {

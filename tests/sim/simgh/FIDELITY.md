@@ -381,15 +381,33 @@ collections at one SHA.
 
 ## Reviews
 
-### `ResolveReviewThread` marks only the first comment on a thread — **Simplified**
+### `ResolveReviewThread` marks every comment on a thread — **Modelled**
 
-A thread is modelled as comments sharing a `reviewThreadID`, and resolving it
-flips `threadResolved` on the first match rather than on every comment in the
-thread. Board projections surface unresolved thread comments individually, so a
-thread with more than one comment reads as partially unresolved after being
-resolved. **Risk:** low — the engine's progress detection reads the resolved
-*count*, and no scenario in the downstream chain seeds multi-comment threads —
-but a scenario that does would see the wrong shape. See #1498.
+A thread is modelled as comments sharing a `reviewThreadID`. Resolving it now
+flips `threadResolved` on every comment sharing that ID, not just the first
+match — board projections surface unresolved thread comments individually
+(`buildProjectItem` appends every review-thread comment with
+`!c.threadResolved`), so leaving a sibling comment unmarked left a
+multi-comment thread reading as partially unresolved after being resolved.
+
+`resolvedThreads` — the count the engine's progress detection reads — still
+bumps by exactly **one per call**, not once per comment: it counts *threads*,
+not comments. Idempotency is preserved at the thread level too: resolving an
+already-fully-resolved thread again is a no-op rather than a second increment.
+
+Seeding a second comment onto an existing thread needs `SeedReviewThreadReply`
+(`seed.go`) — added alongside this fix, since `SeedReviewThreadComment` alone
+cannot construct a multi-comment thread: a thread ID is derived from its first
+comment's own database ID, so there is no way to declare "these comments share
+a thread" before that first comment exists. It requires the target thread ID
+already exist, refusing loudly on a typo'd or not-yet-seeded one — matching
+this file's "loud failure over silent no-op" seeding convention.
+
+**Risk:** low. Fixed in #1498;
+`TestReviewThreadResolutionMarksEveryCommentOnTheThread` pins the multi-comment
+resolution, the exactly-once count, and the idempotent repeat-resolve;
+`TestSeedReviewThreadReplyRefusesUnknownThread` pins the new seed method's
+refusal.
 
 
 ### `reviewDecision` under branch protection — **Simplified**

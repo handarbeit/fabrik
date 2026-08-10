@@ -731,6 +731,18 @@ mutate "a failed worktree add does not prune the stale administrative entry" \
   'TestWithWorktreePrunesAfterFailedAdd' \
   'git.go::s{(rmErr := os\.RemoveAll\(tmp\)\n)\t\t_, _, _ = runGitAllowFail\(r\.bareDir, "worktree", "prune"\)\n}{$1}'
 
+mutate "ResolveReviewThread marks only the first comment on a thread" \
+  'TestReviewThreadResolutionMarksEveryCommentOnTheThread|TestReviewThreadResolutionIsObservable' \
+  'comments.go::s{(if c\.reviewThreadID == threadID \{\n\t\t\t\t\tc\.threadResolved = true\n)}{$1\t\t\t\t\tbreak\n}'
+
+mutate "ResolveReviewThread double-counts a repeat resolve" \
+  'TestReviewThreadResolutionMarksEveryCommentOnTheThread' \
+  'comments.go::s{if allResolved \{}{if allResolved \&\& false \{}'
+
+mutate "SeedReviewThreadReply accepts an unknown thread ID" \
+  'TestSeedReviewThreadReplyRefusesUnknownThread' \
+  'seed.go::s{if !found \{}{if !found \&\& false \{}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
