@@ -19,6 +19,7 @@ func runWatch(args []string) error {
 	repo := fs.String("repo", "", "GitHub repository name (or FABRIK_REPO)")
 	token := fs.String("token", "", "GitHub token (or FABRIK_TOKEN / GITHUB_TOKEN)")
 	pluginDir := fs.String("plugin-dir", "", "Path to Fabrik plugin directory (or FABRIK_PLUGIN_DIR)")
+	ghesHost := fs.String("ghes-host", "", "GitHub Enterprise Server hostname (or FABRIK_GHES_HOST; default: unset, meaning github.com)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: fabrik watch <issue-number> [flags]\n\n")
@@ -70,6 +71,8 @@ func runWatch(args []string) error {
 			*pluginDir = v
 		}
 	}
+	// Resolve GHES host from: flag > env > config.yaml (shared with the daemon path).
+	*ghesHost = resolveGHESHost(*ghesHost, pc)
 
 	// Resolve stages directory: default -> FABRIK_STAGES env -> pc.StagesDir
 	stagesDir := "./.fabrik/stages"
@@ -92,7 +95,11 @@ func runWatch(args []string) error {
 	// Build GitHub client (may be nil if no token, degrading gracefully).
 	var client *gh.Client
 	if *token != "" {
-		client = gh.NewClient(*token)
+		if *ghesHost != "" {
+			client = gh.NewClientForHost(*token, *ghesHost)
+		} else {
+			client = gh.NewClient(*token)
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "[warn] no GitHub token available; PR/CI status will not be shown\n")
 	}

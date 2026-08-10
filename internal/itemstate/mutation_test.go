@@ -393,9 +393,28 @@ func TestApplyStageRetryIncremented(t *testing.T) {
 func TestApplyStageRetryCleared(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	s.Apply(StageRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
+	s.Apply(SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
 	applyExpect(t, s, StageRetryCleared{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
 	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
 		t.Error("Attempts not cleared")
+	}
+	if getItem(t, s, testRepo, 1).StageState.SliceRetries["Implement"] != 0 {
+		t.Error("SliceRetries not cleared alongside Attempts")
+	}
+}
+
+// ---- SliceRetryIncremented ----
+
+func TestApplySliceRetryIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	if getItem(t, s, testRepo, 1).StageState.SliceRetries["Implement"] != 1 {
+		t.Error("SliceRetries not incremented to 1")
+	}
+	// SliceRetries is independent of Attempts — a turn-cap preemption must not
+	// also count against the failure counter (#1199).
+	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
+		t.Error("Attempts must not be touched by SliceRetryIncremented")
 	}
 }
 
@@ -406,6 +425,94 @@ func TestApplyReviewCycleIncremented(t *testing.T) {
 	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
 	if getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"] != 1 {
 		t.Error("ReviewCycles not incremented")
+	}
+}
+
+// ---- ReviewCycleDecremented (#1045) ----
+
+func TestApplyReviewCycleDecremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 1 {
+		t.Errorf("ReviewCycles = %d, want 1", got)
+	}
+}
+
+func TestApplyReviewCycleDecremented_FlooredAtZero(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	// Decrementing an already-zero counter is a genuine no-op field-wise
+	// (the value stays 0), so the store must report no Change (invariant
+	// I6 — no Observers notified) — assert the returned []Change is empty,
+	// not just discard it.
+	_, changes, err := s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(ReviewCycleDecremented) on zero counter: expected no Change (I6), got %v", changes)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (floored)", got)
+	}
+	applyExpect(t, s, ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	_, changes, err = s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(ReviewCycleDecremented) double decrement at zero: expected no Change (I6), got %v", changes)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (floored, double decrement)", got)
+	}
+}
+
+// ---- ReviewBlockedCycleIncremented (ADR-1518) ----
+
+func TestApplyReviewBlockedCycleIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewBlockedCycles["Review"]; got != 1 {
+		t.Errorf("ReviewBlockedCycles = %d, want 1", got)
+	}
+	applyExpect(t, s, ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewBlockedCycles["Review"]; got != 2 {
+		t.Errorf("ReviewBlockedCycles = %d, want 2", got)
+	}
+	// Independent of ReviewCycles — the two counters track different things
+	// (attempts vs. attempts-that-happened-while-genuinely-blocked) and
+	// ReviewBlockedCycleIncremented must never touch the other map.
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (must not be touched by ReviewBlockedCycleIncremented)", got)
+	}
+}
+
+// TestReviewBlockedCyclesNeverRefunded documents, at the store level, the
+// defining property of ReviewBlockedCycles (ADR-1518, R3): unlike
+// ReviewCycles, it has no decrement mutation at all — nothing in this package
+// can lower it once incremented, short of EngineCyclesCleared's full reset.
+// This is what lets it survive #1045's ReviewCycleDecremented refund
+// indefinitely forgiving ReviewCycles for the same sequence of no-op
+// reinvokes.
+func TestReviewBlockedCyclesNeverRefunded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	for i := 0; i < 5; i++ {
+		s.Apply(ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"})
+		// Every increment is paired with the exact refund #1045 applies to
+		// ReviewCycles for a no-op reinvoke — ReviewBlockedCycles must be
+		// unaffected by it.
+		s.Apply(ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"})
+		s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"})
+	}
+	st := getItem(t, s, testRepo, 1)
+	if got := st.StageState.ReviewBlockedCycles["Review"]; got != 5 {
+		t.Errorf("ReviewBlockedCycles = %d, want 5 (never refunded)", got)
+	}
+	if got := st.StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (refunded every time, #1045)", got)
 	}
 }
 
@@ -608,6 +715,7 @@ func TestEngineCyclesClearedClearsEnqueueCycles(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	s.Apply(EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
 	s.Apply(RebaseCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	s.Apply(ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
 	if getItem(t, s, testRepo, 1).StageState.EnqueueCycles["Validate"] != 1 {
 		t.Fatal("precondition: EnqueueCycles not set")
 	}
@@ -618,6 +726,28 @@ func TestEngineCyclesClearedClearsEnqueueCycles(t *testing.T) {
 	}
 	if got := st.StageState.RebaseCycles["Validate"]; got != 0 {
 		t.Errorf("RebaseCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
+	}
+	// ADR-1518: a resumed item must not immediately re-trip the new
+	// non-convergence terminal check on its very next pass — the same
+	// "unpause -> re-pause in one poll" bug #1460 already fixed for the other
+	// counters.
+	if got := st.StageState.ReviewBlockedCycles["Validate"]; got != 0 {
+		t.Errorf("ReviewBlockedCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
+	}
+}
+
+// TestSliceRetriesSnapshotIsDeepCopy verifies that a Snapshot taken before a
+// later SliceRetryIncremented retains its original count — confirming
+// copyStageState deep-copies the SliceRetries map (no shared backing map).
+func TestSliceRetriesSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	if held.SliceRetries("Implement") != 1 {
+		t.Fatalf("precondition: held snapshot SliceRetries = %d, want 1", held.SliceRetries("Implement"))
+	}
+	s.Apply(SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
+	if held.SliceRetries("Implement") != 1 {
+		t.Errorf("held snapshot mutated by later increment: SliceRetries = %d, want 1", held.SliceRetries("Implement"))
 	}
 }
 
@@ -640,6 +770,65 @@ func TestApplyCooldownRecorded(t *testing.T) {
 	got := getItem(t, s, testRepo, 1).CooldownAt["retry"]
 	if !got.Equal(until) {
 		t.Errorf("CooldownAt[retry] = %v; want %v", got, until)
+	}
+}
+
+// ---- LabelAppliedAtRecorded ----
+
+func TestApplyLabelAppliedAtRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Now()
+	snap := applyExpect(t, s, LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: at}, LabelAppliedAtChanged)
+	got := snap.LabelAppliedAt("fabrik:awaiting-ci")
+	if !got.Equal(at) {
+		t.Errorf("LabelAppliedAt(fabrik:awaiting-ci) = %v; want %v", got, at)
+	}
+}
+
+// TestLabelAppliedAtRecorded_AppliedRemovedReapplied proves the record-at-write
+// cache survives the "most recent application" correctness requirement (#1314):
+// a label applied, (conceptually) removed, and re-applied must read back the
+// *latest* timestamp, not the first. LabelAppliedAtRecorded always overwrites
+// (see its doc comment) — this test pins that overwrite behavior directly
+// against the mutation, independent of any engine-level guard.
+func TestLabelAppliedAtRecorded_AppliedRemovedReapplied(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	first := time.Now().Add(-time.Hour)
+	second := time.Now()
+
+	s.Apply(LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: first})
+	// Removal doesn't touch the cache (no mutation for it) — the entry from the
+	// first application is still readable until the next genuine re-apply.
+	if got := getItem(t, s, testRepo, 1).LabelAppliedAt["fabrik:awaiting-ci"]; !got.Equal(first) {
+		t.Fatalf("after first apply: LabelAppliedAt = %v; want %v", got, first)
+	}
+	s.Apply(LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: second})
+
+	got := getItem(t, s, testRepo, 1).LabelAppliedAt["fabrik:awaiting-ci"]
+	if !got.Equal(second) {
+		t.Errorf("after re-apply: LabelAppliedAt = %v; want the latest (second) application %v, not the first %v", got, second, first)
+	}
+}
+
+// TestLabelAppliedAtRecorded_DoesNotAliasCooldown pins the reason LabelAppliedAt
+// is a distinct map from CooldownAt (see ItemState.LabelAppliedAt's doc
+// comment): a raw applied-at timestamp is always in the past the instant it's
+// recorded, so if it were folded into CooldownAt, HasExpiredCooldown would
+// misread it as a permanently expired cooldown and spuriously wake dispatch
+// for the item on every check thereafter.
+func TestLabelAppliedAtRecorded_DoesNotAliasCooldown(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	past := time.Now().Add(-time.Hour)
+	snap := applyExpect(t, s, LabelAppliedAtRecorded{Repo: testRepo, Number: 1, Label: "fabrik:awaiting-ci", At: past}, LabelAppliedAtChanged)
+
+	if snap.HasExpiredCooldown(time.Now()) {
+		t.Error("HasExpiredCooldown should be false: LabelAppliedAtRecorded must never populate CooldownAt")
+	}
+	if snap.HasActiveCooldown(time.Now()) {
+		t.Error("HasActiveCooldown should be false: LabelAppliedAtRecorded must never populate CooldownAt")
+	}
+	if len(getItem(t, s, testRepo, 1).CooldownAt) != 0 {
+		t.Error("CooldownAt should remain empty; LabelAppliedAtRecorded must write only to LabelAppliedAt")
 	}
 }
 
@@ -857,6 +1046,136 @@ func TestApplyCheckRunCompleted(t *testing.T) {
 	}
 	if !st.LinkedPR.HasHadChecks {
 		t.Error("HasHadChecks not set")
+	}
+}
+
+// ---- LastCIProgressAt (ADR-1410: CI-gate liveness detection) ----
+
+// TestApplyCheckRunCompleted_SetsLastCIProgressAt verifies a new check-run ID
+// is recorded as observable progress.
+func TestApplyCheckRunCompleted_SetsLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.LinkedPRNumber = 10
+	s.Apply(IssueOpened{Item: pi})
+	s.mu.Lock()
+	key := itemKeyFor(testRepo, 1)
+	item := s.items[key]
+	item.LinkedPR = &LinkedPRState{Number: 10, HeadSHA: "abc123"}
+	s.shaToKey["abc123"] = key
+	s.mu.Unlock()
+
+	if lpr := getItem(t, s, testRepo, 1).LinkedPR; lpr == nil || !lpr.LastCIProgressAt.IsZero() {
+		t.Fatal("expected LastCIProgressAt to start zero")
+	}
+
+	run := gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: run})
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR.LastCIProgressAt.IsZero() {
+		t.Error("expected LastCIProgressAt to be set after a new check-run ID appeared")
+	}
+}
+
+// TestApplyCheckRunCompleted_StatusTransition_UpdatesLastCIProgressAt
+// verifies an existing check run's Status/Conclusion transitioning is also
+// recorded as progress, not just a brand-new ID appearing.
+func TestApplyCheckRunCompleted_StatusTransition_UpdatesLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.LinkedPRNumber = 10
+	s.Apply(IssueOpened{Item: pi})
+	s.mu.Lock()
+	key := itemKeyFor(testRepo, 1)
+	item := s.items[key]
+	item.LinkedPR = &LinkedPRState{Number: 10, HeadSHA: "abc123"}
+	s.shaToKey["abc123"] = key
+	s.mu.Unlock()
+
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: gh.CheckRun{ID: 1, Name: "CI", Status: "queued"}})
+	first := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if first.IsZero() {
+		t.Fatal("expected LastCIProgressAt set after the first observation")
+	}
+
+	time.Sleep(2 * time.Millisecond) // ensure a distinguishable timestamp
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}})
+	second := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if !second.After(first) {
+		t.Error("expected LastCIProgressAt to advance after a Status transition on the same check-run ID")
+	}
+}
+
+// TestApplyCheckRunCompleted_IdenticalDuplicate_DoesNotUpdateLastCIProgressAt
+// is the negative case the liveness-stall dwell depends on: re-observing the
+// exact same check-run content (e.g. a repeated poll while CI is genuinely
+// stalled) must NOT look like progress.
+func TestApplyCheckRunCompleted_IdenticalDuplicate_DoesNotUpdateLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.LinkedPRNumber = 10
+	s.Apply(IssueOpened{Item: pi})
+	s.mu.Lock()
+	key := itemKeyFor(testRepo, 1)
+	item := s.items[key]
+	item.LinkedPR = &LinkedPRState{Number: 10, HeadSHA: "abc123"}
+	s.shaToKey["abc123"] = key
+	s.mu.Unlock()
+
+	run := gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: run})
+	first := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if first.IsZero() {
+		t.Fatal("expected LastCIProgressAt set after the first observation")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "abc123", Run: run}) // identical duplicate
+	second := getItem(t, s, testRepo, 1).LinkedPR.LastCIProgressAt
+	if !second.Equal(first) {
+		t.Errorf("expected LastCIProgressAt unchanged on an identical duplicate observation, got %v want %v", second, first)
+	}
+}
+
+// TestApplyPRHeadSHAUpdated_SHAChange_SetsLastCIProgressAt verifies a head
+// SHA advancing (a fresh push, which resets CI entirely) is itself counted as
+// progress — this is what removes #342's dependence on when the wait started:
+// a rebase-triggered head change needs no special handling because it's
+// already progress.
+func TestApplyPRHeadSHAUpdated_SHAChange_SetsLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	s.Apply(IssueOpened{Item: pi})
+
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, SHA: "sha-initial"})
+	if lpr := getItem(t, s, testRepo, 1).LinkedPR; lpr == nil || !lpr.LastCIProgressAt.IsZero() {
+		t.Fatal("expected LastCIProgressAt to remain zero on the first-ever link (no prior SHA to change from)")
+	}
+
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, SHA: "sha-new"})
+	if lpr := getItem(t, s, testRepo, 1).LinkedPR; lpr == nil || lpr.LastCIProgressAt.IsZero() {
+		t.Error("expected LastCIProgressAt to be set once the head SHA actually changes")
+	}
+}
+
+// TestApplyPRHeadSHAUpdated_DrainedPendingRuns_SetsLastCIProgressAt verifies
+// that check runs buffered before SHA linkage (the pendingCheckRuns path) are
+// counted as progress once drained into the newly-linked item.
+func TestApplyPRHeadSHAUpdated_DrainedPendingRuns_SetsLastCIProgressAt(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	s.Apply(IssueOpened{Item: pi})
+
+	// Arrives before the SHA is linked to any item — buffered.
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha-prelink", Run: gh.CheckRun{ID: 1, Name: "CI", Status: "in_progress"}})
+
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, SHA: "sha-prelink"})
+	lpr := getItem(t, s, testRepo, 1).LinkedPR
+	if lpr == nil || lpr.LastCIProgressAt.IsZero() {
+		t.Error("expected LastCIProgressAt to be set when the drain actually adds buffered runs")
+	}
+	if len(lpr.CheckRuns) != 1 {
+		t.Fatalf("expected 1 drained check run, got %d", len(lpr.CheckRuns))
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -31,10 +32,13 @@ type Config struct {
 	PollSeconds               int
 	MaxConcurrent             int
 	MaxRetries                int
+	MaxSliceRetries           int                 // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures
+	MaxResumeFailures         int                 // Max consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting (default 2; #1414) — independent of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
 	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)
-	CIWaitTimeout             time.Duration       // How long to wait for CI in the merge guard before pausing (default 30m)
+	CIWaitTimeout             time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
+	CIBackstopTimeout         time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
 	RequiredStatusContexts    map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
 	PostPushDwell             time.Duration       // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
 	MaxCiFixCycles            int                 // Max CI-fix re-invocation cycles per issue before pausing (default 5)
@@ -54,6 +58,7 @@ type Config struct {
 	CommentCycleWindow        time.Duration       // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
 	KillGraceSigInt           time.Duration       // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm          time.Duration       // Grace window after SIGTERM before SIGKILL (default 10s)
+	DrainDeadline             time.Duration       // Bound on a clean stop's worker drain, covering both the kill escalation and the shutdown pause-write phase (default 30s; ADR-1393). <= 0 falls back to the default in drainDeadline() — unlike kill_grace, a clean stop has no "0 = wait forever" mode.
 	ClaudeWaitDelay           time.Duration       // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
 	WorkerStaleTimeout        time.Duration       // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
 	DebugOutput               bool
@@ -71,6 +76,7 @@ type Config struct {
 	SessionRetentionDays      int           // .session files older than this many days are pruned; 0 disables age-based pruning (default 14)
 	ArchiveAfter              time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
 	ArchiveDone               string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
+	GHESHost                  string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
@@ -86,43 +92,56 @@ type cloneCall struct {
 }
 
 type Engine struct {
-	cfg                         Config
-	client                      GitHubClient
-	readClient                  boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
-	claude                      ClaudeInvoker
-	statusField                 *gh.StatusField
-	worktreeManagers            map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	fabrikDir                   string                      // directory containing .fabrik/ (always os.Getwd() at startup)
-	mu                          sync.Mutex
-	store                       *itemstate.Store       // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
-	totalTokens                 TokenUsage             // accumulated token usage since process start
-	lastReportedCost            float64                // cost at last [stats] report; skip repeat prints when unchanged
-	mayNeedWork                 map[string]bool        // key: issueKey; items that have changed since the last poll cycle
-	mayNeedWorkMu               sync.Mutex             // guards mayNeedWork
-	seededRepos                 map[string]bool        // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
-	checkedAutoMergeRepos       map[string]bool        // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
-	idleCount                   int                    // consecutive idle polls; triggers self-upgrade at threshold
-	idleStart                   time.Time              // when consecutive idle polls began; zero value = not idle
-	lastProjectUpdatedAt        time.Time              // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	wakeCh                      chan struct{}          // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh                      chan tui.StopRequest   // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                         chan struct{}          // semaphore bounding concurrent workers across poll cycles
-	wg                          sync.WaitGroup         // tracks in-flight workers for graceful shutdown
-	cloneInFlight               sync.Map               // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
-	mergeTrainInFlight          sync.Map               // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
-	mergeTrainEjectionsMu       sync.Mutex             // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts    map[string]int         // key: "owner/repo#N", ejection count per member
-	mergeTrainTrialsMu          sync.Mutex             // guards mergeTrainTrials
-	mergeTrainTrials            map[string][]time.Time // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
-	issueCtxs                   sync.Map               // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
-	baseBranchWarnedSet         sync.Map               // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
-	mergeTrainBatchSnapshotSeen sync.Map               // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
-	claudeSuspendMu             sync.Mutex             // guards claudeSuspendedUntil
-	claudeSuspendedUntil        time.Time              // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
-	events                      chan tui.Event         // nil in tests / plain-text mode; TUI goroutine consumes
-	logFile                     *os.File               // persistent log file at .fabrik/fabrik.log; nil if not opened
-	logMu                       sync.Mutex             // serializes concurrent writes to logFile
-	webhookMgr                  *webhookManager        // nil when webhooks are disabled
+	cfg                      Config
+	client                   GitHubClient
+	releaseClient            GitHubClient          // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
+	hostClient               *gh.Client            // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	readClient               boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
+	claude                   ClaudeInvoker
+	statusField              *gh.StatusField
+	worktreeManagers         map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	fabrikDir                string                      // directory containing .fabrik/ (always os.Getwd() at startup)
+	mu                       sync.Mutex
+	store                    *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
+	totalTokens              TokenUsage               // accumulated token usage since process start
+	lastReportedCost         float64                  // cost at last [stats] report; skip repeat prints when unchanged
+	mayNeedWork              map[string]bool          // key: issueKey; items that have changed since the last poll cycle
+	mayNeedWorkMu            sync.Mutex               // guards mayNeedWork
+	seededRepos              map[string]bool          // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
+	checkedAutoMergeRepos    map[string]bool          // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
+	repoAccess               map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
+	idleCount                int                      // consecutive idle polls; triggers self-upgrade at threshold
+	idleStart                time.Time                // when consecutive idle polls began; zero value = not idle
+	pollsUntilStalenessCheck int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
+	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
+	// Used by tests to inject a synthetic DevBuildStatus without real git
+	// subprocesses. Production leaves this nil.
+	stalenessCompareFn          func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
+	lastProjectUpdatedAt        time.Time                     // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	wakeCh                      chan struct{}                 // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh                      chan tui.StopRequest          // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                         chan struct{}                 // semaphore bounding concurrent workers across poll cycles
+	wg                          sync.WaitGroup                // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
+	cloneInFlight               sync.Map                      // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	mergeTrainInFlight          sync.Map                      // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
+	mergeTrainEjectionsMu       sync.Mutex                    // guards mergeTrainEjectionCounts
+	mergeTrainEjectionCounts    map[string]int                // key: "owner/repo#N", ejection count per member
+	mergeTrainTrialsMu          sync.Mutex                    // guards mergeTrainTrials
+	mergeTrainTrials            map[string][]time.Time        // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
+	queuedReviewEjectsMu        sync.Mutex                    // guards queuedReviewEjects
+	queuedReviewEjects          map[string]map[int]int        // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
+	issueCtxs                   sync.Map                      // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
+	pauseIssueMuGuard           sync.Mutex                    // guards pauseIssueMu itself (creation, refcounting, deletion) — distinct from the per-issue *sync.Mutex each entry embeds
+	pauseIssueMu                map[string]*pauseIssueMuEntry // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
+	baseBranchWarnedSet         sync.Map                      // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
+	ciGateCoverageWarnedSet     sync.Map                      // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
+	mergeTrainBatchSnapshotSeen sync.Map                      // key: "owner/repo", value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
+	claudeSuspendMu             sync.Mutex                    // guards claudeSuspendedUntil
+	claudeSuspendedUntil        time.Time                     // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
+	events                      chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile                     *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu                       sync.Mutex                    // serializes concurrent writes to logFile
+	webhookMgr                  *webhookManager               // nil when webhooks are disabled
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
@@ -131,9 +150,20 @@ type Engine struct {
 	upgradeCheckFn func()
 	// trainValidateFn overrides the real assemble+combined-Validate path when non-nil.
 	// Tests inject a membership-keyed function so the merge-train bisection / re-form /
-	// fallback control flow (ADR-059 D4) can be exercised without real git or CI.
-	// Production leaves this nil. See assembleAndValidate.
-	trainValidateFn func(ctx context.Context, members []trainMember) TrainCIResult
+	// fallback control flow (ADR-059 D4) can be exercised without real git or CI. The
+	// diagnostic return mirrors pollTrainCI's (TrainCIResult, *trainCIDiagnostic) shape
+	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
+	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
+	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainRedBatchHook, when non-nil, is called as the first line of handleRedBatch — a
+	// test-only call-observation seam (#1440 AC1/AC6) proving handleRedBatch (multi-member
+	// bisection) is never reached for a red batch of exactly one member, which
+	// runMergeTrainWorker's arity guard now intercepts before handleRedBatch is called.
+	// A trial-count-only assertion doesn't distinguish this: bisect's own base case for a
+	// single red member already makes zero extra validate calls, so without this hook a
+	// test proving the guard exists would pass unmodified against pre-#1440 code too.
+	// Nil in production (zero cost).
+	trainRedBatchHook func()
 	// generatedFilesOverride overrides the package-level generatedFiles mapping when
 	// non-nil. Tests inject a synthetic path + fake regen command, since the throwaway
 	// repos built by setupTrainRepo have none of docs/llms-full.txt's real source files
@@ -151,6 +181,11 @@ type Engine struct {
 	// Nil in non-TUI mode. Set via SetCleanupHook; wrapped in sync.Once so
 	// concurrent force-quit goroutines can't call it simultaneously.
 	cleanupHook func()
+	// clock is the source e.now() reads from. Nil in production (New never
+	// sets it) — now() falls back to time.Now(), byte-identical to the
+	// pre-seam behavior. Tests substitute it via SetClock to control
+	// itemstate.CooldownAt timing deterministically (ADR-1449).
+	clock Clock
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -193,13 +228,45 @@ func New(cfg Config) (*Engine, error) {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
 	claudeGHToken = cfg.Token
+	claudeGHHost = cfg.GHESHost
+	claudeAnthropicAPIKey = os.Getenv("FABRIK_ANTHROPIC_API_KEY")
+	claudeAnthropicEnvPassthrough = parseAnthropicEnvPassthrough(os.Getenv("FABRIK_ANTHROPIC_ENV_PASSTHROUGH"))
+
+	// One-time, process-lifetime capability probe (see claudeNameFlagSupported):
+	// older claude binaries reject unknown flags outright, which would kill
+	// every worker on the fleet, so support must be confirmed once up front
+	// rather than assumed or probed per invocation. New() runs once per
+	// long-lived fabrik daemon process start (this is the poll-loop engine,
+	// not a per-invocation interactive CLI path), so the probe's 5s worst-case
+	// timeout is a bounded, one-time cost against the daemon's whole lifetime
+	// — in practice `claude --help` returns in well under a second.
+	claudeNameFlagSupported = probeClaudeNameFlagSupport()
+	if !claudeNameFlagSupported {
+		fmt.Printf("[startup] worker session naming (--name) unavailable: installed claude binary does not advertise --name; upgrade claude to enable session names in ps/session-picker output\n")
+	}
+
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
-	ghClient := gh.NewClient(cfg.Token)
+	var ghClient *gh.Client
+	if cfg.GHESHost != "" {
+		ghClient = gh.NewClientForHost(cfg.Token, cfg.GHESHost)
+	} else {
+		ghClient = gh.NewClient(cfg.Token)
+	}
 	ghClient.SetMergeStrategy(cfg.AutoMergeStrategy)
+	// Fabrik's own release always lives on github.com/handarbeit/fabrik, never
+	// on a customer's GHES instance, so self-upgrade needs a dedicated client
+	// pinned to github.com regardless of cfg.GHESHost (see checkReleaseUpgrade).
+	// cfg.Token is dropped (releaseUpgradeToken returns "") when a GHES host
+	// is configured — it authenticates the GHES instance, not github.com, and
+	// would be rejected outright rather than falling back to unauthenticated
+	// (see releaseUpgradeToken's doc comment).
+	releaseClient := gh.NewClient(releaseUpgradeToken(cfg))
 	eng := &Engine{
 		cfg:                      cfg,
 		client:                   ghClient,
+		releaseClient:            releaseClient,
+		hostClient:               ghClient,
 		claude:                   &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:         make(map[string]*WorktreeManager),
 		fabrikDir:                fabrikDir,
@@ -207,9 +274,12 @@ func New(cfg Config) (*Engine, error) {
 		mayNeedWork:              make(map[string]bool),
 		seededRepos:              make(map[string]bool),
 		checkedAutoMergeRepos:    make(map[string]bool),
+		repoAccess:               make(map[string]gh.RepoAccess),
 		sem:                      make(chan struct{}, cfg.MaxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
+		queuedReviewEjects:       make(map[string]map[int]int),
+		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -256,15 +326,19 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	eng := &Engine{
 		cfg:                      cfg,
 		client:                   client,
+		releaseClient:            client,
 		claude:                   claude,
 		worktreeManagers:         wms,
 		store:                    itemstate.NewStore(nil),
 		mayNeedWork:              make(map[string]bool),
 		seededRepos:              make(map[string]bool),
 		checkedAutoMergeRepos:    make(map[string]bool),
+		repoAccess:               make(map[string]gh.RepoAccess),
 		sem:                      make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
+		queuedReviewEjects:       make(map[string]map[int]int),
+		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
@@ -484,7 +558,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 
 	// This goroutine is the owner: perform the clone.
 	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH)
+	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
 	call.dir = bareDir
 	call.err = err
 
@@ -575,7 +649,7 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 	}
 
 	// This goroutine is the owner: perform the clone.
-	bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH)
+	bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
 	call.dir = bareDir
 	call.err = err
 

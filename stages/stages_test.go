@@ -682,6 +682,150 @@ review_authority: `+val+`
 	}
 }
 
+func TestLoadAll_ExpectedReviewers_Undeclared(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if stages[0].ExpectedReviewers != nil {
+		t.Errorf("ExpectedReviewers = %v, want nil (undeclared)", stages[0].ExpectedReviewers)
+	}
+}
+
+func TestLoadAll_ExpectedReviewers_ExplicitNone(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+expected_reviewers: []
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if stages[0].ExpectedReviewers == nil {
+		t.Fatalf("ExpectedReviewers = nil, want non-nil empty slice")
+	}
+	if len(*stages[0].ExpectedReviewers) != 0 {
+		t.Errorf("ExpectedReviewers = %v, want empty", *stages[0].ExpectedReviewers)
+	}
+}
+
+func TestLoadAll_ExpectedReviewers_Declared(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+expected_reviewers:
+  - handarbeit-pruefer
+  - gemini-code-assist
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if stages[0].ExpectedReviewers == nil {
+		t.Fatalf("ExpectedReviewers = nil, want declared list")
+	}
+	got := *stages[0].ExpectedReviewers
+	want := []string{"handarbeit-pruefer", "gemini-code-assist"}
+	if len(got) != len(want) {
+		t.Fatalf("ExpectedReviewers = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ExpectedReviewers[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoadAll_ExpectedReviewers_Trimmed(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+expected_reviewers:
+  - "  handarbeit-pruefer  "
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if got := (*stages[0].ExpectedReviewers)[0]; got != "handarbeit-pruefer" {
+		t.Errorf("ExpectedReviewers[0] = %q, want trimmed %q", got, "handarbeit-pruefer")
+	}
+}
+
+func TestLoadAll_ExpectedReviewers_Invalid(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry string
+	}{
+		{"empty string", `""`},
+		{"whitespace only", `"   "`},
+		{"leading @", `"@handarbeit-pruefer"`},
+		{"trailing [bot]", `"handarbeit-pruefer[bot]"`},
+		{"trailing [Bot] mixed case", `"handarbeit-pruefer[Bot]"`},
+		{"trailing [BOT] upper case", `"handarbeit-pruefer[BOT]"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+expected_reviewers:
+  - `+tc.entry+`
+`)
+			_, err := LoadAll(dir)
+			if err == nil {
+				t.Errorf("entry %s: expected error, got nil", tc.entry)
+			}
+		})
+	}
+}
+
+// A duplicate declaration is malformed the same way the other rejected forms
+// are: left undetected, declaredReviewersOutstanding preserves it and Phase 1
+// re-prompts the same bot twice in one cycle.
+func TestLoadAll_ExpectedReviewers_Duplicate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries string
+	}{
+		{"exact duplicate", "\n  - handarbeit-pruefer\n  - handarbeit-pruefer"},
+		{"case-insensitive duplicate", "\n  - handarbeit-pruefer\n  - Handarbeit-Pruefer"},
+		{"copilot-prefix collapse duplicate", "\n  - copilot\n  - Copilot"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+wait_for_reviews: true
+expected_reviewers:`+tc.entries+`
+`)
+			_, err := LoadAll(dir)
+			if err == nil {
+				t.Errorf("entries %q: expected error for duplicate declaration, got nil", tc.entries)
+			}
+		})
+	}
+}
+
 func TestLoadAll_MaxWallTime(t *testing.T) {
 	tests := []struct {
 		name      string

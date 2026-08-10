@@ -90,6 +90,13 @@ Anything that could complicate or block this work.
 4. Incorporate answers, remove resolved questions, surface follow-ups if needed
 5. When all questions are resolved and the spec is clear, signal completion
 
+## Labels You Interact With
+
+- **`fabrik:paused` + `fabrik:awaiting-input`** — applied by the engine when you emit `FABRIK_BLOCKED_ON_INPUT`; cleared automatically when the user comments. You never set or remove these yourself.
+- **`fabrik:cruise` / `fabrik:yolo`** — the only way this stage auto-advances despite its default `auto_advance: false`. Their presence doesn't change what you do; it's why completion sometimes proceeds immediately instead of waiting for a human to approve the spec.
+
+See `../../LABELS.md` for the full label reference.
+
 ## Engine Context
 
 **Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — the worktree will be stashed/restored around your invocation.

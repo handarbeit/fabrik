@@ -9,16 +9,17 @@ import (
 
 // settleClosedItemsToDone is the per-poll settle scan that generalizes
 // runValidatePRTerminalAdvance's "closed item → advance to Done" transition
-// from Validate-only to any non-Done, non-cleanup, non-gate-checked column —
-// including holding stages (e.g. Queued), which are excluded from admission
-// dispatch but not from this scan (see below). A closed issue sitting at
-// Specify/Plan/Implement/Review/Backlog never passes itemMayNeedWork/
-// itemNeedsWork's admission guard (engine/item.go), so it never reaches
-// deepFetchCandidates and is never dispatched again — its worktree is never
-// reaped and it never gets archived. Sourced directly from board.Items, not
-// deepFetchCandidates, for the same reason as the child-placement and
-// merge-train-member-close settle scans: the item this scan targets never
-// reaches deepFetchCandidates in the first place.
+// from Validate-only to any non-Done, non-cleanup, non-Validate column —
+// including any other gate-checked stage (e.g. a Review stage configured with
+// wait_for_reviews: true, the shipped default) and holding stages (e.g.
+// Queued), which are excluded from admission dispatch but not from this scan
+// (see below). A closed issue sitting at Specify/Plan/Implement/Review/Backlog
+// never passes itemMayNeedWork/itemNeedsWork's admission guard (engine/item.go),
+// so it never reaches deepFetchCandidates and is never dispatched again — its
+// worktree is never reaped and it never gets archived. Sourced directly from
+// board.Items, not deepFetchCandidates, for the same reason as the
+// child-placement and merge-train-member-close settle scans: the item this
+// scan targets never reaches deepFetchCandidates in the first place.
 //
 // Deliberately not conditioned on any label (fabrik:paused, fabrik:awaiting-input,
 // fabrik:blocked, etc.) — a closed issue at a non-terminal column is itself the
@@ -26,9 +27,25 @@ import (
 // and no in-flight gate/lock label survives a closed issue meaningfully (no
 // further pipeline work can occur on it regardless). See ADR-064.
 //
-// Gate-checked stages (currently only Validate) are excluded so this scan never
-// races or double-advances against runValidatePRTerminalAdvance, which remains
-// the exclusive owner of closed items at gate-checked stages.
+// Excluded by stage.Name == "Validate", not stageIsGateChecked(stage) (ADR-1387
+// follow-up, caught in review on PR #1388): the exclusion exists solely to avoid
+// racing/double-advancing against runValidatePRTerminalAdvance/
+// settleClosedValidateAdvance, which own Validate and only Validate — matching
+// their scope by name, not by category, is what actually prevents that race.
+// stageIsGateChecked(stage) is a broader category (any stage with wait_for_ci OR
+// wait_for_reviews) that also matches a Review stage configured with
+// wait_for_reviews: true — the shipped default (stages/examples/review.yaml) —
+// and using it here left every such stage with zero remaining owners: dispatch
+// admission refuses it (R1), no settle-owner processes anything but Validate,
+// and this scan (under the old, broader exclusion) skipped it too. A closed
+// item stranded at Review was silently un-healed forever. The PR-merge-vs-pause
+// nuance that Validate's settle-owner pair implements (advanceValidateTerminalItem
+// checks whether the linked PR merged or closed unmerged, filling completion
+// labels or pausing accordingly) is specific to Validate: Fabrik's own PR merge
+// action (attemptMergeOnValidate) only ever runs as part of Validate completing,
+// so no other stage's closed item needs that check — advanceClosedItemToDone's
+// plain "move the board column" is exactly as sufficient for a closed Review
+// item as it already is for Specify/Plan/Implement.
 //
 // Holding stages (e.g. Queued) are a universal backstop for issue #1072: a
 // closed item stranded there — whatever the cause (a merge-train batch member
@@ -71,11 +88,11 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 		// declared Backlog stage, issue #973) is deliberately NOT added to the
 		// skip condition below for the same reason: it has no worktree either,
 		// so a closed item there must still be advanced rather than stranded.
-		// Only a *resolved* stage that is itself Cleanup/gate-checked, or a
+		// Only a *resolved* stage that is itself Cleanup/Validate, or a
 		// Holding stage with a live train worker for its repo, is grounds to skip.
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		if stage != nil {
-			if stage.CleanupWorktree || stageIsGateChecked(stage) {
+			if stage.CleanupWorktree || stage.Name == "Validate" {
 				continue
 			}
 			if stage.HoldingStage && e.mergeTrainWorkerActive(itemOwnerRepoString(item, e.defaultRepo())) {

@@ -136,6 +136,18 @@ On detection, it removes the session file immediately and skips the resave of `r
 
 This applies uniformly to both the stage-invocation and comment-processing call paths, since both flow through `interpretClaudeResult`.
 
+#### Consecutive resume-failure abandonment (#1414)
+
+The dead-session self-heal above only fires for the one specific error signature it structurally matches (`error_during_execution` + the "No conversation found" substring). Any *other* resume failure — most notably, a session that has simply grown too large for Claude Code to reload — falls through to a generic error and, before #1414, re-saved the identical session ID for the next attempt: every retry re-triggered the same condition and appended to the transcript that was already the cause. The reporter's workaround (moving the 36-byte `.session` pointer aside so the next run started cold) worked precisely because `resolveResumeSessionID` already treats an absent file as a fresh session; this mechanism automates that workaround.
+
+`interpretClaudeResult` maintains a second, durable sidecar file next to the session pointer — `<stageName>.session.resumefails`, a plain-text integer, read/written with the same idiom `saveSessionIDDirect` uses for the session ID itself — counting **consecutive** failures where the invocation itself was a resume attempt (`resumeSessionID != ""`) and none of the more specific classifiers above claimed the failure. The counter is deliberately file-based rather than living in `itemstate.Store` (confirmed entirely in-memory, resetting on every engine restart): this is the one counter that must survive a restart, or a restart would silently re-enable the indefinite-retry loop this mechanism exists to close.
+
+The counter resets to 0 on any evidence the session is healthy — a clean exit, `FABRIK_STAGE_COMPLETE` found despite a trailing error, or a turn-cap exit (real turns and cost consumed is the strongest possible evidence against a poisoned transcript). It is left untouched by a usage-limit or `api_error` exit, since the stage never ran and those outcomes say nothing about session health either way. A cold start's own failure (`resumeSessionID == ""`) also resets it, clearing any stale count left over from a since-abandoned session lineage.
+
+Once the count reaches `MaxResumeFailures` (`--max-resume-failures` / `FABRIK_MAX_RESUME_FAILURES`, default 2), the session file is removed — the same `os.Remove` call the dead-session path above already uses — and the sidecar resets to 0. No new "force cold start" signal is threaded anywhere: the removed file is itself the cold-start signal, since `resolveResumeSessionID` already treats an absent file identically for both `InvokeClaude` and `InvokeClaudeForComments`. Because both invocation paths (and, transitively, `merge_train.go`'s conflict-resolution invocation) compute the identical session file path for a given (issue, stage), the counter and the abandonment are shared across all three — a session poisoned by a long stage run is abandoned for the next comment-review invocation too, and vice versa, and an alternating stage/comment-review failure sequence still reaches the threshold.
+
+Unlike the dead-session self-heal (a structural fault with no ambiguity), a resume failure caught by this mechanism is exempted from `max_retries` accounting entirely — `StageAttempted` is still recorded (so the normal dispatch cooldown applies), but `StageRetryIncremented` never fires for it, for every consecutive resume failure up to the threshold, not only the one that triggers abandonment. This mirrors the `fabrik:claude-limit` precedent and exists so the guaranteed cold-start attempt cannot be starved by the very failures it is counting. Nothing is posted to the issue and no label is applied — only a log line (session id, stage, consecutive-failure count, threshold, last error) — since the mechanism is self-healing by construction; if the cold-started attempt also fails, that failure carries no `--resume` session ID and is therefore a genuine, unexempted failure that flows into the normal `max_retries` → `fabrik:paused` path. See `docs/state-machine.md` §2.17 and ADR-1414 for the full per-outcome classification table and design rationale.
+
 ### Model Override
 
 Labels matching `model:<name>` on the issue override the stage's configured model.
@@ -172,17 +184,19 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
   ```
   FABRIK_SPAWN_CHILD_BEGIN owner/repo
   TITLE: <single-line title>
+  DEPENDS_ON: <n>                  # optional — forward-only 1-based index into this block list
 
   <scoped spec body>
   FABRIK_SPAWN_CHILD_END
   ```
-  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately.
+  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately. `DEPENDS_ON:`, when present, must immediately follow `TITLE:` (no blank line between) — see [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full grammar and validation rules (ADR-1337).
 - **`fabrik:children-spawned` label** — idempotency guard. If present on the parent issue, `preImplement` returns immediately without making any mutations.
 
 ### Flow (when spawn blocks are present and guard label is absent)
 
-1. **Repo validation**: Call `ensureRepoReady(owner, repo)` for each unique target repo across all blocks. If any repo is not in Fabrik's managed set (clone fails), post an error comment listing the unmanaged repos, add `fabrik:paused`, and stop — no children are created.
-2. **Per-child mutations** (for each block in document order):
+1. **`DEPENDS_ON` validation**: `validateSpawnDependsOn` checks every declared index upfront, before any GitHub mutation — a purely structural forward-reference check (`1 <= DEPENDS_ON < ownIndex`). Any invalid value (out-of-range, non-forward, or malformed) is a hard failure: post an error comment (`Created so far: none`), add `fabrik:paused`, and stop — no children are created.
+2. **Repo validation**: Call `ensureRepoReady(owner, repo)` for each unique target repo across all blocks. If any repo is not in Fabrik's managed set (clone fails), post an error comment listing the unmanaged repos, add `fabrik:paused`, and stop — no children are created.
+3. **Per-child mutations** (for each block in document order — the block-index → child node-ID mapping is retained for step 4):
    - `CreateIssue(owner, repo, title, body)` — REST `POST /repos/{owner}/{repo}/issues`; body = block body + engine-appended back-reference footer
    - `AddProjectV2ItemById(board.ProjectID, childNodeID)` — adds child to the same project board; returns `childItemID`
    - `AddBlockedByIssue(parent.NodeID, childNodeID)` — links child as a `blockedBy` dependency of the parent
@@ -190,15 +204,16 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
    - `UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, specifyOptionID)` — moves child to the `Specify` column (or first non-Backlog, non-terminal column as fallback). **Non-fatal**: if `e.statusField` is nil or no viable column exists, child lands in Backlog and a warning is logged.
    - Conditional `AddLabelToIssue` for `fabrik:yolo` if the parent has `fabrik:yolo`; conditional `AddLabelToIssue` for `fabrik:cruise` if the parent has `fabrik:cruise`. Both are **non-fatal**. `base:<branch>` labels are **not** inherited.
    - On any failure in the fatal steps (CreateIssue, AddProjectV2ItemById, AddBlockedByIssue): post error comment naming completed and failed children, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added
-3. **After all children succeed**: Add `fabrik:children-spawned` label to the parent.
+4. **Sibling-wiring pass** (after all children from step 3 exist): for each block that declared `DEPENDS_ON`, call `AddBlockedByIssue(childNodeID, blockerChildNodeID)` linking it to the earlier sibling it referenced. On failure: post an error comment listing children created so far, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added.
+5. **After all children and sibling edges succeed**: Add `fabrik:children-spawned` label to the parent.
 
 ### After spawn
 
-`preImplement` returns `(spawned=true, nil)`. `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges and adds `fabrik:blocked`, gating the parent's Implement until all children close.
+`preImplement` returns `(spawned=true, nil)`. `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges — parent edges and any sibling edges alike — and adds `fabrik:blocked`, gating the parent's Implement until all children close. No changes were needed to `checkDependencies` or `PushUnblockObserver` to support this: both already operate generically over `item.BlockedBy` regardless of edge origin.
 
 ### Idempotency and retry
 
-`fabrik:children-spawned` is the durable idempotency guard. If pre-Implement fails after creating some but not all children (partial spawn), it pauses the parent without adding `fabrik:children-spawned`. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the start — v1 does not skip already-created children. The error comment names the orphaned children so the user knows what to close before re-advancing.
+`fabrik:children-spawned` is the durable idempotency guard, applied only after both the creation pass (step 3) and the sibling-wiring pass (step 4) succeed. If pre-Implement fails after creating some but not all children, or after creating all children but failing to wire some `DEPENDS_ON` edges, it pauses the parent without adding `fabrik:children-spawned`. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the start — v1 does not skip already-created children. The error comment names the orphaned children so the user knows what to close before re-advancing.
 
 To trigger a fresh spawn (e.g., after Plan is revised), the user must manually remove `fabrik:children-spawned` and close any orphaned children.
 
@@ -277,15 +292,84 @@ Context files are available in .fabrik-context/
 --plugin-dir <absolute-path-to-.fabrik/plugin>
 --output-format json
 --verbose
+--disallowedTools <tool> ...  (always: ScheduleWakeup, Workflow — see below)
 --resume <sessionID>          (if retry)
 --model <override>            (if label or stage config)
 --max-turns <N>               (if configured)
 --allowedTools <tool> ...     (if restricted)
+--name <sentinel>             (if claude supports --name; probed once at startup)
 ```
+
+`--disallowedTools` is emitted unconditionally, outside the `--dangerously-skip-permissions`/`--permission-mode dontAsk` branch, so it applies on both invocation paths — it is a construction-time exclusion from the tool schema Claude is offered, not a call-time permission check like `--allowedTools`. `ScheduleWakeup` and `Workflow` are suppressed because both promise cross-turn resumption a headless stage cannot deliver (see `disallowedTools` in `engine/claude.go` and ADR-1365). `Agent` is deliberately not suppressed — subagents complete within the parent turn.
+
+### Worker Session Naming (`--name`)
+
+Every worker invocation carries a `--name <sentinel>` flag of the form `fabrik:<owner>/<repo>#<issue>:<stage>` (e.g. `fabrik:handarbeit/fabrik#1284:Implement`), built by `sessionNameSentinel` (`engine/claude.go`) from `issue.Repo`, `issue.Number`, and `stage.Name`. This gives every Fabrik worker a self-describing identity in `ps` output — a `ps aux | grep -- "--name fabrik:"` finds every worker on the host, and the sentinel itself names which repo, issue, and stage each one is serving, without fingerprinting incidental flags (`--output-format`, `--plugin-dir`) or recovering `cmd.Dir` via `lsof`/`--add-dir`.
+
+The stage-name component is passed through `sanitizeSentinelComponent`, which collapses any run of whitespace to a single `-` and replaces any `:` or `#` with `-`. The whitespace rule keeps the value a single token, since args are passed as an argv slice (never through a shell) and the sole hard constraint is that naive `ps`-based parsing not break; the `:`/`#` rule keeps a custom stage name (e.g. `Review: Final` or `Review #2`, set via `.fabrik/stages/*.yaml`) from colliding with the sentinel's own `fabrik:<repo>#<issue>:<stage>` field delimiters, which would otherwise make the rendered sentinel ambiguous to split back into fields by position. An empty `issue.Repo` (not expected in production; GraphQL always populates it for real board items) falls back to the literal `unknown/repo` rather than producing a malformed sentinel. The sentinel is identical for a stage run and its comment-review invocations (both are built from the same `stage.Name`), and is deterministic for a given (repo, issue, stage) so repeated and resumed invocations produce the same value.
+
+**Capability probe.** Older `claude` binaries reject unrecognized flags outright, which would kill every in-flight worker — a far worse failure than the `ps`-identification problem this feature solves. To avoid that, `--name` is gated on `claudeNameFlagSupported` (`engine/claude.go`), a package-level boolean probed exactly once, in `engine.New()`, by running `claude --help` with a 5s timeout and checking the output for the literal `--name <name>` flag documentation (`probeClaudeNameFlagSupport`/`parseNameFlagSupport`). This mirrors the existing `claudePluginDir` pattern: computed once at engine construction, read on every `buildClaudeArgs` call, never re-probed per invocation. The probe's zero value is `false`, and any ambiguity — the binary is missing from `PATH`, `--help` exits non-zero, the probe times out, or the output doesn't mention `--name` — fails safe to `false` (flag omitted, workers still run) rather than risking a fleet-wide outage. When unsupported, a single `[startup]` log line explains why and workers proceed exactly as they did before this feature. `buildClaudeArgs` itself stays a pure formatter here too: it receives the already-resolved `sessionName string` and appends `--name <sessionName>` only when both the probe passed and a non-empty sentinel was supplied.
+
+**Interaction with `--resume`.** `--name` is passed unconditionally whenever the capability probe passes, resume or not — live verification during Research confirmed `--name` and `--resume` combine cleanly on the installed CLI (same, unforked `session_id` across a resumed invocation), so there is no conditional-omit branch on the resume path.
+
+**Observability only.** Nothing in the engine reads, parses, or branches on the sentinel — it never appears in prompts or context files, and no engine behavior is keyed off it. Its only consumers are external: a human reading `ps`/the session picker/terminal title, or a future `/fabrik:status` detector (tracked separately, not implemented by this mechanism).
 
 ### Worker Environment: GitHub Identity
 
 The Claude worker subprocess's environment is assembled as `mergeEnv(os.Environ(), extraEnv)` — the base is the engine process's own environment, with `extraEnv` entries taking precedence on key collision (last-wins). Alongside `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` and `CLAUDE_CODE_EFFORT_LEVEL`, `extraEnv` includes `GH_TOKEN` and `GITHUB_TOKEN`, both set to the engine's resolved GitHub token (`Config.Token`, the same value used for the engine's own `gh.NewClient` calls). This guarantees the worker's `gh` invocations (available via the default `Bash(gh:*)` allowed tool) always authenticate as the same identity as the engine itself, regardless of what `GH_TOKEN`/`GITHUB_TOKEN` the launching shell happens to export. Injection is skipped only when the engine's resolved token is empty, which should not occur in practice since a token is mandatory at startup.
+
+`extraEnv` also includes `GH_HOST`, set to the engine's resolved GHES host (`Config.GHESHost`, the same value used for the engine's own client construction via `gh.NewClientForHost` — see ADR-1391), immediately after `GH_TOKEN`/`GITHUB_TOKEN` — but only when `Config.GHESHost` is non-empty. This is the `gh` CLI's own established convention for pointing it at a non-github.com host, so it requires no extra wiring on the worker side: `fabrik-validate`'s Pre-Completion Gate (which runs `gh pr view --json baseRefName` on every Validate invocation) and any other stage's ambient `gh` calls automatically target the same GHES instance as the engine rather than silently falling through to github.com. Unlike `GH_TOKEN`/`GITHUB_TOKEN`, absence is the default and expected case — when no GHES host is configured, `GH_HOST` is omitted from `extraEnv` entirely (not emitted as an empty value), preserving today's behavior byte-for-byte. `GH_HOST` is a Fabrik-computed override like `GH_TOKEN`, not part of the Anthropic auth namespace described below, so it is never subject to the scrub or passthrough machinery.
+
+### Worker Environment: Anthropic Auth Namespace Scrub
+
+`mergeEnv` gained a bare-key removal sentinel (#1346, R1): an entry in `extraEnv` with no `=` (just `KEY`) strips that key from `baseEnv` without supplying a replacement, in addition to the pre-existing `KEY=VALUE` add/shadow/last-wins semantics, which are unchanged. `buildClaudeEnv` uses this to scrub the Anthropic/Claude-Code auth namespace out of the worker's environment by default, so no ambient credential the engine process happens to have (e.g. from a `.env` a human or an agent added locally) can silently redirect a Fabrik invocation from subscription billing to metered API billing.
+
+**Default-deny over a namespace, not a deny-list.** Every inherited variable whose name starts with `ANTHROPIC_` is removed unconditionally (`scrubAnthropicAuthEnv`, `engine/claude.go`) — matching on the exact parsed key, the same "up to the first `=`" extraction `mergeEnv` itself uses, never a substring, so `FANTASY_ANTHROPIC_API_KEY` passes through untouched (R5). This is deliberately wildcard-wide: a newly-introduced upstream `ANTHROPIC_*` billing variable is denied automatically, with no Fabrik code change required (R2). It also means non-auth `ANTHROPIC_*` variables (`ANTHROPIC_MODEL`, `ANTHROPIC_CONFIG_DIR`, etc.) are scrubbed too — an accepted, deliberate side effect of "namespace, not deny-list," documented in `docs/USER_GUIDE.md` and [ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md).
+
+`CLAUDE_CODE_*` is a much broader general-configuration namespace — it already carries Fabrik's own non-auth `CLAUDE_CODE_EFFORT_LEVEL`/`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` — so it is not wildcard-scrubbed. Instead, `claudeCodeAuthSelectors` enumerates the specific `CLAUDE_CODE_*` names verified (against the installed Claude Code binary) to select a non-subscription auth path or supply raw credentials: `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, and the `CLAUDE_CODE_USE_*` provider selectors (`BEDROCK`, `VERTEX`, `FOUNDRY`, `ANTHROPIC_AWS`, `ANTHROPIC_GOOGLE_CLOUD`, `MANTLE`, `GATEWAY`). A not-yet-enumerated future selector would require a Fabrik code change to be scrubbed — an accepted residual risk, since wildcard-scrubbing all of `CLAUDE_CODE_*` would also block legitimate non-billing configuration.
+
+**Explicit API-billing opt-in.** `FABRIK_ANTHROPIC_API_KEY`, resolved once at engine construction into the package-level `claudeAnthropicAPIKey` (mirroring the existing `claudeGHToken` pattern), is translated into an explicit `ANTHROPIC_API_KEY=<value>` override when non-empty (R6) — the only supported way to obtain API billing through this variable. When unset or empty, `ANTHROPIC_API_KEY` never reaches the worker regardless of what the engine inherited (R7). `FABRIK_ANTHROPIC_API_KEY` itself is never forwarded (R8) — `buildClaudeEnv` emits it as a bare removal token, since it is itself present in `os.Environ()`, the very `baseEnv` the worker would otherwise inherit unfiltered (the same ambient-leak reasoning `FABRIK_REPO`'s always-emitted override already documents above). When active, a one-time `[startup]` notice (`logAnthropicAPIKeyOptIn`) states that invocations will be billed to the Anthropic API — never logging the value (R9).
+
+**Explicit passthrough allow-list, for the long tail.** `FABRIK_ANTHROPIC_ENV_PASSTHROUGH`, resolved once into `claudeAnthropicEnvPassthrough` via `parseAnthropicEnvPassthrough` (comma-separated exact variable names), names keys to re-inherit from the ambient environment unchanged, overriding the scrub for only those names (R14). A named variable absent from the ambient environment is a no-op, not an error (R15); a variable not named remains scrubbed even if present (R16); a named variable outside the scrubbed namespace (e.g. `PATH`) is a redundant no-op, not an error (R19) — it was never going to be removed. `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` itself is never forwarded, mirroring R8 (R17). The re-add loop is itself restricted to `isAnthropicAuthNamespaceKey` (`ANTHROPIC_*`-prefixed or a `claudeCodeAuthSelectors` entry) — this is what makes R19's "no-op" claim actually hold for *every* key outside the namespace, including Fabrik's own computed overrides (`GH_TOKEN`, the `FABRIK_*` invocation facts, `CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`): naming one of those in the passthrough list is a no-op rather than letting a stale or attacker-controlled ambient value silently win over Fabrik's own value via `mergeEnv`/`os/exec`'s last-occurrence-wins duplicate-key resolution. This exists specifically for Bedrock/Vertex-style non-subscription auth: their actual credential chains (`AWS_ACCESS_KEY_ID`, `GOOGLE_APPLICATION_CREDENTIALS`, etc.) already fall outside the scrubbed namespace and need no passthrough entry — only the `ANTHROPIC_*`/`CLAUDE_CODE_*`-namespaced selectors do, e.g. `FABRIK_ANTHROPIC_ENV_PASSTHROUGH=CLAUDE_CODE_USE_BEDROCK,ANTHROPIC_AWS_API_KEY`. When non-empty, a one-time `[startup]` notice (`logAnthropicEnvPassthrough`) names which variables were passed through and warns that invocations may not be subscription-billed as a result — never logging values (R18).
+
+**Ordering.** `buildClaudeEnv` emits the scrub removals, then the passthrough re-adds, then the `FABRIK_ANTHROPIC_API_KEY` translation last — so if a passthrough entry and the translation both name `ANTHROPIC_API_KEY` (an edge case R7 permits but nobody is expected to actually hit), the translation wins deterministically via `mergeEnv`/`os/exec`'s last-occurrence-wins duplicate-key resolution.
+
+**`apiKeyHelper` is refused outright, not scrubbed.** `apiKeyHelper` is a `settings.json` key, not an environment variable — a command Claude Code shells out to for credentials — so no amount of environment scrubbing can prevent it from supplying an API key. `checkAPIKeyHelper` (`engine/startup.go`) fails startup (non-zero exit) if it is set anywhere in the resolved managed-policy/user/`fabrikDir`-project settings chain; see "apiKeyHelper Detection Path (Worktree)" below for the structurally identical per-invocation check against a worktree's own repo-resident settings, and `docs/USER_GUIDE.md`/[ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md) for the full rationale and accepted residual risks.
+
+### Worker Environment: Invocation Facts (`FABRIK_*`)
+
+Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects five facts Fabrik uniquely holds about the current invocation, so repo-side scripts running inside the worktree can provision or namespace a resource (a database schema, a port, a fixture namespace, a preview environment) without guessing. This is deliberately **expose-the-facts**, not a lifecycle-hook mechanism: Fabrik publishes what it knows; the consuming repo owns what happens, when, and how (see ADR-1288). No credential is added to this set, and nothing in the engine reads or branches on these variables — they exist solely for repo-side consumption.
+
+| Variable | Value | Presence |
+|---|---|---|
+| `FABRIK_ISSUE` | The issue number (bare integer, e.g. `1085`) | Always |
+| `FABRIK_REPO` | The `owner/repo` this invocation belongs to — the **item's** repo, not the engine's configured default (multi-repo aware) | Always |
+| `FABRIK_WORKTREE` | Absolute path to the issue's worktree (the process's working directory) | Always |
+| `FABRIK_ROOT` | Absolute path to `fabrikDir` (where `.fabrik/` config, stages, and plugin live) | Always |
+| `FABRIK_PR` | The linked pull request number | Only once a PR exists |
+
+`FABRIK_ISSUE` and `FABRIK_WORKTREE` are derived directly from the `issue.Number`/`workDir` values `buildClaudeEnv`'s callers already hold — `workDir` is guaranteed non-empty on every real invocation, since it also becomes the subprocess's `cmd.Dir`. `FABRIK_ROOT` and `FABRIK_PR` require `Engine`-only state (`e.fabrikDir`, `e.readClient`) and are resolved by the shared `Engine.resolveFabrikEnvOpts` helper (`engine/repo.go`), called from every `InvokeOptions`-constructing site — stage invocation (`item.go`), comment processing (`comments.go`), and merge-train conflict resolution (`merge_train.go`, `FABRIK_ROOT` only; see below) — so the worker environment is identical across invocation paths.
+
+**Re-resolved on every extend-turns iteration, not once per call.** `runInvocationWithExtension`'s Turn-Limit Extension Loop (below) can invoke Claude multiple times within a single call, flipping its local `resume` variable to `true` partway through once a turn-capped attempt shows progress. `resolveFabrikEnvOpts` is called fresh at the top of every loop iteration (using the iteration's current `resume` value), not once before the loop — otherwise a PR that came to exist between iterations (e.g. pushed externally to `fabrik/issue-N` while the loop was still running) would stay invisible to `FABRIK_PR` for the rest of that call, since the resume-aware cost-control gate above would never re-evaluate.
+
+**`FABRIK_REPO` and the not-yet-backfilled item case.** `FABRIK_REPO` prefers `issue.Repo`, which is populated from every board fetch and deep-fetch (`github/project.go`) and is therefore set on every item that has gone through Fabrik's normal dispatch path. The one exception is an item freshly constructed from a `projects_v2_item.created` webhook delta, which initially carries only a node ID — `issue.Repo` stays empty there until a subsequent `FetchItemDetails` backfills it (`github/project.go`'s `FetchItemDetails` explicitly comments on this path). To keep `FABRIK_REPO`'s "Always" guarantee true even in that window, `buildClaudeEnv` falls back to `opts.FabrikRepo` — the engine's configured default repo (`e.defaultRepo()`), set at all three `InvokeOptions`-constructing call sites — whenever `issue.Repo` is empty.
+
+`FABRIK_REPO` is always added to `buildClaudeEnv`'s returned overrides, even in the (practically unreachable) case where both `issue.Repo` and `opts.FabrikRepo` are empty — the resolved value is then an empty string, but the key is still present. This is deliberate: `mergeEnv` only strips a key from the base environment (`os.Environ()`) when that key appears in `overrides`. Omitting `FABRIK_REPO` entirely in that case would leave `mergeEnv` with nothing to strip, letting an ambient `FABRIK_REPO` already present in the engine process's own environment — e.g. the distinct engine-startup-config `FABRIK_REPO` (see `docs/USER_GUIDE.md`'s "Not the same `FABRIK_REPO`" note) — pass straight through to the worker unmodified. Always emitting the key, even empty, guarantees the worker-injected value (or its deliberate absence) always wins over anything the launching shell exported.
+
+**`FABRIK_PR` resolution and the `base:<branch>` case.** The board-sourced `item.LinkedPRNumber` is populated from GraphQL `closedByPullRequestsReferences`, which GitHub leaves structurally empty for a PR targeting a non-default base branch. `resolveFabrikEnvOpts` therefore trusts `item.LinkedPRNumber` when non-zero, and otherwise falls back to `FetchLinkedPR` via REST — the identical fallback pattern the review gate already uses (`handleBrokenReviewLinkage` in `reviews.go`). A result that errors, is `nil`, or isn't an open, unmerged PR is treated as "no PR": non-fatal, logged at warn, and never delaying or failing the invocation.
+
+`FetchLinkedPR` matches by branch name (`fabrik/issue-N`) alone, which is never sufficient confirmation on its own: a stale or repurposed `fabrik/issue-N` branch could carry someone else's unrelated open PR — on a `base:<branch>` repo especially, since `closingIssuesReferences` is structurally empty there for *every* PR, not just the linked one, but the same risk exists on a default-branch repo too. `resolveFabrikEnvOpts` therefore **always** confirms the branch-name match via `FetchPRClosingIssues` before trusting it — the same confirmation `handleBrokenReviewLinkage` performs for both its base-label and non-base-label branches — rather than skipping the check on a default-branch repo. `FetchPRClosingIssues` parses the PR body directly via REST, independent of any GraphQL cross-reference field, so it resolves correctly on both repo shapes; every Fabrik-created PR carries a closing keyword (`Closes #N`, per repo convention), so this confirmation succeeds transparently for the common case — including a draft PR that was just created moments ago, before the next GraphQL board refetch has repopulated `item.LinkedPRNumber`. A transient `FetchPRClosingIssues` error fails open (the branch-name match is still trusted, mirroring `handleBrokenReviewLinkage`'s own fail-open behavior) — only a *successful* fetch that doesn't list this issue withholds the PR number.
+
+**Cost control.** The REST fallback only fires when a PR could plausibly exist yet, which is both stage-config- and attempt-aware, not stage-config-alone:
+- A stage with neither `PostToPR` nor `CreateDraftPR` (Specify/Research/Plan in the default stage set) never calls the fallback — structurally, no PR can exist yet.
+- A stage that only posts to an already-existing PR (`PostToPR` without `CreateDraftPR`, e.g. Review/Validate) calls the fallback from its very first attempt, since an earlier stage (Implement) already created the PR.
+- A stage that creates its own draft PR (`CreateDraftPR`, e.g. Implement) calls the fallback only on a *resumed* attempt (`resume == true`, i.e. this issue has a prior invocation attempt already on record) — its own first attempt has no PR to find yet, since `ensureDraftPR` only runs after Claude completes. Gating on the stage flags alone (ignoring `resume`) would burn a REST call on every first Implement invocation that can never succeed — exactly the "network call on every invocation" the cost-control requirement forbids.
+
+Comment processing (`comments.go`) always passes `resume = true`: reaching the comment-review path already implies the stage produced at least one prior attempt.
+
+**Absent is absent, never a misleading zero.** `buildClaudeEnv` omits `FABRIK_PR` entirely when the resolved PR number is `0` — it never emits `FABRIK_PR=0`, which would read as a real PR number to a naive consumer.
+
+**Merge-train conflict resolution is a deliberate partial case.** `merge_train.go`'s inline conflict-resolution invocation (`resolveConflictWithClaude`) sets `FabrikRoot` for consistency but leaves `PRNumber` unset: that invocation resolves a merge conflict on a trial branch, not the member issue's own PR, so there is no single PR for `FABRIK_PR` to name.
 
 ### Output Logging
 
@@ -369,7 +453,7 @@ The baseline is purely in-memory; it is lost on engine restart (an acceptable ri
 
 The `e.claude.Invoke()` call runs inside an extension loop. On each iteration:
 
-1. `opts.MaxTurnsOverride` is set to `currentBudget` (first iteration: `stage.MaxTurns`, or `2 × stage.MaxTurns` if `fabrik:extend-turns` is present).
+1. `opts.MaxTurnsOverride` is set to `currentBudget` (first iteration: `stage.MaxTurns`, or `2 × stage.MaxTurns` if `fabrik:extend-turns` is present). `opts.FabrikRoot`/`opts.PRNumber` are also re-resolved here via `resolveFabrikEnvOpts` (#1288), using the current `resume` value — see "Worker Environment: Invocation Facts" above.
 2. Claude is invoked. Output is appended to `totalOutput`; usage is accumulated into `totalUsage`.
 3. Turn-limit check: `!completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget`.
 4. If turn limit was NOT hit (or stage completed), exit the loop.
@@ -458,6 +542,32 @@ All Fabrik markers are stripped from output before posting:
 **Otherwise** (Specify, Research, Plan):
 - Full output posted directly on the issue as a stage comment
 
+### Spawn Receipt Note
+
+If the Plan stage's posted output contains N > 0 well-formed spawn blocks — as counted by `ParseSpawnBlocks`, never by string-matching the marker text — a deterministic note is appended stating that N sub-issues are declared and will be created when the parent advances to the **Implement** stage. The note is gated to `stage.Name == "Plan"`, matching exactly what `preImplement` itself reads (`findStageComment(item.Comments, "Plan")`, engine/spawn.go): a note on any other stage's comment would promise a spawn that mechanism never performs — for example, a later stage's Claude quoting a spawn block back verbatim from its own context (later stages receive the Plan comment through `.fabrik-context/stage-Plan.md`). The gate applies to both output-posting paths above. The note is folded into the same `footer` value that also carries the stats footer below, computed once and threaded unchanged through every posting path — so it renders identically whether output goes straight to the issue or through `post_to_pr`. N == 0, or a non-Plan stage, produces no note and byte-identical output to before this existed. See ADR-048 and #1338.
+
+### Token Stats Reporting
+
+Every invocation reports token usage in two places: an operator-facing log line (`e.logf(..., "stats", ...)`, emitted from `finalizeStageOutcome` in `engine/item.go` and from comment-processing finalization in `engine/comments.go`) and a human-facing footer appended to the posted comment/PR output (`formatStatsFooter`, `engine/claude.go`). Both are built from the same `TokenUsage` struct, which carries four independent token counts per invocation: `InputTokens` (raw, uncached input), `OutputTokens`, `CacheReadTokens` (context served from Claude's prompt cache), and `CacheCreationTokens` (new context written to the cache this turn).
+
+**Why cached input dominates.** With prompt caching active — which it always is once a conversation has any history — `InputTokens` alone is structurally near-zero: almost all context is served from cache, not resent as fresh input. Reporting only `InputTokens` (as Fabrik did before this reporting was added) makes every stage look like it consumed `0k input` regardless of actual cost, and a short resumed invocation that replays a large accumulated context looks artificially cheap. Cache tokens are not a rounding error; on long-running or resumed invocations they routinely dwarf raw input by two or three orders of magnitude.
+
+**Log line format** (`formatStatsLogLine`, shared by `item.go` and `comments.go`) uses raw, unscaled numbers in the same `key: value | key: value` convention as the pre-existing cumulative line at `engine/poll.go:1172`:
+
+```
+used 41/250 turns | in: 476 | out: 171009 | cache_read: 25003551 | cache_write: 993820
+```
+
+**Footer format** (`formatStatsFooter`, posted into the GitHub comment/PR a human reads) is k/M-scaled and leads with an "effective input" total (`InputTokens + CacheReadTokens + CacheCreationTokens`) so a reader can't mistake the raw figure for total input consumed, with a raw/cache-read/cache-write breakdown in parentheses when cache activity is non-zero. Cache reads and cache writes are broken out separately rather than folded into one "cached" figure, since Anthropic prices them differently per token:
+
+```
+Used 41/250 turns, 26.0M input (476 raw + 25.0M cache-read + 993k cache-write) / 171k output tokens.
+```
+
+**Emptiness guards.** Both formatters return an empty string — suppressing the line entirely — only when *all five* fields (`TurnsUsed`, `InputTokens`, `OutputTokens`, `CacheReadTokens`, `CacheCreationTokens`) are zero. An invocation with meaningful cache activity but zero raw input/output still reports, since caching means that combination is a real, common case rather than a signal of an empty invocation.
+
+`TokenUsage.InputTokens` keeps its existing meaning (raw uncached input) everywhere, including in `internal/itemstate` and the poll-level cumulative log — this is a display change only, not a change to what the field means or how cost (`CostUSD`) is calculated.
+
 ### Comments Marked as Seen
 
 After a stage runs, any pre-existing user comments get a rocket reaction via `markCommentsSeenByStage`. They were included in the prompt as context and should not trigger the awaiting-input unblock logic on subsequent polls.
@@ -531,6 +641,36 @@ early, without restarting the engine, by applying `fabrik:clear-claude-limit` to
 why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
 Audit above (with the opposite pause/fail outcome — a usage limit is transient and self-resolving, a
 boundary violation is not).
+
+### apiKeyHelper Detection Path (Worktree)
+
+A fifth outcome, checked in `runInvocationWithExtension` immediately alongside the account-wide
+usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
+before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
+preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
+`.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file
+coverage for the user/project layers): a **repo-resident** setting Fabrik cannot see at engine startup,
+since the worktree doesn't exist yet (#1346, R13). If either sets `apiKeyHelper`, the invocation is skipped and
+`*apiKeyHelperDetectedError` is returned in place of invoking Claude at all; `finalizeStageOutcome`
+classifies it via `errors.As` (alongside the usage-limit check) and routes to
+`handleAPIKeyHelperDetected`, which mirrors `handleUsageLimitExit` exactly:
+
+1. `StageAttempted` recorded — the normal cooldown applies, so the item does not retry on the very
+   next poll.
+2. Retry count is **not** incremented — the stage never ran.
+3. If `fabrik:api-key-helper-detected` is absent, an explanatory comment naming the offending file is
+   posted and the label is added — gated on the label's own absence, matching `fabrik:claude-limit`'s
+   non-spamming behavior. Neither `fabrik:paused` nor `stage:<name>:failed` is applied.
+4. No partial-progress commit, no branch push — nothing was produced.
+5. Lock released.
+
+`fabrik:api-key-helper-detected` clears on the next invocation that is not itself classified as a
+usage-limit exit or an `apiKeyHelper` detection (the same unconditional label-clear site as
+`fabrik:claude-limit`, later in `finalizeStageOutcome`) — a human removing `apiKeyHelper` from the
+worktree's `.claude/settings.json` and letting the next poll reach Claude successfully is enough to
+self-resolve; no manual label removal is required. Unlike `fabrik:claude-limit`, there is no
+account-wide settle sweep for this label — the condition is inherently per-worktree, not
+account-wide. See [ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md).
 
 ### Branch Pushing
 

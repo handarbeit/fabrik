@@ -884,6 +884,32 @@ func TestIsReviewReinvoke_EmptySlice_ReturnsFalse(t *testing.T) {
 	}
 }
 
+// Finding 4 (#1375): a batch of only synthetic review-body comments (no
+// inline thread comments at all — the exact shape a CHANGES_REQUESTED review
+// with no inline comments produces) must still classify as a review reinvoke,
+// so publishCommentOutput posts the PR feedback summary.
+func TestIsReviewReinvoke_AllReviewBodyIDs_ReturnsTrue(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "review-body:555", ReviewThreadID: ""},
+	}
+	if !isReviewReinvoke(comments) {
+		t.Error("expected true when all comments carry the review-body: ID prefix")
+	}
+}
+
+// A mixed batch (some real thread comments plus a review-body comment) must
+// also classify as a review reinvoke — the ID-prefix discriminator handles
+// the case ReviewThreadID alone cannot (a body-derived comment has no thread).
+func TestIsReviewReinvoke_MixedThreadAndBody_ReturnsTrue(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "C_1", ReviewThreadID: "RT_abc"},
+		{ID: "review-body:555", ReviewThreadID: ""},
+	}
+	if !isReviewReinvoke(comments) {
+		t.Error("expected true for a mixed thread-comment + review-body batch")
+	}
+}
+
 // ── fabrik:extend-turns in comment processing ─────────────────────────────────
 
 // TestCommentProcessingExtendTurnsLabelAbsent verifies that when fabrik:extend-turns

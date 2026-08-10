@@ -44,18 +44,6 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 	return false
 }
 
-// stageIsGateChecked reports whether a stage gates completion on CI or reviews
-// (wait_for_ci / wait_for_reviews). The Validate stage is the gate-checked stage
-// in the default pipeline; the settle-owner (runValidatePRTerminalAdvance) and
-// the closed-issue admit gates key on this property so a merged PR at a
-// gate-checked stage is advanced/healed regardless of which gate label is set.
-func stageIsGateChecked(stage *stages.Stage) bool {
-	if stage == nil {
-		return false
-	}
-	return (stage.WaitForCI != nil && *stage.WaitForCI) || (stage.WaitForReviews != nil && *stage.WaitForReviews)
-}
-
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
@@ -160,6 +148,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				if e.webhookMgr != nil {
 					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 				}
+				e.recordLabelAppliedAtNow(item, "fabrik:awaiting-ci")
 			}
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
@@ -247,6 +236,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 					if e.webhookMgr != nil {
 						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-review")
 					}
+					e.recordLabelAppliedAtNow(item, "fabrik:awaiting-review")
 				}
 				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
 			}
@@ -286,6 +276,37 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// Idempotency: auto-merge was already enabled on a prior run.
 	if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 		return true, false, nil
+	}
+
+	// Dependency guard (ADR-1419): re-verify BlockedBy live, immediately
+	// before any landing decision. A Review/Validate mid-flight spawn
+	// (finalizeStageOutcome, engine/item.go) can create a brand-new
+	// blockedBy edge within this very dispatch — after Claude already
+	// emitted FABRIK_STAGE_COMPLETE alongside the spawn block — so the
+	// `item` snapshot passed in here predates that edge entirely.
+	// checkDependencies's own live-reread (engine/dependencies.go) only
+	// fires when the item is *already* fabrik:blocked, which it never is
+	// yet on a same-dispatch edge, so it cannot catch this on its own.
+	// Without this guard, a Validate agent that (against its own skill
+	// instructions — see "If You Discover a Blocking Issue" in
+	// fabrik-validate/SKILL.md) emits a spawn block together with
+	// FABRIK_STAGE_COMPLETE on a yolo issue could reach MergePR/auto-merge
+	// before fabrik:blocked is ever applied — reproducing, one dispatch
+	// earlier, the exact silent-merge-past-an-undeclared-blocker danger
+	// this issue exists to close. Both callers of this function
+	// (handleStageComplete and poll.go's catch-up loop) already gate on
+	// yolo and return above once fabrik:auto-merge-enabled is set, so this
+	// live fetch is bounded to the same narrow per-Validate-completion
+	// window guard 1 below already re-fetches live data in.
+	fresh := item
+	if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+		e.logf(item.Number, "warn", "attemptMergeOnValidate: live re-read of dependencies failed (%v) — using possibly-stale snapshot\n", ferr)
+	} else {
+		item = fresh
+	}
+	if e.checkDependencies(board, item, stage) {
+		e.logf(item.Number, "yolo-merge-guard", "not merging: dependencies are open (live re-check)\n")
+		return false, false, nil
 	}
 
 	// Guard 1 (#1207): do not advance out of Validate or enable auto-merge/
@@ -409,6 +430,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 			}
+			e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 		}
 		e.logf(item.Number, "info", "PR #%d merged directly (auto-merge unavailable fallback)\n", pr.Number)
 		return true, false, nil
@@ -424,6 +446,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
+		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 	}
 
 	e.logf(item.Number, "info", "GitHub auto-merge enabled on PR #%d (%s) — awaiting GitHub atomic merge\n", pr.Number, strategy)
@@ -465,6 +488,7 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
+		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 	}
 	e.logf(item.Number, "info", "PR #%d enqueued into merge queue — awaiting GitHub merge\n", prNumber)
 	return true, nil

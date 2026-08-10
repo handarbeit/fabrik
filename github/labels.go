@@ -54,6 +54,14 @@ var staticLabelDefs = []labelDef{
 	{"effort:medium", "Override the stage's configured thinking effort", "6f42c1"},
 	{"effort:high", "Override the stage's configured thinking effort", "6f42c1"},
 	{"effort:max", "Override the stage's configured thinking effort", "6f42c1"},
+
+	// --- review authority override labels (purple) ---
+	{"review-authority:advisory", "Override the stage's configured review_authority to advisory for this issue", "6f42c1"},
+	{"review-authority:authoritative", "Override the stage's configured review_authority to authoritative for this issue", "6f42c1"},
+
+	// --- expected reviewers override labels (purple) ---
+	{"expected-reviewers:none", "Override the stage's configured expected_reviewers to none for this issue", "6f42c1"},
+	{"expected-reviewers:declared", "Override expected_reviewers to a fixed synthetic reviewer; testing/e2e use only", "6f42c1"},
 }
 
 // labelDefFor returns the description and default color for labelName.

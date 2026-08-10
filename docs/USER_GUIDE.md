@@ -95,6 +95,21 @@ Without a URL, `fabrik init` behaves as before: if your terminal is interactive 
 prompts for owner, repo, project number, and username; otherwise it writes a
 fully-commented template for you to fill in.
 
+**GitHub Enterprise Server project URLs are also accepted.** Pass `--ghes-host` (or
+set `FABRIK_GHES_HOST`) alongside a project URL on your GHES instance:
+
+```bash
+./fabrik init --user you --ghes-host github.example.com \
+    https://github.example.com/orgs/your-org/projects/5
+```
+
+`init` runs before `.fabrik/config.yaml` exists, so the host can only come from the
+flag or environment variable at this point — never from `config.yaml`. The resolved
+host is written into the generated config (`ghes_host: github.example.com`), so you
+only need to supply it to `init` once; every subsequent `fabrik` invocation picks it
+up from `config.yaml`. See [GitHub Enterprise Server
+Support](#github-enterprise-server-support) below for the full effect of `ghes_host`.
+
 To refresh plugin skills without touching stages or config (e.g., after upgrading Fabrik):
 
 ```bash
@@ -116,6 +131,16 @@ GitHub token to a gitignored `.env` file:
 # Required scopes: repo, project, workflow
 # Create at: https://github.com/settings/tokens (select "Tokens (classic)")
 FABRIK_TOKEN=ghp_...
+
+# Optional: run this instance's Claude invocations against a different Claude
+# account/subscription. See "Alternate Claude Profile (CLAUDE_CONFIG_DIR)" below.
+# CLAUDE_CONFIG_DIR=/home/user/.claude-alt-profile
+
+# Optional: explicit opt-in to API billing instead of subscription billing.
+# An ambient ANTHROPIC_API_KEY here is scrubbed by default and never reaches
+# Claude invocations on its own — see "Anthropic Auth Namespace Scrub &
+# apiKeyHelper Refusal" below.
+# FABRIK_ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 > **Note:** When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories **without** `.git/` — containers, CI workspaces, or bare directories — this check is skipped and `.env` is loaded normally without requiring a `.gitignore` entry.
@@ -219,6 +244,15 @@ The `.fabrik/` directory (config, stages, plugin) always lives in the directory 
 
 Fabrik can manage issues across every repository on the board in a single run. To enable multi-repo mode, omit (or comment out) the `repo:` field in `.fabrik/config.yaml` — Fabrik then discovers repositories lazily from the project board and processes issues from all of them. Each repository gets its own bare clone at `.fabrik/repos/<owner>-<repo>.git` and its own set of worktrees, all driven by the same poll loop.
 
+#### Write-access gating for board-derived repos
+
+Because repos are discovered from board items rather than configured explicitly, tracking an upstream issue on your own board (a normal GitHub Projects workflow) can surface a repo you don't administer. Fabrik checks the configured token's write access to each newly discovered repo (piggybacked on the same API call already used for the `allow_auto_merge` check — no extra request) before seeding any labels or evaluating `allow_auto_merge` on it:
+
+- A repo the token **can** write to is managed exactly as before: labels are seeded, `allow_auto_merge` is checked, and its board items are dispatched into the pipeline normally.
+- A repo the token **cannot** write to is skipped entirely: no label-mutation requests are made against it, no `allow_auto_merge` warning is printed (its only fix requires admin rights the operator doesn't have), and its board items are **not processed at all** — not even read-only. Nearly every stage past Specify/Research needs to push commits and open PRs, which requires exactly the access already found absent, so partial processing would only fail later and less clearly. Fabrik logs a one-time notice naming the repo and reason instead.
+
+The access determination is cached per repo for the life of the process — it costs one API call the first time a repo is seen, never repeated on later polls.
+
 ### Git Clone Protocol (HTTPS vs SSH)
 
 By default, Fabrik uses HTTPS to bare-clone managed repos (`https://github.com/<owner>/<repo>.git`). Users who authenticate via SSH keys can switch to SSH clone URLs instead.
@@ -270,12 +304,65 @@ git -C .fabrik/repos/owner-repo.git remote set-url origin git@github.com:owner/r
 
 If you have `url.<base>.insteadOf` configured in your global `~/.gitconfig` (a common way to redirect HTTPS to SSH globally), Fabrik will notice at startup and print an informational message. Git applies URL rewriting transparently, so Fabrik's HTTPS clone URLs will automatically use your SSH configuration — no additional Fabrik setting is needed.
 
+> **GitHub Enterprise Server:** clone URLs (both HTTPS and SSH) are built against the configured `ghes_host` when set, instead of `github.com`. See [GitHub Enterprise Server Support](#github-enterprise-server-support) below.
+
+### GitHub Enterprise Server Support
+
+Fabrik can run against a GitHub Enterprise Server (GHES) instance instead of github.com. This was verified against a live GHES 3.19.8 instance with full API parity for everything Fabrik uses — no adapter layer, schema introspection, or capability negotiation is involved. It's pure endpoint/host configuration.
+
+#### Configuring a GHES host
+
+Set the hostname of your GHES instance (no scheme, no trailing slash) via any of the usual precedence layers:
+
+```bash
+# Flag
+fabrik --ghes-host github.example.com --owner myorg --project 5 --user me
+
+# Environment variable
+export FABRIK_GHES_HOST=github.example.com
+
+# .fabrik/config.yaml
+ghes_host: github.example.com
+```
+
+Precedence is flag > `FABRIK_GHES_HOST` > `config.yaml`'s `ghes_host`, matching every other setting. A value with a `https://`/`http://` scheme or a trailing `/` is normalized automatically, so `https://github.example.com/` and `github.example.com` are equivalent.
+
+**Absent any GHES configuration, behavior is exactly today's github.com behavior** — this is the default path and does not regress.
+
+Once configured, the GHES host governs:
+- **REST and GraphQL API endpoints** — REST resolves to `https://<host>/api/v3/...`, GraphQL to `https://<host>/api/graphql`. These are independently derived, not one path-suffixed from the other — GHES puts them at different paths (`/api/v3/graphql` is a 404 on GHES; `/api/graphql` is the correct endpoint).
+- **Bare-clone URLs** — both the HTTPS and SSH forms (`--ssh` / `git_ssh: true` still selects which protocol is used; see [Git Clone Protocol](#git-clone-protocol-https-vs-ssh) above).
+- **Commit author noreply email** — Fabrik-authored commits use `<user>@users.noreply.<host>` instead of `<user>@users.noreply.github.com`. **Note:** this mirrors github.com's own noreply-email convention with the configured host substituted, but has not been verified against a live GHES instance's actual private-commit-email behavior — GitHub's published GHES admin documentation does not explicitly confirm this format. If your GHES instance uses a different convention, please file an issue.
+- **`GH_HOST` in stage-worker subprocess environments** — every Claude-invoked stage worker's `gh` CLI calls (e.g. `fabrik-validate`'s Pre-Completion Gate, which runs `gh pr view` on every invocation) are pointed at the same GHES instance as the engine, via the `gh` CLI's own `GH_HOST` convention. See [Subprocess Environment](#subprocess-environment).
+- **`fabrik init`'s project-URL parsing** — a GHES project URL is accepted alongside github.com URLs when `--ghes-host`/`FABRIK_GHES_HOST` is supplied to `init`. See the `fabrik init` walkthrough near the top of this guide.
+
+**Self-upgrade (`--auto-upgrade`) stays on github.com, unauthenticated, when a GHES host is configured.** Fabrik's own releases always live at `github.com/handarbeit/fabrik`, never on your GHES instance. Your configured token authenticates your GHES host, not github.com, so it is never sent with the release-check/download request — sending it would fail outright with "Bad credentials" rather than falling back to unauthenticated. Since `handarbeit/fabrik`'s releases are public, self-upgrade still works unauthenticated; it's just subject to github.com's lower unauthenticated rate limit. See [Auto-upgrade](#auto-upgrade) below.
+
+#### Minimum supported version
+
+Fabrik requires **GHES 3.19 or later**. At startup, when a GHES host is configured, Fabrik queries the instance's unauthenticated `/meta` endpoint for `installed_version` and refuses to start if it's below the floor:
+
+```
+GHES instance github.example.com reports version 3.18.5, below Fabrik's minimum supported version 3.19 —
+upgrade the GHES instance or remove the ghes_host configuration. See docs/USER_GUIDE.md
+```
+
+If the `/meta` fetch itself fails (network error, auth problem), Fabrik logs a non-fatal warning and continues — connectivity issues surface more clearly moments later when the project board fetch runs. This preflight only applies when a GHES host is configured; github.com deployments never see it.
+
+#### Known limitations
+
+A few advisory-only, non-gating features still hardcode `github.com` and have not been updated for GHES:
+- The startup board-validation check's human-facing project board URL link.
+- The URL-rewrite and HTTPS-credential-helper startup checks' SSH-rewrite detection heuristics.
+
+None of these affect correctness — they may just show a `github.com`-shaped link or an inapplicable advisory message on a GHES deployment. Webhook support and `projects_v2_item` availability on GHES are also unverified; Fabrik always falls back to polling when webhooks aren't available, so this is not a blocker.
+
 ### Auto-upgrade
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself automatically. It checks for a newer version in two places:
 
-- **At startup** — once before the first poll, so boards that are always busy still receive upgrades promptly. The check fires after the exclusive file lock is acquired, so concurrent Fabrik instances never race on the upgrade check.
-- **After 2 consecutive idle polls** — as a belt-and-suspenders check for long-running instances.
+- **At startup** — once before the first poll. The check fires after the exclusive file lock is acquired, so concurrent Fabrik instances never race on the upgrade check.
+- **After 2 consecutive idle polls** — the only other trigger. Because upgrading a dev build re-execs the process (`syscall.Exec`), this check requires true idleness — no workers in flight, including merge-train workers — so an in-progress Claude invocation is never killed mid-run. A board that is *continuously* busy (dispatching work, or with a merge-train worker in flight, every single poll) never reaches this check, and therefore never upgrades on its own — see "Staleness reporting on a busy board" below for how that gap is surfaced instead of going unnoticed.
 
 For release builds, Fabrik queries the GitHub Releases API at each check point. If a newer version is found, it downloads the new binary, replaces the running executable, runs `fabrik upgrade` to refresh plugin skills, and re-execs itself. Version comparison ignores any pre-release/build/pseudo-version suffix (`-...`/`+...`) on the running version's version string — so a `go install ...@main` or branch install (which reports a pseudo-version like `v0.0.72-0.20260716173320-6198e8102f90+dirty` in `--version`) still upgrades correctly when a newer clean release tag is published; before this fix such a suffixed version silently compared as "already up to date" and the daemon would never upgrade (#1074). On macOS, the freshly-downloaded binary is best-effort re-signed (`xattr -cr` + `codesign --force --sign -`) before the re-exec, working around an Apple Silicon quirk where a binary materialized via a fresh file write (rather than built in place) can otherwise be killed on exec.
 
@@ -296,6 +383,27 @@ local `HEAD`:
 After rebuilding, Fabrik runs `fabrik upgrade` (non-interactive, silent — see below)
 and re-execs the new binary. This keeps dev builds current with the same hands-off
 experience as release binaries.
+
+**Staleness reporting on a busy board:** the two upgrade-check points above both
+require true idleness before a dev build can rebuild and re-exec (upgrading kills
+in-flight workers). A board that dispatches work every poll — or has a merge-train
+worker running continuously — never reaches either one, so the daemon can end up
+running arbitrarily stale code indefinitely with no signal that anything is wrong.
+To close that gap, dev-build source checkouts get a separate, report-only staleness
+check that runs independently of idleness: every 30 polls (~15 minutes at the
+default 30s `--poll` interval, including once on the very first poll), Fabrik
+compares the running binary's commit against `origin/main` — the same comparison
+the upgrade path itself uses, so the two can never disagree — and, if it's behind,
+records a warning naming the running SHA, how many commits behind it is, and the
+age of the running commit (e.g. "75 commits behind origin/main" was the exact
+signal that would have caught the incident this feature was built to prevent).
+The warning surfaces in the TUI Warnings panel, in the startup/poll log output,
+and in `fabrik.log`; it clears itself on the next check once the daemon is
+restarted onto current code. This check **never** runs `git pull`, `go build`, or
+re-execs — it only reports. Applies to dev-build source checkouts only (the same
+`handarbeit/fabrik`-remote gate the upgrade path itself uses); release-binary
+installs and non-source-checkout directories see no change and trigger no `git
+fetch`.
 
 > **Plugin-skills upgrade: automatic vs. standalone behavior**: The plugin-skills check
 > runs in two contexts with different behavior.
@@ -384,6 +492,40 @@ Custom stages (names not present in any embedded default) are silently skipped �
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
+
+### Graceful Shutdown
+
+Pressing Ctrl-C (bare CLI) or quitting the TUI (`q` or Ctrl-C — both raise the same SIGTERM) triggers
+a **clean stop**, not a kill:
+
+1. **Stop admitting new work.** Fabrik stops dispatching new stage invocations immediately.
+2. **Pause every in-flight issue durably.** Every issue with a live worker gets `fabrik:paused` +
+   `fabrik:awaiting-input` applied on GitHub, plus a one-time audit comment naming the stage that was
+   interrupted and instructing you to remove `fabrik:paused` to resume. `stage:<Name>:in_progress` is
+   cleared at the same time — the board reflects "parked by a clean stop," not "still running."
+3. **Commit and push in-progress worktree changes.** Any uncommitted work in the worktree is
+   committed (`chore: partial <Stage> stage progress (incomplete)`) and pushed to the remote branch —
+   nothing is silently discarded.
+4. **Wind down Claude workers within a bounded deadline.** Each worker gets the existing
+   SIGINT→SIGTERM→SIGKILL escalation (`--kill-grace-sigint`/`--kill-grace-sigterm`), and the entire
+   drain — workers plus the pause-write phase above — is bounded by `--drain-deadline` (default
+   **30 seconds**, comfortably above the kill-grace escalation's ~20s worst case). If the deadline
+   passes with work still outstanding, Fabrik logs a warning and exits anyway rather than hanging
+   indefinitely.
+
+**Resuming** is exactly the same as resuming any other paused issue: remove `fabrik:paused` (and
+`fabrik:awaiting-input`, if you want to skip straight back into dispatch — it also self-clears on the
+stage's next entry). The stage picks back up from the pushed partial-progress commit.
+
+**Force-quit** is still available as an escape hatch if the clean stop itself gets stuck: press
+Ctrl-C (or send SIGINT/SIGTERM) a **second time** while "shutting down gracefully" is in progress.
+This exits immediately (`os.Exit(1)`) with no further label writes or worktree commits — use it only
+when the ordinary clean stop is visibly wedged.
+
+An idle daemon (no workers in flight) stops exactly as fast and quietly as it always did — the pause
+phase writes nothing when there is nothing to pause.
+
+See `--drain-deadline`/`FABRIK_DRAIN_DEADLINE` in [§2 Configuration Reference](#2-configuration-reference) to change the drain bound, and [ADR-1393](https://github.com/handarbeit/fabrik/blob/main/adrs/1393-clean-stop-shutdown.md) for the full design record.
 
 ### Worktree Janitor
 
@@ -509,6 +651,12 @@ project: 1
 user: your-github-username
 
 # Optional settings (defaults shown):
+
+# GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent
+# (the default) means github.com — byte-identical to today's behavior. See
+# "GitHub Enterprise Server Support" above for the full effect and the
+# minimum supported version (3.19).
+# ghes_host: ""
 
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
@@ -669,10 +817,13 @@ FABRIK_USER=my-personal-username
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
-| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
+| `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
+| `--max-resume-failures` | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts the next invocation instead of resuming (0 = use default of 2; also `FABRIK_MAX_RESUME_FAILURES`). Independent of `--max-retries` — a resume failure never consumes a retry slot, so the guaranteed cold-start attempt can't be starved by the failures it exists to recover from. See the "Resume failures" troubleshooting note below | `0` (2 failures) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
-| `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
+| `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
+| `--ci-backstop-timeout` | Absolute cap in minutes on how long an item may sit in `fabrik:awaiting-ci` under any classification, bounding per-poll cost independent of CI duration — sized much larger than `--ci-wait-timeout` on purpose (0 = use default of 240 = 4h; also `FABRIK_CI_BACKSTOP_TIMEOUT`; ADR-1410) | `0` (240 min / 4h) |
 | `--post-push-dwell` | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (0 = use default of 90; also `FABRIK_POST_PUSH_DWELL`). Prevents premature gate-clear in the brief post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `0` (90 sec) |
 | `--worker-stale-timeout` | Minutes before a stale worker heartbeat triggers PID-liveness check and handle clearing (0 = use default of 5; must be > `heartbeatInterval×2`; also `FABRIK_WORKER_STALE_TIMEOUT`) | `0` (5 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
@@ -696,10 +847,12 @@ FABRIK_USER=my-personal-username
 | `--session-retention-days` | Delete `.fabrik/sessions/` `.session` files older than this many days; 0 disables age-based pruning; never deletes a session file for a stage currently in flight; also `FABRIK_SESSION_RETENTION_DAYS` | `14` |
 | `--kill-grace-sigint` | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGINT entirely; also `FABRIK_KILL_GRACE_SIGINT`) | `""` (10s) |
 | `--kill-grace-sigterm` | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGTERM entirely; also `FABRIK_KILL_GRACE_SIGTERM`) | `""` (10s) |
+| `--drain-deadline` | Bound on a clean stop's worker drain — how long `Run()` waits, after the first SIGINT/SIGTERM, for in-flight workers and the shutdown-pause write phase (see [Graceful Shutdown](#graceful-shutdown)) before returning anyway (Go duration: `30s`, `1m`; unlike `--kill-grace-*`, `"0s"` is **not** a "wait forever" sentinel — any non-positive value falls back to the default with a warning; also `FABRIK_DRAIN_DEADLINE`). Should stay comfortably above `--kill-grace-sigint` + `--kill-grace-sigterm`, or the drain will preempt the kill escalation before it can complete — a startup warning fires if it doesn't. | `""` (30s) |
 | `--archive-after` | Grace period since an item settled into Done (its `stage:<Done>:complete` label was applied) before it is auto-archived off the project board (Go duration: `168h`, `24h`; `"0s"` archives immediately once eligible; also `FABRIK_ARCHIVE_AFTER`) | `""` (168h = 1 week) |
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off`; also `FABRIK_ARCHIVE_DONE` | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
+| `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
 ### Environment Variables
 
@@ -715,7 +868,9 @@ FABRIK_USER=my-personal-username
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds | `30` |
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
-| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited) | `3` |
+| `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
+| `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
+| `FABRIK_MAX_RESUME_FAILURES` | *(no config.yaml key)* | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts (positive integer; invalid or unset values default to 2). Independent of `max_retries` — see `--max-resume-failures`. | `2` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -723,7 +878,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_SYMLINK_ENV` | `symlink_env` | Symlink fabrikDir `.env` into each worktree at setup time (`true`/`1`/`yes`) — see `--symlink-env` | `false` |
 | `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle at the review gate (whether waiting for requested reviewers to submit or for at least one review to exist) before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
 | `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
-| `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
+| `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes of CI *inactivity* before pausing with `fabrik:awaiting-input` — not total CI wait time (positive integer; invalid or unset values default to 30). See [§3 CI Gate](#ci-gate-and-ci-fix-workflow) and ADR-1410. | `30` |
+| `FABRIK_CI_BACKSTOP_TIMEOUT` | *(no config.yaml key)* | Absolute cap in minutes on how long an item may sit in `fabrik:awaiting-ci` under any classification, independent of CI duration (positive integer; invalid or unset values default to 240 = 4h). See [§3 CI Gate](#ci-gate-and-ci-fix-workflow) and ADR-1410. | `240` |
 | `FABRIK_POST_PUSH_DWELL` | *(no config.yaml key)* | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (non-negative integer; `0` or unset uses the default of 90; negative values default to 90). Prevents premature gate-clear during the post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `90` |
 | `FABRIK_WORKER_STALE_TIMEOUT` | *(no config.yaml key)* | Minutes before a stale worker heartbeat triggers PID-liveness check; if the PID is dead the handle is cleared so the item can be re-dispatched (positive integer; invalid or unset values default to 5; must be > `heartbeatInterval×2`, i.e., > 1 min) | `5` |
 | `FABRIK_MAX_CI_FIX_CYCLES` | *(no config.yaml key)* | Maximum number of CI-fix re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
@@ -747,10 +903,32 @@ FABRIK_USER=my-personal-username
 | `FABRIK_SESSION_RETENTION_DAYS` | `session_retention_days` | Delete `.fabrik/sessions/` `.session` files older than this many days (non-negative integer; `0` disables age-based pruning; never deletes a session file for a stage currently in flight) | `14` |
 | `FABRIK_KILL_GRACE_SIGINT` | *(no config.yaml key)* | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGINT step entirely) | `""` (10s) |
 | `FABRIK_KILL_GRACE_SIGTERM` | *(no config.yaml key)* | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGTERM step, SIGKILL fires immediately after SIGINT) | `""` (10s) |
+| `FABRIK_DRAIN_DEADLINE` | *(no config.yaml key)* | Bound on a clean stop's worker drain (Go duration string: `"30s"`, `"1m"`; empty or unset = use default of 30s; unlike the `KILL_GRACE_*` variables, `"0s"` is not a "wait forever" sentinel — any non-positive or invalid value falls back to the default with a warning). See [Graceful Shutdown](#graceful-shutdown). | `""` (30s) |
 | `FABRIK_ARCHIVE_AFTER` | *(no config.yaml key)* | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration string: `"168h"`, `"24h"`; empty or unset = use default of 168h/1 week; `"0s"` archives immediately once eligible; invalid or negative values fall back to the default) | `""` (168h = 1 week) |
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
+| `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
+
+### Worker-Injected Environment Variables
+
+The table above lists variables **you** set to configure the engine. Separately, on every Claude worker invocation Fabrik **exports** a small set of facts about that invocation into the worker subprocess's own environment — visible only inside the running worktree, never read back by the engine. This is a supported extension point for repo-side provisioning: a script in your repo (a test-setup hook, a fixture generator, anything invoked from a stage's own Bash tool calls) can key off these to provision or namespace a resource per worktree, per issue, or per PR — a database schema, a port, a container, a preview environment — without guessing at Fabrik's internals. Fabrik only publishes the facts; your repo's scripts own what happens with them.
+
+| Variable | Value | Presence |
+|---|---|---|
+| `FABRIK_ISSUE` | The issue number (bare integer, e.g. `1085`) | Always |
+| `FABRIK_REPO` | The `owner/repo` this invocation belongs to (the **item's** repo — correct for multi-repo setups) | Always |
+| `FABRIK_WORKTREE` | Absolute path to the issue's worktree | Always |
+| `FABRIK_ROOT` | Absolute path to the directory containing `.fabrik/` (config, stages, plugin) | Always |
+| `FABRIK_PR` | The linked pull request number | Only once a PR exists — unset (never `0`) before then |
+
+**Not the same `FABRIK_REPO`.** The `FABRIK_REPO` in this table is a different variable from the `FABRIK_REPO` in the config table above, despite the identical name. The config-table `FABRIK_REPO` is something *you* set before starting Fabrik, to tell the engine which repo to manage. This worker-injected `FABRIK_REPO` is something *Fabrik* sets, per invocation, inside the Claude subprocess only — it names whichever repo the current issue actually belongs to (relevant in multi-repo mode, where the config-table `FABRIK_REPO` is typically omitted entirely). The worker-injected value always wins inside the subprocess regardless of what the launching shell exported, so there is no functional collision — only a naming one worth knowing about if you're scripting against both.
+
+`FABRIK_PR` requires a REST fallback to resolve correctly on a `base:<branch>` repo (GitHub's `closedByPullRequestsReferences` field, which the board-level PR link is normally sourced from, is structurally empty for any PR targeting a non-default base branch) — see `docs/stage-lifecycle.md`'s "Worker Environment: Invocation Facts" section for the full resolution rule, cost-control gating, and the deliberate partial case (merge-train conflict resolution never sets `FABRIK_PR`).
+
+These five names are a compatibility surface — once a repo scripts against them, renaming is a breaking change for that repo. See ADR-1288 for the full design rationale, including why this is scoped to exposing facts rather than a `worktree_created`/`worktree_removed` lifecycle-hook mechanism.
 
 ### Stage YAML Reference
 
@@ -786,7 +964,11 @@ max_wall_time: "45m"      # Optional. Wall-clock deadline for a single Claude in
                           #   Recommended: "45m" for Implement and Review stages in
                           #   production use. The hardcoded 15-minute inactivity timeout
                           #   (see below) acts as a universal backstop even when this field
-                          #   is not set.
+                          #   is not set. Automatically scaled up when fabrik:extend-turns
+                          #   pre-grants a larger turn budget for a single invocation (e.g.
+                          #   2x turns -> 2x wall time for that invocation only) — size this
+                          #   field for the ordinary case; the extended case gets
+                          #   proportionate headroom for free. See fabrik:extend-turns below.
 kill_grace:               # Optional. Per-signal grace windows for the kill sequence.
   sigint: "10s"           #   How long to wait after SIGINT before escalating to SIGTERM.
                           #   Empty or absent = inherit engine default (10s).
@@ -828,13 +1010,28 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   auto-advance to be active. This loop repeats until no reviewers are
                           #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
-                          #   See §3 Pending Reviewer Gate for full details.
+                          #   If this repo has no reviewer to request (no CODEOWNERS, no review
+                          #   bot), set this to false — that is the supported setting rather than
+                          #   waiting on a gate that can never clear on its own. See §3 Pending
+                          #   Reviewer Gate for full details, including the self-review escape hatch.
 review_authority: advisory # Optional: advisory (default) | authoritative. Only meaningful alongside
                           #   wait_for_reviews: true. advisory clears the gate once reviewers have
                           #   responded, whatever they said. authoritative additionally requires no
                           #   outstanding CHANGES_REQUESTED review and required approvals satisfied.
                           #   yolo/cruise never bypass an authoritative gate — they still control
                           #   timing, not whether the gate is open. See §3 Authoritative Mode.
+expected_reviewers:       # Optional. Declares unrequested reviewers (self-submitting review bots
+  - handarbeit-pruefer    #   like Pruefer, Gemini, CodeRabbit) expected to review PRs from this
+                          #   stage without ever appearing in GitHub's requested-reviewer list.
+                          #   Only meaningful alongside wait_for_reviews: true. Absent (default):
+                          #   unchanged behavior — Fabrik waits the full FABRIK_REVIEW_WAIT_TIMEOUT
+                          #   for a self-submitting bot exactly as before this key existed.
+                          #   Declared with one or more names: the bot re-prompt ladder engages for
+                          #   them, satisfied when any one responds. expected_reviewers: [] (empty
+                          #   list): declares explicitly that no unrequested reviewer runs here —
+                          #   the gate advances immediately when nothing is requested either,
+                          #   instead of waiting out the timeout. See §3 Declaring Expected
+                          #   Reviewers for full details, including the required identity format.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
                           #   Validate+yolo) on CI checks passing on the PR head. At
                           #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
@@ -895,7 +1092,7 @@ These two fields control how much Claude "thinks" before responding. `disable_ad
 
 Fabrik applies two complementary timeout mechanisms to every Claude invocation to prevent indefinite hangs from stuck background processes:
 
-1. **`max_wall_time` (per-stage, opt-in):** A hard wall-clock deadline. When the deadline expires, Fabrik sends `SIGINT` to the Claude process group (which includes any background children spawned during the session), waits the `kill_grace.sigint` window (default 10 s), then `SIGTERM`, then the `kill_grace.sigterm` window (default 10 s), then `SIGKILL` to any surviving processes. Recommended: `"45m"` for Implement and Review stages in production. Legitimately long stages (e.g., a 90-minute Review on a large PR) should either set a higher limit or leave this field unset.
+1. **`max_wall_time` (per-stage, opt-in):** A hard wall-clock deadline. When the deadline expires, Fabrik sends `SIGINT` to the Claude process group (which includes any background children spawned during the session), waits the `kill_grace.sigint` window (default 10 s), then `SIGTERM`, then the `kill_grace.sigterm` window (default 10 s), then `SIGKILL` to any surviving processes. Recommended: `"45m"` for Implement and Review stages in production. Legitimately long stages (e.g., a 90-minute Review on a large PR) should either set a higher limit or leave this field unset. **Scaled automatically when `fabrik:extend-turns` pre-grants a larger turn budget:** the label-gated first invocation of a stage (or comment-review pass) that receives 2× the configured turn budget also gets `max_wall_time` scaled by the same 2× factor for that invocation — the deadline stays proportionate to the work granted rather than cutting off a legitimately-progressing extended run on a clock sized for the ordinary case. Size this field for the ordinary (1×) case; you don't need to inflate it to cover the rare extended one.
 
 2. **15-minute inactivity timeout (global, always active):** If no streamed output is received from Claude for 15 consecutive minutes, the process group is killed using the same SIGINT → `kill_grace.sigint` window (default 10 s) → SIGTERM → `kill_grace.sigterm` window (default 10 s) → SIGKILL sequence. This catches sessions that are stuck on a hung background task even when `max_wall_time` is not set — as long as Claude is actively producing output, it continues indefinitely. The threshold is hardcoded and cannot be configured.
 
@@ -1012,7 +1209,7 @@ on:
   merge_group:        # ← required for merge queue
 ```
 
-**Stall detection (ADR-058 D5):** If the PR has been in the merge queue for longer than `CIWaitTimeout` (default 30 min; `FABRIK_CI_WAIT_TIMEOUT`) with no merge-group CI ever reporting, Fabrik detects the stall poll-natively and pauses the issue with an instructional comment:
+**Stall detection (ADR-058 D5):** If the PR has been in the merge queue for longer than `CIWaitTimeout` (default 30 min; `FABRIK_CI_WAIT_TIMEOUT`) with no merge-group CI ever reporting, Fabrik detects the stall poll-natively and pauses the issue with an instructional comment. This is a genuine liveness dwell — no merge-group CI has ever run, so there is nothing to wait on — the same class of dwell `CIWaitTimeout` governs everywhere else since ADR-1410; it is unrelated to `CIBackstopTimeout`, which bounds a different, unconditional per-poll-cost cap:
 
 > 🏭 **Fabrik — merge queue stall detected**
 >
@@ -1060,7 +1257,7 @@ Both engines drain the same `Queued` column and advance their members to **Done*
    ```
 3. **Enable the train**: `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml`.
 
-> **Startup requirement.** When `merge_train: on`, the `Queued` board column is **mandatory** — Fabrik fails startup if it is missing (the same board-validation that guards every non-cleanup stage). This is why the train is **off by default**: flipping it on globally would break startup on every board that has not yet added the column. Enable it per deployment only after step 1.
+> **Startup requirement.** Whenever a `holding_stage: true` stage (e.g. `Queued`) is configured in `.fabrik/stages/`, its board column is part of the required set, the same board-validation that guards every non-cleanup stage — but the *severity* of a missing column depends on `merge_train`'s value, because that's what determines whether the column is actually reachable. With `merge_train: on`, a missing `Queued` column **fails startup** — the column is live (the train writes to it) and an unvalidated board would strand merged, closed issues the moment the batch lands, the least recoverable point in the pipeline, since native dependency edges clear on *close*, not on *merge* (see #1082, ADR-1421). With `merge_train` off/unset — the default, and the state of every fresh `fabrik init`, since `init` extracts `queued.yaml` unconditionally regardless of whether you intend to use the train — a missing `Queued` column instead prints a **startup warning** naming the column and stating it must exist before `merge_train` can be enabled; Fabrik still boots. `merge_train` is a runtime-togglable setting that does not regenerate board columns, so add the column (step 1 above) before flipping it on, even though the warning alone won't stop you. The `Queued` column itself is **terminal-only**: it is never a valid column to move items into manually, and a Status of `Todo`/`Backlog`/null means Fabrik ignores the item entirely.
 
 **Batch tuning.** `--max-batch-size` (default 5) caps how many `Queued` items land in one batch, **per repo**. A red batch (a genuine cross-PR conflict — rare, since every member already passed Validate alone) is isolated by halving bisection, bounded by `--max-bisect-validations`; the poisoner is ejected and the survivors re-form. If the base branch moves under an in-flight batch (an external push), the trial is rebased and re-validated up to `--max-train-rebase-cycles` times before the batch dissolves back to `Queued`. See the flag reference above for all knobs.
 
@@ -1098,6 +1295,14 @@ Closes #841
 The `Closes #N` first line links the PR to the issue so Fabrik can discover PR comments via GraphQL. Every downstream gate (review gate, CI gate, auto-merge) depends on this linkage. If the closing keyword is ever missing from an existing PR body, Fabrik detects it post-Implement and auto-heals by prepending `Closes #N` to the body.
 
 **Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
+
+### How do I ask Fabrik to change something on an open PR?
+
+Leave an **inline review thread comment** on the specific line(s) you want changed, or write your feedback in the **top-level review body** — start a review on the PR (either commenting on specific diff lines, or just writing a summary, or both) and submit it, in any of `CHANGES_REQUESTED`, `COMMENTED`, or `APPROVED` state. Fabrik picks up unresolved inline thread comments and unaddressed review bodies from any non-`DISMISSED`, non-`PENDING` review — an `APPROVED` "LGTM, minor nit" is picked up the same as a `CHANGES_REQUESTED` review, and so is a `COMMENTED` review whose body is the substantive feedback (this covers review bots — such as Pruefer — that submit findings exclusively as `COMMENTED` reviews) — and re-invokes the stage agent to address them, commit, and push. A reinvoke that lands no commit (nothing actionable in the review body — a generic "Pull request overview" summary, say) does not spend your `FABRIK_MAX_REVIEW_CYCLES` budget; see the no-op note under [Phase 3](#pending-reviewer-gate) below.
+
+If a bot reviewer (e.g. `@copilot review`) posts its findings as a **plain PR comment with no formal review submitted at all** — some bots do this inconsistently — Fabrik still recognizes it as review content to evaluate and address autonomously, rather than waiting for a human to confirm the bot is right first.
+
+This works **regardless of `wait_for_reviews`** — re-invocation from review feedback is unconditional, not gated behind that setting. See [Pending Reviewer Gate](#pending-reviewer-gate) for the full mechanism, including how this interacts with auto-advance and the `fabrik:awaiting-review` label.
 
 ### Retry and Escalation
 
@@ -1167,9 +1372,53 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A Claude account usage-limit exit (see the `fabrik:claude-limit` troubleshooting
      note above) is exempted from this count entirely — the stage never ran, so it
      never consumes a retry attempt
+   - A turn-cap preemption (the invocation ran out of turns and will resume on the
+     next dispatch) is likewise exempted — it counts against a separate slice
+     counter instead. See below.
+   - A consecutive `--resume` failure (the session pointer, not the stage's own
+     work, is the suspected cause) is likewise exempted, up to `--max-resume-failures`
+     — see below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
+
+> **Troubleshooting: an issue is paused with a "slice budget exceeded" comment,
+> not a failure comment.** `--max-retries` bounds genuine failures only — errors,
+> degenerate output, PR-creation failures. A turn-cap preemption (the invocation
+> hit its per-stage turn budget and stopped; the session resumes on the next
+> dispatch) is not a failure and is bounded separately by `--max-slice-retries`
+> (default 10). A large job that legitimately needs several slices completes
+> without pausing as long as it stays within that limit; only a job that keeps
+> hitting the turn cap `--max-slice-retries` times in a row is paused. The pause
+> comment names the specific cause and never says "failed to complete" — no
+> `stage:<name>:failed` label is applied, since the stage has not failed. It
+> applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
+> `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
+> slices are needed) or split the issue into smaller pieces, then remove
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
+> reset the slice counter — it is already at the limit, so the very next
+> turn-cap exit re-pauses immediately unless the underlying job size or turn
+> budget actually changes. See #1199 and #1191.
+
+> **Troubleshooting: a stage keeps failing at 1 turn / $0.0000 after a large
+> prior invocation.** A `--resume` invocation resumes the same session every
+> time, including when the session's own transcript (grown too large, or
+> otherwise broken) is the cause of the failure — every retry re-triggers the
+> identical condition. Fabrik tracks consecutive failed resume attempts per
+> (issue, stage) session — shared by both the stage-run and comment-review
+> invocation paths, since they resume the same session pointer — and after
+> `--max-resume-failures` consecutive failures (default 2), discards the
+> session pointer and cold-starts the next invocation instead of resuming.
+> This is silent and self-healing: only a log line is written (no issue
+> comment, no label), since the whole point is that the *next* attempt
+> succeeds without anyone intervening. Only the resume pointer is discarded —
+> committed work on the issue branch is completely unaffected. Consecutive
+> resume failures do not consume a `--max-retries` slot (mirroring the
+> `fabrik:claude-limit` exemption above), so the guaranteed cold-start attempt
+> can never be starved by the very failures it exists to recover from; a
+> successful invocation resets the counter to zero. If the cold-started
+> attempt also fails, that *is* a genuine failure and flows into the normal
+> `--max-retries` → `fabrik:paused` path described above. See #1414.
 
 ### Stages Waiting for Input
 
@@ -1290,7 +1539,7 @@ In this 5-issue formation:
 
 ### Sub-issue Decomposition
 
-When Plan determines that an issue is too broad for a single Implement cycle — or that work needs to happen in more than one repository — it can fan out the work into focused sub-issues, each of which runs through the full Fabrik pipeline independently.
+When Plan determines that an issue is too broad for a single Implement cycle — or that work needs to happen in more than one repository — it can fan out the work into focused sub-issues, each of which runs through the full Fabrik pipeline independently. Review and Validate can declare sub-issues too, for the different case of a blocker discovered mid-flight rather than an upfront decomposition — see [Mid-flight Spawning from Review/Validate](#mid-flight-spawning-from-reviewvalidate) below. Everything in this section (block format, board registration, assignment, dependency wiring) applies identically regardless of which stage declares the spawn.
 
 **No user configuration required.** Decomposition is Plan's judgment call based on Research findings. If the issue is well-scoped and single-repo, Plan produces a normal implementation plan. If it requires parallel work or spans multiple repos, Plan declares sub-issues to spawn.
 
@@ -1311,19 +1560,39 @@ These blocks are **declarative data**, not immediate actions. They persist in th
 
 When the parent advances to Implement, the engine's `preImplement` step fires **before** Claude is invoked:
 
-1. Creates each child issue in its target repo (same repo or cross-repo)
-2. Adds each child to the same project board
-3. Links each child as a `blockedBy` dependency of the parent
-4. Applies `fabrik:sub-issue` label to each child (informational)
-5. Applies `fabrik:children-spawned` to the parent (idempotency guard)
+1. Validates any `DEPENDS_ON:` headers declared in the blocks (see below); an invalid one pauses the parent before any child is created
+2. Confirms this Fabrik instance is actually configured to serve each target repo (see [Same-Repo and Cross-Repo](#same-repo-and-cross-repo) below) — if not, the spawn fails loudly rather than silently registering the child on the wrong board
+3. Creates each child issue in its target repo (same repo or cross-repo) and **assigns it to the `user:` configured on this instance** — every spawned child gets an assignee, unconditionally
+4. Adds each child to the same project board
+5. Links each child as a `blockedBy` dependency of the parent
+6. Applies `fabrik:sub-issue` label to each child (informational)
+7. Wires any declared `DEPENDS_ON` sibling edges, once all children exist
+8. Applies `fabrik:children-spawned` to the parent (idempotency guard, applied only after step 7 succeeds)
 
-If step 2's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
+If step 4's board-placement call fails for a given child (API error, missing status-field metadata, or no suitable column found), the child, board item, and `blockedBy` link already exist by that point — only the initial column placement is missing. Rather than stranding the child in `Backlog` forever, Fabrik sets `fabrik:awaiting-placement` on it and retries placement on every subsequent poll. The marker clears automatically once placement succeeds, or if the child is observed closed in the meantime. After repeated failures (`--max-retries` settle passes), the child is escalated instead: `fabrik:paused` is added, `fabrik:awaiting-placement` is removed, and an explanatory comment is posted on both the child and the parent. See ADR-062.
+
+Any failure in steps 1–3 — including the board-servability refusal in step 2 — pauses the parent with an explanatory comment and creates no children for the affected batch; there is no partial, silently-registered-but-broken spawn.
+
+#### Ordering Siblings with `DEPENDS_ON`
+
+By default, every spawned child is an independent unit — all of them start Specify at the same time, gated only on the parent (a "parallel star"). For a decomposition into **sequentially dependent** slices — the common case when splitting a single-repo feature into ordered chunks for PR hygiene — Plan can declare that ordering with an optional `DEPENDS_ON:` header:
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Retry-same-input: turn-attempt capture (slice 3/4)
+DEPENDS_ON: 2
+
+Full scoped spec body...
+FABRIK_SPAWN_CHILD_END
+```
+
+`DEPENDS_ON: 2` means "this block depends on block 2 of this same Plan output" — a 1-based index into the blocks as emitted, not an issue number. The engine wires it as an additional `blockedBy` edge between the two children (alongside the unchanged parent edge), so the dependent child carries `fabrik:blocked` until its sibling closes — exactly like any other dependency Fabrik tracks. References must point to a strictly earlier block; an out-of-range or non-forward `DEPENDS_ON` value fails the spawn step loudly (the parent is paused with an explanatory comment) rather than being silently dropped. Without this, ordering could only be expressed as prose in the child's body ("Depends on: Slice 2") — invisible to Fabrik's dependency gate, so nothing would stop the sibling worktrees from running concurrently and colliding on shared files.
 
 After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
 
 #### What You Observe
 
-- During Plan: no sub-issues exist. Plan can be revised freely.
+- During Plan: no sub-issues exist. Plan can be revised freely. A decomposing Plan comment carries a receipt note stating how many sub-issues were declared and that they'll be created when the issue advances to Implement — so you don't have to know this section exists to know where they went.
 - After advancing to Implement: child issues appear on the project board in Specify, each labeled `fabrik:sub-issue`.
 - A child may transiently show `fabrik:awaiting-placement` if its initial board placement failed — it clears automatically once a later poll places it successfully, or escalates to `fabrik:paused` with an explanatory comment after repeated failures.
 - If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages, while cruise children stop at Validate for manual merge.
@@ -1334,6 +1603,24 @@ After spawning, the parent waits at Implement with `fabrik:blocked` until all ch
 #### Same-Repo and Cross-Repo
 
 Spawn blocks work identically whether the target is the parent's own repo or a different repo. Research is responsible for identifying which repos are in scope — it emits a `## Repositories` section listing all potentially-relevant repos. Plan is constrained to spawn only into repos Research named.
+
+**A cross-repo spawn also requires the *spawning instance's own* `repo:`/`project:` config to actually cover the target repo.** Each Fabrik instance polls exactly one project board. A multi-repo instance (no `repo:` configured) already serves any repo the org grants that board access to — spawning cross-repo into any of those repos just works, the same as it always has. A `repo:`-scoped instance, however, is declared to serve only that one repo; asking it to spawn into a different repo has no board for the engine to register the child on. Before this was enforced, that scenario silently registered the child onto the *spawning* instance's own board anyway — wrong, and invisible, since the child sat correctly in a real column the whole time, just on a board no `repo:`-scoped instance watching the *right* repo would ever see. Fabrik now refuses instead: the spawn fails loudly (parent paused, explanatory comment naming both the unservable target and this instance's own configured repo) rather than silently mis-registering. If you hit this, either point the spawning instance's own `repo:`/`project:` at a board that covers the target repo, or have a differently-configured instance perform the spawn.
+
+#### Mid-flight Spawning from Review/Validate
+
+Plan is not the only stage that can declare a spawn. Review and Validate — the stages positioned to discover a blocker mid-flight, after implementation is already underway — recognize the same `FABRIK_SPAWN_CHILD_BEGIN/END` block format, with identical board registration, assignment, and dependency wiring. This exists because an agent with `gh` available and no sanctioned route to declare a blocker will reasonably reach for `gh issue create` directly — which Fabrik never observes: no board registration, no assignee, and critically no `blocked_by` edge, so the parent has no record it is blocked at all and can proceed to merge without the blocker's fix ever landing.
+
+What differs from a Plan-stage spawn:
+
+- **Parsed from the stage's own output directly**, not from a stored comment — Review/Validate post to the linked PR, so there's no comment for the engine to re-read later the way it re-reads Plan's.
+- **Takes effect immediately**, not deferred to Implement — since Review/Validate run *after* Implement, there is no later dispatch step to defer to. The child is created, boarded, assigned, and linked as soon as the block is recognized.
+- **The receipt note is present-tense**: "Spawned 1 sub-issue: owner/repo#N. It has been registered, assigned, and linked as a blocker of this issue" — rather than Plan's "will be created when this issue advances to Implement."
+- **The raw declaration block is stripped from the posted comment**, unlike Plan's — Plan's comment intentionally keeps its block visible ("N sub-issues declared above"), but the mid-flight receipt note already says what was spawned, so the internal `FABRIK_SPAWN_CHILD_BEGIN`/`TITLE:`/`FABRIK_SPAWN_CHILD_END` syntax would only duplicate that information if left in.
+- **No separate idempotency label** — each stage dispatch's output is fresh and never replayed, so a block is only ever processed once.
+
+Once a mid-flight spawn is processed, the parent picks up `fabrik:blocked` on its next dispatch, exactly as any other dependency does — it will not proceed past the blocked stage until the newly spawned child closes.
+
+**Validate's merge decision re-checks dependencies live before landing anything.** Signaling completion at Validate means "ready to merge" — on a `fabrik:yolo` issue, that enables auto-merge or performs a direct merge in the very same dispatch that just processed the spawn. Before doing either, Fabrik re-fetches the issue's dependency state live and refuses to merge if anything is still open — so even a Validate output that (against the skill's own guidance below) signals completion in the same turn as a genuine spawn cannot merge past it. The skill still instructs the agent to report BLOCKED rather than complete alongside a spawn (per Validate's own "Decision: Complete or Block" criteria) — that keeps the pipeline's state clean and avoids an unnecessary retry cycle — but it is no longer the only thing preventing a premature merge. Review carries no equivalent risk in the first place — completing Review while also spawning a blocker is safe, because the next stage's dispatch is gated on dependency resolution before it runs.
 
 #### Recursive Decomposition
 
@@ -1359,9 +1646,11 @@ When a child is closed — regardless of whether its PR was merged — the paren
 
 ### Pending Reviewer Gate
 
-When a stage has `wait_for_reviews: true` set, Fabrik waits for all requested PR reviewers to submit their reviews, then re-invokes the stage agent to address any submitted inline feedback. **Re-invocation is unconditional** — it fires for any issue with submitted inline review thread comments, regardless of whether auto-advance is active. Auto-advancement to the next stage after re-invocation still requires auto-advance to be active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue).
+Unresolved inline PR review thread comments re-invoke the stage agent to address them — **this happens regardless of whether `wait_for_reviews: true` is set on the stage**. What `wait_for_reviews: true` actually controls is narrower: whether Fabrik *waits* for all requested PR reviewers to submit their reviews **before advancing the issue** to the next stage. Re-invocation is a separate, unconditional mechanism triggered purely by the presence of unresolved inline feedback, whether or not the gate is enabled. Auto-advancement to the next stage after re-invocation additionally requires auto-advance to be active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue).
 
-For the authoritative spec on label lifecycle and gate transitions, see [State Machine](state-machine.md).
+**Review re-invocation vs. CI re-invocation — not the same rule.** Review re-invocation (this section) fires irrespective of `wait_for_reviews`, because `handleReviewGate` falls through to dispatching re-invocation whenever the gate is inactive rather than skipping it. CI re-invocation is different: it genuinely requires `wait_for_ci: true`, because its caller (`handleMergeAndCIGates`) guards the CI-fix dispatch on the gate's own result and has no equivalent fall-through path when the gate is off. Don't generalize this section's "unconditional" to CI re-invocation — see [CI Gate and CI-Fix Workflow](#ci-gate-and-ci-fix-workflow) below, which requires `wait_for_ci: true`.
+
+For the authoritative spec on label lifecycle and gate transitions, see [State Machine § 2.9 Review Reinvoke](state-machine.md#29-review-reinvoke).
 
 The Review and Validate stages ship with `wait_for_reviews: true` enabled by default.
 
@@ -1376,7 +1665,7 @@ wait_for_reviews: true
 ...
 ```
 
-The reviewer wait and re-invocation cycle fire unconditionally — they activate whenever `wait_for_reviews: true` and inline review feedback is present, regardless of whether auto-advance is active. If you're manually dragging cards through the board, re-invocation still happens; the issue will not advance automatically after the cycle completes — you still move the card manually.
+Re-invocation fires whenever unresolved inline review feedback is present, regardless of `wait_for_reviews` or whether auto-advance is active — enabling the gate above changes only whether Fabrik *waits* for reviewers before advancing. If you're manually dragging cards through the board, re-invocation still happens; the issue will not advance automatically after the cycle completes — you still move the card manually.
 
 #### Label Lifecycle
 
@@ -1393,15 +1682,17 @@ The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
 2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates the dual condition: the gate clears only when no requested reviewers are outstanding **and** at least one review has been submitted. Requiring at least one review (not just an empty pending list) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhook without ever appearing in the formal requested-reviewer list — if only the pending list were checked, the gate would race through while bots were still processing. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
-3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review`, and the cycle returns to Phase 2 until the gate clears again under the same dual condition — no requested reviewers outstanding **and** at least one review submitted — or, if that does not happen before the wait limit, Fabrik falls back to `fabrik:awaiting-input`. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with `wait_for_reviews: true` and submitted inline feedback, regardless of whether auto-advance is active.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present — or, under `review_authority: authoritative`, even while the verdict itself is still unresolved (see [Authoritative Mode](#authoritative-mode)) — Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved review feedback as input: unresolved inline review thread comments, **and** the top-level body of any review whose state is not `DISMISSED` or `PENDING` (`CHANGES_REQUESTED`, `COMMENTED`, and `APPROVED` bodies are all treated as potentially actionable — GitHub requires a body for `REQUEST_CHANGES`/`COMMENT`, so this is what lets a reviewer's written explanation trigger a re-invocation on its own, with no inline comments needed; it also means a bot reviewer that submits exclusively `COMMENTED` reviews — such as Pruefer — has its findings routed here just like a `CHANGES_REQUESTED` review would be). Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments); a review body carries no such location context, just the reviewer's text. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review`, and the cycle returns to Phase 2 until the gate clears again under the same dual condition — no requested reviewers outstanding **and** at least one review submitted — or, if that does not happen before the wait limit, Fabrik falls back to `fabrik:awaiting-input`. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with submitted inline feedback, regardless of `wait_for_reviews` (when the gate is off, Phases 1–2 above simply never run, and Fabrik goes straight to this Phase 3 dispatch) and regardless of whether auto-advance is active.
+
+   **A reinvoke that lands no commit does not spend `FABRIK_MAX_REVIEW_CYCLES`.** If the agent evaluates the feedback and finds nothing actionable — a generic "Pull request overview" summary from a bot like Copilot or Gemini, most commonly — and pushes no commit, Fabrik decrements the review-cycle counter it incremented for that dispatch, netting the attempt back to unchanged. This is why widening actionability to `COMMENTED`/`APPROVED` bodies above doesn't risk exhausting your review-cycle budget on bot noise: only a reinvoke that actually changes something counts against the limit. Five consecutive no-op reinvokes leave the counter exactly where it started; a genuine finding arriving afterward is still addressed and still counted.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
 
-#### No Inline-Thread Feedback Skip
+#### No Actionable Feedback Skip
 
-If a submitted-review batch leaves no unresolved inline PR review thread comments to process, Fabrik skips re-invocation entirely and advances the issue normally. Top-level review bodies are ignored for this decision, so a review body containing text like "APPROVED" does not trigger re-invocation unless there is unresolved line-level thread feedback to address.
+If a submitted-review batch leaves nothing unresolved to process — no inline PR review thread comments **and** no unaddressed review body — Fabrik skips re-invocation entirely and advances the issue normally. A `DISMISSED` or `PENDING` review's body is never treated as actionable (a dismissed review is no longer an active verdict; a pending review hasn't been submitted yet), so neither triggers re-invocation on its own. Every other review state — `CHANGES_REQUESTED`, `COMMENTED`, and `APPROVED` alike — is treated as actionable when its body is non-empty, which, per GitHub's own requirement that `REQUEST_CHANGES`/`COMMENT` carry a body, means most reviews trigger re-invocation even with zero inline thread comments; only a truly empty-bodied `APPROVED` ("LGTM" with nothing further typed) has nothing to route.
 
-This prevents spurious re-invocation cycles when reviews contain no actionable inline thread feedback for the agent to address.
+This prevents spurious re-invocation cycles when reviews contain no actionable feedback (inline or written) for the agent to address, while still catching the common case of a reviewer who writes an explanation but leaves no inline comments — including a bot reviewer that only ever submits `COMMENTED` verdicts.
 
 #### PR Summary Comment
 
@@ -1449,6 +1740,22 @@ fabrik --review-wait-timeout=30
 
 The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
 
+#### No Reviewer Ever Requested
+
+`wait_for_reviews: true` assumes something will eventually request or submit a review — a human collaborator, CODEOWNERS, or a review bot. On a repo with none of those (a solo maintainer with no CODEOWNERS and no review bot installed, for example), no reviewer is ever requested, so the gate's dual condition can never clear on its own. Since GitHub forbids a PR author from approving their own PR, the gate can look unsatisfiable from the operator's side too.
+
+It isn't: **the gate's actual test is "has a human looked at this?", not "has a reviewer approved this?"** A `COMMENTED` review submitted by the PR author itself satisfies the gate — GitHub permits a self-`COMMENT` even though it forbids self-approval. This is the supported manual way to clear the gate when no other reviewer can respond.
+
+When the timeout elapses with no reviewer ever requested, Fabrik's pause comment says so plainly — it does not claim to have waited on "outstanding reviewers" that don't exist — and lists five ways to resume:
+
+1. Post a review on the PR yourself. A `COMMENTED` self-review satisfies the gate — unless the stage is `authoritative` and the repo requires approving reviews (branch protection reports `REVIEW_REQUIRED`), in which case an approval from another account is needed; see [Authoritative Mode](#authoritative-mode) below.
+2. Set `expected_reviewers: []` in the stage YAML to declare that no *unrequested* reviewer (e.g. a bot) is expected here — an explicitly requested reviewer is still honored. This is the narrower, purpose-built option: it stops the gate from waiting out unrequested reviewers that will never respond, without disabling the gate for a reviewer requested on a later PR. See [Declaring Expected Reviewers](#declaring-expected-reviewers) below.
+3. Set `wait_for_reviews: false` in the stage YAML if this repo has no reviewer at all. This disables the review gate entirely, including for a reviewer requested on a later PR — the supported setting only when no review will ever be relevant on this repo.
+4. Merge the PR manually.
+5. Remove the `fabrik:paused` label to let the engine wait again (useful if a reviewer is actually expected and just hasn't gotten to it yet).
+
+Fabrik deliberately does not try to detect "no reviewer will ever respond" automatically (e.g. by inspecting CODEOWNERS or requested-reviewer history) — that signal can't distinguish "no reviewer exists" from "the reviewer is just slow or down," and guessing wrong in the direction of auto-advancing would merge an unreviewed PR. The gate stays loud-and-conservative; only the messaging tells you honestly what it knows.
+
 #### Authoritative Mode
 
 Everything above describes the default — **advisory** — mode: the gate clears once every requested reviewer has responded and at least one review exists, whatever the review actually says. A reviewer requesting changes does not, by itself, stop Fabrik from advancing.
@@ -1470,6 +1777,8 @@ In `authoritative` mode, the gate additionally requires:
 
 This applies at **both** decision points: the stage-advance gate (the mechanism described above) and the landing/auto-merge gate at Validate completion — a `CHANGES_REQUESTED` review blocks auto-merge under `yolo`, not just stage advancement.
 
+**`authoritative` governs merging, never working.** An unresolved `CHANGES_REQUESTED` does not make Fabrik sit idle waiting for a human to resolve it — Fabrik re-invokes the stage to address the reviewer's feedback (both inline PR comments and the review's own written explanation), pushes a fix, and waits for the reviewer to re-review. This is the same "review reinvoke" mechanism described above for the default (advisory) mode; `authoritative` does not disable it. The reinvoke loop is bounded by `FABRIK_MAX_REVIEW_CYCLES` exactly as before — if a reviewer keeps requesting changes past that limit, *then* Fabrik pauses for a human (see below). Pausing is the fallback for a loop that fails to converge, not the first response to a change request.
+
 **`yolo`/`cruise` never bypass an authoritative gate.** They still control *when* Fabrik acts once the gate is satisfied — not *whether* it's satisfied:
 
 | Mode | Behavior |
@@ -1478,11 +1787,57 @@ This applies at **both** decision points: the stage-advance gate (the mechanism 
 | `authoritative` + `yolo` | Auto-merge fires as soon as `CHANGES_REQUESTED` is cleared and required approvals are met — no human click needed for the merge itself, but Fabrik waits for a still-blocking verdict rather than forcing through it. |
 | `authoritative` + `cruise` | Cruise's existing "stop before auto-merge" behavior is unaffected — a cruise item never reaches the authoritative check at all. |
 
-If the verdict never resolves — an unfixable review finding, or a required human who never approves — the issue falls into the same pause-for-human path as an unresponsive reviewer: the existing `FABRIK_MAX_REVIEW_CYCLES` / `FABRIK_REVIEW_WAIT_TIMEOUT` machinery above applies unchanged. There is no separate timeout or cycle limit for authoritative mode.
+If the verdict never resolves — an unfixable review finding, or a required human who never approves — Fabrik keeps reinvoking on each new round of feedback (the primary response, above) until `FABRIK_MAX_REVIEW_CYCLES` is reached, at which point it pauses for a human. There is no separate cycle limit for authoritative mode — it reuses the same `FABRIK_MAX_REVIEW_CYCLES` bound advisory mode's review reinvoke already has. A plain "reviewer hasn't responded at all yet" block (nothing to reinvoke on) still falls back to the existing `FABRIK_REVIEW_WAIT_TIMEOUT` pause, unchanged.
 
 `review_authority` defaults to `advisory` (equivalent to leaving it unset) — existing repos and stages are unaffected until you opt in.
 
-For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode) and [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md).
+**Per-issue override.** Editing stage YAML opts in every issue on that stage, repo-wide. To make a single high-risk change authoritative (or exempt a single issue from an otherwise-authoritative stage) without touching stage config, apply a `review-authority:advisory` or `review-authority:authoritative` label directly to the issue — it overrides the stage's configured `review_authority` for that issue only. No `review-authority:` label means the stage config governs, unchanged. If you apply both labels to the same issue, Fabrik resolves to `authoritative` (the more restrictive value) and logs a warning; a misspelled or unrecognized value (e.g. `review-authority:Authoritative`) is ignored with a logged warning and falls back to the stage config — it never silently escalates to authoritative. The label only changes the verdict-strictness once the gate is active — `wait_for_reviews: true` on the stage is still required for the gate to engage at all, and `yolo`/`cruise` still never bypass whatever authority resolves to.
+
+For the full mechanism (verdict source precedence, fetch-failure handling, message wording), see [State Machine §6.1.1](state-machine.md#611-review_authority-verdict-aware-clearing-authoritative-mode), [ADR-1250](../adrs/1250-review-authority-orthogonal-to-autonomy.md), and [ADR-1261](../adrs/1261-per-issue-review-authority-label-override.md).
+
+#### Declaring Expected Reviewers
+
+Every real-world review bot — Pruefer, Gemini, CodeRabbit, Copilot — is **unrequested**: it polls or receives a webhook and posts a review directly, without ever being formally requested as a reviewer on the PR. From the gate's point of view, "a bot is a few minutes away from reviewing" and "no bot is coming, ever" look identical: no requested reviewer, no review yet. Left alone, the gate has to wait out the full timeout to find out which one it was — which is exactly what happens on a solo-maintainer repo with no bots configured at all (every issue burns the full wait before pausing for no reason).
+
+`expected_reviewers` tells Fabrik, per stage, which unrequested reviewers (if any) to expect:
+
+```yaml
+name: Review
+order: 4
+wait_for_reviews: true
+expected_reviewers:
+  - handarbeit-pruefer
+```
+
+**Three states:**
+
+| Setting | Meaning |
+|---|---|
+| *(absent — default)* | Unchanged behavior: Fabrik waits the full `FABRIK_REVIEW_WAIT_TIMEOUT` for a self-submitting bot, exactly as before this key existed. Safe to leave as-is; nothing breaks. |
+| `expected_reviewers: []` | Explicitly declares that **no** unrequested reviewer runs on this repo. If nothing is requested either, Fabrik advances immediately instead of waiting out the timeout — the advance is logged, not silent. A reviewer actually requested on the PR is still honored regardless; this only narrows waiting for *unrequested* reviewers, it does not disable `wait_for_reviews`. |
+| `expected_reviewers: [name, ...]` | One or more declared reviewers. Declaring them makes the bot re-prompt ladder (Phase 1/2) reachable while nothing has been requested and nothing has been reviewed. Re-prompts and timeout messages name them by name. |
+
+**What "any one" actually means.** The gate's underlying clearing condition — no reviewer left outstanding, and at least one non-`DISMISSED` review exists — is unchanged by this feature (out of scope; see [State Machine §6.1](state-machine.md#61-two-phase-review-gate)). That condition is satisfied by a review from **any** author, not specifically one of the declared names. In the common case this means any one declared reviewer responding clears the gate (that's the point of declaring more than one — see #1071), but an unrelated human or bot review landing first clears it too. `expected_reviewers` governs the re-prompt ladder and timeout messaging — not all having to respond, and not requiring the response to come specifically from a declared name — it does not change the clearing check itself.
+
+**Identity format.** A declared name must be a bare, `@`-mentionable handle: no leading `@`, and no trailing `[bot]` suffix — even though that suffix is exactly what GitHub's REST API reports as the bot's actual review author (e.g. Pruefer's is literally `<slug>[bot]`). Fabrik strips the suffix internally when matching a declaration against a live review, so declare the bare form:
+
+```yaml
+expected_reviewers:
+  - handarbeit-pruefer     # correct — matches both "handarbeit-pruefer" and "handarbeit-pruefer[bot]"
+  # - handarbeit-pruefer[bot]   # WRONG — @handarbeit-pruefer[bot] does not resolve as a mention
+```
+
+A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fails Fabrik's startup entirely, with an error naming the offending stage and value — a typo here fails loudly at startup, not silently at 3am.
+
+**Declaring a bot does not vouch for it.** If you declare `expected_reviewers: [some-bot]` and `some-bot` is not actually installed on the repo, Fabrik still runs the full re-prompt-then-timeout sequence and pauses, naming `some-bot` as the reviewer that never responded — a declaration only tells Fabrik who to expect, never that the reviewer is guaranteed to show up.
+
+**What changes once you declare a name.** The existing bot re-prompt ladder (§Label Lifecycle above, `fabrik:bot-reprompted`) — previously reachable only for a formally-*requested* bot reviewer, which none of the bots people actually run ever are — becomes reachable: at `1× FABRIK_REVIEW_WAIT_TIMEOUT`, Fabrik posts an `@<name> just checking in` comment directly on the PR (there is no formal review request to re-send for a reviewer that was never requested) and applies `fabrik:bot-reprompted`; if still no response after another full timeout window, Fabrik pauses for human input, naming the reviewer. With multiple declared reviewers, the pause message reports per-reviewer status, e.g. `` Expected reviewers: `handarbeit-pruefer` reviewed; `gemini-code-assist` did not respond ``.
+
+**Startup notice.** On every startup, Fabrik prints a one-line notice for each `wait_for_reviews: true` stage that has not declared `expected_reviewers` — informational only, never blocking. Add a declaration (even an explicit `expected_reviewers: []`) and the notice disappears on the next startup.
+
+**Interaction with `review_authority: authoritative`.** The immediate-advance path for `expected_reviewers: []` fires regardless of `review_authority`. This is deliberate, not an oversight: authoritative mode weighs an existing review's verdict (approvals, `CHANGES_REQUESTED`) — see [Authoritative Mode](#authoritative-mode) — and that weighing only ever runs once at least one review has been submitted. When nothing is requested, nothing has been reviewed, and the stage has explicitly declared that no unrequested reviewer is coming, there is no verdict for authoritative mode to weigh; gating the advance on `review_authority` would just wait out the timeout every cycle for a review that, by the stage's own declaration, will never arrive — recreating the exact stall this feature exists to eliminate. If you need branch-protection review requirements enforced even when Fabrik expects no reviewer, configure that requirement on the repository itself (GitHub still blocks the actual merge); `expected_reviewers` and `review_authority` govern Fabrik's own wait/verdict bookkeeping, not GitHub's merge protection.
+
+**Per-issue override.** Editing stage YAML opts in every issue on that stage, repo-wide. To declare no unrequested reviewer (or a synthetic declared one, for testing) on a single issue without touching stage config, apply an `expected-reviewers:none` or `expected-reviewers:declared` label directly to the issue — it overrides the stage's configured `expected_reviewers` for that issue only. No `expected-reviewers:` label means the stage config governs, unchanged (`nil` stays `nil`). `expected-reviewers:declared` resolves to a fixed synthetic reviewer identity (`e2e-synthetic-declared-reviewer`) intended for testing/e2e use — it never posts a real review, so applying it to a production issue runs out the full re-prompt ladder before pausing. If you apply both labels to the same issue, Fabrik resolves to `declared` (the more restrictive value — it imposes waiting, unlike `none`'s immediate advance) and logs a warning; a misspelled or unrecognized value is ignored with a logged warning and falls back to the stage config — it never silently escalates to `declared`. The label only changes which reviewers are expected once the gate is active — `wait_for_reviews: true` on the stage is still required for the gate to engage at all.
 
 ---
 
@@ -1505,14 +1860,16 @@ wait_for_ci: true
 ...
 ```
 
-CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST calls per poll: one to get the head SHA via the linked PR, and one to fetch the check runs. If no check runs exist **and** GitHub's `mergeable_state` is either empty or `"unknown"` (meaning no legacy Commit Status is blocking merge), the gate clears immediately. If `mergeable_state` is non-empty and not `"unknown"` (a legacy Commit Status or external status check is actively blocking merge), the gate holds even with no `check_runs` — Fabrik falls back to CIWaitTimeout escalation to avoid blocking forever.
+CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST calls per poll: one to get the head SHA via the linked PR, and one to fetch the check runs. If no check runs exist **and** GitHub's `mergeable_state` is either empty or `"unknown"` (meaning no legacy Commit Status is blocking merge), the gate clears immediately. If `mergeable_state` is non-empty and not `"unknown"` (a legacy Commit Status or external status check is actively blocking merge), the gate holds even with no `check_runs` — Fabrik falls back to `CIWaitTimeout` escalation to avoid blocking forever. This case has no check-run signal to observe progress on at all, so it stays elapsed-time-based even though the check-runs-present case below does not (ADR-1410).
+
+For a repo whose required CI signal is a classic commit status rather than a normal GitHub Actions check run, configure `required_status_contexts` (per-repo, in [`.fabrik/config.yaml`](#2-configuration-reference), ADR-933) so the gate can distinguish a required context that never ran from one that was correctly skipped.
 
 #### Label Lifecycle
 
 When a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`, Fabrik immediately adds the `fabrik:awaiting-ci` label to the issue — it means "CI gate active" and covers both pending and failed CI states. `stage:X:complete` is withheld until `checkCIGate` confirms all checks pass (conjunctive gate, ADR 032). This label:
 
 - Makes the CI-blocked state visible on the project board; present whether checks are still running or have failed
-- Is cleared automatically when all CI checks pass; or when the CI wait timeout elapses (removed before pausing with `fabrik:awaiting-input`)
+- Is cleared automatically when all CI checks pass, or when a genuine liveness dwell elapses (removed before pausing with `fabrik:awaiting-input`) — since ADR-1410, a confirmed CI failure does **not** clear this label via a timeout; it instead triggers the CI-fix re-invocation above, and the label stays applied while that plays out
 - Triggers the `itemMayNeedWork` cache bypass — CI results change independently of the issue's GitHub `updatedAt`, so items with `fabrik:awaiting-ci` bypass the staleness cache and are re-evaluated on every poll
 - **R5 post-push guard**: within the current engine run, if the PR has previously had check runs, empty check run results after a push are treated as a post-push registration delay (GitHub takes a few seconds to register new runs) rather than "no CI configured" — the gate does not prematurely clear
 
@@ -1559,9 +1916,10 @@ The CI gate operates on two different paths depending on whether the item is bei
 **Catch-up loop (all other paths):**
 - Evaluates CI on every poll for items with `fabrik:awaiting-ci` on stages with `wait_for_ci: true`
 - **`mergeable_state` shortcut (v0.0.52):** `checkCIGate` queries GitHub's `mergeable_state` first; if `clean` or `unstable`, `addCompleteLabelAndRemoveCI` runs immediately — stale `fabrik:awaiting-ci` is cleared, `stage:<X>:complete` is added, and per-check classification is skipped entirely
-- On pending: `fabrik:awaiting-ci` is already present (applied at FABRIK_STAGE_COMPLETE); no additional label applied, re-evaluates next poll
-- On failure: `fabrik:awaiting-ci` applied idempotently; dispatches CI-fix re-invocation
-- On timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`; timeout measured from when `fabrik:awaiting-ci` was first applied (durable across restarts)
+- On pending: `fabrik:awaiting-ci` is already present (applied at FABRIK_STAGE_COMPLETE); no additional label applied, re-evaluates next poll — indefinitely, as long as check-run state keeps changing (ADR-1410)
+- On failure: `fabrik:awaiting-ci` applied idempotently; dispatches CI-fix re-invocation **unconditionally**, regardless of how long the gate has been open (ADR-1410, R3 — never a timeout)
+- On a genuine liveness-dwell timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`. For the pending-but-stalled case, the dwell is measured from the last observed check-run change (in-memory, resets to "no progress observed" on restart — a cold cache never escalates blind); for the required-check-never-starts and legacy-Commit-Status cases (R3 above), it's measured from when `fabrik:awaiting-ci` was first applied (durable across restarts, via `FetchLabelAppliedAt`) — see ADR-1410.
+- **Absolute backstop:** independent of the above, `fabrik:awaiting-ci` is also unconditionally capped at `FABRIK_CI_BACKSTOP_TIMEOUT` (default 4h) regardless of classification, bounding per-poll cost — see [Timeout Configuration](#timeout-configuration-adr-1410-liveness-not-elapsed-time) below.
 
 > **Rationale for the `mergeable_state` shortcut:** GitHub's `mergeable_state` reflects branch protection rules — it already aggregates required check status, reviewer approvals, and protection constraints. Non-required check_run failures (e.g., cleanup workflow jobs, notification steps) do not block merges per branch protection, so Fabrik's gate must not block on them either. Consulting `mergeable_state` first avoids over-aggressive blocking caused by raw per-check classification that cannot distinguish required from non-required checks.
 
@@ -1573,7 +1931,7 @@ Beyond the normal pending→failure→fix→pass loop, the CI gate handles four 
 
 **R2 — Closed (not merged) PR:** If the PR is closed without merging, Fabrik posts an explanatory comment and pauses the issue with `fabrik:awaiting-input`. The gate is not cleared — an operator must decide the next step (reopen the PR, create a new one, or close the issue).
 
-**R3 — Required check that never starts:** If a required check is expected but never produces a check run (e.g., converted to `workflow_dispatch` after the PR was created), the gate would wait indefinitely. After CIWaitTimeout elapses with the PR in an `OPEN+BLOCKED` state and no check runs ever having run, Fabrik pauses the issue via `pauseForRequiredNeverRunningCheck`. Apply `fabrik:revalidate` after fixing the CI configuration to re-run Validate.
+**R3 — Required check that never starts:** If a required check is expected but never produces a check run (e.g., converted to `workflow_dispatch` after the PR was created), the gate would wait indefinitely. After `CIWaitTimeout` elapses with the PR in an `OPEN+BLOCKED` state and no check runs ever having run, Fabrik pauses the issue via `pauseForRequiredNeverRunningCheck`. Apply `fabrik:revalidate` after fixing the CI configuration to re-run Validate. This case has no check-run signal to observe progress on at all, so — like the merge-guard fallback above — it stays elapsed-time-based under `CIWaitTimeout` (ADR-1410), unlike the check-runs-present pending case.
 
 **R4 — Paused-item auto-recovery:** Items paused with `fabrik:paused` and either `fabrik:awaiting-ci` or `fabrik:awaiting-review` are monitored by a separate recovery loop (`runValidatePRTerminalAdvance`) that bypasses the boardcache (which may have stale PR state). When the linked PR merges, the recovery loop automatically clears the gate, removes the pause labels, and advances the issue to Done — **no manual unpause is required**. This handles the case where a PR is merged externally (e.g., by a human or GitHub auto-merge) while the issue sits paused under either gate.
 
@@ -1612,21 +1970,40 @@ fabrik --max-ci-fix-cycles=3
 
 The cycle count resets on engine restart, and is also reset by `clearFailedStage()` when the user manually unpauses a failed issue.
 
-#### Timeout Configuration
+#### Timeout Configuration (ADR-1410: liveness, not elapsed time)
 
-`FABRIK_CI_WAIT_TIMEOUT` sets the timeout in minutes for the CI gate (catch-up loop path). If `fabrik:awaiting-ci` has been present for longer than this duration, Fabrik pauses the issue with `fabrik:awaiting-input` rather than continuing to re-invoke.
+Fabrik distinguishes CI that is *slow* from CI that is *dead*, and bounds only the latter. This changed as of ADR-1410 — see below for what an existing `FABRIK_CI_WAIT_TIMEOUT` setting means now.
+
+- **CI checks failed:** never a timeout. A confirmed failure always triggers the CI-fix re-invocation above, however long `fabrik:awaiting-ci` has been present. This is a verdict, not a wait.
+- **CI checks still pending, and observably progressing** (a check-run status changed, or a fresh commit was pushed, since the last poll): Fabrik waits indefinitely. An 18-minute suite and a 3-hour suite are both fine — nothing about their duration counts against a deadline.
+- **CI checks still pending, with no progress observed for `FABRIK_CI_WAIT_TIMEOUT` minutes:** Fabrik pauses the issue with `fabrik:awaiting-input`. This is the genuine stall case — something stopped reporting.
+- **A required check that never starts, or a legacy Commit Status actively blocking merge with no check runs at all:** also governed by `FABRIK_CI_WAIT_TIMEOUT`, unchanged — there is no check-run signal in these cases to observe progress on, so a plain elapsed-time dwell remains the right instrument (see R3 above).
+
+> **Known gap — the pending-and-stalled case above is not currently reached via the normal catch-up loop.** The merge gate (`checkMergeabilityGate`) unconditionally claims any item with check runs still pending before the CI gate is ever evaluated, so `FABRIK_CI_WAIT_TIMEOUT` never actually fires for "checks pending but frozen" in practice — only `FABRIK_CI_BACKSTOP_TIMEOUT` (below, default 4h) escalates that case today. If you lower `FABRIK_CI_WAIT_TIMEOUT` expecting a stalled-but-pending PR to escalate sooner, it won't; lower `FABRIK_CI_BACKSTOP_TIMEOUT` instead. See ADR-1410's "Architectural discovery" section for the full detail.
 
 ```bash
-FABRIK_CI_WAIT_TIMEOUT=60  # Wait up to 60 minutes for CI to pass (default: 30)
+FABRIK_CI_WAIT_TIMEOUT=60  # Pause after 60 minutes of no observed CI progress (default: 30)
 # or equivalently:
 fabrik --ci-wait-timeout=60
 ```
 
-The CI timeout is measured from when `fabrik:awaiting-ci` was first applied. Because the label is applied immediately at FABRIK_STAGE_COMPLETE, the timeout covers both pending and failed CI states — it starts from when the stage finishes, not from when CI first fails.
+**If you already had `FABRIK_CI_WAIT_TIMEOUT` set:** the name, flag, and default (30 minutes) are unchanged — you do not need to update anything. What changed is what the number *means*: before ADR-1410, it capped the PR's total time in `fabrik:awaiting-ci` regardless of whether CI was alive; now it only measures inactivity. If you had tuned it up to accommodate a slow test suite, you likely no longer need that override — a suite of any length now completes normally as long as it keeps reporting.
+
+**Absolute backstop — `FABRIK_CI_BACKSTOP_TIMEOUT` (new, ADR-1410, R5):** a separate setting bounds how long an item may sit in `fabrik:awaiting-ci` under *any* classification, including a suite that is technically still progressing. This exists purely to cap the per-poll cost of a held item (a deep-fetch plus a live check-run refresh every poll), not to bound CI duration — so it defaults much larger than the liveness dwell above:
+
+```bash
+FABRIK_CI_BACKSTOP_TIMEOUT=480  # Absolute cap of 8 hours (default: 240 = 4h)
+# or equivalently:
+fabrik --ci-backstop-timeout=480
+```
+
+Tune this down only if you want a hard ceiling on how long any single PR can occupy `fabrik:awaiting-ci`, independent of whether it's making progress.
+
+**Keep `FABRIK_CI_BACKSTOP_TIMEOUT` well above `FABRIK_CI_WAIT_TIMEOUT`.** Nothing enforces this ordering structurally — if the backstop is set at or below the liveness dwell, `settleAwaitingCIScan`'s unconditional backstop fires before the CI-gate liveness dwell ever gets a chance to distinguish a stalled CI run from one that's actively progressing, silently reintroducing the #342 spurious-pause behavior this redesign fixed. Fabrik logs a `[startup] warning` (not a hard failure) if the resolved values are misordered — watch for it after changing either setting.
 
 #### Restart Persistence
 
-The CI timeout is measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making it durable across engine restarts. The cycle count is in-memory and resets on restart.
+The R3/legacy-Commit-Status elapsed dwells and the `CIBackstopTimeout` backstop are measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making them durable across engine restarts. The check-run-pending liveness dwell instead tracks progress in memory; a restart resets it to "no progress observed yet," which is the safe default — it never escalates blind on a cold cache, only re-observes on the next poll. The CI-fix cycle count is also in-memory and resets on restart.
 
 ### CI Auto-Advance Workflow (removed)
 
@@ -1842,6 +2219,8 @@ After each rebase onto the base branch, both the `fabrik-review` and `fabrik-val
 #### Validate: pre-completion mergeability gate
 
 Before emitting `FABRIK_STAGE_COMPLETE`, the `fabrik-validate` skill checks the linked PR's mergeability via `gh pr view --json mergeable,mergeStateStatus`. When the `mergeable` value is `CONFLICTING` or `mergeStateStatus` is `DIRTY` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
+
+Before that mergeability check, the skill's Pre-Completion Gate also decides whether to rebase the branch onto its base at all. Rebasing pushes, and a push restarts CI, so an unconditional rebase on every Validate invocation can livelock a repo whose required-check duration exceeds its merge interarrival time, or eject a PR already sitting in a merge queue. The skill skips the rebase when the branch is already up to date with its base (nothing to gain), when the linked PR is in a merge queue or the check can't confirm it isn't (pushing there would eject the PR), or when every one of the PR's required checks has already succeeded against the current base branch tip — measured by comparing the base branch's own commit time against the *earliest* start time among those required checks (not completion time — a long-running check can finish after the base has moved again, so only the start time proves the check began against a tree at least as new as the current base; and the earliest, not the most recent, since one fresh required check says nothing about a sibling required check that hasn't rerun), not by reading branch-protection config, since a repo can allow merging on a stale check regardless of how up-to-date-ness is enforced. It still rebases in the one case that needs it: behind its base, not queued, with no fresh-enough successful check run to fall back on. Either way, the stage summary states which outcome applied (`rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, or `skipped-ci-fresh`), so a skipped rebase reads as a deliberate decision, not an omission. See ADR-1364.
 
 ### Customizing Skills
 
@@ -2107,12 +2486,13 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
-| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode) |
-| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
+| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
+| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `fabrik:awaiting-placement` | Set on a spawned child issue when its initial project-board Status placement fails (the child, board item, and `blockedBy` link already exist — only the column placement is missing). Retried every poll from `board.Items` directly. Cleared on successful placement, or when the child is observed closed. Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on both child and parent (ADR-062). |
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
+| `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal). |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
@@ -2131,14 +2511,22 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes. If the linked PR was already manually merged when auto-merge runs, Fabrik treats it as a success and advances the issue to Done normally. |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence for both decisions: the PR is not auto-merged and the issue does not advance to Done. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
-| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for every stage invocation while the label is present. Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
+| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for the first stage invocation while the label is present, with `max_wall_time` scaled by the same 2× factor for that invocation (so the extra turn budget gets proportionate wall-clock headroom instead of a deadline sized for the un-extended case — see `max_wall_time` above). Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal); each such extension re-invokes with a fresh `max_wall_time` window at the un-scaled deadline. The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `fabrik:revalidate` | Force re-entry of the Validate stage. Removes `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, then itself; Validate then re-runs on the current HEAD SHA. Use this to recover from a stuck-Validate state in one action — no need to manually clear individual gate labels. Applied to non-Validate issues: removed with a warning, no work dispatched. Safe to apply while Validate is in-flight — the label is held until the worker exits, then processed normally. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
+| `review-authority:advisory` | Override the stage's configured `review_authority` to `advisory` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
+| `review-authority:authoritative` | Override the stage's configured `review_authority` to `authoritative` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
+| `expected-reviewers:none` | Override the stage's configured `expected_reviewers` to none for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](#declaring-expected-reviewers). |
+| `expected-reviewers:declared` | Override `expected_reviewers` to a fixed synthetic reviewer for this issue only; testing/e2e use — never posts a real review. Only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](#declaring-expected-reviewers). |
 | `fabrik:clear-claude-limit` | Clear an active account-wide Claude usage-limit suspension without restarting the engine. Apply to *any* open board item — it does not need to be one already carrying `fabrik:claude-limit`, since the suspension is account-wide, not per-issue. Read and consumed on the next poll: clears the suspension immediately and removes itself. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
 Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
+
+Review authority label precedence: no `review-authority:` label → stage YAML `review_authority` governs. Exactly one recognized label (`advisory` or `authoritative`) → it overrides the stage config for this issue only. Both labels present → resolves to `authoritative` (the more restrictive value) and a warning is logged. A malformed or unrecognized suffix is ignored with a logged warning and falls back to the stage config.
+
+Expected reviewers label precedence: no `expected-reviewers:` label → stage YAML `expected_reviewers` governs (`nil` stays `nil`). Exactly one recognized label (`none` or `declared`) → it overrides the stage config for this issue only. Both labels present → resolves to `declared` (the more restrictive value — it imposes waiting, unlike `none`'s immediate advance) and a warning is logged. A malformed or unrecognized suffix is ignored with a logged warning and falls back to the stage config.
 
 ### Advanced: `base:<branch>` timing
 
@@ -2160,7 +2548,11 @@ If the named branch does not exist on the remote, Fabrik falls back to the repos
 
 ## 7. Permissions
 
-Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions — tools not in the allowed set are silently denied rather than triggering an interactive prompt. This ensures Fabrik works correctly in headless mode and shared environments regardless of the user's `~/.claude/settings.json`. Fabrik does not require users to pre-configure permissions in their Claude Code settings.
+Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions interactively. This ensures Fabrik works correctly in headless mode and shared environments regardless of the user's `~/.claude/settings.json`. Fabrik does not require users to pre-configure permissions in their Claude Code settings.
+
+**`allowed_tools` is a call-time permission filter, not an availability filter.** A tool absent from the allowed set is still offered to the model in its tool schema; under `--permission-mode dontAsk`, absence from the allowed list is not a guarantee the tool call is rejected either (see the Worktree Boundary Enforcement caveat below and #1372). The only mechanism that removes a tool from what the model is even offered is `--disallowedTools`, a separate, construction-time exclusion.
+
+**`ScheduleWakeup` and `Workflow` are unconditionally suppressed via `--disallowedTools`** on every invocation, regardless of stage config, `allowed_tools`, or whether `fabrik:unrestricted` is set. Both tools promise cross-turn resumption — a scheduled wakeup or a completion notification delivered after the current turn ends — that a headless Fabrik stage cannot honor: there is no running session to receive it. Without suppression, a stage worker calls one of these tools, the turn ends, the stage exits without `FABRIK_STAGE_COMPLETE`, and the next retry deterministically re-derives the identical stall (`Workflow` additionally risks spending session budget on background subagents that never report back). See ADR-1365.
 
 **Default allowed-tool set** (used when a stage does not specify `allowed_tools`):
 
@@ -2275,8 +2667,10 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
 | `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
 | `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
-| `fabrik:extend-turns` | Pre-grant 2× max turns budget for every stage while present; auto-extends to 3× when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
+| `fabrik:extend-turns` | Pre-grant 2× max turns budget (with matching 2× `max_wall_time`) for the first stage invocation while present; auto-extends to 3× (unscaled deadline) when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
 | `base:<branch>` | Override base branch for this issue (e.g. `base:develop`); Fabrik forks from, rebases onto, and targets PRs at this branch |
+| `review-authority:<mode>` | Override the stage's configured `review_authority` for this issue only (`advisory`, `authoritative`); only meaningful alongside `wait_for_reviews: true` |
+| `expected-reviewers:<mode>` | Override the stage's configured `expected_reviewers` for this issue only (`none`, `declared`); only meaningful alongside `wait_for_reviews: true` |
 
 Dismiss the panel by pressing `?` again or `Esc`.
 
@@ -2317,7 +2711,7 @@ Tab into the Warnings panel to take action:
 - **S** — show/hide dismissed entries
 - **Enter** — expand/collapse the full detail text for the selected entry
 
-Warning entries persist to `.fabrik/warnings.json` and survive auto-upgrade restarts. Dismissed entries are preserved in the file until the underlying condition clears, at which point they are removed entirely.
+Warning entries persist to `.fabrik/warnings.json` and survive auto-upgrade restarts. Dismissed entries are preserved in the file until the underlying condition clears, at which point they are removed entirely. This includes the condition's *subject* going away entirely (e.g. a repo leaving the project board, or a stage being renamed) — a per-poll or startup sweep clears those automatically too, without requiring a restart (see `docs/state-machine.md` §7.11).
 
 ### History Persistence
 
@@ -2403,11 +2797,176 @@ working directory. Useful for diagnosing prompt issues or unexpected behavior.
 
 ### Subprocess Environment
 
-Claude Code is invoked with a clean, isolated environment — environment variables
-from the parent process do not leak into Claude subprocesses. If you previously
-relied on ambient env vars being available inside Claude (e.g., API keys or tool
-paths set in your shell), pass them explicitly via your stage YAML or a shell
-wrapper script.
+Claude Code is invoked with the engine's parent-process environment as its base,
+but it is not inherited unfiltered: Fabrik scrubs the Anthropic/Claude-Code auth
+namespace by default (see below) so no ambient credential can silently redirect
+billing, then shadows a small, explicit set of keys it cares about
+(`CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, the
+`FABRIK_*` invocation facts, `GH_TOKEN`/`GITHUB_TOKEN`, `GH_HOST`) so that Fabrik's
+own value for those specific keys always wins over an ambient one, no matter which
+happened to be set first. `GH_HOST` is only emitted when a GHES host is configured
+(`ghes_host` / `FABRIK_GHES_HOST`) — see [GitHub Enterprise Server
+Support](#github-enterprise-server-support); it is a Fabrik-computed override, not
+part of the Anthropic auth namespace, so it is never subject to the scrub described
+below. Everything else — anything outside the scrubbed namespace and
+not on the shadowed-keys list — passes through untouched. If you want a
+stage-specific variable to reach Claude reliably regardless of what's ambient,
+pass it explicitly via your stage YAML or a shell wrapper script rather than
+relying on shell export order.
+
+### Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal
+
+Claude Code resolves its API key **before** consulting any subscription path. An
+`ANTHROPIC_API_KEY` (or several other Anthropic/Claude-Code environment
+variables) present in the engine's own environment — for example, added to a
+managed repo's `.env` by a human or an agent doing something locally reasonable —
+would otherwise silently redirect every Fabrik stage invocation from subscription
+billing to metered API billing, with no log line, no label, and no board signal.
+Fabrik closes this by scrubbing the Anthropic/Claude-Code auth namespace out of
+every worker's environment **by default**, and gating any exception behind an
+explicit, `FABRIK_`-prefixed variable.
+
+**What's scrubbed.** Every inherited variable whose name starts with `ANTHROPIC_`
+is removed unconditionally — default-deny over the whole namespace, not a
+deny-list of currently-known-bad names, so a newly introduced upstream
+`ANTHROPIC_*` billing variable is denied automatically with no Fabrik upgrade
+required. This also scrubs non-auth `ANTHROPIC_*` variables you might otherwise
+expect to pass through (`ANTHROPIC_MODEL`, `ANTHROPIC_CONFIG_DIR`, etc.) — a
+deliberate consequence of scrubbing the namespace rather than an enumerated list.
+A specific, enumerated set of `CLAUDE_CODE_*` auth-selector variables
+(`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN` and its
+file-descriptor variant, and the `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/`_FOUNDRY`/
+`_ANTHROPIC_AWS`/`_ANTHROPIC_GOOGLE_CLOUD`/`_MANTLE`/`_GATEWAY` provider
+selectors) is also removed — `CLAUDE_CODE_*` as a whole is too broad a
+general-configuration namespace to wildcard-scrub, since it already carries
+Fabrik's own non-auth `CLAUDE_CODE_EFFORT_LEVEL`/`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`.
+A variable that merely mentions "anthropic" without matching one of these exact
+names (e.g. a hypothetical `FANTASY_ANTHROPIC_API_KEY`) is left untouched — the
+scrub matches on the parsed variable name, never a substring.
+
+**Explicit API-billing opt-in.** API billing is not forbidden — some
+environments (corporate deployments especially) have no Claude subscription
+available. Set `FABRIK_ANTHROPIC_API_KEY` in `.env` to opt in explicitly:
+
+```
+FABRIK_ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Fabrik translates this into `ANTHROPIC_API_KEY` on every worker invocation. This
+is the only supported way to get `ANTHROPIC_API_KEY` into the worker — an
+ambient `ANTHROPIC_API_KEY` already in the engine's environment is scrubbed and
+never reaches the worker on its own, regardless of this setting. When active, a
+one-time startup notice confirms it (the value itself is never logged):
+
+```
+[startup] notice: FABRIK_ANTHROPIC_API_KEY is set — Claude invocations will be billed to the Anthropic API rather than a subscription. See docs/USER_GUIDE.md.
+```
+
+**Passthrough escape hatch, for the long tail.** `FABRIK_ANTHROPIC_API_KEY`
+covers the common case; `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` covers everything
+else non-subscription auth might need — Bedrock, Vertex, or a future
+provider-selector this doc hasn't caught up with yet. It names an exact,
+comma-separated allow-list of variables to re-inherit from the engine's ambient
+environment unchanged, overriding the scrub for only those names:
+
+```
+FABRIK_ANTHROPIC_ENV_PASSTHROUGH=CLAUDE_CODE_USE_BEDROCK,ANTHROPIC_AWS_API_KEY
+```
+
+Bedrock and Vertex are examples of a growing list — Claude Code has at least
+seven `CLAUDE_CODE_USE_*` provider selectors today, not just these two — so treat
+this as "name whatever selector your provider needs," not a fixed set. Note that
+most Bedrock/Vertex credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`GOOGLE_APPLICATION_CREDENTIALS`, etc.) already fall outside the scrubbed
+namespace and need no passthrough entry at all — only the `ANTHROPIC_*`/
+`CLAUDE_CODE_*`-namespaced selector variables do. A name listed but absent from
+the ambient environment is a harmless no-op; a name listed but outside the
+scrubbed namespace (e.g. `PATH`) is likewise a no-op — it was never going to be
+removed. When the list is non-empty, a one-time startup notice names which
+variables were passed through (never their values), and warns that invocations
+may not be subscription-billed as a result:
+
+```
+[startup] notice: FABRIK_ANTHROPIC_ENV_PASSTHROUGH passes through CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_AWS_API_KEY — Claude invocations may not be subscription-billed as a result. See docs/USER_GUIDE.md.
+```
+
+No line means the passthrough list is empty — the scrub applies to every
+`ANTHROPIC_*`/enumerated `CLAUDE_CODE_*` variable with no exceptions.
+
+**`apiKeyHelper` is refused, not scrubbed.** `apiKeyHelper` is a `settings.json`
+key, not an environment variable — a command Claude Code shells out to for
+credentials — so no amount of environment scrubbing can prevent it from
+supplying an API key. Fabrik refuses to start if `apiKeyHelper` is set anywhere
+in the resolved Claude Code settings chain: the managed-policy layer
+(`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+`/etc/claude-code/managed-settings.json` on Linux), the user layer
+(`$CLAUDE_CONFIG_DIR` or `~/.claude`, `settings.json`/`settings.local.json`), and
+the project layer (`.claude/settings.json`/`.claude/settings.local.json` in the
+directory Fabrik itself runs from). The startup error names the specific file
+and layer; remove `apiKeyHelper` from it and restart. A missing or unreadable
+settings file is not an error — only a present, parseable `apiKeyHelper` key is
+fatal.
+
+Separately, since a managed repo's own checked-in `.claude/settings.json` isn't
+visible until Fabrik has already checked it out into a worktree, each invocation
+also checks the worktree's own settings files (`settings.json` and
+`settings.local.json`). If either sets `apiKeyHelper`, that
+invocation is skipped (not run) and the issue is labeled
+`fabrik:api-key-helper-detected` with an explanatory comment — this does not
+count against `max_retries`, and self-clears once a human removes
+`apiKeyHelper` from the repo and a later invocation reaches Claude successfully.
+There is no support for actually using `apiKeyHelper` with Fabrik; it is refused
+outright.
+
+### Alternate Claude Profile (`CLAUDE_CONFIG_DIR`)
+
+`CLAUDE_CONFIG_DIR` is not special-cased by Fabrik — it is simply one instance of
+the general passthrough rule above (it is not `ANTHROPIC_`/`CLAUDE_CODE_*`-namespaced,
+so the auth scrub above never touches it), which is what makes this pattern work
+at all. Setting it in the engine's environment points every Claude Code
+invocation at an alternate credentials/config directory — a different account,
+subscription, and billing quota than the engine's own default profile. Fabrik
+does not set or otherwise manage this variable; it only reads it once, at
+startup, to emit the notice below.
+
+This is the pattern to use when you want one Fabrik instance's stage invocations
+to bill against a different Claude account than the one the engine itself runs
+as — for example, running several instances across several accounts to spread
+usage-limit exposure.
+
+Set it in `.env` (already `.gitignore`-enforced, per the note above):
+
+```
+CLAUDE_CONFIG_DIR=/home/user/.claude-alt-profile
+```
+
+It survives `--auto-upgrade` re-execs: a re-exec restarts the same binary from
+scratch, which re-runs `.env` loading at startup, so the value is picked up again
+exactly as on a fresh start.
+
+To confirm it took effect, check the startup output (stderr and `.fabrik/fabrik.log`)
+for a line naming the resolved directory:
+
+```
+[startup] notice: CLAUDE_CONFIG_DIR is set to "/home/user/.claude-alt-profile" — Claude invocations will use this profile directory instead of the default account. See docs/USER_GUIDE.md.
+```
+
+No line means `CLAUDE_CONFIG_DIR` was unset — every invocation runs against the
+default profile. Fabrik does not validate the directory's contents or credential
+state; a misconfigured or unauthenticated profile fails wherever Claude Code
+itself would fail, not at Fabrik startup.
+
+### Worker Session Naming (`--name`)
+
+Every worker invocation carries a `--name fabrik:<owner>/<repo>#<issue>:<stage>`
+flag (e.g. `fabrik:handarbeit/fabrik#1284:Implement`), giving each Fabrik worker a
+self-describing identity in `ps` output — `ps aux | grep -- "--name fabrik:"` finds
+every worker on the host, and the sentinel itself names which repo, issue, and stage
+each one is serving. The flag is gated on a one-time startup probe of the installed
+`claude` binary's `--help` output; on older binaries that predate the flag, it's
+omitted and workers run exactly as before. It is observability-only — the engine
+never reads or branches on it. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
+for the full as-built mechanism.
 
 ### Rate Limit Monitoring
 
@@ -2443,6 +3002,24 @@ The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
 Typical cost is ~5–30 points per poll depending on active items, well within the
 5,000 points/hour limit.
 
+#### Footer GraphQL Indicator Color
+
+The TUI footer's GraphQL indicator (`remaining/limit  countdown`) colors itself from a
+**projected-exhaustion estimate**, not raw percentage remaining. Fabrik estimates the
+burn rate (points consumed per minute) from consecutive polls, projects that rate
+forward to the window reset, and compares the projection against `Remaining`:
+
+- **Green** — projected consumption stays comfortably below `Remaining`.
+- **Yellow** — projected consumption is within 25% of `Remaining`.
+- **Red** — projected consumption would exceed `Remaining` before the window resets.
+
+This means a low percentage remaining with little time left in the window can still be
+green: if the window is about to reset, the budget resets with it. Conversely, a
+seemingly-healthy percentage with a high burn rate and a long time left before reset can
+turn yellow or red. On startup, before enough polls have landed to estimate a rate, and
+whenever the engine is idle, the indicator is green — it never flashes red before there
+is a burn rate to project from.
+
 #### Cold-Start Cache Population
 
 On first startup, Fabrik bootstraps the board cache from the same lightweight probe
@@ -2454,20 +3031,36 @@ operator beyond the faster startup time.
 
 #### Rate-Limit Exhaustion Alert Banner
 
-When the GraphQL budget hits zero or drops below 20% and probe failures begin,
-Fabrik suspends polling and displays a red alert banner immediately below the TUI
-header:
+GitHub tracks two separate API budgets — REST/core and GraphQL — and Fabrik reports
+exhaustion of either one distinctly, naming the bucket that actually ran out. When the
+GraphQL budget drops below 20% and probe failures begin, or when the REST budget hits
+a hard near-zero threshold, Fabrik suspends polling and displays a red alert banner
+immediately below the TUI header:
 
 ```
 ⚠ GraphQL rate limit exhausted — polling suspended. Resumes in 12m (14:30 local time).
 ```
 
-The countdown ticks every second and shows the local time when the quota resets.
-Once the GraphQL budget recovers above 50%, the banner disappears automatically and
-polling resumes. You do not need to restart Fabrik — it recovers on its own. On
-recovery from near-zero exhaustion, Fabrik fires an immediate probe rather than
-waiting for the next scheduled poll tick, so processing resumes as soon as the
-budget is restored.
+```
+⚠ REST rate limit exhausted — polling suspended. Resumes in 18m (21:38 local time).
+```
+
+If both buckets are exhausted at the same time, the banner names both in a single
+combined line and quotes whichever bucket's reset comes sooner:
+
+```
+⚠ REST and GraphQL rate limits exhausted — polling suspended. Resumes in 5m (21:25 local time).
+```
+
+The countdown ticks every second and shows the local time when the named bucket's
+quota resets. Each bucket recovers and clears its own banner independently — a REST
+recovery never dismisses a banner raised by GraphQL exhaustion, and vice versa; if
+both are exhausted, the banner stays until both clear. You do not need to restart
+Fabrik — it recovers on its own. On recovery from near-zero GraphQL exhaustion,
+Fabrik fires an immediate probe rather than waiting for the next scheduled poll tick,
+so processing resumes as soon as the budget is restored. The footer's GraphQL
+remaining/limit readout always reflects the same underlying stats the banner uses for
+GraphQL, so the two can never disagree about GraphQL's state.
 
 ### Claude Usage-Limit Suspension
 

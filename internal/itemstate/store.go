@@ -402,15 +402,40 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case StageRetryCleared:
 		ensureStageStateMaps(item)
 		item.StageState.Attempts[v.StageName] = 0
+		item.StageState.SliceRetries[v.StageName] = 0
 		delete(item.StageState.PRCreationFailed, v.StageName)
 		delete(item.StageState.LastTurnsUsed, v.StageName)
 		delete(item.StageState.LastTurnsCapped, v.StageName)
 		delete(item.StageState.StallHintPending, v.StageName)
 		return StageStateChanged
 
+	case SliceRetryIncremented:
+		ensureStageStateMaps(item)
+		item.StageState.SliceRetries[v.StageName]++
+		return StageStateChanged
+
 	case ReviewCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.ReviewCycles[v.StageName]++
+		return StageStateChanged
+
+	case ReviewBlockedCycleIncremented:
+		ensureStageStateMaps(item)
+		item.StageState.ReviewBlockedCycles[v.StageName]++
+		return StageStateChanged
+
+	case ReviewCycleDecremented:
+		// Check before ensureStageStateMaps, not after: a nil map reads as
+		// the zero value safely, but ensureStageStateMaps's nil->empty-map
+		// initialization is itself a state change under applySingleItem's
+		// reflect.DeepEqual no-op gate. Mutating unconditionally here would
+		// make a truly-fresh item (StageState.ReviewCycles == nil) emit a
+		// spurious Change even when the counter itself never left zero.
+		if item.StageState.ReviewCycles[v.StageName] == 0 {
+			return 0 // no-op: already floored at zero
+		}
+		ensureStageStateMaps(item)
+		item.StageState.ReviewCycles[v.StageName]--
 		return StageStateChanged
 
 	case CIFixCycleIncremented:
@@ -446,6 +471,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case EngineCyclesCleared:
 		ensureStageStateMaps(item)
 		delete(item.StageState.ReviewCycles, v.StageName)
+		delete(item.StageState.ReviewBlockedCycles, v.StageName)
 		delete(item.StageState.CIFixCycles, v.StageName)
 		delete(item.StageState.RebaseCycles, v.StageName)
 		delete(item.StageState.EnqueueCycles, v.StageName)
@@ -488,6 +514,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		item.CooldownAt[v.Reason] = v.Until
 		return CooldownChanged
+
+	case LabelAppliedAtRecorded:
+		if item.LabelAppliedAt == nil {
+			item.LabelAppliedAt = make(map[string]time.Time)
+		}
+		item.LabelAppliedAt[v.Label] = v.At
+		return LabelAppliedAtChanged
 
 	case WorkerEntered:
 		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
@@ -619,6 +652,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		flags := ChangeFlags(LinkedPRChanged)
 		if v.SHA != item.LinkedPR.HeadSHA && item.LinkedPR.HeadSHA != "" {
 			item.LinkedPR.LastHeadSHAUpdate = time.Now()
+			// A fresh push resets CI entirely — that's progress in its own
+			// right, not merely a prerequisite for future progress (ADR-1410).
+			item.LinkedPR.LastCIProgressAt = time.Now()
 			// The outgoing SHA's check runs never apply to the new head.
 			// Prune them so CheckRunsBySHA(newSHA) — and boardcache reads
 			// that trust it — can't be shadowed by a stale run left behind
@@ -631,10 +667,16 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.HeadSHA = v.SHA
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
+			drainedChanged := false
 			for _, run := range pending {
-				item.LinkedPR.CheckRuns, _ = upsertCheckRunByID(item.LinkedPR.CheckRuns, run)
+				var changed bool
+				item.LinkedPR.CheckRuns, changed = upsertCheckRunByID(item.LinkedPR.CheckRuns, run)
+				drainedChanged = drainedChanged || changed
 			}
 			item.LinkedPR.HasHadChecks = true
+			if drainedChanged {
+				item.LinkedPR.LastCIProgressAt = time.Now()
+			}
 			delete(s.pendingCheckRuns, v.SHA)
 			flags |= CheckRunChanged
 		}
@@ -785,8 +827,19 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 		item.LinkedPR = &LinkedPRState{}
 	}
 	// Update or append the check run by ID.
-	item.LinkedPR.CheckRuns, _ = upsertCheckRunByID(item.LinkedPR.CheckRuns, v.Run)
+	var changed bool
+	item.LinkedPR.CheckRuns, changed = upsertCheckRunByID(item.LinkedPR.CheckRuns, v.Run)
 	item.LinkedPR.HasHadChecks = true
+	if changed {
+		// A new check-run ID appearing, or an existing one differing at all
+		// from its prior entry per upsertCheckRunByID's reflect.DeepEqual —
+		// not only Status/Conclusion, but also OutputSummary/OutputText/
+		// DetailsURL/HTMLURL changing on an otherwise-unchanged run — counts
+		// as observable CI progress (ADR-1410, R2). Deliberately permissive:
+		// GitHub reporting any change on a check run is still evidence it is
+		// alive, even when the change itself is weak signal on its own.
+		item.LinkedPR.LastCIProgressAt = time.Now()
+	}
 
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)
@@ -1128,6 +1181,9 @@ func ensureStageStateMaps(item *ItemState) {
 	if ss.ReviewCycles == nil {
 		ss.ReviewCycles = make(map[string]int)
 	}
+	if ss.ReviewBlockedCycles == nil {
+		ss.ReviewBlockedCycles = make(map[string]int)
+	}
 	if ss.CIFixCycles == nil {
 		ss.CIFixCycles = make(map[string]int)
 	}
@@ -1136,6 +1192,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.EnqueueCycles == nil {
 		ss.EnqueueCycles = make(map[string]int)
+	}
+	if ss.SliceRetries == nil {
+		ss.SliceRetries = make(map[string]int)
 	}
 	if ss.ProcessedComments == nil {
 		ss.ProcessedComments = make(map[string]time.Time)

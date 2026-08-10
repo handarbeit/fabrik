@@ -152,6 +152,38 @@ In preference order:
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it.
 6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent. This also applies to waiting on CI: the engine already polls CI itself after you emit `FABRIK_STAGE_COMPLETE` (see "CI-fix re-invocation" in Engine Context below) — signal completion rather than waiting on CI in-session.
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
+This paragraph's CI-gating language applies only if `wait_for_ci: true` is configured for this stage — see "CI-fix re-invocation" in Engine Context below, which is conditional on that same setting and is unset by default for Review.
+
+## If You Discover a Blocking Issue
+
+If, while reviewing, you determine this PR cannot be safely completed without another piece of work landing first — a bug in a dependency, a missing capability in another repo, work that was scoped out but turns out to be required — declare it as a spawned child issue using `FABRIK_SPAWN_CHILD_BEGIN/END`, the same mechanism Plan uses for decomposition.
+
+**Do not run `gh issue create` yourself.** The engine never observes an issue you create directly — no board registration, no assignee, and critically no `blocked_by` edge on this issue. Fabrik would then have no record that this PR is blocked, and would resume review work as if nothing were wrong, potentially reporting green and merging without the blocker's fix.
+
+### Block Format
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Single-line title for the new issue
+
+Full scoped spec body — markdown, multiple paragraphs OK, no nested FABRIK_* markers.
+Include enough context for the child to run autonomously through its own pipeline
+without consulting this issue.
+FABRIK_SPAWN_CHILD_END
+```
+
+Rules:
+- `FABRIK_SPAWN_CHILD_BEGIN` and `FABRIK_SPAWN_CHILD_END` must each be on their own line
+- The `owner/repo` follows `BEGIN` on the same line, separated by a space
+- `TITLE:` must be the first non-empty line after `BEGIN`; the body follows after a blank line and continues until `END`
+- Only spawn into a repo this Fabrik instance is actually configured to serve (its own `repo:`/`project:` config) — a mismatched repo fails the spawn loudly rather than silently misrouting; if you're unsure which repos are servable, say so in your output rather than guessing
+- The engine creates the issue, adds it to the project board, assigns it, and links it as a `blocked_by` dependency of this issue automatically — you do not need to do any of that yourself, and must not attempt it via `gh`
+- Emit the block anywhere in your normal output; you may still emit `FABRIK_STAGE_COMPLETE` in the same response — the engine processes the spawn before posting your output
+
+Once the spawn is processed, this issue gets `fabrik:blocked` automatically and will not resume until the new child closes.
+
 ## Output
 
 The engine captures your stdout and posts it on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
@@ -219,6 +251,15 @@ So: prefer making steady, committed progress over racing to finish inside one sl
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
+## Labels You Interact With
+
+- **`fabrik:awaiting-review`** — applied by the engine when `wait_for_reviews: true` and outstanding PR reviewer requests remain after you signal completion; cleared once all reviewers respond or the wait times out.
+- **`review-authority:<mode>`** (`advisory`/`authoritative`) — if present, overrides this stage's configured `review_authority` for this issue: `authoritative` additionally requires no outstanding CHANGES_REQUESTED and satisfied approvals before the gate clears, beyond the `advisory` default of "reviewers responded, whatever they said."
+- **`expected-reviewers:<mode>`** (`none`/`declared`) / the stage's `expected_reviewers` config — declares self-submitting bot reviewers (Copilot, Gemini, CodeRabbit-style) that never appear in GitHub's formal requested-reviewer list but are still expected to respond before the gate clears.
+- **`fabrik:bot-reprompted`** — applied by the engine's bot-reviewer re-prompt ladder if every outstanding reviewer is a bot and the wait timeout elapses once; you don't act on it directly, but its presence means a re-prompt already happened this gate cycle.
+
+See `../../LABELS.md` for the full label reference.
 
 ## Engine Context
 

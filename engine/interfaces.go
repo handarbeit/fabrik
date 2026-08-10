@@ -32,6 +32,7 @@ type GitHubClient interface {
 	FetchPRMergeable(owner, repo string, prNumber int) (*bool, error)
 	FetchPRMerged(owner, repo string, prNumber int) (bool, error)
 	FetchPRMergeableState(owner, repo string, prNumber int) (string, error)
+	FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error)
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
@@ -51,7 +52,7 @@ type GitHubClient interface {
 	DisablePullRequestAutoMerge(owner, repo string, prNumber int) error
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	CloseIssue(owner, repo string, issueNumber int) error
-	CreateIssue(owner, repo, title, body string) (number int, nodeID string, err error)
+	CreateIssue(owner, repo, title, body string, assignees []string) (number int, nodeID string, err error)
 	AddProjectV2ItemById(projectID, contentNodeID string) (string, error)
 	AddBlockedByIssue(issueNodeID, blockerNodeID string) error
 	DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error
@@ -60,7 +61,7 @@ type GitHubClient interface {
 	EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error
 	DequeuePullRequest(owner, repo string, prNumber int) error
 	FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error)
-	FetchAllowAutoMerge(owner, repo string) (bool, error)
+	FetchRepoAccess(owner, repo string) (gh.RepoAccess, error)
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
@@ -94,6 +95,33 @@ type InvokeOptions struct {
 	// Set by consumeStallHint when a stall was detected on the stage's previous
 	// incomplete attempt (a turn-capped run followed by one using fewer turns).
 	CorrectiveHint string
+	// FabrikRoot is the absolute path to fabrikDir (where .fabrik/ config, stages,
+	// and plugin live), exported to the worker as FABRIK_ROOT (#1288). Empty means
+	// omit the variable entirely.
+	FabrikRoot string
+	// PRNumber is the resolved linked-PR number, exported to the worker as
+	// FABRIK_PR (#1288). 0 means "no PR" — buildClaudeEnv omits the variable
+	// entirely rather than emitting a misleading FABRIK_PR=0.
+	PRNumber int
+	// FabrikRepo is the engine's configured default repo (e.Config.Repo),
+	// used by buildClaudeEnv as a fallback for FABRIK_REPO (#1288) only when
+	// issue.Repo is empty — e.g. an item constructed bare from a
+	// projects_v2_item.created webhook delta before FetchItemDetails has
+	// backfilled item.Repo. Ignored whenever issue.Repo is non-empty, which
+	// is the case for every item that has passed through a board fetch or
+	// deep-fetch.
+	FabrikRepo string
+	// MaxResumeFailures is the effective Config.MaxResumeFailures value
+	// (#1414): the number of consecutive failed --resume attempts for this
+	// (issue, stage) session before the session pointer is discarded and the
+	// next invocation cold-starts. Threaded from e.cfg.MaxResumeFailures at
+	// every InvokeOptions construction site (stage path, comment path, and
+	// merge-train conflict resolution) so classifyResumeFailure in claude.go
+	// has it without needing engine.Config access itself. 0 or negative
+	// disables the mechanism (mirrors MaxRetries == 0's "unlimited"
+	// convention); resolveInt always resolves a positive default in
+	// production.
+	MaxResumeFailures int
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.

@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+// TestFabrikPlugin_EmbedsLabelsMd is the direct assertion for #1339 AC1:
+// LABELS.md must be present in the built binary's embed FS, asserted
+// against plugin.FabrikPlugin itself (not the source tree, which
+// TestRunInit_WritesPluginFiles-style tests would only indirectly cover).
+func TestFabrikPlugin_EmbedsLabelsMd(t *testing.T) {
+	content, err := FabrikPlugin.ReadFile("fabrik-workflows/LABELS.md")
+	if err != nil {
+		t.Fatalf("LABELS.md not present in FabrikPlugin embed: %v", err)
+	}
+	const minNonTrivialBytes = 1024
+	if len(content) < minNonTrivialBytes {
+		t.Errorf("LABELS.md embed content suspiciously small: %d bytes (want at least %d)", len(content), minNonTrivialBytes)
+	}
+}
+
 func TestComputeEmbeddedVersion_Deterministic(t *testing.T) {
 	v1 := ComputeEmbeddedVersion()
 	v2 := ComputeEmbeddedVersion()
@@ -101,7 +116,7 @@ func TestCheckPluginState_Migration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cw, up, err := CheckPluginState(dir)
+	cw, up, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
@@ -126,7 +141,7 @@ func TestCheckPluginState_NoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cw, up, err := CheckPluginState(dir)
+	cw, up, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
@@ -164,7 +179,7 @@ func TestCheckPluginState_AutoRefresh(t *testing.T) {
 	}
 
 	// Inject diskVer2 as a "known" version so the corrupted-state guard passes.
-	cw, up, err := checkPluginState(dir2, []string{diskVer2})
+	cw, up, err := checkPluginState(dir2, []string{diskVer2}, false)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -195,7 +210,7 @@ func TestCheckPluginState_CustomWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cw, up, err := CheckPluginState(dir)
+	cw, up, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
@@ -225,7 +240,7 @@ func TestCheckPluginState_MigrationCustomised(t *testing.T) {
 	}
 	// No .installed-version file present (simulating pre-v0.0.64).
 
-	cw, up, err := CheckPluginState(dir)
+	cw, up, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
@@ -280,7 +295,7 @@ func TestCheckPluginState_CorruptedMigration(t *testing.T) {
 		t.Skip("embedded matches customized disk — cannot test corrupted-migration path")
 	}
 
-	cw, up, err := checkPluginState(dir, []string{})
+	cw, up, err := checkPluginState(dir, []string{}, false)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -322,7 +337,7 @@ func TestCheckPluginState_KnownEmbeddedAutoRefresh(t *testing.T) {
 		t.Skip("embedded matches old hash — cannot test known-embedded auto-refresh")
 	}
 	// Inject oldHash into known list → should return upgradeNeeded=true.
-	cw, up, err := checkPluginState(dir, []string{oldHash})
+	cw, up, err := checkPluginState(dir, []string{oldHash}, false)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -331,6 +346,58 @@ func TestCheckPluginState_KnownEmbeddedAutoRefresh(t *testing.T) {
 	}
 	if !up {
 		t.Errorf("known-embedded-auto-refresh: upgradeNeeded should be true")
+	}
+}
+
+// TestCheckPluginState_DevBuildUnlistedFingerprint verifies that when
+// installedVer is present, disk==installed, embedded differs, and installedVer
+// is not in knownVersions, a dev build (isDevBuild=true) still auto-refreshes
+// (upgradeNeeded=true) rather than being misclassified as a custom workflow —
+// the fix for issue #1297. Mirrors TestCheckPluginState_CorruptedMigration's
+// setup exactly, differing only in isDevBuild and the expected outcome.
+func TestCheckPluginState_DevBuildUnlistedFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	if err := populatePluginDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	// Modify a skill to create a disk state distinct from the current embedded
+	// content — this simulates a dev build's own (unlisted) embedded fingerprint
+	// having previously been written as installedVer.
+	entries, _ := filepath.Glob(filepath.Join(dir, "skills", "*", "SKILL.md"))
+	if len(entries) == 0 {
+		t.Fatal("no SKILL.md files found")
+	}
+	if err := os.WriteFile(entries[0], []byte("dev build content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	diskVer, err := ComputeDiskVersion(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a prior dev-build refresh: installedVer = disk fingerprint, never
+	// registered in KnownEmbeddedVersions (dev fingerprints structurally can't be).
+	if err := WriteVersionHash(dir, diskVer); err != nil {
+		t.Fatal(err)
+	}
+	for _, known := range KnownEmbeddedVersions {
+		if diskVer == known {
+			t.Skip("diskVer accidentally matches a known embedded version — cannot test dev-build path")
+		}
+	}
+	embeddedVer := ComputeEmbeddedVersion()
+	if embeddedVer == diskVer {
+		t.Skip("embedded matches dev-build disk — cannot test dev-build path")
+	}
+
+	cw, up, err := checkPluginState(dir, []string{}, true)
+	if err != nil {
+		t.Fatalf("checkPluginState error: %v", err)
+	}
+	if cw {
+		t.Errorf("dev-build-unlisted-fingerprint: customWorkflow should be false, got true")
+	}
+	if !up {
+		t.Errorf("dev-build-unlisted-fingerprint: upgradeNeeded should be true, got false")
 	}
 }
 

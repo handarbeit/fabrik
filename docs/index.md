@@ -482,7 +482,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">👁️</span>
         <div class="feature-title">Pending Reviewer Gate</div>
         <div class="feature-desc">
-          Waits for all requested PR reviewers then re-invokes the stage to address comments.
+          Waits for requested reviewers—including self-submitting bots—then re-invokes the stage, optionally enforcing an authoritative verdict before advancing.
         </div>
       </a>
       <a class="feature-card" href="{{ '/state-machine' | relative_url }}#65-ci-gate-and-ci-fix-reinvoke" aria-label="CI Gate — open documentation">
@@ -525,6 +525,13 @@ fabrik --auto-upgrade</pre>
         <div class="feature-title">Merge Train &amp; Merge Queue</div>
         <div class="feature-desc">
           Batches ready PRs and validates the combined result once, killing the O(N²) rebase-and-retest cascade — GitHub's native queue where available, an internal plan-agnostic merge train everywhere else.
+        </div>
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#anthropic-auth-namespace-scrub--apikeyhelper-refusal" aria-label="Anthropic Auth Namespace Scrub — open documentation">
+        <span class="feature-icon">🔒</span>
+        <div class="feature-title">Anthropic Auth Namespace Scrub</div>
+        <div class="feature-desc">
+          Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default, so an ambient API key can never silently flip a stage from subscription to metered billing — with an explicit opt-in and an outright refusal of <code>apiKeyHelper</code>.
         </div>
       </a>
     </div>

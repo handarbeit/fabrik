@@ -36,7 +36,8 @@ sorted concatenation of all embedded file hashes.
 | absent | "" | any | Migration — no plugin files on disk | No-op; no seed |
 | present | == installedVer | == installedVer | Up to date | No-op |
 | present | == installedVer | != installedVer | installedVer in KnownEmbeddedVersions | Upgrade available — auto-refresh (non-TTY) or y/N prompt (TTY) |
-| present | == installedVer | != installedVer | installedVer NOT in KnownEmbeddedVersions | Corrupted migration — treat as custom workflow; warn operator |
+| present | == installedVer | != installedVer | installedVer NOT in KnownEmbeddedVersions, checking binary is a dev build | Upgrade available — auto-refresh, same as "in KnownEmbeddedVersions" (see ADR 1297) |
+| present | == installedVer | != installedVer | installedVer NOT in KnownEmbeddedVersions, checking binary is a release build | Corrupted migration — treat as custom workflow; warn operator |
 | present | != installedVer | any | Custom workflow | Block refresh; warn operator |
 
 ### Migration baseline
@@ -65,7 +66,13 @@ When `disk == installed != embedded`, before treating this as a safe auto-refres
 `checkPluginState` checks whether `installedVer` appears in `KnownEmbeddedVersions`.
 If it does not, the value was written by the buggy pre-fix migration (which
 recorded the customised disk hash, not an embedded hash) and the state is treated
-as a custom workflow instead of an upgrade.
+as a custom workflow instead of an upgrade — **unless the checking binary is
+itself a dev build** (see ADR 1297), in which case the unlisted fingerprint is
+trusted as a prior legitimate dev-build write instead. `KnownEmbeddedVersions`
+only ever grows from release-cut fingerprints, so a dev build's own embedded
+content can never appear in it by construction; without the ADR 1297 carve-out,
+every dev instance and test bed is permanently misclassified as customized after
+its first plugin refresh.
 
 The list grows by one entry when the embedded plugin fingerprint changes between
 releases, appended automatically by `scripts/cut-release.sh` after the build
@@ -93,7 +100,7 @@ New functions in `plugin/refresh.go`:
 - `WriteVersionHash(pluginDir, hash string) error` — writes hash to `.installed-version`
 - `WriteInstalledVersion(pluginDir string) error` — writes the current embedded hash (post-upgrade)
 - `ReadInstalledVersion(pluginDir string) (string, error)` — reads the file; returns `("", nil)` if absent
-- `CheckPluginState(pluginDir string) (customWorkflow, upgradeNeeded bool, err error)` — implements the four-state table above; runs migration as a side-effect when installed-version is absent
+- `CheckPluginState(pluginDir string, isDevBuild bool) (customWorkflow, upgradeNeeded bool, err error)` — implements the table above; runs migration as a side-effect when installed-version is absent; `isDevBuild` gates the corrupted-state guard's unlisted-fingerprint branch (see ADR 1297)
 
 All auto-refresh paths in `cmd/root.go` and `cmd/upgrade.go` are updated to call
 `CheckPluginState` before touching `.fabrik/plugin/`.

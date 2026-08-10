@@ -398,7 +398,8 @@ type StageRetryIncremented struct {
 func (StageRetryIncremented) isMutation()       {}
 func (m StageRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// StageRetryCleared resets the attempt counter for a stage.
+// StageRetryCleared resets the attempt counter (and the sibling SliceRetries
+// counter) for a stage.
 type StageRetryCleared struct {
 	Repo      string
 	Number    int
@@ -407,6 +408,20 @@ type StageRetryCleared struct {
 
 func (StageRetryCleared) isMutation()       {}
 func (m StageRetryCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// SliceRetryIncremented increments the turn-cap preemption ("slice") counter for
+// a stage. Applied instead of StageRetryIncremented when the invocation ended in
+// a turn-cap exit (CLI subtype error_max_turns) — a resumable time-slice, not a
+// failure — so it is bounded independently by MaxSliceRetries rather than
+// counting against MaxRetries (#1199).
+type SliceRetryIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (SliceRetryIncremented) isMutation()       {}
+func (m SliceRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ReviewCycleIncremented increments the review cycle counter for a stage.
 type ReviewCycleIncremented struct {
@@ -417,6 +432,42 @@ type ReviewCycleIncremented struct {
 
 func (ReviewCycleIncremented) isMutation()       {}
 func (m ReviewCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ReviewBlockedCycleIncremented increments the never-refunded non-convergence
+// counter for a stage's review gate (ADR-1518). Applied alongside
+// ReviewCycleIncremented, but only when the reinvoke it accompanies is
+// dispatched while the gate is still blocked/timed-out — a reinvoke
+// dispatched with the gate already clear (the #1045 junk-overview shape)
+// never increments this counter. Unlike ReviewCycleIncremented, this counter
+// has no decrement counterpart by design: a reinvoke that turns out to be a
+// no-op on HEAD while the gate was blocking is still genuine evidence the
+// loop failed to converge, not an attempt that "didn't count."
+type ReviewBlockedCycleIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (ReviewBlockedCycleIncremented) isMutation()       {}
+func (m ReviewBlockedCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ReviewCycleDecremented compensates a prior ReviewCycleIncremented when a
+// review reinvoke lands no new commit (#1045) — a cycle that changed nothing
+// was not an attempt, so it must not count against MaxReviewCycles. Applied
+// post-hoc from dispatchReviewReinvoke's after hook, which runs synchronously
+// inside the reinvoke goroutine before the deferred WorkerExited fires, so
+// the decrement is always visible before any poll can next read the counter.
+// Floored at 0 by the store — never goes negative even if applied more than
+// once for the same increment (defensive; the call site is idempotency-safe
+// by construction, this is a second line of defense).
+type ReviewCycleDecremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (ReviewCycleDecremented) isMutation()       {}
+func (m ReviewCycleDecremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // CIFixCycleIncremented increments the CI-fix cycle counter for a stage.
 type CIFixCycleIncremented struct {
@@ -462,8 +513,12 @@ type PRCreationFailedRecorded struct {
 func (PRCreationFailedRecorded) isMutation()       {}
 func (m PRCreationFailedRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// EnginePaused records that the engine has paused work on a stage due to
-// repeated failures. (The design doc listed this as "EngineEnginePaused" — typo.)
+// EnginePaused records that the engine has paused work on a stage — either
+// due to repeated failures (escalateFailedStage/escalatePRCreationFailure) or
+// a turn-cap slice budget exceeded (pauseForSliceLimit, #1199), both of which
+// need the same "a human manually removed fabrik:paused" detection to reset
+// their respective counters via clearFailedStage. (The design doc listed this
+// as "EngineEnginePaused" — typo.)
 type EnginePaused struct {
 	Repo      string
 	Number    int
@@ -483,6 +538,22 @@ type CooldownRecorded struct {
 
 func (CooldownRecorded) isMutation()       {}
 func (m CooldownRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// LabelAppliedAtRecorded records the time the engine itself applied Label to
+// this issue (record-at-write, #1314). Always overwrites any prior entry for
+// the same label — a genuine re-application (applied → removed → re-applied)
+// must yield the latest timestamp, not the first. Callers are expected to
+// only record here on a genuine new application (guarded by a "not already
+// present" check at the write site), never as a defensive idempotent no-op.
+type LabelAppliedAtRecorded struct {
+	Repo   string
+	Number int
+	Label  string
+	At     time.Time
+}
+
+func (LabelAppliedAtRecorded) isMutation()       {}
+func (m LabelAppliedAtRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerHeartbeat updates the LastSignAt timestamp for the active worker.
 type WorkerHeartbeat struct {
@@ -664,8 +735,9 @@ func (m PREnqueueRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number
 // CIFixNoOpRecorded sets LinkedPRState.LastCIFixNoOpSHA to the head SHA at which a
 // CI-fix reinvoke (engine.dispatchCIFixReinvoke) completed without pushing a new
 // commit (#958 leg 2). While the head SHA stays at this value, handleMergeAndCIGates
-// skips further CI-fix dispatch/cycle-increment for it — CIWaitTimeout remains the
-// backstop if CI never resolves on this SHA.
+// skips further CI-fix dispatch/cycle-increment for it — settleAwaitingCIScan's
+// CIBackstopTimeout remains the backstop if CI never resolves on this SHA
+// (ADR-1410 — a confirmed CI failure never consults CIWaitTimeout).
 type CIFixNoOpRecorded struct {
 	Repo   string
 	Number int
@@ -710,9 +782,10 @@ type EngineUnpaused struct {
 func (EngineUnpaused) isMutation()       {}
 func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// EngineCyclesCleared zeroes ReviewCycles, CIFixCycles, RebaseCycles, and
-// EnqueueCycles for a stage. Called by clearFailedStage on unpause/success to
-// prevent stale counters from triggering premature max-cycle pauses on the next run.
+// EngineCyclesCleared zeroes ReviewCycles, ReviewBlockedCycles, CIFixCycles,
+// RebaseCycles, and EnqueueCycles for a stage. Called by clearFailedStage on
+// unpause/success to prevent stale counters from triggering premature
+// max-cycle pauses on the next run.
 type EngineCyclesCleared struct {
 	Repo      string
 	Number    int

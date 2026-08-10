@@ -26,15 +26,18 @@ type Snapshot struct {
 //   - ItemState.Comments
 //   - ItemState.BlockedBy
 //   - ItemState.CooldownAt
+//   - ItemState.LabelAppliedAt
 //   - ItemState.BaseBranchWarned
 //   - ItemState.StageState.Attempts
 //   - ItemState.StageState.LastAttemptAt
 //   - ItemState.StageState.PausedByEngine
 //   - ItemState.StageState.PRCreationFailed
 //   - ItemState.StageState.ReviewCycles
+//   - ItemState.StageState.ReviewBlockedCycles
 //   - ItemState.StageState.CIFixCycles
 //   - ItemState.StageState.RebaseCycles
 //   - ItemState.StageState.EnqueueCycles
+//   - ItemState.StageState.SliceRetries
 //   - ItemState.StageState.ProcessedComments
 //   - ItemState.StageState.LinkageHealAttempted
 //   - LinkedPRState.Reviews
@@ -49,6 +52,7 @@ func newSnapshot(s ItemState) Snapshot {
 	c.Comments = copyComments(s.Comments)
 	c.BlockedBy = copyDeps(s.BlockedBy)
 	c.CooldownAt = copyMap(s.CooldownAt)
+	c.LabelAppliedAt = copyMap(s.LabelAppliedAt)
 	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)
 	c.StageState = copyStageState(s.StageState)
 	c.CommentBreaker.InvocationsAt = copyTimes(s.CommentBreaker.InvocationsAt)
@@ -170,6 +174,15 @@ func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
 	return false
 }
 
+// LabelAppliedAt returns the time the engine itself most recently applied the
+// given label to this issue, or zero if no record-at-write has been made for
+// it (cold cache — the caller should fall back to a live fetch). See
+// ItemState.LabelAppliedAt's doc comment for why this is a distinct map from
+// CooldownAt.
+func (s Snapshot) LabelAppliedAt(label string) time.Time {
+	return s.state.LabelAppliedAt[label]
+}
+
 // LastAttemptAt returns the last invocation timestamp for a given stage, or zero.
 func (s Snapshot) LastAttemptAt(stageName string) time.Time {
 	return s.state.StageState.LastAttemptAt[stageName]
@@ -197,6 +210,12 @@ func (s Snapshot) ReviewCycles(stageName string) int {
 	return s.state.StageState.ReviewCycles[stageName]
 }
 
+// ReviewBlockedCycles returns the never-refunded non-convergence cycle count
+// for a given stage's review gate (ADR-1518) — see StageState.ReviewBlockedCycles.
+func (s Snapshot) ReviewBlockedCycles(stageName string) int {
+	return s.state.StageState.ReviewBlockedCycles[stageName]
+}
+
 // CIFixCycles returns the CI-fix re-invocation cycle count for a given stage.
 func (s Snapshot) CIFixCycles(stageName string) int {
 	return s.state.StageState.CIFixCycles[stageName]
@@ -210,6 +229,12 @@ func (s Snapshot) RebaseCycles(stageName string) int {
 // EnqueueCycles returns the merge-queue re-enqueue cycle count for a given stage.
 func (s Snapshot) EnqueueCycles(stageName string) int {
 	return s.state.StageState.EnqueueCycles[stageName]
+}
+
+// SliceRetries returns the turn-cap preemption ("slice") count for a given
+// stage, or zero. Bounded independently of Attempts/MaxRetries (#1199).
+func (s Snapshot) SliceRetries(stageName string) int {
+	return s.state.StageState.SliceRetries[stageName]
 }
 
 // LastEnqueuedSHA returns the PR head SHA recorded at the last merge-queue enqueue,
@@ -365,9 +390,11 @@ func copyStageState(s StageState) StageState {
 		PausedByEngine:       copyMap(s.PausedByEngine),
 		PRCreationFailed:     copyMap(s.PRCreationFailed),
 		ReviewCycles:         copyMap(s.ReviewCycles),
+		ReviewBlockedCycles:  copyMap(s.ReviewBlockedCycles),
 		CIFixCycles:          copyMap(s.CIFixCycles),
 		RebaseCycles:         copyMap(s.RebaseCycles),
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
+		SliceRetries:         copyMap(s.SliceRetries),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 		LastTurnsUsed:        copyMap(s.LastTurnsUsed),

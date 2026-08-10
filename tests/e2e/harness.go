@@ -5,6 +5,7 @@ package e2e
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -28,6 +29,51 @@ const (
 	defaultProjectNumber = 2
 	defaultProjectOwner  = "handarbeit"
 )
+
+// markerPaths is the single source of truth for every non-train scenario's
+// marker file target: one fixed, distinct e2e/markers/<scenario>.md path per
+// writer test function, so parallel scenarios can never conflict on a shared
+// file (#1394). Unlike the merge-train members' uniqueMemberPath (which needs
+// per-run uniqueness because a landed batch merges files into main and a
+// fixed path would collide with the existing blob's SHA on the Contents API),
+// these files are edited through a normal agent git commit in a worktree — a
+// real diff, not a raw Contents-API PUT — so a fixed path across runs is
+// fine, and it's what lets TestMarkerPathsAreUnique enumerate the set
+// statically (AC1) rather than needing to execute the tests to know the
+// paths.
+//
+// TestPausedMergedPRRecovery's 3 sub-variants deliberately share one path:
+// they run strictly sequentially (t.Run, no t.Parallel between them) and each
+// variant's PR merges before the next is filed, so there is no concurrent
+// write to race.
+//
+// TestConvergenceRace is deliberately absent from this map. Its entire
+// premise (documented in convergence_race_test.go's own top-of-file comment)
+// is that its two issues collide on the same anchor line of the shared
+// README.md, forcing a genuine merge conflict that Fabrik must resolve via a
+// rebase reinvoke — giving it a unique path would eliminate the exact
+// condition it exists to provoke (R4).
+var markerPaths = map[string]string{
+	"TestSmokeSingleRepoFullPipeline": "e2e/markers/smoke-full-pipeline.md",
+	"TestYoloAutoMergeLabel":          "e2e/markers/auto-merge-yolo.md",
+	"TestPausedMergedPRRecovery":      "e2e/markers/paused-merged-pr-recovery.md",
+	"TestBaseBranchPipeline":          "e2e/markers/base-branch-pipeline.md",
+	"TestCruiseFullPipeline":          "e2e/markers/cruise-full-pipeline.md",
+	"TestCIFixReinvoke":               "e2e/markers/ci-fix-reinvoke.md",
+	"TestCIFixReinvokeCycleLimit":     "e2e/markers/ci-fix-reinvoke-cycle-limit.md",
+	"TestConjunctiveCIReviewGate":     "e2e/markers/conjunctive-ci-review-gate.md",
+}
+
+// markerPath returns the unique marker file path for the named scenario.
+// Panics on an unknown name so a typo'd lookup fails loudly at test setup
+// rather than silently producing an empty path in an issue body.
+func markerPath(name string) string {
+	path, ok := markerPaths[name]
+	if !ok {
+		panic(fmt.Sprintf("markerPath: no entry for %q — add it to markerPaths in harness.go", name))
+	}
+	return path
+}
 
 // Env carries the resolved test-bed paths and identifiers. Constructed by
 // LoadEnv from environment variables (with sensible defaults).
@@ -352,6 +398,163 @@ func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, ti
 	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
 }
 
+// defaultReviewFailFastWindow is how long a linked PR may sit ready-for-review
+// with zero reviews before WaitForIssueClosedWithReviewCheck fails fast,
+// rather than running out the full close-timeout (handarbeit/fabrik#1396).
+//
+// Pruefer (the bed's real reviewer once .pruefer/config.yaml's watched_repos
+// includes the test repos — see tests/e2e/README.md "Reviewer topology")
+// polls every 120s with a concurrency_cap of 3 across its watched repos. 10
+// minutes is ~5x that cadence — comfortable headroom for a busy-but-healthy
+// Pruefer — while still catching a genuinely dropped review-dispatch well
+// before the engine's own first ReviewWaitTimeout window (15 min default)
+// completes, let alone the ~45-minute wall-clock the issue's Problem section
+// observed.
+//
+// Override with E2E_REVIEW_FAILFAST_WINDOW (any time.ParseDuration value),
+// mirroring E2E_POLL_INTERVAL's tuning convention, if real-world flakiness
+// data says the bound needs adjusting.
+const defaultReviewFailFastWindow = 10 * time.Minute
+
+func reviewFailFastWindow() time.Duration {
+	if s := os.Getenv("E2E_REVIEW_FAILFAST_WINDOW"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultReviewFailFastWindow
+}
+
+// reviewFailFastDue is the pure decision behind the fail-fast check: given
+// when the PR became ready for review (readyAt, zero if not yet ready or
+// unknown), how many reviews it currently has, the current time, and the
+// configured window, should the wait fail now?
+//
+// Deliberately author- and state-agnostic (any review counts, including
+// DISMISSED) — this is a test-side diagnostic, not a reimplementation of
+// engine/reviews.go's hasReviews gate-clearing semantics (R2 requires the
+// engine's clearing rule stay untouched).
+func reviewFailFastDue(readyAt time.Time, reviewCount int, now time.Time, window time.Duration) bool {
+	if readyAt.IsZero() {
+		return false
+	}
+	if reviewCount > 0 {
+		return false
+	}
+	return now.Sub(readyAt) >= window
+}
+
+// tryPRReviewState is the non-fatal read behind WaitForIssueClosedWithReviewCheck's
+// fail-fast check: draft state, creation time, and review count for a PR, in
+// one gh call. Returns an error on any gh/JSON failure so callers can treat
+// it like the other try* helpers — log and retry, never fail the whole wait
+// on one transient blip.
+func tryPRReviewState(env *Env, repo string, prNumber int) (isDraft bool, createdAt time.Time, reviewCount int, err error) {
+	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
+		"--json", "isDraft,createdAt,reviews")
+	if err != nil {
+		return false, time.Time{}, 0, err
+	}
+	var parsed struct {
+		IsDraft   bool              `json:"isDraft"`
+		CreatedAt time.Time         `json:"createdAt"`
+		Reviews   []json.RawMessage `json:"reviews"`
+	}
+	if uerr := json.Unmarshal([]byte(out), &parsed); uerr != nil {
+		return false, time.Time{}, 0, fmt.Errorf("parse PR review state for %s PR #%d: %w", repo, prNumber, uerr)
+	}
+	return parsed.IsDraft, parsed.CreatedAt, len(parsed.Reviews), nil
+}
+
+// WaitForIssueClosedWithReviewCheck is WaitForIssueClosed plus a bounded
+// fail-fast check on the linked PR's review state (handarbeit/fabrik#1396,
+// R3/R4). If the PR has been ready-for-review (not draft) for
+// reviewFailFastWindow() with zero reviews, it fails immediately with a
+// message that names that specific cause — distinguishable from the generic
+// close-timeout below — rather than running out the full timeout waiting on
+// a review that (per the issue's Problem section) may never come because a
+// bot-review dispatch was dropped.
+//
+// The draft→ready transition is self-observed across polls rather than read
+// from GitHub's readyForReviewAt field: that field isn't in this gh CLI's
+// supported --json fields for `pr view` (verified during Plan). The first
+// poll that observes isDraft==false anchors readyAt — to "now" if an earlier
+// poll observed isDraft==true (a real draft→ready transition happened
+// in-window), or to the PR's createdAt if it was never seen as a draft
+// (opened ready from the start; the ~poll-interval error this introduces is
+// negligible against a 10-minute window). If a later poll observes
+// isDraft==true again (a PR re-drafted after going ready — unusual but
+// possible), readyAt resets to zero so the zero-review clock doesn't keep
+// running through a period the PR genuinely wasn't reviewable.
+//
+// Once a review is observed (reviewCount > 0), the PR-review-state poll is
+// skipped for the remainder of the wait — reviewFailFastDue can never fire
+// again once a review exists, so there's no reason to keep paying the extra
+// `gh pr view` call every cycle (see tests/e2e/README.md's GraphQL-budget
+// note, which assumes exactly this bound).
+//
+// Contract for callers: this helper only trusts readyAt's createdAt fallback
+// to be within poll-interval error of "actually ready" if the wait begins at
+// or near PR creation (true of all current call sites — either no PR exists
+// yet, or, per the "opt-in" note below, a review has already organically
+// landed via the Review stage's own gate before this helper is ever called).
+// A future call site that invokes this well after a long-idle, never-drafted,
+// still-unreviewed PR was created would see readyAt anchored to that stale
+// createdAt and could fail on its very first poll — that's a real risk for a
+// hypothetical caller, not a mitigated one; verify it doesn't apply before
+// adopting this helper at a new site.
+//
+// Not wired into every WaitForIssueClosed call site — see the Plan stage's
+// "Opt-in helper, not a default-on change" decision (handarbeit/fabrik#1396):
+// only scenarios that drive a real, unreviewed PR through the organic Review
+// gate benefit: sites that submit their own review before waiting, or that
+// never create an organically-reviewed PR at all (FABRIK_NO_WORK_NEEDED,
+// merge-train Queued members, externally-force-merged PRs), would never
+// trigger the check or would trigger it spuriously.
+func WaitForIssueClosedWithReviewCheck(t *testing.T, env *Env, repo string, issueNumber int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var sawDraft bool
+	var readyAt time.Time
+	var reviewLanded bool
+	for time.Now().Before(deadline) {
+		state, err := tryIssueState(env, repo, issueNumber)
+		if err != nil {
+			t.Logf("WaitForIssueClosedWithReviewCheck: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
+		} else if state == "CLOSED" {
+			return
+		}
+
+		if !reviewLanded {
+			if prNumber, prErr := tryLinkedPRNumber(env, repo, issueNumber); prErr == nil {
+				if isDraft, createdAt, reviewCount, rsErr := tryPRReviewState(env, repo, prNumber); rsErr == nil {
+					if isDraft {
+						sawDraft = true
+						readyAt = time.Time{}
+					} else if readyAt.IsZero() {
+						if sawDraft {
+							readyAt = time.Now()
+						} else {
+							readyAt = createdAt
+						}
+					}
+					if reviewCount > 0 {
+						reviewLanded = true
+					} else if reviewFailFastDue(readyAt, reviewCount, time.Now(), reviewFailFastWindow()) {
+						t.Fatalf("%s#%d: PR #%d has been ready for review for over %s with zero reviews — "+
+							"likely a dropped bot-review dispatch, not a Fabrik engine defect (see handarbeit/fabrik#1396)",
+							repo, issueNumber, prNumber, reviewFailFastWindow())
+					}
+				}
+			}
+		}
+
+		pollSleep(pollBase())
+	}
+	state, _ := tryIssueState(env, repo, issueNumber)
+	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
+}
+
 // WaitForLabelAbsent polls until the named label is no longer on the issue.
 // Tolerant of transient gh errors — see WaitForIssueClosed for rationale.
 func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, label string, timeout time.Duration) {
@@ -639,6 +842,29 @@ query {
 	t.Fatalf("%s#%d not blocked by %s#%d (blockedBy was: %+v)", issueRepo, issueNumber, blockerRepo, blockerNumber, nodes)
 }
 
+// FetchRepoFileContent reads a file's content from repo's default branch via
+// the GitHub Contents API and returns it decoded. Mirrors CreateMemberPR's
+// write shape (mergetrain_helpers.go) but as a read. Fails the test
+// immediately on a fetch/decode error (API or plumbing failure) — a
+// content-mismatch check is the caller's responsibility, kept separate so a
+// transient API hiccup here is never mistaken for "the expected content is
+// absent". GitHub wraps the base64 content with embedded newlines, which
+// must be stripped before decoding.
+func FetchRepoFileContent(t *testing.T, env *Env, repo, path string) string {
+	t.Helper()
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/contents/%s", repo, path),
+		"--jq", ".content")
+	if err != nil {
+		t.Fatalf("fetch %s from %s: %v\n%s", path, repo, err, out)
+	}
+	encoded := strings.ReplaceAll(strings.TrimSpace(out), "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode content of %s from %s: %v", path, repo, err)
+	}
+	return string(decoded)
+}
+
 // CloseIssue best-effort closes the named issue (used in t.Cleanup).
 func CloseIssue(env *Env, repo string, issueNumber int) {
 	_, _ = ghOutput(env, "issue", "close", fmt.Sprint(issueNumber), "-R", repo,
@@ -729,6 +955,71 @@ func WaitForLogLine(t *testing.T, env *Env, substring string, startOffset int64,
 	}
 	t.Fatalf("timed out waiting for log line containing %q (scanned from offset %d)", substring, startOffset)
 	return ""
+}
+
+// tryLogLineContaining does a single, non-fatal scan of the test bed's
+// fabrik.log starting at startOffset for a line containing substring —
+// unlike WaitForLogLine, it does not wait/retry and does not fail the test;
+// it returns ("", nil) if no matching line is present yet. Used to assert the
+// *absence* of a log line over a bounded settle window (e.g. AC7's "did not
+// re-dispatch" check), where WaitForLogLine's fail-on-timeout semantics are
+// the wrong shape — the caller wants "confirm this didn't happen," not "wait
+// until it does."
+func tryLogLineContaining(env *Env, substring string, startOffset int64) (string, error) {
+	f, err := os.Open(env.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		return "", err
+	}
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadString('\n')
+		if strings.Contains(line, substring) {
+			return line, nil
+		}
+		if err != nil {
+			return "", nil
+		}
+	}
+}
+
+// allLogLinesContaining does a single, non-fatal scan of the test bed's
+// fabrik.log starting at startOffset for every line containing substring —
+// unlike tryLogLineContaining, which returns only the first match, this
+// returns all of them. Used where a caller must distinguish which of several
+// matching lines actually matters (e.g. AC7's per-review-ID check), rather
+// than merely detecting presence or absence.
+func allLogLinesContaining(env *Env, substring string, startOffset int64) ([]string, error) {
+	f, err := os.Open(env.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		return nil, err
+	}
+	var matches []string
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadString('\n')
+		if strings.Contains(line, substring) {
+			matches = append(matches, line)
+		}
+		if err != nil {
+			return matches, nil
+		}
+	}
 }
 
 // ── small internals ────────────────────────────────────────────────────────
@@ -1136,22 +1427,40 @@ func tryPRComments(env *Env, repo string, prNumber int) ([]string, error) {
 // the given substring, or timeout expires.
 func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber int, substring string, timeout time.Duration) {
 	t.Helper()
+	WaitForPRCommentContainingAny(t, env, repo, prNumber, []string{substring}, timeout)
+}
+
+// WaitForPRCommentContainingAny is WaitForPRCommentContaining for assertions
+// that have more than one legitimate wording. It returns as soon as some
+// comment contains ANY of substrings, so a caller can accept several equally
+// correct engine messages instead of pinning the test to whichever one the
+// current bed configuration happens to produce.
+//
+// Matching is case-sensitive, like WaitForPRCommentContaining. Callers wanting
+// case-insensitivity should pass the variants explicitly rather than have this
+// helper fold case silently — some engine messages embed deliberately
+// capitalized GitHub enums (e.g. CHANGES_REQUESTED), and folding would make an
+// assertion that means to pin the enum quietly stop doing so.
+func WaitForPRCommentContainingAny(t *testing.T, env *Env, repo string, prNumber int, substrings []string, timeout time.Duration) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		bodies, err := tryPRComments(env, repo, prNumber)
 		if err != nil {
-			t.Logf("WaitForPRCommentContaining: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
+			t.Logf("WaitForPRCommentContainingAny: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
 			pollSleep(pollBase())
 			continue
 		}
 		for _, b := range bodies {
-			if strings.Contains(b, substring) {
-				return
+			for _, substring := range substrings {
+				if strings.Contains(b, substring) {
+					return
+				}
 			}
 		}
 		pollSleep(pollBase())
 	}
-	t.Fatalf("timed out waiting for PR comment containing %q on %s#%d", substring, repo, prNumber)
+	t.Fatalf("timed out waiting for PR comment containing any of %q on %s#%d", substrings, repo, prNumber)
 }
 
 // tryPRCheckRunConclusions resolves the head SHA of the PR and returns the
@@ -1313,6 +1622,24 @@ func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
 	n, err := strconv.Atoi(strings.TrimSpace(val))
 	if err != nil {
 		t.Fatalf("FABRIK_MAX_CI_FIX_CYCLES in %s is not an integer: %q", envFile, val)
+	}
+	return n
+}
+
+// readEnvFileMaxReviewCycles reads FABRIK_MAX_REVIEW_CYCLES from the test
+// bed's .env file. Returns 5 (the engine default) if the key is absent.
+// Fails the test if the key is present but not a valid integer.
+func readEnvFileMaxReviewCycles(t *testing.T, env *Env) int {
+	t.Helper()
+	envFile := filepath.Join(env.FabrikTestDir, ".env")
+	val, err := readEnvFileValue(envFile, "FABRIK_MAX_REVIEW_CYCLES")
+	if err != nil {
+		// Key absent — return engine default.
+		return 5
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil {
+		t.Fatalf("FABRIK_MAX_REVIEW_CYCLES in %s is not an integer: %q", envFile, val)
 	}
 	return n
 }
@@ -1526,6 +1853,8 @@ func ghOutputWithToken(token string, args ...string) (string, error) {
 // SubmitPRReview submits a review on the PR using reviewerToken (a PAT for a
 // non-author identity — GitHub forbids the PR author from approving their own
 // PR). action must be "APPROVE" or "REQUEST_CHANGES" (GitHub API event values).
+// GitHub's API requires a non-empty body for REQUEST_CHANGES/COMMENT (only
+// APPROVE may omit it), so a fixed body is always sent — harmless for APPROVE.
 // Fails the test on API error (e.g. 422 if reviewerToken == env.GHToken).
 func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, prNumber int, action string) {
 	t.Helper()
@@ -1535,7 +1864,8 @@ func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, p
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
 	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
-		"-f", "event="+action)
+		"-f", "event="+action,
+		"-f", "body=e2e harness review ("+action+")")
 	if err != nil {
 		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
 	}

@@ -11,9 +11,11 @@ It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that w
 Every `poll_interval_seconds`, Pruefer lists open, non-draft PRs on each watched repo and, for each one, checks:
 
 - Is the PR authored by Pruefer's own bot identity? Skip (GitHub rejects self-review anyway).
-- Does an excluded author/label/path match? Skip.
+- Does an excluded author or label match? Skip.
 - Has Pruefer already reviewed this exact head SHA? Skip — **unless** an unprocessed `/pruefer review` comment is on the PR, which forces a fresh review of the current head.
-- Is the diff larger than `max_diff_bytes`? Skip (logged, not truncated).
+- Is *every* touched path excluded by `excluded_paths`? Skip — this is the only whole-PR path exclusion; see below for the per-file case.
+- Once the diff is fetched, `excluded_paths` is applied **per file**, before the diff is ever measured against `max_diff_bytes` — so a file matching an exclusion glob can never count toward the size verdict. If the diff is still over `max_diff_bytes` after exclusion, Pruefer trims further (largest files first) rather than skipping outright, and reviews the remainder. Whatever was dropped — by exclusion or by trimming — is disclosed to the reviewing model (so it doesn't silently assume it saw the whole change) and named in a PR comment if the raw diff was actually oversized. Only when nothing reviewable survives exclusion and trimming does Pruefer skip the PR, for the same reason a partial review that presents as a complete one would be worse than no review at all. See [adrs/1462-pruefer-per-file-diff-exclusion-and-trim.md](../../adrs/1462-pruefer-per-file-diff-exclusion-and-trim.md).
+- Does GitHub refuse to render the diff at all (a 406 `too_large` response — the diff exceeds GitHub's own 20,000-line ceiling on the `.diff` media type, independent of `max_diff_bytes`)? This is a deterministic size verdict, not a transient error, so Pruefer does not hot-retry it every poll. Instead it falls back to the paginated changed-files API (no line-count ceiling) to reconstruct the list of touched paths, and reviews the PR normally against the local clone — with inline-comment anchoring naturally unavailable, so findings land in the review body instead of as line comments. Only if that fallback also fails does Pruefer skip the PR (same disposition as the `max_diff_bytes` skip above) and post a single PR comment explaining why, so the decision is visible to a human instead of silently repeating in the log. This path's `excluded_paths` check is still whole-PR (no diff text is ever obtained to filter per file). See [adrs/1427-pruefer-diff-too-large-degrade-not-block.md](../../adrs/1427-pruefer-diff-too-large-degrade-not-block.md).
 
 Otherwise, Pruefer clones the PR's head commit into a temporary directory, invokes `claude` with a read-only tool allowlist to produce a prose summary plus structured findings (each classified with a severity tier), and submits it as a formal `pull_request_review` pinned to that head SHA — `event: COMMENT` by default, or `event: REQUEST_CHANGES` if `request_changes_threshold` is set and a finding meets it (see below). Findings that map to a changed line in the diff are posted as line-anchored inline comments in the same request; any finding that can't be anchored (a line the diff doesn't touch) is demoted into the summary body instead of dropping it or failing the whole review — but still counts toward the severity threshold either way. Inline comments are what let Fabrik's review-reinvoke path pick up Pruefer's findings and act on them automatically — see [adrs/1189-pruefer-inline-review-comments.md](../../adrs/1189-pruefer-inline-review-comments.md). On any failure — clone, invocation, or submission — Pruefer posts nothing and logs the failure; the PR is naturally retried on the next poll.
 
@@ -120,7 +122,7 @@ max_diff_bytes: 500000
 
 # excluded_authors: [dependabot]
 # excluded_labels: [skip-review]
-# excluded_paths: ["vendor/**", "*.generated.go"]
+# excluded_paths: ["testdata/schema/**"]  # a vendored schema or generated fixture directory — filtered per file, applied before max_diff_bytes (see above)
 # request_changes_threshold: high  # low, medium, high, or critical — see below
 ```
 
@@ -146,6 +148,19 @@ Pruefer loads `.env` (via the same `godotenv`-based loader Fabrik uses), reads `
 
 A lock file at `.pruefer/pruefer.lock` prevents two instances from polling the same working directory concurrently.
 
+## Version & self-upgrade
+
+`pruefer --version` (or `-version`) prints the running build's version and exits: a stamped release tag (e.g. `v0.0.76`) for a binary downloaded from GitHub Releases, or `dev(<short-sha>)` for a binary built from source. This distinction is what the self-upgrade logic below uses to pick its upgrade path — Pruefer ships from the same `.goreleaser.yaml`/tag as Fabrik itself, not an independent release train (see [adrs/1197-pruefer-self-upgrade.md](../../adrs/1197-pruefer-self-upgrade.md) for the rationale).
+
+Self-upgrade is **off by default** (`--auto-upgrade` / `PRUEFER_AUTO_UPGRADE` / `auto_upgrade: true`) — an operator opts in deliberately, mirroring Fabrik's own `-auto-upgrade` default. Given that a stale Pruefer has no board or issues to make its staleness visible (see the top of this README's motivation), **enabling `--auto-upgrade` is recommended** for any long-running deployment. When enabled, Pruefer checks for an upgrade at the poll boundary — right after a poll cycle's reviews have all completed (`Daemon.poll` joins every in-flight review before returning) and before the next poll begins — so an upgrade never interrupts an in-flight review's ephemeral clone or `claude` subprocess. The check itself is throttled to roughly every 30 minutes, independent of `poll_interval_seconds`, to bound `git fetch`/GitHub Releases API chatter.
+
+Which upgrade path runs depends on how the binary was built:
+
+- **Dev mode** (running version is `dev(<sha>)`): Pruefer must be run from the Fabrik source checkout, invoked such that `.pruefer/pruefer.lock` (and thus Pruefer's working directory) sits at the checkout root — the same convention Fabrik's own dev-rebuild path uses. On finding new commits on `origin/main` (or unpushed local commits matching neither), Pruefer runs `git pull --ff-only` and rebuilds itself with `go build` from `cmd/pruefer` before re-exec'ing. This is the mode you get by building and running `pruefer` directly inside a Fabrik checkout — no extra configuration needed beyond `--auto-upgrade`.
+- **Release mode** (running version is a stamped tag): Pruefer checks `handarbeit/fabrik`'s GitHub Releases for a newer tag using a dedicated, unauthenticated GitHub API client (decoupled from the per-owner App installation tokens used for reviews — those aren't guaranteed to cover `handarbeit/fabrik`), downloads the matching platform archive, atomically replaces the running binary, and re-execs. This is the mode for a deployment running from a distinct directory (e.g. `~/dev/pruefer`) with a binary downloaded from a release — the actual "usage" deployment shape this feature targets.
+
+On macOS arm64, a release-mode upgrade re-signs the replacement binary ad-hoc after download (the same step Fabrik's own upgrade path uses) so the swapped-in binary isn't rejected by Gatekeeper/AMFI.
+
 ## Terminal UI
 
 When run with a real terminal attached (both stdin and stdout), Pruefer launches an interactive TUI by default — the same `bubbletea`/`bubbles`/`lipgloss` stack and model/update/view structure as Fabrik's own `tui/` package, so the two feel like the same family of tool. It shows:
@@ -159,6 +174,23 @@ When run with a real terminal attached (both stdin and stdout), Pruefer launches
 Keyboard: `q` or `ctrl+c` to quit, `tab` to switch panes, `↑`/`↓` or `j`/`k` to scroll and select an entry, `enter` to view its detail.
 
 The TUI is purely observational — it never changes which PRs get reviewed, when, or how. Running with `-notui` disables it entirely and falls back to Pruefer's existing structured `logf`-based console output, with **identical review behavior** either way. Use `-notui` (or `PRUEFER_TUI=0` / `tui: false` in the YAML config) when running under systemd, tmux with no attached TTY, or any other non-interactive environment.
+
+## Logging
+
+Pruefer writes every daemon log line — poll cycles, review outcomes, warnings, auth events — to a timestamped, mutex-serialized log file at `.pruefer/pruefer.log` by default, so an incident is diagnosable from the daemon's own durable record instead of requiring reconstruction from the GitHub API. Set `log_file` (or `--log-file` / `PRUEFER_LOG_FILE`) to write elsewhere, or to an empty value to disable file logging entirely.
+
+Each line looks like:
+
+```
+2026-08-08T18:12:03Z [pr#103 warn] listing open PRs for verveguy/zusammen: context deadline exceeded — skipping this repo this cycle
+```
+
+- **With the TUI running** (the default on a real terminal), stderr output would corrupt the bubbletea display, so the log file is the sole destination. If `log_file` is disabled (or the log file can't be opened) while the TUI is running, log lines are discarded rather than written raw to stderr — the same corruption concern, just with no file to fall back to.
+- **In plain daemon mode** (`-notui`, or no TTY attached), logging is additive: every line is written to both stderr and the log file, so an operator watching the terminal keeps seeing exactly what they see today. With `log_file` disabled in plain mode, output stays on stderr only, matching Pruefer's behavior before this feature existed.
+
+The log file is append-only across restarts — it is never truncated on daemon startup, unlike Fabrik engine's own `fabrik.log` — so a restart doesn't erase the history an incident investigation needs. Growth is bounded by size-triggered rotation: once the file reaches 10 MB it's renamed to `pruefer.log.1` (existing numbered backups shift up, `pruefer.log.3` is dropped), and a fresh file is opened. Up to 3 rotated backups are retained.
+
+A `warn`-tagged line fires when a review's summary doesn't follow the `PRUEFER_SUMMARY_BEGIN`/`PRUEFER_SUMMARY_END` delimiter contract: either the markers were missing (or malformed) entirely, or a well-formed pair was found but some preamble text ahead of the opening marker had to be discarded. Neither is fatal — the review still submits — but either is a sign the model drifted from the prompt's output contract and is worth a look.
 
 ## On-demand re-review
 
@@ -200,11 +232,11 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--model` | `PRUEFER_MODEL` | `model` | `sonnet` | Claude model |
 | `--effort` | `PRUEFER_EFFORT` | `effort` | `medium` | `low`, `medium`, `high`, or `max` |
 | `--concurrency` | `PRUEFER_CONCURRENCY` | `concurrency_cap` | `3` | Max simultaneous `claude` invocations |
-| `--max-diff-bytes` | `PRUEFER_MAX_DIFF_BYTES` | `max_diff_bytes` | `500000` | PRs with a larger diff are skipped, not truncated |
+| `--max-diff-bytes` | `PRUEFER_MAX_DIFF_BYTES` | `max_diff_bytes` | `500000` | Compared against the diff **after** `excluded_paths` filtering; if still over, Pruefer trims further (largest files first) and reviews the remainder rather than skipping, disclosing what was dropped to both the model and a PR comment. Skips only if nothing reviewable survives. |
 | `--max-wall-time` | `PRUEFER_MAX_WALL_TIME` | `max_wall_time_seconds` | `0` (no cap) | Seconds; caps a single `claude` review invocation's wall-clock duration on top of the fixed 15-minute inactivity watchdog |
 | `--excluded-authors` | `PRUEFER_EXCLUDED_AUTHORS` | `excluded_authors` | (none) | Comma-separated logins |
 | `--excluded-labels` | `PRUEFER_EXCLUDED_LABELS` | `excluded_labels` | (none) | Skip if any label matches |
-| `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns; skip only if **every** touched path matches |
+| `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns, filtered **per file** and applied before `max_diff_bytes` is measured; a PR is skipped whole only if **every** touched path matches |
 | `--request-changes-threshold` | `PRUEFER_REQUEST_CHANGES_THRESHOLD` | `request_changes_threshold` | (none — disabled) | `low`, `medium`, `high`, or `critical`; submits `REQUEST_CHANGES` when a finding's severity meets or exceeds this tier. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes). |
 | `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none) | Only needed for manual/compat setup — omit it to let first-run manifest setup create and track its own App ID in `github_app_state_path` instead |
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | Read from and written to by both manifest and manual setup |
@@ -213,6 +245,9 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--no-browser` | `PRUEFER_NO_BROWSER` | `no_browser` | `false` | Skip attempting to open a local browser during first-run manifest setup — the setup URL is always printed regardless |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
+| `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |
+| `--auto-upgrade` | `PRUEFER_AUTO_UPGRADE` | `auto_upgrade` | `false` | Check for a newer version at the poll boundary and self-upgrade (dev-rebuild or release-download, depending on the running build — see [Version & self-upgrade](#version--self-upgrade)). Recommended for long-running deployments. |
+| `--version` | — | — | — | Print the running version (a stamped release tag, or `dev(<sha>)`) and exit. |
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -35,49 +36,46 @@ var noWorkNeededRE = regexp.MustCompile(`(?m)^FABRIK_NO_WORK_NEEDED\r?$`)
 // classifyUsageLimitExit and #1183.
 const usageLimitTerminalReason = "blocking_limit"
 
-// claudeUsageLimitError signals that a Claude invocation exited because the
-// account's usage limit (session or weekly) was exhausted, not because the
-// stage genuinely failed. The stage never ran to completion, so this
-// condition must be excluded from max_retries — see handleUsageLimitExit
-// in item.go, which is the sole consumer (via errors.As).
-type claudeUsageLimitError struct {
-	// Message describes the structural field that triggered detection (see
-	// classifyUsageLimitExit), for logging.
-	Message string
-	// ResetTime is always "" — the structural detector never parses a reset
-	// time from prose. Kept so computeUsageLimitResetDeadline's existing
-	// fallback-when-empty path (claudeUsageLimitFallbackBackoff) is exercised
-	// unconditionally; do not populate this from matched text (#1183).
-	ResetTime string
-}
+// claudeUsageLimitError, claudeTurnLimitError, claudeAPIErrorExit, and
+// claudeResumeFailureError are unexported aliases of the exported types in
+// internal/claudeerr, where the definitions (and their doc comments) live.
+// They are aliases, not new types (`type X = claudeerr.X`), so every existing
+// construction site and errors.As assertion in this package (and its test
+// files) keeps compiling and behaving unchanged — this extraction moved the
+// types' location, not their name, identity, or behavior. See
+// internal/claudeerr's package doc and ADR-1449.
+type claudeUsageLimitError = claudeerr.UsageLimitError
+type claudeTurnLimitError = claudeerr.TurnLimitError
+type claudeAPIErrorExit = claudeerr.APIErrorExit
+type claudeResumeFailureError = claudeerr.ResumeFailureError
 
-func (e *claudeUsageLimitError) Error() string {
-	if e.ResetTime != "" {
-		return fmt.Sprintf("claude usage limit hit: %s (resets %s)", e.Message, e.ResetTime)
+// apiErrorTerminalReason is the CLI's structural terminal_reason value for a
+// transient Anthropic-side API error — observed live on 2026-08-08 (#1458) as
+// eight exits across two issues, each at 1 turn and $0.0000. Unlike
+// usageLimitTerminalReason, this is per-invocation and self-resolving: it
+// says nothing about the account as a whole, so it must never trigger
+// activateClaudeSuspension (see claudeAPIErrorExit's doc comment and #1458 R3).
+const apiErrorTerminalReason = "api_error"
+
+// classifyAPIErrorExit determines whether a Claude invocation exited on a
+// transient Anthropic-side API error, using only the CLI's own structured
+// result object (resp) — never text the assistant itself wrote, per the same
+// structural-only discipline #1183 established for classifyUsageLimitExit.
+//
+// resp.TerminalReason == "api_error" is the CLI's structural signal. usage is
+// kept as the same belt-and-suspenders exclusion gate classifyUsageLimitExit
+// uses: an invocation that consumed turns and incurred real cost is never
+// classified as a did-not-run exit, regardless of what TerminalReason says
+// (#1458 R5 could not empirically verify CostUSD on a real api_error sample,
+// so this guard is reused unchanged rather than dropped — see ADR-1458).
+func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, detected bool) {
+	if resp.TerminalReason != apiErrorTerminalReason {
+		return "", false
 	}
-	return fmt.Sprintf("claude usage limit hit: %s", e.Message)
-}
-
-// claudeTurnLimitError signals that a Claude invocation exited because it
-// exhausted its configured turn budget (CLI-reported subtype
-// "error_max_turns"), not because the stage genuinely failed. Unlike
-// claudeUsageLimitError, this does NOT short-circuit finalizeStageOutcome /
-// processComments with an early return: the existing retry/escalation
-// machinery (StageAttempted, commitWIP, StageRetryIncremented, MaxRetries)
-// must still run exactly as it does today for a turn-cap exit — that
-// behavior is pre-existing and deliberate (see #1081/#448), and out of scope
-// for #1178. This sentinel only changes what feeds the InvocationRecorded
-// write, so history/TUI can render the run as incomplete-but-resumable
-// rather than as a genuine fault.
-type claudeTurnLimitError struct {
-	// TerminalReason is the CLI's own terminal_reason field, if present, for logging.
-	TerminalReason string
-	// NumTurns is the CLI-reported turn count at exit, for logging.
-	NumTurns int
-}
-
-func (e *claudeTurnLimitError) Error() string {
-	return fmt.Sprintf("claude exited: turn limit reached (num_turns=%d)", e.NumTurns)
+	if usage.TurnsUsed > 0 && usage.CostUSD > 0 {
+		return "", false
+	}
+	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
 }
 
 // classifyUsageLimitExit determines whether a Claude invocation exited on a
@@ -120,6 +118,26 @@ var defaultAllowedTools = []string{
 	"Bash(ls:*)", "Bash(cat:*)", "Bash(rm:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(mkdir:*)", "Bash(find:*)",
 }
 
+// disallowedTools lists harness tools that must never reach a headless Fabrik
+// stage worker, regardless of stage config or the unrestricted/dontAsk split.
+// Unlike --allowedTools (a call-time permission filter that does not prevent a
+// tool from being offered or invoked — see #1372 and #1365), --disallowedTools
+// is a construction-time exclusion: the tool is absent from the schema Claude
+// is given, so there is no permission check to reason around or bypass.
+var disallowedTools = []string{
+	// ScheduleWakeup promises cross-turn resumption via a scheduled wakeup.
+	// A headless Fabrik stage has no scheduler to deliver that wakeup: the
+	// turn ends, the stage exits without FABRIK_STAGE_COMPLETE, and the next
+	// retry re-derives the identical stall. See #1345, #1365.
+	"ScheduleWakeup",
+	// Workflow promises a <task-notification> on completion after spawning
+	// background subagents against the session budget. It is more damaging
+	// than ScheduleWakeup: nothing ever delivers the notification in a
+	// headless stage, so the failure mode is the stall plus the spend. See
+	// #1345, #1365.
+	"Workflow",
+}
+
 // CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.
 func CheckBlockedOnInput(output string) bool {
 	return blockedOnInputRE.MatchString(output)
@@ -152,6 +170,16 @@ var claudeTUI bool
 // during construction. When non-empty, --plugin-dir is added to Claude args.
 var claudePluginDir string
 
+// claudeNameFlagSupported records whether the installed claude binary accepts
+// -n/--name, as determined once at startup by probeClaudeNameFlagSupport (see
+// engine.New). Zero value is false ("unsupported"), so every existing call
+// path that never touches this var — including the entire pre-#1284 test
+// suite — keeps producing today's exact argv with no --name flag. Only a
+// successfully parsed, positive probe result flips it; any ambiguity (binary
+// missing, --help errors, unexpected output) must fail safe to false rather
+// than risk killing every worker on a fleet running an older claude binary.
+var claudeNameFlagSupported bool
+
 // claudeWaitDelay is how long runClaude waits for stdout pipe drain after the
 // Claude process exits before giving up and processing buffered output. Set by
 // the Engine during construction from Config.ClaudeWaitDelay. Default (0) is
@@ -178,6 +206,38 @@ var claudeKillGraceSigTerm = 10 * time.Second
 // always authenticate as the same identity as the engine itself, regardless
 // of the launching shell's ambient environment. Empty skips injection.
 var claudeGHToken string
+
+// claudeGHHost is the engine's resolved GHES host (Config.GHESHost). Set by
+// the Engine during construction, mirroring claudeGHToken's package-var
+// pattern. Injected into every Claude worker's environment as GH_HOST so the
+// worker's gh invocations target the same GitHub instance as the engine
+// itself (FR-6, ADR-1391) — without this, a stage worker's `gh` calls (e.g.
+// fabrik-validate's Pre-Completion Gate) would silently hit github.com even
+// when the engine is talking to a GHES instance. Empty (the default) skips
+// injection entirely, preserving today's behavior byte-for-byte.
+var claudeGHHost string
+
+// claudeAnthropicAPIKey is the engine's resolved FABRIK_ANTHROPIC_API_KEY
+// (read from os.Getenv, which reflects .env by the time Engine.New runs —
+// see config.LoadDotenv). Set once by the Engine during construction,
+// mirroring claudeGHToken's package-var pattern, since this value is read
+// once at process start and never changes mid-run. When non-empty,
+// buildClaudeEnv translates it into an explicit ANTHROPIC_API_KEY override
+// on every worker invocation (R6); FABRIK_ANTHROPIC_API_KEY itself is never
+// forwarded (R8). Empty (the default) means API billing is not opted into —
+// buildClaudeEnv's default-deny scrub (R2-R5) still removes any ambient
+// ANTHROPIC_API_KEY regardless of what this variable holds (R7).
+var claudeAnthropicAPIKey string
+
+// claudeAnthropicEnvPassthrough is the engine's resolved, parsed
+// FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list (R14-R19): exact variable
+// names to re-inherit from the ambient environment into every worker
+// invocation, overriding the Anthropic auth namespace scrub (R2-R5) for
+// only the names listed. Set once by the Engine during construction via
+// parseAnthropicEnvPassthrough, mirroring claudeGHToken/claudeAnthropicAPIKey.
+// Nil/empty (the default) means no passthrough — the scrub applies
+// unconditionally.
+var claudeAnthropicEnvPassthrough []string
 
 // killReasonCtxKey is the context key for kill reason annotation.
 type killReasonCtxKey struct{}
@@ -487,11 +547,13 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 		effectiveBudget = opts.MaxTurnsOverride
 	}
 	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, resume)
-	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
+	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
+	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir, sessionName)
 
-	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
+	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
+	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -516,16 +578,19 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	ld := logDirForItem(issue)
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
-	limit := commentMaxTurns(stage)
+	base := commentMaxTurns(stage)
+	limit := base
 	if opts.MaxTurnsOverride > 0 {
 		limit = opts.MaxTurnsOverride
 	}
 	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, true) // resume existing session
-	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir)
+	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
+	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir, sessionName)
 
-	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
+	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
+	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -569,15 +634,65 @@ func commentMaxTurns(stage *stages.Stage) int {
 	return 50
 }
 
+// scaledWallTime scales base proportionately to how far effectiveBudget exceeds
+// baseBudget, so a turn-budget pre-grant (e.g. fabrik:extend-turns' 2x first-invocation
+// grant) gets matching wall-clock headroom instead of being killed on a clock sized for
+// the un-extended case. Returns base unchanged (no scaling) when there is no cap
+// (base <= 0), no baseline to scale against (baseBudget <= 0, e.g. an unlimited
+// stage.MaxTurns), or no extension is in effect (effectiveBudget <= baseBudget) — which
+// covers every ordinary invocation and every progress-based extension iteration, since
+// those already reset back to the un-multiplied budget before their own fresh runClaude
+// call.
+func scaledWallTime(base time.Duration, effectiveBudget, baseBudget int) time.Duration {
+	if base <= 0 || baseBudget <= 0 || effectiveBudget <= baseBudget {
+		return base
+	}
+	return base * time.Duration(effectiveBudget) / time.Duration(baseBudget)
+}
+
 // buildClaudeEnv returns environment variable overrides to inject into the claude subprocess.
-// Fabrik's values are appended after os.Environ() so they take precedence (last-wins semantics).
+// Fabrik's values are appended after baseEnv (typically os.Environ()) so they
+// take precedence (last-wins semantics, via mergeEnv).
 //
-// effortOverride, when non-empty, supersedes stage.EffortLevel.
+// opts.EffortOverride, when non-empty, supersedes stage.EffortLevel.
 //
 // Defaults (when fields are nil/empty):
 //   - CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 (adaptive thinking disabled)
 //   - CLAUDE_CODE_EFFORT_LEVEL=high (high thinking effort)
-func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
+//
+// FABRIK_* invocation facts (#1288): FABRIK_ISSUE and FABRIK_WORKTREE are derived
+// directly from issue.Number/workDir — both are guaranteed non-zero/non-empty on
+// every real invocation (an empty workDir would break the invocation itself, since
+// it also becomes cmd.Dir). FABRIK_REPO prefers issue.Repo, falling back to
+// opts.FabrikRepo (the caller's e.defaultRepo()) only for the rare item that
+// reaches here before a deep-fetch has backfilled issue.Repo, so the "always
+// present" guarantee holds even then. FABRIK_REPO is always added to the returned
+// overrides, even when the resolved value is empty (both sources unset) — unlike
+// FABRIK_ROOT/FABRIK_PR below, omitting it entirely in that case would leave
+// mergeEnv with no override key to strip, letting an ambient FABRIK_REPO already
+// in the engine process's own environment (e.g. the distinct engine-startup-config
+// FABRIK_REPO) leak into the worker unmodified. FABRIK_ROOT and FABRIK_PR come
+// from opts, resolved by the caller's Engine-level resolveFabrikEnvOpts (repo.go)
+// since buildClaudeEnv itself has no access to fabrikDir or the GitHub client.
+// FABRIK_PR is omitted entirely — never emitted as "0" — when opts.PRNumber is 0,
+// so a naive consumer never mistakes "no PR yet" for a real PR number; this is
+// safe because FABRIK_PR's documented contract is conditional presence, unlike
+// FABRIK_REPO's "always."
+//
+// Anthropic auth namespace scrub (#1346, R2-R9, R14-R19): baseEnv (the true
+// ambient environment the subprocess would otherwise inherit) is scanned for
+// every ANTHROPIC_*-prefixed key plus the enumerated claudeCodeAuthSelectors,
+// and a mergeEnv removal sentinel (see mergeEnv) is emitted for each —
+// default-deny, so a newly-introduced upstream ANTHROPIC_* billing variable
+// is denied automatically, without a Fabrik code change. A key named in the
+// resolved claudeAnthropicEnvPassthrough allow-list is exempted from the
+// scrub and re-inherited from baseEnv unchanged. Finally, claudeAnthropicAPIKey
+// (resolved once from FABRIK_ANTHROPIC_API_KEY) is translated into an explicit
+// ANTHROPIC_API_KEY override — the only supported way to opt into API billing
+// through this variable — emitted last so it wins even over a passthrough
+// entry also naming ANTHROPIC_API_KEY (Go's os/exec resolves a duplicate
+// cmd.Env key by last occurrence).
+func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, opts InvokeOptions, baseEnv []string) []string {
 	var env []string
 	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
 	// any ambient value from the parent process. Default (nil) disables it.
@@ -587,7 +702,7 @@ func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
 		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=0")
 	}
 	// Set effort level: label override takes precedence, then stage config, then default "high".
-	level := effortOverride
+	level := opts.EffortOverride
 	if level == "" {
 		level = stage.EffortLevel
 	}
@@ -598,14 +713,218 @@ func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
 	if claudeGHToken != "" {
 		env = append(env, "GH_TOKEN="+claudeGHToken, "GITHUB_TOKEN="+claudeGHToken)
 	}
+	if claudeGHHost != "" {
+		env = append(env, "GH_HOST="+claudeGHHost)
+	}
+
+	env = append(env, "FABRIK_ISSUE="+strconv.Itoa(issue.Number))
+	// Always add a FABRIK_REPO entry to overrides, even when the resolved value
+	// is empty (both issue.Repo and opts.FabrikRepo unset — practically
+	// unreachable, but possible in pure multi-repo mode with an unbackfilled
+	// item). mergeEnv only strips a base-env key that appears in overrides; if
+	// FABRIK_REPO were omitted here entirely, an ambient FABRIK_REPO already in
+	// the engine process's own environment (e.g. the distinct engine-startup-config
+	// FABRIK_REPO documented in USER_GUIDE.md) would pass straight through to the
+	// worker unmodified — silently contradicting the "worker-injected value always
+	// wins" guarantee documented there.
+	fabrikRepo := issue.Repo
+	if fabrikRepo == "" {
+		fabrikRepo = opts.FabrikRepo
+	}
+	env = append(env, "FABRIK_REPO="+fabrikRepo)
+	if workDir != "" {
+		env = append(env, "FABRIK_WORKTREE="+workDir)
+	}
+	if opts.FabrikRoot != "" {
+		env = append(env, "FABRIK_ROOT="+opts.FabrikRoot)
+	}
+	if opts.PRNumber != 0 {
+		env = append(env, "FABRIK_PR="+strconv.Itoa(opts.PRNumber))
+	}
+
+	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)
+	env = append(env, scrubAnthropicAuthEnv(baseEnv, passthrough)...)
+	for _, key := range claudeAnthropicEnvPassthrough {
+		// A passthrough entry only ever re-adds a key inside the scrubbed
+		// Anthropic auth namespace (ANTHROPIC_*-prefixed or a
+		// claudeCodeAuthSelectors entry) — never one of Fabrik's own
+		// computed overrides emitted earlier in this function (GH_TOKEN,
+		// GITHUB_TOKEN, the FABRIK_* invocation facts,
+		// CLAUDE_CODE_EFFORT_LEVEL, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING),
+		// and never the two control variables themselves. mergeEnv's bare
+		// removal sentinel (appended below) only strips a key from base — it
+		// cannot retract an earlier "KEY=VALUE" entry already present in
+		// this same overrides slice, so without this namespace restriction
+		// an operator naming e.g. GH_TOKEN in FABRIK_ANTHROPIC_ENV_PASSTHROUGH
+		// (deliberately or by typo) would append a second, later GH_TOKEN
+		// entry from the ambient environment — and since os/exec resolves a
+		// duplicate cmd.Env key by last occurrence, that stale/attacker
+		// ambient value would silently win over the token Fabrik computed.
+		// This also makes R19's "outside the namespace is a no-op" claim
+		// actually true for every key, not just ones buildClaudeEnv never
+		// itself overrides. (#1346 Validate-stage review finding.)
+		if !isAnthropicAuthNamespaceKey(key) {
+			continue
+		}
+		if val, ok := envLookup(baseEnv, key); ok {
+			env = append(env, key+"="+val)
+		}
+	}
+	// FABRIK_ANTHROPIC_API_KEY and FABRIK_ANTHROPIC_ENV_PASSTHROUGH are
+	// Fabrik-internal control variables, read by the engine from its own
+	// process environment (os.Getenv in Engine.New) — which means they are
+	// themselves present in os.Environ(), the very baseEnv the subprocess
+	// would otherwise inherit unfiltered. Without an explicit removal
+	// sentinel here, they would leak straight through to the worker (R8,
+	// R17), the same ambient-leak failure mode FABRIK_REPO's own handling
+	// above already guards against.
+	env = append(env, "FABRIK_ANTHROPIC_API_KEY", "FABRIK_ANTHROPIC_ENV_PASSTHROUGH")
+	if claudeAnthropicAPIKey != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+claudeAnthropicAPIKey)
+	}
 	return env
+}
+
+// claudeCodeAuthSelectors is the enumerated set of CLAUDE_CODE_*-prefixed
+// variables that select a non-subscription auth/billing path or supply raw
+// credentials directly, verified against the installed Claude Code binary
+// (#1346 Research). Unlike ANTHROPIC_*, CLAUDE_CODE_* is a much broader
+// general-configuration namespace — it already carries Fabrik's own non-auth
+// CLAUDE_CODE_EFFORT_LEVEL/CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING — so it is
+// not wildcard-scrubbed; only these specific names are removed. A new,
+// not-yet-enumerated CLAUDE_CODE_* billing selector introduced upstream would
+// require a Fabrik code change to be scrubbed; this is an accepted residual
+// risk, documented in ADR-1346.
+var claudeCodeAuthSelectors = []string{
+	"CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_ANTHROPIC_AWS",
+	"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+	"CLAUDE_CODE_USE_MANTLE",
+	"CLAUDE_CODE_USE_GATEWAY",
+}
+
+// scrubAnthropicAuthEnv returns bare mergeEnv removal-sentinel entries (see
+// mergeEnv) for every inherited ANTHROPIC_*-prefixed key found in baseEnv,
+// plus every name in claudeCodeAuthSelectors (emitted unconditionally,
+// regardless of presence in baseEnv — mirroring buildClaudeEnv's FABRIK_REPO
+// reasoning: a removal sentinel for a key baseEnv doesn't have is a harmless
+// no-op, but omitting it would leave mergeEnv with nothing to strip if the
+// key were present). Keys named in passthrough (the resolved
+// FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list, R14-R19) are exempted. This is
+// a default-deny namespace scrub, not a deny-list: a newly-introduced
+// upstream ANTHROPIC_* variable is denied automatically, without a Fabrik
+// code change (R2). Matching is on the exact parsed key — the same "up to
+// the first '='" extraction mergeEnv itself uses — never a substring, so
+// e.g. FANTASY_ANTHROPIC_API_KEY is untouched (R5).
+func scrubAnthropicAuthEnv(baseEnv []string, passthrough map[string]bool) []string {
+	var removals []string
+	seen := make(map[string]bool)
+	for _, kv := range baseEnv {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			continue
+		}
+		key := kv[:i]
+		if !strings.HasPrefix(key, "ANTHROPIC_") {
+			continue
+		}
+		if passthrough[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		removals = append(removals, key)
+	}
+	for _, key := range claudeCodeAuthSelectors {
+		if passthrough[key] {
+			continue
+		}
+		removals = append(removals, key)
+	}
+	return removals
+}
+
+// isAnthropicAuthNamespaceKey reports whether key belongs to the scrubbed
+// Anthropic auth namespace — the same universe scrubAnthropicAuthEnv removes
+// from and buildClaudeEnv's passthrough loop is allowed to re-add from:
+// every ANTHROPIC_*-prefixed key, plus the enumerated claudeCodeAuthSelectors.
+// Used to keep FABRIK_ANTHROPIC_ENV_PASSTHROUGH scoped to that namespace so a
+// passthrough entry can never re-add one of Fabrik's own computed override
+// keys (GH_TOKEN, the FABRIK_* invocation facts, CLAUDE_CODE_EFFORT_LEVEL,
+// CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING) from the ambient environment.
+func isAnthropicAuthNamespaceKey(key string) bool {
+	if strings.HasPrefix(key, "ANTHROPIC_") {
+		return true
+	}
+	for _, sel := range claudeCodeAuthSelectors {
+		if key == sel {
+			return true
+		}
+	}
+	return false
+}
+
+// passthroughSet builds a lookup set from the resolved
+// FABRIK_ANTHROPIC_ENV_PASSTHROUGH allow-list (R14-R19, claudeAnthropicEnvPassthrough).
+func passthroughSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// envLookup returns the value of key in env (a "KEY=VALUE" slice, typically
+// os.Environ()) and whether it was found. Matches mergeEnv's own key
+// extraction convention (up to the first '=').
+func envLookup(env []string, key string) (string, bool) {
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i > 0 && kv[:i] == key {
+			return kv[i+1:], true
+		}
+	}
+	return "", false
+}
+
+// parseAnthropicEnvPassthrough parses the raw FABRIK_ANTHROPIC_ENV_PASSTHROUGH
+// value (R14) into a list of exact variable names: comma-separated, each
+// entry trimmed of surrounding whitespace, empty entries (from a leading/
+// trailing/doubled comma, or an entirely blank input) dropped.
+func parseAnthropicEnvPassthrough(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var names []string
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(part)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // mergeEnv builds a subprocess environment from base (typically os.Environ()),
 // with overrides applied on top. Keys present in overrides are removed from
 // base first so that overrides take effect even when the base already contains
-// the same key (Go's os/exec does not deduplicate; first-occurrence wins on
-// POSIX systems, so appending alone is not sufficient).
+// the same key (Go's os/exec does not deduplicate on its own; if a key
+// appeared twice in cmd.Env, the value from the *last* occurrence wins, so
+// stripping the base entry before appending the override is what guarantees
+// the override — not the append order alone).
+//
+// An override entry may take one of two forms:
+//   - "KEY=VALUE" — the normal add/shadow form. KEY is stripped from base (if
+//     present) and "KEY=VALUE" is appended to the result.
+//   - "KEY" (no "=") — a removal-only sentinel. KEY is stripped from base (if
+//     present) and nothing is appended in its place. This is distinct from
+//     "KEY=" (an intentional empty value, which IS appended — see
+//     buildClaudeEnv's FABRIK_REPO handling) and is how a caller expresses
+//     "remove this key from whatever the subprocess would otherwise inherit,
+//     full stop" with no replacement value of its own.
 func mergeEnv(base, overrides []string) []string {
 	if len(overrides) == 0 {
 		return base
@@ -614,19 +933,80 @@ func mergeEnv(base, overrides []string) []string {
 	for _, kv := range overrides {
 		if i := strings.IndexByte(kv, '='); i > 0 {
 			keys[kv[:i]] = true
+		} else if i < 0 && kv != "" {
+			keys[kv] = true // bare removal sentinel
 		}
 	}
 	result := make([]string, 0, len(base)+len(overrides))
 	for _, kv := range base {
 		if i := strings.IndexByte(kv, '='); i > 0 && keys[kv[:i]] {
-			continue // overrides provides this key
+			continue // overrides provides or removes this key
 		}
 		result = append(result, kv)
 	}
-	return append(result, overrides...)
+	for _, kv := range overrides {
+		if strings.IndexByte(kv, '=') < 0 {
+			continue // removal sentinel only — nothing to append
+		}
+		result = append(result, kv)
+	}
+	return result
 }
 
-func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
+// probeClaudeNameFlagSupport runs `claude --help` once with a short timeout to
+// determine whether the installed binary supports -n/--name. Any error path —
+// the binary is missing from PATH, --help exits non-zero, or the command times
+// out — fails safe to false. This is a one-time, process-lifetime probe (see
+// claudeNameFlagSupported); it must never be called per-invocation.
+func probeClaudeNameFlagSupport() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "claude", "--help").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return parseNameFlagSupport(string(out))
+}
+
+// parseNameFlagSupport checks whether claude --help output advertises the
+// -n/--name flag. Matches the precise documented form ("--name <name>") rather
+// than a bare "--name" substring, to avoid a false positive from unrelated
+// help text that happens to mention "name".
+func parseNameFlagSupport(helpText string) bool {
+	return strings.Contains(helpText, "--name <name>")
+}
+
+// sanitizeSentinelComponent collapses any run of whitespace in s to a single
+// "-", then replaces any ":" or "#" with "-". The sentinel must stay a single
+// shell token so a naive `ps | grep` keeps working; no shell is involved in
+// launching claude (args are passed as an argv slice), so whitespace is the
+// only character that would break that. ":" and "#" are additionally replaced
+// because they are the sentinel's own field delimiters
+// (fabrik:<repo>#<issue>:<stage>) — left alone, a stage name containing
+// either (e.g. "Review #2") would make the rendered sentinel ambiguous to
+// split back into fields by position, even though nothing in the engine does
+// so today.
+func sanitizeSentinelComponent(s string) string {
+	joined := strings.Join(strings.Fields(s), "-")
+	joined = strings.ReplaceAll(joined, ":", "-")
+	return strings.ReplaceAll(joined, "#", "-")
+}
+
+// sessionNameSentinel builds the --name value passed to every worker
+// invocation: fabrik:<owner>/<repo>#<issue>:<stage>. It is deterministic for a
+// given (repo, issueNumber, stageName) and purely observational — nothing in
+// the engine parses it back or branches on it. repo is expected to already be
+// "owner/repo" (as populated from the GitHub GraphQL response on real board
+// items); an empty repo falls back to the literal "unknown/repo" rather than
+// producing a malformed sentinel.
+func sessionNameSentinel(repo string, issueNumber int, stageName string) string {
+	if repo == "" {
+		repo = "unknown/repo"
+	}
+	return fmt.Sprintf("fabrik:%s#%d:%s", sanitizeSentinelComponent(repo), issueNumber, sanitizeSentinelComponent(stageName))
+}
+
+func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string, sessionName string) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -636,6 +1016,13 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 		args = append(args, "--dangerously-skip-permissions")
 	} else {
 		args = append(args, "--permission-mode", "dontAsk")
+	}
+
+	// Applies unconditionally on both invocation paths above: --disallowedTools
+	// is a construction-time exclusion, not a permission-mode behavior, so it
+	// must not live inside the unrestricted branch. See disallowedTools doc.
+	for _, tool := range disallowedTools {
+		args = append(args, "--disallowedTools", tool)
 	}
 
 	if claudePluginDir != "" {
@@ -666,6 +1053,10 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 	}
 	for _, tool := range tools {
 		args = append(args, "--allowedTools", tool)
+	}
+
+	if claudeNameFlagSupported && sessionName != "" {
+		args = append(args, "--name", sessionName)
 	}
 
 	return args
@@ -700,7 +1091,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -834,7 +1225,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// we still process whatever output was collected before the kill.
 	wasTimedOut := inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)
 
-	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir)
+	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures)
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log
@@ -864,6 +1255,61 @@ func openStageLog(issueNumber int, logDir, label string, stdout *bytes.Buffer) (
 	return io.MultiWriter(stdout, logFile), logFile
 }
 
+// classifyResumeFailure implements the consecutive-resume-failure counter's
+// increment/threshold/abandon logic for the generic-failure fallthrough in
+// interpretClaudeResult (see #1414). It is only reached for a failure not
+// already classified by a more specific check above it (stale session,
+// turn-cap, usage-limit, api_error) — see interpretClaudeResult's final
+// return point.
+//
+//   - maxResumeFailures <= 0 disables the mechanism entirely (mirrors
+//     MaxRetries == 0's "unlimited" convention): the sidecar is left
+//     untouched and the plain, unwrapped error is returned so normal
+//     max_retries accounting applies exactly as it did before #1414.
+//     resolveInt always resolves a positive default, so production never
+//     exercises this branch.
+//   - resumeSessionID == "" means this invocation was itself a cold start
+//     (no --resume) that failed — not attributable to a resumed session, so
+//     the count resets to 0 (clearing any stale leftover from a
+//     since-abandoned or since-pruned prior session lineage) and the plain
+//     error is returned unwrapped.
+//   - Otherwise the count increments. At or past maxResumeFailures, the
+//     session pointer is discarded (the same os.Remove used by the existing
+//     stale-session path) and the sidecar reset to 0, so the very next
+//     invocation on either invocation path cold-starts —
+//     resolveResumeSessionID already treats an absent session file as a
+//     cold start for both callers identically, so no separate "force cold
+//     start" signal is needed. Every occurrence of this branch — not only
+//     the one that crosses the threshold — returns *claudeResumeFailureError
+//     so finalizeStageOutcome can exempt it from StageRetryIncremented; see
+//     that type's doc comment for why.
+func classifyResumeFailure(issueNumber int, sessFilePath, resumeSessionID string, maxResumeFailures int, lastErr error) error {
+	plain := fmt.Errorf("claude exited with error: %w", lastErr)
+	if maxResumeFailures <= 0 {
+		return plain
+	}
+	if resumeSessionID == "" {
+		resetResumeFailureCount(sessFilePath)
+		return plain
+	}
+	count := readResumeFailureCount(sessFilePath) + 1
+	abandoned := count >= maxResumeFailures
+	if abandoned {
+		claudeLog(issueNumber, "resume", "abandoning session %s after %d consecutive resume failures (threshold %d), last error: %v — branch work on disk is unaffected, only the resume pointer is discarded; next invocation will cold-start\n", resumeSessionID, count, maxResumeFailures, lastErr)
+		os.Remove(sessFilePath)
+		resetResumeFailureCount(sessFilePath)
+	} else {
+		writeResumeFailureCount(issueNumber, sessFilePath, count)
+	}
+	return &claudeResumeFailureError{
+		Cause:               lastErr,
+		SessionID:           resumeSessionID,
+		ConsecutiveFailures: count,
+		Threshold:           maxResumeFailures,
+		Abandoned:           abandoned,
+	}
+}
+
 // interpretClaudeResult classifies a completed Claude invocation's raw NDJSON
 // output: it checks for a WaitDelay-related exit override, parses the
 // stream-json result, extracts result text and token usage (falling back to
@@ -871,7 +1317,12 @@ func openStageLog(issueNumber int, logDir, label string, stdout *bytes.Buffer) (
 // process was killed before emitting a result line), and classifies the
 // completion/error status of the invocation from the parsed or extracted
 // text.
-func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string) (string, bool, TokenUsage, error) {
+//
+// resumeSessionID is the --resume session ID this invocation attempted (""
+// if this was a cold start) and maxResumeFailures is the effective
+// MaxResumeFailures threshold — both threaded through from the caller's
+// InvokeOptions purely to drive classifyResumeFailure; see #1414.
+func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
@@ -940,6 +1391,10 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// and (b) timeout kills where FABRIK_STAGE_COMPLETE appeared in streamed output.
 		if stageCompleteRE.MatchString(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
+			// Completed is completed — the strongest possible evidence the
+			// session is healthy, regardless of the trailing error. Reset the
+			// resume-failure counter (#1414).
+			resetResumeFailureCount(sessFilePath)
 			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
 		}
 		// Structural turn-cap classification from the CLI's own result object,
@@ -951,6 +1406,11 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// condition to misclassify as a usage-limit exit — see #1183.
 		if ok && resp.Subtype == "error_max_turns" {
 			claudeLog(issueNumber, "claude", "turn limit reached (subtype=error_max_turns, terminal_reason=%q, num_turns=%d)\n", resp.TerminalReason, resp.NumTurns)
+			// A turn-cap exit consumed real turns and real cost — by
+			// construction the strongest possible evidence the session is
+			// healthy, not the poisoned-session symptom #1414 targets. Reset
+			// the resume-failure counter.
+			resetResumeFailureCount(sessFilePath)
 			return text, false, usage, &claudeTurnLimitError{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns}
 		}
 		// Structural usage-limit classification from the CLI's own result
@@ -962,6 +1422,9 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 			if msg, detected := classifyUsageLimitExit(resp, usage); detected {
 				claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (turns=%d, cost=$%.4f): %s\n", usage.TurnsUsed, usage.CostUSD, msg)
 				return text, false, usage, &claudeUsageLimitError{Message: msg}
+			} else if _, detected := classifyAPIErrorExit(resp, usage); detected {
+				claudeLog(issueNumber, "claude", "api_error exit detected (turns=%d, cost=$%.4f) — stage did not run, not charged against max_retries\n", usage.TurnsUsed, usage.CostUSD)
+				return text, false, usage, &claudeAPIErrorExit{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 			} else if resp.TerminalReason != "" && resp.TerminalReason != usageLimitTerminalReason {
 				// Diagnostic-only: records any other non-empty terminal_reason
 				// seen on an error exit (e.g. "rapid_refill_breaker"), so a
@@ -970,9 +1433,18 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 				claudeLog(issueNumber, "claude", "error exit with unmatched terminal_reason=%q (not classified as usage limit)\n", resp.TerminalReason)
 			}
 		}
-		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
+		// None of the classifiers above matched — the generic fallthrough.
+		// classifyResumeFailure owns the consecutive-resume-failure counter
+		// from here: it increments (and abandons the session at threshold)
+		// when resumeSessionID != "", or resets when this was itself a
+		// failed cold start. See its doc comment and #1414.
+		return text, false, usage, classifyResumeFailure(issueNumber, sessFilePath, resumeSessionID, maxResumeFailures, runErr)
 	}
 
+	// A clean process exit (runErr == nil) is evidence the session loaded and
+	// ran without a structural break, even if the stage itself didn't finish
+	// (no FABRIK_STAGE_COMPLETE). Reset the resume-failure counter (#1414).
+	resetResumeFailureCount(sessFilePath)
 	completed := stageCompleteRE.MatchString(text)
 	return text, completed, usage, nil
 }
@@ -1138,6 +1610,27 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 				b.WriteString("\n```\n")
 			}
 			b.WriteString(c.Body + "\n\n")
+		} else if gh.IsBotLogin(c.Author) {
+			// #1045 requirement 4: a bot-authored comment with no inline
+			// thread context is structurally distinct from a human's
+			// comment: it's a finding to evaluate and address autonomously,
+			// not a decision awaiting the model's interpretation. This
+			// branch covers both delivery shapes the issue names — a plain
+			// PR body/issue comment with no formal review submission at all
+			// (the original report; c.ID has no reviewBodyIDPrefix) and a
+			// synthetic review-body comment from dispatchReviewReinvoke
+			// (c.ID does carry reviewBodyIDPrefix) — both render with
+			// c.Path == "" (no inline thread), and the marker's job is the
+			// same in either case: tell the skill "this is bot review
+			// content," not "this came from a formal review." Marking it
+			// here (rather than asking the model to pattern-match "@login"
+			// suffixes itself) makes the distinction a testable
+			// prompt-content assertion (AC1/AC5) — gh.IsBotLogin is the same
+			// structural helper isBotServiceNotice already uses, so this
+			// reuses an existing, if inherently incomplete
+			// (suffix/prefix/literal allow-list), detector rather than
+			// adding a new one.
+			b.WriteString(fmt.Sprintf("**@%s** (%s) [Bot Review Finding]:\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
 		} else {
 			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
 		}
@@ -1202,22 +1695,126 @@ Your job is to:
 7. Maintain the structure and formatting of the PR description.`
 }
 
+// formatSpawnReceiptNote returns a deterministic "parse receipt" note when
+// output contains N > 0 well-formed spawn blocks, as counted by
+// ParseSpawnBlocks — the sole source of truth for block counting (#1338).
+// Never derive N by string-matching the marker text: that is the exact
+// regression #1263 guards against, since a Plan that merely mentions the
+// marker in prose must not produce a note. Returns "" when there are no
+// blocks, so a non-decomposing stage comment is byte-identical to before
+// this note existed.
+//
+// The note deliberately avoids any literal FABRIK_* token so it can never be
+// mistaken for a marker by this or any other marker-detection logic, and is
+// self-delimited with its own "---" rule so it renders as a clearly separate
+// block from the stats footer.
+//
+// Callers must only invoke this for the Plan stage's own output. preImplement
+// (engine/spawn.go) only ever reads the comment literally named "Plan", so a
+// note rendered on any other stage's comment would promise a spawn that
+// mechanism never performs — e.g. if a later stage's context (which includes
+// the Plan comment verbatim) leads it to quote a spawn block back into its
+// own output. See the stage.Name == "Plan" gate at the call site in
+// finalizeStageOutcome (engine/item.go).
+func formatSpawnReceiptNote(output string) string {
+	n := len(ParseSpawnBlocks(output))
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return "\n\n---\n1 sub-issue declared above. It does not exist yet — it will be created when this issue advances to the **Implement** stage."
+	}
+	return fmt.Sprintf("\n\n---\n%d sub-issues declared above. None exist yet — they will be created when this issue advances to the **Implement** stage.", n)
+}
+
+// formatMidflightSpawnReceiptNote returns a present-tense sibling of
+// formatSpawnReceiptNote for the Review/Validate mid-flight spawn path
+// (ADR-1419): unlike a Plan-stage declaration, these children already exist
+// by the time this note is rendered — spawnChildren has already run and
+// created, boarded, assigned, and linked them as blockers of this issue
+// before finalizeStageOutcome prepends this note to the stage's output.
+// spawned holds each child as "owner/repo#N" (spawnChildren's own format).
+// Returns "" for an empty list so a stage output with no spawn is
+// byte-identical to before this note existed.
+func formatMidflightSpawnReceiptNote(spawned []string) string {
+	n := len(spawned)
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return fmt.Sprintf("🏭 Spawned 1 sub-issue: %s. It has been registered, assigned, and linked as a blocker of this issue.\n\n---\n\n", spawned[0])
+	}
+	return fmt.Sprintf("🏭 Spawned %d sub-issues: %s. Each has been registered, assigned, and linked as a blocker of this issue.\n\n---\n\n", n, strings.Join(spawned, ", "))
+}
+
+// scaleTokens renders a token count as a human-readable, k/M-scaled string:
+// raw digits below 1,000; "Nk" below 1,000,000; "N.1M" at or above 1,000,000. No
+// billion-scale unit is provided: a single invocation's token counts realistically
+// stay well under 1B, so values at or above that render as a large-but-readable "M" figure.
+func scaleTokens(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1000000:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1000000)
+	}
+}
+
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
-// Returns empty string when no stats are available (e.g. JSON parse fallback).
+// Returns empty string when no stats are available (e.g. JSON parse fallback). Input is
+// reported as an "effective input" total (raw + cached) since prompt caching means raw
+// InputTokens alone is structurally near-zero once a conversation has any history. Cache
+// reads and cache writes are broken out separately (not folded into one "cached" figure)
+// because Anthropic prices them differently per token, and collapsing them would obscure
+// that distinction from a reader trying to reason about actual spend from the footer alone.
 func formatStatsFooter(usage TokenUsage, completed bool) string {
-	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 {
+	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
 		return ""
 	}
 	var completion string
 	if !completed {
 		completion = " Stage incomplete."
 	}
-	if usage.MaxTurns > 0 {
-		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %dk input / %dk output tokens.%s",
-			usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
+	cached := usage.CacheReadTokens + usage.CacheCreationTokens
+	effectiveInput := usage.InputTokens + cached
+	inputStr := scaleTokens(effectiveInput) + " input"
+	if cached > 0 {
+		breakdown := scaleTokens(usage.InputTokens) + " raw"
+		if usage.CacheReadTokens > 0 {
+			breakdown += " + " + scaleTokens(usage.CacheReadTokens) + " cache-read"
+		}
+		if usage.CacheCreationTokens > 0 {
+			breakdown += " + " + scaleTokens(usage.CacheCreationTokens) + " cache-write"
+		}
+		inputStr = fmt.Sprintf("%s (%s)", inputStr, breakdown)
 	}
-	return fmt.Sprintf("\n\n---\nUsed %d turns, %dk input / %dk output tokens.%s",
-		usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
+	if usage.MaxTurns > 0 {
+		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %s / %s output tokens.%s",
+			usage.TurnsUsed, usage.MaxTurns, inputStr, scaleTokens(usage.OutputTokens), completion)
+	}
+	return fmt.Sprintf("\n\n---\nUsed %d turns, %s / %s output tokens.%s",
+		usage.TurnsUsed, inputStr, scaleTokens(usage.OutputTokens), completion)
+}
+
+// formatStatsLogLine returns a one-line, machine-greppable stats summary for operator logs,
+// matching poll.go's cumulative "in: N | out: N | cache_read: N | cache_write: N" convention.
+// Returns empty string when no stats are available so callers can suppress the log line.
+func formatStatsLogLine(usage TokenUsage) string {
+	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
+		return ""
+	}
+	var turns string
+	if usage.MaxTurns > 0 {
+		turns = fmt.Sprintf("used %d/%d turns", usage.TurnsUsed, usage.MaxTurns)
+	} else {
+		turns = fmt.Sprintf("used %d turns", usage.TurnsUsed)
+	}
+	return fmt.Sprintf("%s | in: %d | out: %d | cache_read: %d | cache_write: %d",
+		turns, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheCreationTokens)
 }
 
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.
@@ -1664,4 +2261,55 @@ func saveSessionIDDirect(issueNumber int, path, sessionID string) {
 	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
 		claudeLog(issueNumber, "warn", "failed to save session id to %s: %v\n", path, err)
 	}
+}
+
+// resumeFailureCountPath returns the sidecar file path that tracks the
+// consecutive-resume-failure count for the session at sessFilePath. It is
+// deliberately a plain sibling file (not itemstate, which is confirmed
+// entirely in-memory — see #1414 Research) so the counter survives an engine
+// restart, exactly as the spec requires. It is shared by both InvokeClaude
+// and InvokeClaudeForComments (and merge_train.go's conflict-resolution
+// path), since all three compute the identical sessFilePath stem — the
+// counter is keyed to the session-pointer identity, not the invocation path.
+func resumeFailureCountPath(sessFilePath string) string {
+	return sessFilePath + ".resumefails"
+}
+
+// readResumeFailureCount reads the consecutive-resume-failure count for
+// sessFilePath. A missing or unparseable sidecar is treated as 0 — the same
+// "absence means zero/cold" convention resolveResumeSessionID already uses
+// for the session file itself.
+func readResumeFailureCount(sessFilePath string) int {
+	data, err := os.ReadFile(resumeFailureCountPath(sessFilePath))
+	if err != nil {
+		return 0
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || count < 0 {
+		return 0
+	}
+	return count
+}
+
+// writeResumeFailureCount persists count to the sidecar file for
+// sessFilePath, mirroring saveSessionIDDirect's plain-text write idiom.
+// Best-effort: a write failure is logged but does not fail the invocation.
+func writeResumeFailureCount(issueNumber int, sessFilePath string, count int) {
+	path := resumeFailureCountPath(sessFilePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		claudeLog(issueNumber, "warn", "failed to create session dir for %s: %v\n", path, err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(count)), 0600); err != nil {
+		claudeLog(issueNumber, "warn", "failed to save resume-failure count to %s: %v\n", path, err)
+	}
+}
+
+// resetResumeFailureCount discards the sidecar file for sessFilePath,
+// restoring the consecutive-failure count to its implicit zero. Best-effort:
+// a missing file is not an error (os.Remove's own ENOENT is silently
+// ignored, matching the existing stale-session os.Remove(sessFilePath) call
+// this mirrors).
+func resetResumeFailureCount(sessFilePath string) {
+	os.Remove(resumeFailureCountPath(sessFilePath))
 }

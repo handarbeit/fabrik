@@ -10,9 +10,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -20,8 +22,11 @@ import (
 
 // trainTestEngine builds an Engine wired with the given mock client and invoker.
 // It configures a Queued holding stage and a Done stage for merge-train use, and sets
-// a short CIWaitTimeout so CI-polling tests terminate quickly. statusField is pre-set
-// so advanceToNextStage can advance members from Queued to Done in landing tests.
+// a short CIBackstopTimeout so CI-polling tests terminate quickly — pollForMergeable/
+// pollTrainCI's blocking-loop deadline is CIBackstopTimeout (ADR-1410, R6), not
+// CIWaitTimeout (now a liveness-stall dwell consumed only by the async CI gate).
+// statusField is pre-set so advanceToNextStage can advance members from Queued to
+// Done in landing tests.
 func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker, wm *WorktreeManager) *Engine {
 	t.Helper()
 	holdingStageConfig := &stages.Stage{
@@ -40,7 +45,7 @@ func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeI
 			MaxConcurrent:          5,
 			MaxMergeTrainEjections: 3,
 			MergeTrain:             "on",
-			CIWaitTimeout:          100 * time.Millisecond, // fast timeout for tests
+			CIBackstopTimeout:      100 * time.Millisecond, // fast deadline for tests (ADR-1410)
 			Stages: []*stages.Stage{
 				{Name: "Research", Order: 1, Prompt: "Do research"},
 				{Name: "Plan", Order: 2, Prompt: "Make a plan"},
@@ -54,11 +59,16 @@ func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeI
 		wm,
 	)
 	// Pre-set statusField so advanceToNextStage can find the "Done" board column.
+	// "Implement" (opt-implement) is included so rerouteQueuedMemberOffHolding
+	// (#1208) can resolve its reroute target — the stage stageBeforeHolding derives
+	// structurally as the highest-Order non-Unmanaged stage before Queued (Order 10),
+	// which is Implement (Order 3) in this stage set.
 	eng.statusField = &gh.StatusField{
 		FieldID: "sf-test-1",
 		Options: map[string]string{
-			"Done":   "opt-done",
-			"Queued": "opt-queued",
+			"Done":      "opt-done",
+			"Queued":    "opt-queued",
+			"Implement": "opt-implement",
 		},
 	}
 	return eng
@@ -182,7 +192,7 @@ func TestPollTrainCI_MergeableStateClean_ReturnsGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen for clean mergeable_state, got %v", result)
 	}
@@ -200,7 +210,7 @@ func TestPollTrainCI_MergeableStateUnstable_ReturnsGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen for unstable mergeable_state, got %v", result)
 	}
@@ -213,7 +223,7 @@ func TestPollTrainCI_FailedCheckRun_ReturnsRed(t *testing.T) {
 		},
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
 			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "failure"},
+				{Name: "build", Status: "completed", Conclusion: "failure", OutputText: "line 141: assertion failed"},
 			}, nil
 		},
 	}
@@ -222,9 +232,21 @@ func TestPollTrainCI_FailedCheckRun_ReturnsRed(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, diag := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIRed {
 		t.Errorf("expected TrainCIRed for failed check run, got %v", result)
+	}
+	// R1/AC1/AC2: pollTrainCI must return the failing check's diagnostic, not just the
+	// enum — this is the point of capture that #1420 fixes. Neutralizing it (returning
+	// an empty diagnostic here) must turn this assertion red.
+	if diag == nil {
+		t.Fatal("expected a non-nil diagnostic for a red result, got nil")
+	}
+	if len(diag.FailedChecks) != 1 || diag.FailedChecks[0].Name != "build" {
+		t.Fatalf("expected diag.FailedChecks to name the failing check \"build\", got %+v", diag.FailedChecks)
+	}
+	if diag.FailedChecks[0].OutputText != "line 141: assertion failed" {
+		t.Errorf("expected diag.FailedChecks[0].OutputText to carry the check's output, got %q", diag.FailedChecks[0].OutputText)
 	}
 }
 
@@ -245,7 +267,7 @@ func TestPollTrainCI_AllChecksPass_ReturnsGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen when all checks pass, got %v", result)
 	}
@@ -270,7 +292,7 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 			Repo:                   "repo",
 			MaxConcurrent:          5,
 			MaxMergeTrainEjections: 3,
-			CIWaitTimeout:          1 * time.Millisecond, // expires during first API call
+			CIBackstopTimeout:      1 * time.Millisecond, // expires during first API call (ADR-1410)
 			Stages: []*stages.Stage{
 				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
 			},
@@ -280,9 +302,298 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIPending {
-		t.Errorf("expected TrainCIPending on CIWaitTimeout, got %v", result)
+		t.Errorf("expected TrainCIPending on CIBackstopTimeout, got %v", result)
+	}
+}
+
+// TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades is the R6
+// acceptance test (ADR-1410): a batch member whose integration PR never
+// reaches a mergeable_state GitHub will accept is not wedged indefinitely —
+// pollForMergeable's blocking loop is bounded by CIBackstopTimeout, posts a
+// "landing timeout" comment on the first survivor, and returns false so the
+// batch simply retries on the next merge-train cycle (no fabrik:paused, no
+// escalation — it degrades, matching pollTrainCI's TrainCIPending shape
+// above rather than reproducing #342's destructive pause).
+func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) {
+	var commentPosted bool
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			// Small sleep ensures the post-API deadline check (not the 30s
+			// poll-interval sleep) is what trips — mirrors
+			// TestPollTrainCI_Timeout_ReturnsPending's pattern.
+			time.Sleep(10 * time.Millisecond)
+			return &gh.PRDetails{Number: prNumber, MergeableState: ""}, nil // mergeable never resolves, no HeadSHA
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			CIBackstopTimeout:      1 * time.Millisecond, // expires during first API call (ADR-1410)
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false when CIBackstopTimeout elapses with mergeability never resolved")
+	}
+	if !commentPosted {
+		t.Error("expected a landing-timeout comment to be posted on the first survivor")
+	}
+}
+
+// ── R6 (ADR-1441): pollForMergeable check-run classification ────────────────
+//
+// pollForMergeable previously read only mergeable_state and treated
+// gh.MergeableStateAccepted (clean/unstable) as an unconditional green light
+// — the same defect ADR-1153 fixed for pollTrainCI, left unfixed here and
+// explicitly flagged as a "candidate fast-follow" that never got its own
+// issue. These are the direct regression tests for that fix at this call
+// site (AC7), mirroring the pr_settle.go/ci.go fixtures for AC1 — the
+// non-vacuousness requirement (AC8) is that these must independently fail if
+// only the pr_settle.go/ci.go site were fixed and this one were not.
+
+// TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse is the direct
+// AC7 regression test: an integration PR reporting mergeable_state=unstable
+// with a concluded failure check run on its head SHA must not be judged
+// landable. Must fail against pre-ADR-1441 pollForMergeable, which never
+// called FetchCheckRuns at all.
+func TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "unstable", HeadSHA: "sha-unstable-failed"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+			}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false for mergeable_state=unstable with a failed check run")
+	}
+}
+
+// TestPollForMergeable_UnstableWithPendingCheckRun_KeepsPollingThenDegrades
+// covers R2's failing-vs-pending discrimination at this call site: a
+// still-running non-required check under mergeable_state=unstable must not
+// be treated as a confirmed failure (which would return false immediately
+// for the wrong reason) nor as green — it keeps polling until
+// CIBackstopTimeout, then degrades like any other unresolved landing (a
+// timeout comment is posted, matching TestPollForMergeable_
+// BackstopTimeout_ReturnsFalseAndDegrades's shape).
+func TestPollForMergeable_UnstableWithPendingCheckRun_KeepsPollingThenDegrades(t *testing.T) {
+	var commentPosted bool
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			time.Sleep(10 * time.Millisecond)
+			return &gh.PRDetails{Number: prNumber, MergeableState: "unstable", HeadSHA: "sha-unstable-pending"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "Test and vet", Status: "in_progress"},
+			}, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			CIBackstopTimeout:      1 * time.Millisecond,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false — a pending non-required check must not be judged landable")
+	}
+	if !commentPosted {
+		t.Error("expected a landing-timeout comment once CIBackstopTimeout elapses with the check still pending")
+	}
+}
+
+// TestPollForMergeable_Dirty_ReturnsFalseImmediately confirms the pre-existing
+// dirty short-circuit survives the R6 rewrite unchanged: a merge conflict is
+// an immediate, definitive rejection — no check-run fetch, no timeout
+// comment (distinguishing it from the degrade-on-timeout path above).
+func TestPollForMergeable_Dirty_ReturnsFalseImmediately(t *testing.T) {
+	checkRunsFetched := false
+	commentPosted := false
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "dirty", HeadSHA: "sha-dirty"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			checkRunsFetched = true
+			return nil, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false immediately for mergeable_state=dirty")
+	}
+	if checkRunsFetched {
+		t.Error("FetchCheckRuns must NOT be called when mergeable_state=dirty — the conflict is dispositive on its own")
+	}
+	if commentPosted {
+		t.Error("a definitive dirty rejection is not a timeout — no landing-timeout comment should be posted")
+	}
+}
+
+// TestPollForMergeable_CleanZeroCheckRuns_ReturnsTrue confirms ADR-033/
+// ADR-1441's fast path is preserved at this call site: mergeable_state=clean
+// with no check-run footprint at all still lands immediately (mirrors
+// settlePRMergeState's own zero-check-runs "no CI configured" branch).
+func TestPollForMergeable_CleanZeroCheckRuns_ReturnsTrue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean", HeadSHA: "sha-clean"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // GitHub Actions disabled — no check-run footprint
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if !result {
+		t.Error("expected pollForMergeable to return true for mergeable_state=clean with zero check runs")
+	}
+}
+
+// TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse mirrors
+// TestPollTrainCI_EmptyCheckRuns_RequiredContextFailedViaCommitStatus_ReturnsRed
+// for the landing path: a confirmed required-context failure via a classic
+// commit status (zero check runs — the local-CI-takeover case #933 was filed
+// for) must block landing even though mergeable_state alone would otherwise
+// be the only signal available.
+func TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "blocked", HeadSHA: "sha-rc-failed"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // no check runs at all — GitHub Actions disabled
+		},
+		fetchCombinedStatusFn: func(owner, repo, ref string) ([]gh.CommitStatus, error) {
+			return []gh.CommitStatus{{Context: "fantasy/local-test", State: "failure"}}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"fantasy/local-test"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false for a required context confirmed-failed via classic commit status with zero check runs")
+	}
+}
+
+// TestPollForMergeable_FetchCheckRunsError_DoesNotTreatAsGreen is the
+// regression test for a review finding on this PR: a FetchCheckRuns error
+// means the PR's real check-run state is unknown, not "confirmed zero check
+// runs." classifyLandingCI's zero-check-runs fallback treats an accepted
+// mergeable_state (clean/unstable) as sufficient for green — reachable this
+// way if a fetch error were (incorrectly) passed through as an empty
+// checkRuns slice, which would let an unobserved, possibly-failing check run
+// through as green on a transient API error. mergeable_state=unstable here
+// means a real check-run failure may be sitting unobserved; the fetch error
+// must never be treated as evidence there's nothing to see. Mirrors
+// pollTrainCI's if/else-if/else shape, which already gets this right (an
+// error takes neither the "has checks" nor the "zero checks" branch).
+func TestPollForMergeable_FetchCheckRunsError_DoesNotTreatAsGreen(t *testing.T) {
+	var commentPosted bool
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			time.Sleep(10 * time.Millisecond)
+			return &gh.PRDetails{Number: prNumber, MergeableState: "unstable", HeadSHA: "sha-fetch-error"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, fmt.Errorf("transient API error")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentPosted = true
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			CIBackstopTimeout:      1 * time.Millisecond,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
+	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	if result {
+		t.Error("expected pollForMergeable to return false when FetchCheckRuns errors — a fetch failure must not be treated as confirmed zero check runs")
+	}
+	if !commentPosted {
+		t.Error("expected a landing-timeout comment once CIBackstopTimeout elapses while FetchCheckRuns keeps erroring")
 	}
 }
 
@@ -290,14 +601,14 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 // regression for the merge-train path: an all-skipped/neutral check-run set
 // on the trial head must NOT read as TrainCIGreen when a required context is
 // configured but hasn't confirmed success — it should keep polling until
-// CIWaitTimeout, landing on TrainCIPending, never TrainCIGreen.
+// CIBackstopTimeout, landing on TrainCIPending, never TrainCIGreen.
 func TestPollTrainCI_AllSkippedRequiredContext_NotGreen(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			return nil, "blocked", nil // not clean/unstable — falls through to check runs
 		},
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			// Sleep past CIWaitTimeout (100ms in trainTestEngine) so the
+			// Sleep past CIBackstopTimeout (100ms in trainTestEngine) so the
 			// post-classification deadline check trips on the first loop
 			// iteration instead of waiting through the 30s poll interval.
 			time.Sleep(150 * time.Millisecond)
@@ -316,12 +627,12 @@ func TestPollTrainCI_AllSkippedRequiredContext_NotGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result == TrainCIGreen {
 		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen when a required context is only skipped/neutral/absent on the trial head")
 	}
 	if result != TrainCIPending {
-		t.Errorf("expected TrainCIPending (CIWaitTimeout reached while required context stays unconfirmed), got %v", result)
+		t.Errorf("expected TrainCIPending (CIBackstopTimeout reached while required context stays unconfirmed), got %v", result)
 	}
 }
 
@@ -350,7 +661,7 @@ func TestPollTrainCI_RequiredContextFailedViaCommitStatus_ReturnsRed(t *testing.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIRed {
 		t.Errorf("expected TrainCIRed for a required context confirmed-failed via classic commit status, got %v", result)
 	}
@@ -381,7 +692,7 @@ func TestPollTrainCI_EmptyCheckRuns_RequiredContextFailedViaCommitStatus_Returns
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIRed {
 		t.Errorf("expected TrainCIRed for a required context confirmed-failed via classic commit status with zero check runs, got %v", result)
 	}
@@ -407,7 +718,7 @@ func TestPollTrainCI_Unconfigured_AllSkippedChecks_StillGreen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen for skipped checks on an unconfigured repo (no behavior change), got %v", result)
 	}
@@ -442,12 +753,12 @@ func TestPollTrainCI_MergeableStateAccepted_NonRequiredCheckStillPending_NotGree
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result == TrainCIGreen {
 		t.Fatal("expected pollTrainCI to NOT report TrainCIGreen while a non-required check is still in_progress, even with an accepted mergeable_state")
 	}
 	if result != TrainCIPending {
-		t.Errorf("expected TrainCIPending (CIWaitTimeout reached while the non-required check stays pending), got %v", result)
+		t.Errorf("expected TrainCIPending (CIBackstopTimeout reached while the non-required check stays pending), got %v", result)
 	}
 }
 
@@ -470,7 +781,7 @@ func TestPollTrainCI_ContextCancelled_ReturnsPending(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
-	result := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
+	result, _ := eng.pollTrainCI(ctx, "owner", "repo", 42, "sha123")
 	if result != TrainCIPending {
 		t.Errorf("expected TrainCIPending when context cancelled, got %v", result)
 	}
@@ -484,8 +795,7 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(1, "Test Issue")
-	eng.ejectMember("owner", "repo", member, "conflict with #2")
-
+	eng.ejectMember("owner", "repo", member, "conflict with #2", nil, nil, true)
 	client.mu.Lock()
 	calls := client.addCommentCalls
 	client.mu.Unlock()
@@ -498,6 +808,51 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	}
 }
 
+// TestEjectMember_StayInQueueWordingIsDistinguishable verifies the #1208 requirement
+// that an operator can tell from the ejection comment alone which of the four causes
+// fired: stayInQueue=true (the three pre-#1208 causes) must say the member remains in
+// Queued, while stayInQueue=false (the new unresolved-review-finding cause) must say
+// the opposite — that it has left Queued to be addressed via the review pipeline.
+func TestEjectMember_StayInQueueWordingIsDistinguishable(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	stayMember := makeTrainItem(1, "Stays")
+	eng.ejectMember("owner", "repo", stayMember, "conflict", nil, nil, true)
+
+	leaveMember := makeTrainItem(2, "Leaves")
+	eng.ejectMember("owner", "repo", leaveMember, "unresolved review finding", nil, nil, false)
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 ejection comments, got %d", len(calls))
+	}
+
+	stayBody := calls[0].body
+	leaveBody := calls[1].body
+
+	if !strings.Contains(stayBody, "remains in the Queued column") {
+		t.Errorf("stayInQueue=true comment should say the member remains in Queued, got: %s", stayBody)
+	}
+	if strings.Contains(stayBody, "has left the Queued column") {
+		t.Errorf("stayInQueue=true comment should not say the member left Queued, got: %s", stayBody)
+	}
+
+	if !strings.Contains(leaveBody, "has left the Queued column") {
+		t.Errorf("stayInQueue=false comment should say the member left Queued, got: %s", leaveBody)
+	}
+	if strings.Contains(leaveBody, "remains in the Queued column") {
+		t.Errorf("stayInQueue=false comment should not say the member remains in Queued, got: %s", leaveBody)
+	}
+
+	if stayBody == leaveBody {
+		t.Error("stayInQueue=true and stayInQueue=false ejection comments must be textually distinguishable")
+	}
+}
+
 func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
@@ -507,9 +862,8 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	member := makeTrainItem(5, "Problem Issue")
 
 	// First two ejections should not add pause labels.
-	eng.ejectMember("owner", "repo", member, "conflict")
-	eng.ejectMember("owner", "repo", member, "conflict")
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
 	client.mu.Lock()
 	pauseCount := 0
 	for _, c := range client.addLabelCalls {
@@ -523,8 +877,7 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	}
 
 	// Third ejection should trigger pause.
-	eng.ejectMember("owner", "repo", member, "conflict")
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
 	client.mu.Lock()
 	pauseCount = 0
 	awaitCount := 0
@@ -555,11 +908,10 @@ func TestEjectMember_EjectionCountIsPerMember(t *testing.T) {
 	member2 := makeTrainItem(2, "Issue 2")
 
 	// Eject member 1 three times and member 2 once.
-	eng.ejectMember("owner", "repo", member1, "conflict")
-	eng.ejectMember("owner", "repo", member1, "conflict")
-	eng.ejectMember("owner", "repo", member1, "conflict") // triggers pause for #1
-	eng.ejectMember("owner", "repo", member2, "conflict") // should NOT trigger pause for #2
-
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member1, "conflict", nil, nil, true) // triggers pause for #1
+	eng.ejectMember("owner", "repo", member2, "conflict", nil, nil, true) // should NOT trigger pause for #2
 	client.mu.Lock()
 	pausedIssues := make(map[int]bool)
 	for _, c := range client.addLabelCalls {
@@ -598,10 +950,9 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 
 	member := makeTrainItem(5, "Problem Issue")
 
-	eng.ejectMember("owner", "repo", member, "conflict")
-	eng.ejectMember("owner", "repo", member, "conflict")
-	eng.ejectMember("owner", "repo", member, "conflict") // triggers pause
-
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true) // triggers pause
 	labels, err := cache.FetchLabels("owner", "repo", 5)
 	if err != nil {
 		t.Fatalf("FetchLabels: %v", err)
@@ -672,6 +1023,451 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}
 	if !awaitingEcho {
 		t.Error("expected fabrik:awaiting-input webhook echo to be registered")
+	}
+}
+
+// ── #1208 Queued review-finding ejection: stageBeforeHolding / reroute / eject ──
+
+func TestStageBeforeHolding_ReturnsHighestOrderPrecedingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Research", Order: 1},
+		{Name: "Plan", Order: 2},
+		{Name: "Implement", Order: 3},
+		{Name: "Queued", Order: 10, HoldingStage: true},
+		{Name: "Done", Order: 99, CleanupWorktree: true},
+	}}
+	hs := holdingStage(cfg)
+	got := stageBeforeHolding(cfg, hs)
+	if got == nil || got.Name != "Implement" {
+		t.Fatalf("expected Implement (highest Order < holding stage's Order), got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_SkipsUnmanagedStages(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Research", Order: 1},
+		{Name: "Backlog", Order: 5, Unmanaged: true},
+		{Name: "Queued", Order: 10, HoldingStage: true},
+	}}
+	hs := holdingStage(cfg)
+	got := stageBeforeHolding(cfg, hs)
+	if got == nil || got.Name != "Research" {
+		t.Fatalf("expected Research (Backlog is Unmanaged and must be skipped), got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_NilHoldingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{{Name: "Research", Order: 1}}}
+	if got := stageBeforeHolding(cfg, nil); got != nil {
+		t.Fatalf("expected nil for nil holding stage, got %+v", got)
+	}
+}
+
+func TestStageBeforeHolding_NoPrecedingStage(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Queued", Order: 1, HoldingStage: true},
+	}}
+	hs := holdingStage(cfg)
+	if got := stageBeforeHolding(cfg, hs); got != nil {
+		t.Fatalf("expected nil when nothing precedes the holding stage, got %+v", got)
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_MovesStatusToPrecedingStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	ok := eng.rerouteQueuedMemberOffHolding("PVT_1", item)
+	if !ok {
+		t.Fatal("expected reroute to succeed")
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+	call := client.updateStatusCalls[0]
+	if call.projectID != "PVT_1" || call.optionID != "opt-implement" {
+		t.Errorf("update call = %+v, expected move to opt-implement", call)
+	}
+}
+
+// TestRerouteQueuedMemberOffHolding_DoesNotTouchLabelsOrClearCycles pins the #1208
+// stall-risk constraint: the reroute must be a plain status move only. It must never
+// add/remove stage:Validate:complete (already present from the original Validate
+// completion) and must never clear ReviewCycles — either would break the "MaxReviewCycles
+// applies for free across the eject/re-queue cycle" property the design relies on.
+func TestRerouteQueuedMemberOffHolding_DoesNotTouchLabelsOrClearCycles(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	repoStr := "owner/repo"
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: 1, StageName: "Implement"})
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: 1, StageName: "Implement"})
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: repoStr, Status: "Queued",
+		Labels: []string{"stage:Implement:complete"}}
+	if !eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to succeed")
+	}
+
+	if len(client.addLabelCalls) != 0 || len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no label mutations from reroute, got add=%v remove=%v", client.addLabelCalls, client.removeLabelCalls)
+	}
+
+	snap, err := eng.store.Get(repoStr, 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != 2 {
+		t.Errorf("expected ReviewCycles to remain 2 (untouched by reroute), got %d", got)
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_NoPrecedingStage_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", MaxConcurrent: 1,
+			Stages: []*stages.Stage{
+				{Name: "Queued", Order: 1, HoldingStage: true},
+			},
+		},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+	eng.statusField = &gh.StatusField{FieldID: "sf-1", Options: map[string]string{"Queued": "opt-queued"}}
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	if eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to fail when no stage precedes the holding stage")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no status update call on failure, got %d", len(client.updateStatusCalls))
+	}
+}
+
+func TestRerouteQueuedMemberOffHolding_StatusMoveFails_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	if eng.rerouteQueuedMemberOffHolding("PVT_1", item) {
+		t.Fatal("expected reroute to fail when UpdateProjectItemStatus errors")
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount verifies the
+// reroute-then-eject ordering: when the status move fails, ejectQueuedMemberForReviewFindings
+// must not post an ejection comment or increment the ejection counter — a failed reroute
+// looks like nothing happened, so a retry on the next settle scan pass can't double-count.
+func TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 0 {
+		t.Errorf("expected no ejection comment when reroute fails, got %d", comments)
+	}
+
+	eng.mergeTrainEjectionsMu.Lock()
+	count := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if count != 0 {
+		t.Errorf("expected ejection counter to remain 0 when reroute fails, got %d", count)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_Success verifies the full happy path: status
+// moves off Queued, an ejection comment distinguishable from the stay-in-Queue wording
+// is posted, and the ejection counter increments.
+func TestEjectQueuedMemberForReviewFindings_Success(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 2)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call, got %d", len(client.updateStatusCalls))
+	}
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 ejection comment, got %d", len(calls))
+	}
+	if !strings.Contains(calls[0].body, "has left the Queued column") {
+		t.Errorf("expected ejection comment to use the leaves-Queued wording, got: %s", calls[0].body)
+	}
+	if !strings.Contains(calls[0].body, "2 unresolved review-thread finding") {
+		t.Errorf("expected ejection comment to name the finding count, got: %s", calls[0].body)
+	}
+
+	eng.mergeTrainEjectionsMu.Lock()
+	count := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if count != 1 {
+		t.Errorf("expected ejection counter to be 1, got %d", count)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_MaxReviewCyclesComposesAcrossCycle is the
+// key #1208 stall-risk regression named in the issue's Requirements and Risks
+// sections: a member ejected repeatedly for the same unresolved review finding,
+// rerouted back to Implement (the stage preceding Queued in this test's stage
+// set), and re-picked-up by the ordinary review-reinvoke path (handleReviewGate,
+// completely unmodified by this issue) must have its ReviewCycles counter keep
+// counting across every eject/reroute cycle — never reset — so it eventually
+// escalates via pauseForReviewCycleLimit instead of oscillating Queued<->Implement
+// forever. Also confirms MaxMergeTrainEjections (a separate, already-existing
+// bound reused via ejectMember) fires independently of ReviewCycles, per the
+// issue's own framing of the two bounds as distinct.
+func TestEjectQueuedMemberForReviewFindings_MaxReviewCyclesComposesAcrossCycle(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxReviewCycles = 3
+
+	item := gh.ProjectItem{
+		Number: 1,
+		ItemID: "PVTI_1",
+		Repo:   "owner/repo",
+		Status: "Queued",
+		Labels: []string{"stage:Implement:complete"},
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Please fix this.", ReviewThreadID: "RT_1"},
+		},
+	}
+	// implementStage mirrors stageBeforeHolding's own resolution for trainTestEngine's
+	// stage set (Implement, Order 3, is the stage immediately preceding Queued, Order 10).
+	implementStage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	pausedByEnd := false
+	for i := 0; i <= eng.cfg.MaxReviewCycles; i++ {
+		// Step 1: eject the member off Queued — simulates settleQueuedReviewFindings
+		// having detected the still-unresolved thread on this poll.
+		eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+
+		// Step 2: simulate the ordinary review-reinvoke path picking the rerouted
+		// item back up on the very next poll — the exact same, unmodified
+		// handleReviewGate any non-Queued item with an unresolved thread goes through.
+		advancedItems := make(map[string]bool)
+		pctx := &phase1Ctx{
+			ctx: context.Background(), board: board, item: item, stage: implementStage,
+			hasComplete: true, advancedItems: advancedItems,
+		}
+		if claimed := eng.handleReviewGate(pctx); !claimed {
+			t.Fatalf("iteration %d: expected handleReviewGate to claim the item", i)
+		}
+		eng.wg.Wait()
+
+		if advancedItems["owner/repo#1"] {
+			continue // a reinvoke dispatched this cycle — keep going
+		}
+		pausedByEnd = true // no dispatch this cycle: the cap was hit and it paused
+		break
+	}
+
+	if !pausedByEnd {
+		t.Fatal("expected the cycle to eventually pause at MaxReviewCycles instead of dispatching forever")
+	}
+
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != eng.cfg.MaxReviewCycles {
+		t.Errorf("ReviewCycles(Implement) = %d; want exactly %d — must not reset across the eject/reroute cycle", got, eng.cfg.MaxReviewCycles)
+	}
+
+	client.mu.Lock()
+	hasPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	client.mu.Unlock()
+	if !hasPaused {
+		t.Error("expected fabrik:paused to be added once the review cycle limit was reached")
+	}
+
+	// MaxMergeTrainEjections (3 in trainTestEngine) is a separate bound reused via
+	// ejectMember: it fires — and resets — purely from repeated ejections in this
+	// loop, independent of ReviewCycles. Assert it is a valid, in-range value
+	// rather than an exact count, since ejectMember resets its own counter to 0
+	// once it pauses (so the exact value depends on loop length vs. the cap).
+	eng.mergeTrainEjectionsMu.Lock()
+	ejections := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if ejections < 0 || ejections >= eng.cfg.MaxMergeTrainEjections {
+		t.Errorf("unexpected ejection counter value: %d (want in [0, %d))", ejections, eng.cfg.MaxMergeTrainEjections)
+	}
+}
+
+// TestEjectQueuedMemberForReviewFindings_MaxMergeTrainEjectionsFiresIndependently
+// confirms the issue's Risks-section expectation directly: MaxMergeTrainEjections
+// (ejectMember's own pre-existing consecutive-ejection pause cap) can pause a
+// member purely from repeated review-finding ejections, entirely independent of —
+// and potentially before — MaxReviewCycles ever fires, since the two bounds are
+// driven by different counters incremented from different call sites.
+func TestEjectQueuedMemberForReviewFindings_MaxMergeTrainEjectionsFiresIndependently(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxMergeTrainEjections = 2
+	eng.cfg.MaxReviewCycles = 100 // deliberately far out of reach in this test
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}
+
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+	client.mu.Lock()
+	pausedAfterFirst := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAfterFirst = true
+		}
+	}
+	client.mu.Unlock()
+	if pausedAfterFirst {
+		t.Fatal("did not expect fabrik:paused after only 1 ejection (MaxMergeTrainEjections=2)")
+	}
+
+	eng.ejectQueuedMemberForReviewFindings("PVT_1", item, 1)
+	client.mu.Lock()
+	pausedAfterSecond := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAfterSecond = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedAfterSecond {
+		t.Error("expected fabrik:paused after 2 ejections (MaxMergeTrainEjections=2), purely from review-finding ejections")
+	}
+
+	// ReviewCycles is untouched by this path entirely — this test never dispatches
+	// through handleReviewGate — confirming the two bounds are driven independently.
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.ReviewCycles("Implement"); got != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0 (MaxMergeTrainEjections must fire independently of it)", got)
+	}
+}
+
+// ── #1208 pending-eject signal: mark/take/apply ─────────────────────────────────
+
+func TestTakePendingReviewEject_UnflaggedMember_NoOp(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	count, ok := eng.takePendingReviewEject("owner/repo", 1)
+	if ok || count != 0 {
+		t.Fatalf("expected (0, false) for an unflagged member, got (%d, %v)", count, ok)
+	}
+}
+
+func TestMarkAndTakePendingReviewEject_TakeClearsTheSignal(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	eng.markPendingReviewEject("owner/repo", 1, 3)
+
+	count, ok := eng.takePendingReviewEject("owner/repo", 1)
+	if !ok || count != 3 {
+		t.Fatalf("expected (3, true) on first take, got (%d, %v)", count, ok)
+	}
+
+	// A second take must observe the signal already cleared — one-shot semantics.
+	count, ok = eng.takePendingReviewEject("owner/repo", 1)
+	if ok || count != 0 {
+		t.Fatalf("expected (0, false) on second take (already consumed), got (%d, %v)", count, ok)
+	}
+}
+
+func TestMarkPendingReviewEject_ScopedPerRepoAndIssue(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	eng.markPendingReviewEject("owner/repo", 1, 1)
+	eng.markPendingReviewEject("owner/repo", 2, 5)
+	eng.markPendingReviewEject("owner/other", 1, 9)
+
+	if count, ok := eng.takePendingReviewEject("owner/repo", 1); !ok || count != 1 {
+		t.Errorf("owner/repo#1: got (%d, %v), want (1, true)", count, ok)
+	}
+	if count, ok := eng.takePendingReviewEject("owner/repo", 2); !ok || count != 5 {
+		t.Errorf("owner/repo#2: got (%d, %v), want (5, true)", count, ok)
+	}
+	if count, ok := eng.takePendingReviewEject("owner/other", 1); !ok || count != 9 {
+		t.Errorf("owner/other#1: got (%d, %v), want (9, true)", count, ok)
+	}
+}
+
+func TestApplyPendingReviewEjects_EjectsFlaggedMembersOnly(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	members := []trainMember{
+		{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued"}},
+	}
+	eng.markPendingReviewEject("owner/repo", 2, 4)
+
+	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+
+	if ejectedCount != 1 {
+		t.Fatalf("expected ejectedCount=1, got %d", ejectedCount)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("expected 2 remaining members, got %d", len(remaining))
+	}
+	for _, m := range remaining {
+		if m.item.Number == 2 {
+			t.Errorf("ejected member #2 must not appear in remaining, got: %+v", remaining)
+		}
+	}
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected the flagged member to be rerouted (1 status update), got %d", len(client.updateStatusCalls))
+	}
+
+	// The signal is one-shot — a second call with the same members must not re-eject.
+	remaining2, ejectedCount2 := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	if ejectedCount2 != 0 || len(remaining2) != 3 {
+		t.Errorf("expected second apply to be a no-op (signal already consumed), got ejectedCount=%d remaining=%d", ejectedCount2, len(remaining2))
+	}
+}
+
+func TestApplyPendingReviewEjects_NoFlags_ReturnsAllUnchanged(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	members := []trainMember{
+		{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}},
+		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
+	}
+
+	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	if ejectedCount != 0 {
+		t.Errorf("expected ejectedCount=0, got %d", ejectedCount)
+	}
+	if len(remaining) != 2 {
+		t.Errorf("expected all members to remain, got %d", len(remaining))
 	}
 }
 
@@ -901,6 +1697,9 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil // CI green immediately
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 	}
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, wm)
@@ -939,6 +1738,117 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	}
 	if state.CIResult != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen, got %v", state.CIResult)
+	}
+}
+
+// TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms verifies
+// Hook 2 (#1208): a pending review-finding eject flagged for a member while its
+// batch's trial is assembling/CI-polling must cause the worker to discard that
+// trial — even though its CI result is green — and re-form with the reduced
+// membership, rather than landing the flagged member via landGreenBatch. This is
+// the "checkpoint-consumed-by-the-worker-itself" half of the coordination design;
+// settleQueuedReviewFindings (the settle-scan half) is exercised separately.
+func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately, every trial
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	// Flag #1 for a pending review-finding eject BEFORE the worker runs — simulates
+	// settleQueuedReviewFindings having observed an unresolved thread on #1 while a
+	// worker was already in flight for this repo.
+	eng.markPendingReviewEject("owner/repo", 1, 2)
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	// #1 must have been rerouted off Queued (the ejection), not landed.
+	if len(client.updateStatusCalls) == 0 {
+		t.Fatal("expected at least 1 status update call rerouting #1 off Queued")
+	}
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Errorf("expected a reroute-to-Implement status update among %+v", client.updateStatusCalls)
+	}
+
+	client.mu.Lock()
+	var ejectionComment string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 {
+			ejectionComment = c.body
+		}
+	}
+	client.mu.Unlock()
+	if !strings.Contains(ejectionComment, "has left the Queued column") {
+		t.Errorf("expected #1's ejection comment to use the leaves-Queued wording, got: %q", ejectionComment)
+	}
+
+	// The pending-eject signal must have been consumed (one-shot).
+	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
+		t.Error("expected the pending-eject signal for #1 to already be consumed")
+	}
+
+	// The worker must have re-formed and landed #2 normally — trainInFlight/store
+	// liveness clears only once the (re-formed) train actually finishes.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared once the re-formed train finishes")
+	}
+	if eng.store.RepoWorkerActive("owner/repo") {
+		t.Error("expected store repo-worker liveness to be cleared once the re-formed train finishes")
+	}
+
+	// At least 2 draft PRs: the discarded 2-member trial, and the re-formed
+	// 1-member trial that actually lands #2.
+	mu.Lock()
+	prs := createdPRs
+	mu.Unlock()
+	if prs < 2 {
+		t.Errorf("expected at least 2 draft PR creations (discarded trial + re-formed trial), got %d", prs)
 	}
 }
 
@@ -981,6 +1891,9 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 	}
 	// Claude returns success but doesn't actually fix the conflict (simulates failure).
@@ -1209,6 +2122,9 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 	}
 
 	// Claude resolves the conflict by writing a resolved file and committing.
@@ -1397,6 +2313,9 @@ func TestAssembleAndValidate_LeavesWorktreeForCallerCleanup(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil // CI green immediately
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 
@@ -1410,7 +2329,7 @@ func TestAssembleAndValidate_LeavesWorktreeForCallerCleanup(t *testing.T) {
 	members := []trainMember{{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1}}
 	const trialName = "assemble-persist-trial"
 
-	survivors, result, prNum, err := eng.assembleAndValidate(context.Background(), p, members, trialName)
+	survivors, result, prNum, _, err := eng.assembleAndValidate(context.Background(), p, members, trialName)
 	if err != nil {
 		t.Fatalf("assembleAndValidate: %v", err)
 	}
@@ -1477,6 +2396,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			mergePRNum = prNumber
@@ -1594,6 +2516,9 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			return 1, nil
@@ -1645,6 +2570,9 @@ func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
@@ -1752,6 +2680,9 @@ func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			return 1, nil
@@ -1807,6 +2738,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return fmt.Errorf("merge rejected: branch protection rules not satisfied")
@@ -1871,6 +2805,9 @@ func TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
 		},
@@ -1929,6 +2866,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return fmt.Errorf("%w: mergeable_state=%q", gh.ErrNotMergeableCI, "blocked")
 		},
@@ -1985,6 +2925,9 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
 		closeIssueFn: func(owner, repo string, number int) error { return nil },
@@ -2027,9 +2970,14 @@ type recordingValidator struct {
 	mu      sync.Mutex
 	calls   [][]int
 	redWhen func(present map[int]bool) bool
+	// diagFor optionally overrides the synthetic default diagnostic returned on a red
+	// result, keyed on the validated batch's member-number set — for tests asserting
+	// specific diagnostic content (#1420 AC1-AC6). nil means every red result gets the
+	// same generic synthetic diagnostic below.
+	diagFor func(present map[int]bool) *trainCIDiagnostic
 }
 
-func (rv *recordingValidator) fn(_ context.Context, members []trainMember) TrainCIResult {
+func (rv *recordingValidator) fn(_ context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
 	present := make(map[int]bool, len(members))
 	nums := make([]int, 0, len(members))
 	for _, m := range members {
@@ -2039,10 +2987,17 @@ func (rv *recordingValidator) fn(_ context.Context, members []trainMember) Train
 	rv.mu.Lock()
 	rv.calls = append(rv.calls, nums)
 	rv.mu.Unlock()
-	if rv.redWhen(present) {
-		return TrainCIRed
+	if !rv.redWhen(present) {
+		return TrainCIGreen, nil
 	}
-	return TrainCIGreen
+	if rv.diagFor != nil {
+		return TrainCIRed, rv.diagFor(present)
+	}
+	return TrainCIRed, &trainCIDiagnostic{
+		FailedChecks: []gh.CheckRun{{Name: "ci/test", Status: "completed", Conclusion: "failure", OutputText: "synthetic seam failure output"}},
+		PRNum:        900,
+		TrialSHA:     "seam-trial-sha",
+	}
 }
 
 func (rv *recordingValidator) count() int {
@@ -2075,6 +3030,9 @@ func seamTrainEngine(t *testing.T, wm *WorktreeManager, redWhen func(map[int]boo
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
 			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
 		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
@@ -2112,6 +3070,21 @@ func ejectionCommentCount(client *mockGitHubClient, issueNumber int) int {
 		}
 	}
 	return n
+}
+
+// ejectionCommentBodies returns the bodies of every ejection comment posted on a given
+// member issue number, in posting order — for asserting on comment *content* (#1420
+// R1-R4), not just that an ejection occurred.
+func ejectionCommentBodies(client *mockGitHubClient, issueNumber int) []string {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == issueNumber && strings.Contains(c.body, "ejected") {
+			bodies = append(bodies, c.body)
+		}
+	}
+	return bodies
 }
 
 // TestMergeTrainBisect_GreenCommonPath is the D-d hard invariant: a green batch costs exactly
@@ -2233,6 +3206,450 @@ func TestMergeTrainBisect_RepeatedEjectionPauses(t *testing.T) {
 	}
 }
 
+// ── #1420 acceptance tests: ejection comment carries the combined-Validate diagnostic ──
+
+// TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic covers #1420 AC1/AC3: the
+// FIRST ejection comment for a bisection-isolated poisoner — not only a later or pause
+// comment — must contain the failing check name and its output. A test that only asserts
+// ejection occurred (the pre-#1420 state) would pass vacuously; this asserts on comment
+// body text instead.
+func TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 3)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #3, got %d", len(comments))
+	}
+	first := comments[0]
+	if !strings.Contains(first, "ci/test") {
+		t.Errorf("first ejection comment must name the failing check, got: %s", first)
+	}
+	if !strings.Contains(first, "synthetic seam failure output") {
+		t.Errorf("first ejection comment must include the failure output, got: %s", first)
+	}
+}
+
+// TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic covers the threading property
+// itself, not just that some diagnostic content arrives (Review feedback on PR #1426):
+// bisect's recursive call must forward halfDiag — the diagnostic of the half just found
+// red — not the diag it was entered with. Neutralizing that (recursing with the incoming
+// diag instead of halfDiag) leaves every existing diagnostic-content test passing, because
+// none of them distinguish diagnostics by recursion level; this test does, by keying the
+// seam's returned diagnostic on the exact membership set validated at each level. #3 poisons
+// a 5-member batch, forcing two full halving levels before isolation:
+//
+//	[1,2,3,4,5] (outer, red)  →  [3,4,5] (middle, red)  →  [3] (innermost, red, base case)
+//
+// The ejected member must carry only the innermost level's diagnostic — the run that
+// actually isolated it — never the middle or outer level's, which recursion passed through
+// but did not originate from.
+func TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	sameSet := func(present map[int]bool, want ...int) bool {
+		if len(present) != len(want) {
+			return false
+		}
+		for _, w := range want {
+			if !present[w] {
+				return false
+			}
+		}
+		return true
+	}
+	rv.diagFor = func(present map[int]bool) *trainCIDiagnostic {
+		switch {
+		case sameSet(present, 1, 2, 3, 4, 5):
+			return &trainCIDiagnostic{
+				FailedChecks: []gh.CheckRun{{Name: "ci/level-outer", Status: "completed", Conclusion: "failure", OutputText: "outer batch output"}},
+				PRNum:        900, TrialSHA: "sha-outer",
+			}
+		case sameSet(present, 3, 4, 5):
+			return &trainCIDiagnostic{
+				FailedChecks: []gh.CheckRun{{Name: "ci/level-middle", Status: "completed", Conclusion: "failure", OutputText: "middle batch output"}},
+				PRNum:        900, TrialSHA: "sha-middle",
+			}
+		case sameSet(present, 3):
+			return &trainCIDiagnostic{
+				FailedChecks: []gh.CheckRun{{Name: "ci/level-innermost", Status: "completed", Conclusion: "failure", OutputText: "innermost isolating output"}},
+				PRNum:        900, TrialSHA: "sha-innermost",
+			}
+		default:
+			t.Fatalf("unexpected membership validated red: %v", present)
+			return nil
+		}
+	}
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 3)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #3, got %d", len(comments))
+	}
+	body := comments[0]
+	if !strings.Contains(body, "ci/level-innermost") || !strings.Contains(body, "innermost isolating output") {
+		t.Errorf("expected the ejection comment to carry the innermost (isolating) run's diagnostic, got: %s", body)
+	}
+	if strings.Contains(body, "ci/level-outer") || strings.Contains(body, "outer batch output") {
+		t.Errorf("ejection comment must not carry the outer (initial full-batch) run's diagnostic, got: %s", body)
+	}
+	if strings.Contains(body, "ci/level-middle") || strings.Contains(body, "middle batch output") {
+		t.Errorf("ejection comment must not carry the middle-level run's diagnostic, got: %s", body)
+	}
+}
+
+// TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers covers #1420 R4/AC5: the
+// ejection comment must name the other members the isolated poisoner's batch was
+// combined against, so an operator knows the failure is combination-only before
+// investigating their own branch.
+func TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	comments := ejectionCommentBodies(client, 3)
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 ejection comment for #3, got %d", len(comments))
+	}
+	body := comments[0]
+	for _, other := range []string{"#1", "#2", "#4", "#5"} {
+		if !strings.Contains(body, other) {
+			t.Errorf("expected ejection comment to name batch member %s, got: %s", other, body)
+		}
+	}
+	if strings.Contains(body, "No other members were present") {
+		t.Errorf("expected a populated batch-context sentence (not the singleton fallback), got: %s", body)
+	}
+}
+
+// TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers covers #1440 R1/R2/R3/AC1/AC2/AC4:
+// a red batch of exactly one member has no poisoner to isolate and must never reach
+// handleRedBatch's bisection machinery (AC1) — the trainRedBatchHook seam proves this
+// structurally, not just via trial count (bisect's own len==1 base case already costs zero
+// extra validations even on unmodified main, so a trial-count-only assertion would be
+// vacuous per AC6). The disposition must read as "this PR's own validation failed," never
+// promise a retry "in a future train with a different composition," and never attribute the
+// failure to a conflict (AC2) — and it must pause immediately, on this first occurrence,
+// without touching the shared 3-strike mergeTrainEjectionCounts counter (R3/AC4).
+func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return true }) // always red
+
+	var redBatchHookCalls int
+	eng.trainRedBatchHook = func() { redBatchHookCalls++ }
+
+	batch := makeSeamBatch(1)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	// AC1: handleRedBatch (multi-member bisection machinery) must never be reached.
+	if redBatchHookCalls != 0 {
+		t.Errorf("expected handleRedBatch to be skipped for a red singleton, but it was called %d time(s)", redBatchHookCalls)
+	}
+	// AC1: no bisection sub-trial beyond the initial validation.
+	if got := rv.count(); got != 1 {
+		t.Errorf("expected exactly 1 validation (no bisection sub-trials) for a red singleton, got %d", got)
+	}
+
+	client.mu.Lock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 {
+			bodies = append(bodies, c.body)
+		}
+	}
+	client.mu.Unlock()
+	if len(bodies) != 1 {
+		t.Fatalf("expected exactly 1 comment posted for #1, got %d: %v", len(bodies), bodies)
+	}
+	body := bodies[0]
+
+	// AC2: never the bisection-ejection/conflict framing.
+	if strings.Contains(body, "different composition") {
+		t.Errorf("red-singleton comment must not promise retry in a different composition, got: %s", body)
+	}
+	if strings.Contains(body, "conflict") {
+		t.Errorf("red-singleton comment must not attribute the failure to a conflict, got: %s", body)
+	}
+	if !strings.Contains(body, "own combined Validate is failing") {
+		t.Errorf("expected the comment to state the PR's own validation failed, got: %s", body)
+	}
+	if !strings.Contains(body, "No other members were present") {
+		t.Errorf("expected the single-member-train sentence, got: %s", body)
+	}
+
+	// R3/AC4: the shared ejection counter is untouched for a red singleton...
+	if count := eng.mergeTrainEjectionCounts["owner/repo#1"]; count != 0 {
+		t.Errorf("expected mergeTrainEjectionCounts to be untouched for a red singleton, got %d", count)
+	}
+	// ...but the member is paused on this first (and only) disposition.
+	var sawPaused, sawAwaitingInput bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber != 1 {
+			continue
+		}
+		switch c.labelName {
+		case "fabrik:paused":
+			sawPaused = true
+		case "fabrik:awaiting-input":
+			sawAwaitingInput = true
+		}
+	}
+	client.mu.Unlock()
+	if !sawPaused || !sawAwaitingInput {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input applied on the first red-singleton disposition, got labels: %v", client.addLabelCalls)
+	}
+}
+
+// TestMergeTrainRedSingleton_NoRetrialOnNextPoll covers #1440 R4/AC5: escalating a red
+// singleton to fabrik:paused on its first disposition must exclude it from every future
+// Queued batch snapshot, so an unchanged red singleton never re-forms into an identical
+// trial on the next poll — no separate backoff mechanism is needed because this composes
+// with groupQueuedByRepo's pre-existing poison-well guard (the same mechanism that already
+// stops a repeatedly-ejected multi-member poisoner from being re-snapshotted).
+func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return true }) // always red
+
+	batch := makeSeamBatch(1)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	if got := rv.count(); got != 1 {
+		t.Fatalf("expected exactly 1 validation trial after the first episode, got %d", got)
+	}
+
+	var pausedLabel bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 1 && c.labelName == "fabrik:paused" {
+			pausedLabel = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedLabel {
+		t.Fatalf("expected fabrik:paused applied to #1 after the red-singleton disposition")
+	}
+
+	// Simulate the next poll's Queued snapshot: #1 now carries the fabrik:paused label
+	// ejectRedSingleton just applied.
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"fabrik:paused"}},
+	}
+	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+	if len(groups) != 0 {
+		t.Errorf("expected the paused red singleton to be excluded from the next poll's train batch, got %d group(s): %+v", len(groups), groups)
+	}
+
+	// Nothing was (re-)dispatched for a second episode, so no additional trial occurred.
+	if got := rv.count(); got != 1 {
+		t.Errorf("expected no additional validation trial on the next poll, got %d", got)
+	}
+}
+
+// TestEjectMember_TruncatesOversizedDiagnostic covers #1420 R3/AC4: an output exceeding
+// the inline budget must produce a truncated body plus a run/job link, and the whole
+// comment must stay within GitHub's ~65536-char comment limit.
+func TestEjectMember_TruncatesOversizedDiagnostic(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(7, "Big Output Issue")
+	hugeOutput := strings.Repeat("x", 50000)
+	diag := &trainCIDiagnostic{
+		FailedChecks: []gh.CheckRun{
+			{Name: "ci/huge", Status: "completed", Conclusion: "failure", OutputText: hugeOutput, HTMLURL: "https://github.com/owner/repo/runs/123"},
+		},
+		PRNum:    900,
+		TrialSHA: "deadbeef",
+	}
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil, true)
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected an ejection comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if len(body) > 65536 {
+		t.Errorf("ejection comment body exceeds GitHub's comment size limit: %d chars", len(body))
+	}
+	if !strings.Contains(body, "chars omitted") {
+		t.Errorf("expected a truncated-output marker, got a body of length %d", len(body))
+	}
+	if !strings.Contains(body, "https://github.com/owner/repo/runs/123") {
+		t.Errorf("expected a details/run link in the truncated comment, got: %s", body)
+	}
+}
+
+// TestTruncateBlockHard_ClosesDanglingCodeFence covers a gap in R3's truncation policy:
+// renderDiagnosticBlock's whole-block hard cap (trainDiagBlockMax) can land its cut
+// partway through one of renderFailedChecks' per-check ``` fences when enough failing
+// checks are inlined — an odd number of ``` markers past the cut would render every
+// following section (the batch-context sentence, the "remains in Queued" boilerplate)
+// as part of an open code block instead of prose. truncateBlockHard must always leave a
+// balanced (even) fence count.
+func TestTruncateBlockHard_ClosesDanglingCodeFence(t *testing.T) {
+	// A block whose hard-cap cut point (at byte 20) lands inside an open fence.
+	block := "0123456789" + "```\nsome code that runs past the cut point\n```" + " trailing prose"
+	got := truncateBlockHard(block, 20)
+	if strings.Count(got, "```")%2 != 0 {
+		t.Fatalf("expected a balanced (even) number of ``` fence markers, got %d in: %q", strings.Count(got, "```"), got)
+	}
+	if !strings.HasSuffix(got, "\n```") {
+		t.Errorf("expected the dangling fence to be closed with a trailing \\n```, got: %q", got)
+	}
+}
+
+// TestTruncateBlockHard_NoSplitOnEvenFenceCount covers the already-balanced case: a cut
+// point that lands after a complete, closed fence must not add a spurious extra fence.
+func TestTruncateBlockHard_NoSplitOnEvenFenceCount(t *testing.T) {
+	block := "```\ncode\n```" + strings.Repeat("z", 100)
+	got := truncateBlockHard(block, 12) // cuts exactly after the closing fence
+	if got != "```\ncode\n```" {
+		t.Errorf("expected no extra fence appended for an already-balanced cut, got: %q", got)
+	}
+}
+
+// TestTruncateBlockHard_DoesNotSplitMultibyteRune covers UTF-8 safety: a byte-index cut
+// must never land in the middle of a multi-byte rune, which would produce invalid UTF-8
+// in the posted comment.
+func TestTruncateBlockHard_DoesNotSplitMultibyteRune(t *testing.T) {
+	block := strings.Repeat("a", 9) + "é" + strings.Repeat("b", 20) // 'é' is 2 bytes, straddling index 10
+	got := truncateBlockHard(block, 10)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateBlockHard produced invalid UTF-8: %q (bytes: %v)", got, []byte(got))
+	}
+}
+
+// TestTruncateMiddle_DoesNotSplitMultibyteRune covers the same UTF-8 safety concern for
+// the per-check truncation helper: CI output text is arbitrary third-party content and
+// may contain non-ASCII, so both the head and tail cut points must land on rune
+// boundaries rather than splitting a multi-byte rune into invalid UTF-8.
+func TestTruncateMiddle_DoesNotSplitMultibyteRune(t *testing.T) {
+	// 'é' (2 bytes) straddles the head cut at byte 9; '日' (3 bytes) straddles the tail
+	// cut near the end.
+	s := strings.Repeat("a", 9) + "é" + strings.Repeat("x", 50) + "日" + strings.Repeat("b", 9)
+	got := truncateMiddle(s, len(s)-1, 10, 11)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateMiddle produced invalid UTF-8: %q (bytes: %v)", got, []byte(got))
+	}
+}
+
+// TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence is an end-to-end check that
+// enough large failing checks to exceed trainDiagBlockMax still produce a
+// balanced-fence, well-formed comment via the real ejectMember path.
+func TestEjectMember_BlockHardCapNeverLeavesDanglingCodeFence(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(8, "Many Failing Checks Issue")
+	var checks []gh.CheckRun
+	for i := 0; i < 5; i++ {
+		checks = append(checks, gh.CheckRun{
+			// Long name + long URL, on top of 5 near-max-inline-cap outputs, is what
+			// pushes the assembled block past trainDiagBlockMax in practice.
+			Name:       fmt.Sprintf("ci/check-%d-%s", i, strings.Repeat("x", 60)),
+			Status:     "completed",
+			Conclusion: "failure",
+			OutputText: strings.Repeat(fmt.Sprintf("line %d ", i), 1000), // well over the per-check inline cap
+			HTMLURL:    "https://github.com/owner/repo/actions/runs/" + strings.Repeat("9", 80),
+		})
+	}
+	diag := &trainCIDiagnostic{FailedChecks: checks, PRNum: 901, TrialSHA: "cafef00d"}
+	eng.ejectMember("owner", "repo", member, "ejected from merge-train — combined Validate red", diag, nil, true)
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected an ejection comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "(truncated)") {
+		t.Fatalf("expected the block-level hard cap to have engaged, got a body of length %d", len(body))
+	}
+	if strings.Count(body, "```")%2 != 0 {
+		t.Errorf("expected a balanced (even) number of ``` fence markers, got %d — the block-level truncation left a code fence open:\n%s", strings.Count(body, "```"), body)
+	}
+}
+
+// TestMergeTrainBisect_PauseCommentNamesCause covers #1420 R5/AC6: the pause-after-N
+// comment must name or link the cause, not just instruct the operator to "resolve the
+// underlying conflict" with nothing to go on.
+func TestMergeTrainBisect_PauseCommentNamesCause(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	// Pre-seed #3's ejection counter to one below the cap so this run triggers the pause.
+	eng.mergeTrainEjectionsMu.Lock()
+	eng.mergeTrainEjectionCounts["owner/repo#3"] = eng.cfg.MaxMergeTrainEjections - 1
+	eng.mergeTrainEjectionsMu.Unlock()
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	var pauseBody string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 && strings.Contains(c.body, "pausing after") {
+			pauseBody = c.body
+		}
+	}
+	client.mu.Unlock()
+	if pauseBody == "" {
+		t.Fatal("expected a pause comment to be posted for #3")
+	}
+	if !strings.Contains(pauseBody, "ci/test") {
+		t.Errorf("expected pause comment to name the failing check, got: %s", pauseBody)
+	}
+	if !strings.Contains(pauseBody, "issuecomment-") {
+		t.Errorf("expected pause comment to link the ejection comment, got: %s", pauseBody)
+	}
+}
+
 // TestMergeTrainBisect_CostCapFallbackLogs verifies FR-5: exceeding the per-red-batch
 // validation cap degrades to one-at-a-time landing with a clear log line (no silent
 // truncation). Uses an interaction (red iff {#1,#2}) and a low MaxBisectValidations so the
@@ -2270,6 +3687,75 @@ func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
 	client.mu.Unlock()
 	if singletonPRs != 4 {
 		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
+
+// TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition covers #1440's extension of the
+// red-singleton fix to landOneAtATime's own TrainCIRed branch: a member validated completely
+// alone ([]trainMember{m}) after bisection degrades to the one-at-a-time fallback is
+// structurally the same true-singleton scenario the top-level arity guard targets — it must
+// get the identical ejectRedSingleton disposition (no "different composition" promise, no
+// shared-counter churn, immediate pause), not the pre-#1440 ejectMember wording that would be
+// equally misleading here. Forces the cost cap to fire before bisection can isolate #3 as an
+// ordinary poisoner, so #3's red-singleton disposition is only reachable via landOneAtATime.
+func TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Only #3 is ever red, alone or combined with anyone else.
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] })
+	eng.cfg.MaxBisectValidations = 2 // force the cost cap before bisection isolates #3 itself
+
+	batch := makeSeamBatch(4)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Fatalf("expected the cost cap to force a one-at-a-time fallback; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	var bodies []string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 {
+			bodies = append(bodies, c.body)
+		}
+	}
+	client.mu.Unlock()
+	if len(bodies) != 1 {
+		t.Fatalf("expected exactly 1 comment posted for #3, got %d: %v", len(bodies), bodies)
+	}
+	body := bodies[0]
+
+	if strings.Contains(body, "different composition") {
+		t.Errorf("red-singleton comment reached via one-at-a-time must not promise retry in a different composition, got: %s", body)
+	}
+	if strings.Contains(body, "conflict") {
+		t.Errorf("red-singleton comment reached via one-at-a-time must not attribute the failure to a conflict, got: %s", body)
+	}
+	if !strings.Contains(body, "own combined Validate is failing") {
+		t.Errorf("expected the comment to state the PR's own validation failed, got: %s", body)
+	}
+
+	if count := eng.mergeTrainEjectionCounts["owner/repo#3"]; count != 0 {
+		t.Errorf("expected mergeTrainEjectionCounts to be untouched for a red singleton reached via one-at-a-time, got %d", count)
+	}
+
+	var sawPaused bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 3 && c.labelName == "fabrik:paused" {
+			sawPaused = true
+		}
+	}
+	client.mu.Unlock()
+	if !sawPaused {
+		t.Errorf("expected fabrik:paused applied to #3 on its first (and only) red-singleton disposition, got labels: %v", client.addLabelCalls)
 	}
 }
 
@@ -2311,6 +3797,94 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 	client.mu.Unlock()
 	if singletonPRs != 4 {
 		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
+
+// TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead verifies Hook 2
+// (#1208) inside the one-at-a-time fallback: a pending review-finding eject flagged
+// for a member at the moment its own singleton trial validates must be honored
+// instead of that singleton's normal green/red outcome — the member is rerouted off
+// Queued and ejected with the distinct #1208 wording, not landed via landSingleton
+// (even though its singleton trial is green) and not ejected via the ordinary
+// fails-even-in-isolation red path.
+func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+
+	// Red iff both #1 and #2 are present (forces bisection -> non-isolable
+	// interaction -> the landOneAtATime fallback with the full original 2-member
+	// set). Marks #2's pending-eject signal at the exact moment its own singleton
+	// trial validates — simulating settleQueuedReviewFindings having flagged it
+	// mid-CI-wait, just before landOneAtATime's own checkpoint would otherwise
+	// decide its fate via the normal green/red switch.
+	eng.trainValidateFn = func(_ context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
+		present := make(map[int]bool, len(members))
+		for _, m := range members {
+			present[m.item.Number] = true
+		}
+		if len(members) == 1 && members[0].item.Number == 2 {
+			eng.markPendingReviewEject("owner/repo", 2, 5)
+		}
+		if present[1] && present[2] {
+			return TrainCIRed, &trainCIDiagnostic{Note: "interaction", PRNum: 900, TrialSHA: "seam-sha"}
+		}
+		return TrainCIGreen, nil
+	}
+
+	batch := makeSeamBatch(2)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Fatalf("expected the interaction to degrade to one-at-a-time; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	var singletonTitles []string
+	for _, c := range client.createPRCalls {
+		if strings.Contains(c.title, "singleton") {
+			singletonTitles = append(singletonTitles, c.title)
+		}
+	}
+	client.mu.Unlock()
+	if len(singletonTitles) != 1 {
+		t.Fatalf("expected exactly 1 singleton landing PR (#1 only — #2 must be ejected, not landed), got %d: %v", len(singletonTitles), singletonTitles)
+	}
+	if strings.Contains(singletonTitles[0], "#2") {
+		t.Errorf("expected #2 NOT to be landed as a singleton, got title: %s", singletonTitles[0])
+	}
+
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Errorf("expected #2 to be rerouted to Implement, got status updates: %+v", client.updateStatusCalls)
+	}
+
+	client.mu.Lock()
+	var ejectionComment string
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 2 {
+			ejectionComment = c.body
+		}
+	}
+	client.mu.Unlock()
+	if !strings.Contains(ejectionComment, "has left the Queued column") {
+		t.Errorf("expected #2's ejection comment to use the leaves-Queued wording, got: %q", ejectionComment)
+	}
+
+	if _, ok := eng.takePendingReviewEject("owner/repo", 2); ok {
+		t.Error("expected the pending-eject signal for #2 to already be consumed")
 	}
 }
 
@@ -2590,6 +4164,84 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 	}
 	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
 	// defer, not by landGreenBatch/landMergeTrainBatch (ADR-067).
+}
+
+// TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding
+// closes the gap the outer re-form loop's and landOneAtATime's Hook 2 checkpoints
+// don't cover (#1208): landGreenBatch's own main-moved rebase-and-revalidate loop
+// can itself spend a full combined-Validate wait without ever returning control to
+// runMergeTrainWorker, where the primary Hook 2 lives. A review-finding eject
+// flagged for a member while that rebase re-validation is running must still stop
+// the batch from landing — it must not ride the freshly-green rebased trial to
+// landMergeTrainBatch just because this loop never re-checked the signal.
+func TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+
+	// Behind on the first landing-gate check (forces exactly one rebase cycle),
+	// up to date thereafter — same shape as TestLandGreenBatch_BehindOnceThenLands.
+	var mu sync.Mutex
+	behindCalls := 0
+	client.fetchCommitsBehindFn = func(_, _, _, _ string) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		behindCalls++
+		if behindCalls == 1 {
+			return 1, nil // main moved
+		}
+		return 0, nil // caught up after rebase
+	}
+
+	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
+
+	// Flag #1 for a pending review-finding eject — simulates settleQueuedReviewFindings
+	// observing an unresolved thread on #1 while the rebase re-validate is in flight.
+	eng.markPendingReviewEject("owner/repo", 1, 3)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.landGreenBatch(ctx, state, p, survivors)
+
+	// The rebased trial must NOT land: no merge, no member advanced to Done.
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+	if merges != 0 {
+		t.Errorf("expected the flagged trial to be discarded rather than landed, got %d merge(s)", merges)
+	}
+
+	// #1 must have been rerouted off Queued and carry the distinct ejection wording.
+	foundReroute := false
+	client.mu.Lock()
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	client.mu.Unlock()
+	if !foundReroute {
+		t.Error("expected #1 to be rerouted off Queued to Implement")
+	}
+	bodies := ejectionCommentBodies(client, 1)
+	if len(bodies) != 1 || !strings.Contains(bodies[0], "has left the Queued column") {
+		t.Errorf("expected #1's ejection comment to use the leaves-Queued wording, got: %v", bodies)
+	}
+
+	// The pending-eject signal must have been consumed (one-shot).
+	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
+		t.Error("expected the pending-eject signal for #1 to already be consumed")
+	}
+
+	// #2 (not flagged) must not have been touched — no comment, no reroute — it
+	// simply re-forms fresh on a future poll's dispatchMergeTrainWorker call.
+	if len(ejectionCommentBodies(client, 2)) != 0 {
+		t.Error("expected #2 to be left untouched, not ejected")
+	}
 }
 
 // TestLandGreenBatch_ExhaustionDissolves verifies FR-2/FR-5: when the trial keeps
@@ -2946,6 +4598,9 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 			tr := true
 			return &tr, "clean", nil
 		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
 		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
 		closeIssueFn: func(owner, repo string, n int) error { return nil },
@@ -2957,7 +4612,7 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 	eng.worktreeManagers["ownerB/repoB"] = wmB
 	eng.mu.Unlock()
 
-	eng.trainValidateFn = func(_ context.Context, _ []trainMember) TrainCIResult {
+	eng.trainValidateFn = func(_ context.Context, _ []trainMember) (TrainCIResult, *trainCIDiagnostic) {
 		mu.Lock()
 		inFlight++
 		if inFlight > maxInFlight {
@@ -2975,7 +4630,7 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 		mu.Lock()
 		inFlight--
 		mu.Unlock()
-		return TrainCIGreen
+		return TrainCIGreen, nil
 	}
 
 	itemA := gh.ProjectItem{Number: 1, Repo: "ownerA/repoA", Status: "Queued", ItemID: "a1"}
@@ -4368,5 +6023,53 @@ func TestMergeTrainWorker_ByteIdenticalPrematureCommitStillEjectsMember(t *testi
 	}
 	if len(survivors) != 1 || survivors[0].item.Number != 1 {
 		t.Fatalf("expected only member #1 to survive (member #2 ejected despite byte-identical content), got %+v", survivors)
+	}
+}
+
+// TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase covers #1472 (found by
+// handarbeit-pruefer[bot] reviewing #1206/PR #1467): the extend-turns pre-grant for
+// resolveConflictWithClaude's InvokeForComments call must be based on the same
+// commentMaxTurns(stage) that scaledWallTime (engine/claude.go) divides by when scaling
+// max_wall_time, not on stage.MaxTurns — otherwise the two bases disagree and the
+// effective wall-time multiplier silently diverges from the intended 2x.
+func TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase(t *testing.T) {
+	tests := []struct {
+		name        string
+		stage       *stages.Stage
+		extendTurns bool
+		want        int
+	}{
+		{
+			name:        "no extend-turns label -> no override",
+			stage:       &stages.Stage{MaxTurns: 100, CommentMaxTurns: 50},
+			extendTurns: false,
+			want:        0,
+		},
+		{
+			name:        "differing max_turns/comment_max_turns (this repo's own configs) -> scales off comment_max_turns, not max_turns",
+			stage:       &stages.Stage{MaxTurns: 100, CommentMaxTurns: 50},
+			extendTurns: true,
+			want:        100, // 2 * commentMaxTurns(50), NOT 2 * MaxTurns(100) = 200
+		},
+		{
+			name:        "no explicit comment_max_turns -> falls back to MaxTurns as the base",
+			stage:       &stages.Stage{MaxTurns: 100},
+			extendTurns: true,
+			want:        200, // commentMaxTurns falls back to stage.MaxTurns per commentMaxTurns()
+		},
+		{
+			name:        "unlimited stage (MaxTurns 0, no CommentMaxTurns) -> commentMaxTurns falls back to 50 default -> still scales",
+			stage:       &stages.Stage{},
+			extendTurns: true,
+			want:        100, // commentMaxTurns() defaults to 50 when both are 0
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeTrainMaxTurnsOverride(tt.stage, tt.extendTurns)
+			if got != tt.want {
+				t.Errorf("mergeTrainMaxTurnsOverride(%+v, extendTurns=%v) = %d, want %d", tt.stage, tt.extendTurns, got, tt.want)
+			}
+		})
 	}
 }

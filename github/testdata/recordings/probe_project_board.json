@@ -1,0 +1,2384 @@
+{
+  "provenance": {
+    "operation": "probe_project_board",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-08-09T19:10:00Z",
+    "source_repo": "handarbeit/fabrik (project #1, read-only, single full page: first=100)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "organization": {
+        "projectV2": {
+          "id": "PVT_kwDOENB0Ac4BW0n_",
+          "items": {
+            "totalCount": 94,
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "Y3Vyc29yOnYyOpK5MDAwMDAwMDAuMDAxNDEyNDI5Mzc4NTMxMM4Ndm2k"
+            },
+            "nodes": [
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zXpw",
+                "updatedAt": "2026-08-09T18:29:26Z",
+                "fieldValueByName": {
+                  "name": "Plan"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_NaWQ",
+                  "number": 1457,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T18:29:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtnw0U",
+                "updatedAt": "2026-07-26T19:31:00Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDMefTw",
+                  "number": 774,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:30:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtsWSQ",
+                "updatedAt": "2026-08-02T21:25:32Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDQvz9g",
+                  "number": 815,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:25:31Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgv_E0Y",
+                "updatedAt": "2026-08-02T21:25:43Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABFvM0aQ",
+                  "number": 884,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:25:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgykwOs",
+                "updatedAt": "2026-07-26T19:13:23Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABIitXew",
+                  "number": 971,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:14:11Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0B8kQ",
+                "updatedAt": "2026-07-27T01:13:11Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKHDEvg",
+                  "number": 1065,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-27T01:13:08Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1068,
+                        "updatedAt": "2026-07-26T20:15:21Z",
+                        "headRefOid": "93f17c8959b8ab81b38b144b9a61833f26f33598",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0B88s",
+                "updatedAt": "2026-07-26T19:41:16Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKHDkJw",
+                  "number": 1066,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:41:15Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0CcSs",
+                "updatedAt": "2026-07-25T04:40:17Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKHwsjw",
+                  "number": 1071,
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-29T19:32:02Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtvZ4Y",
+                "updatedAt": "2026-07-27T20:42:55Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDUIKLw",
+                  "number": 825,
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-27T20:42:54Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0KYr8",
+                "updatedAt": "2026-07-27T01:29:06Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKQnopg",
+                  "number": 1142,
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-27T01:29:05Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0PYQo",
+                "updatedAt": "2026-07-27T14:24:22Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKV0zgg",
+                  "number": 1177,
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-27T14:23:56Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0Sieg",
+                "updatedAt": "2026-08-08T23:47:16Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZH77w",
+                  "number": 1199,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T23:47:15Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1447,
+                        "updatedAt": "2026-08-08T23:46:00Z",
+                        "headRefOid": "254e4c157216bc9308aa738fa9afd7a4288b2a52",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0Sogs",
+                "updatedAt": "2026-08-09T02:51:25Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZa9Qg",
+                  "number": 1206,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:51:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1467,
+                        "updatedAt": "2026-08-09T02:51:16Z",
+                        "headRefOid": "e5908eb8579ba076c19c350100d0aa80c550f52d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0Sr_c",
+                "updatedAt": "2026-08-08T23:35:35Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZfZow",
+                  "number": 1208,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T23:35:34Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1455,
+                        "updatedAt": "2026-08-08T23:35:25Z",
+                        "headRefOid": "56950e074e0fdaac867240c816021a0557513fe0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0m1L4",
+                "updatedAt": "2026-08-03T16:15:42Z",
+                "fieldValueByName": {
+                  "name": "Validate"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKvM6og",
+                  "number": 1253,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-03T16:15:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1256,
+                        "updatedAt": "2026-08-09T17:56:07Z",
+                        "headRefOid": "2885fb75199fe7b6b5511117b6da1e034d76973e",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0m1MU",
+                "updatedAt": "2026-08-03T16:15:43Z",
+                "fieldValueByName": {
+                  "name": "Validate"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKvM7XQ",
+                  "number": 1254,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-03T16:15:42Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1255,
+                        "updatedAt": "2026-08-09T17:57:36Z",
+                        "headRefOid": "f1e1ac53cb8d684f4452dd11302455c8c2f97ee8",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0z8fE",
+                "updatedAt": "2026-08-09T00:05:24Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABK9BrPg",
+                  "number": 1274,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T00:05:23Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg00uuU",
+                "updatedAt": "2026-08-02T21:47:02Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABK9zQbQ",
+                  "number": 1285,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:47:00Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg04Bko",
+                "updatedAt": "2026-08-02T20:56:09Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLBjHpQ",
+                  "number": 1301,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T20:56:08Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1302,
+                        "updatedAt": "2026-08-02T20:56:02Z",
+                        "headRefOid": "981183b6f21c8330655fb94e012b5a4a86ede874",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg053II",
+                "updatedAt": "2026-08-02T21:13:03Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLDxQmQ",
+                  "number": 1319,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T21:13:01Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-nvk",
+                "updatedAt": "2026-08-03T03:12:07Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJYTWQ",
+                  "number": 1337,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:06Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1354,
+                        "updatedAt": "2026-08-03T03:12:03Z",
+                        "headRefOid": "0e06c499dd50f84369e931ada736c01c5c71855e",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uF0",
+                "updatedAt": "2026-08-03T03:12:08Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgU-Q",
+                  "number": 1339,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:06Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1368,
+                        "updatedAt": "2026-08-03T03:11:58Z",
+                        "headRefOid": "47a1e96eb5a453b4080fe227a3adb4c10df31d84",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg03w8Q",
+                "updatedAt": "2026-08-02T22:32:56Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLBL6Gg",
+                  "number": 1297,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T22:32:55Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1361,
+                        "updatedAt": "2026-08-02T22:32:50Z",
+                        "headRefOid": "b596dcb12cd80c105716a0abdff7aedf93f28753",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uGA",
+                "updatedAt": "2026-08-08T14:19:49Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgVOA",
+                  "number": 1340,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:47Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uGY",
+                "updatedAt": "2026-08-08T14:19:50Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgVaQ",
+                  "number": 1341,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:48Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uGw",
+                "updatedAt": "2026-08-08T14:19:51Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgViw",
+                  "number": 1342,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:49Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uHM",
+                "updatedAt": "2026-08-08T14:19:52Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgVuQ",
+                  "number": 1343,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:50Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0SxMg",
+                "updatedAt": "2026-08-08T14:19:47Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZl1bw",
+                  "number": 1209,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:46Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1AJAY",
+                "updatedAt": "2026-08-08T18:40:52Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLLD8hw",
+                  "number": 1364,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T18:40:51Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1424,
+                        "updatedAt": "2026-08-08T18:40:45Z",
+                        "headRefOid": "2aa29fccf7889b912e3684ce98349b15fe5a7074",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg04ZwU",
+                "updatedAt": "2026-08-03T03:12:09Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLCEdiw",
+                  "number": 1314,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:08Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1369,
+                        "updatedAt": "2026-08-03T03:12:01Z",
+                        "headRefOid": "9f5caeaca5caf5280c4c36907cf023b1a3566828",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0STyc",
+                "updatedAt": "2026-08-02T22:19:05Z",
+                "fieldValueByName": {
+                  "name": "Review"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZD4_w",
+                  "number": 1197,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T22:19:04Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1362,
+                        "updatedAt": "2026-08-09T17:55:45Z",
+                        "headRefOid": "27ec48898bac0e1d1f31e1ea8af465786dbe8cf5",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_iGk",
+                "updatedAt": "2026-08-03T16:30:58Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKaQIA",
+                  "number": 1346,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T16:30:57Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1374,
+                        "updatedAt": "2026-08-03T16:30:53Z",
+                        "headRefOid": "f0a91b7cfd4f13e3f4e4b507beae3a1f23620d62",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_iio",
+                "updatedAt": "2026-08-03T03:12:09Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKal2Q",
+                  "number": 1347,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:07Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1356,
+                        "updatedAt": "2026-08-03T03:11:59Z",
+                        "headRefOid": "781c115a3051e92223e11227463ec6f082cc9b90",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_ii8",
+                "updatedAt": "2026-08-02T22:04:41Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKal_w",
+                  "number": 1348,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T22:04:40Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1357,
+                        "updatedAt": "2026-08-02T22:04:34Z",
+                        "headRefOid": "c9e3613635423fdd5ec5990842ad5413a6d72111",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_ijY",
+                "updatedAt": "2026-08-02T21:37:13Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKamIw",
+                  "number": 1349,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T21:37:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1353,
+                        "updatedAt": "2026-08-02T21:37:03Z",
+                        "headRefOid": "267df045d01ab1f972db14892ca4ed1317845a78",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_nw0",
+                "updatedAt": "2026-08-02T21:46:52Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKfhEA",
+                  "number": 1350,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T21:46:50Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1352,
+                        "updatedAt": "2026-08-02T21:46:43Z",
+                        "headRefOid": "0b0e6a00f52d40d2449ee5552dddcf6f06d824f5",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_5pY",
+                "updatedAt": "2026-08-03T03:36:31Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKyshA",
+                  "number": 1355,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:36:29Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1363,
+                        "updatedAt": "2026-08-03T03:36:28Z",
+                        "headRefOid": "d004512e4ece240400355ba56f9c5916192d691f",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ADwI",
+                "updatedAt": "2026-08-08T14:19:53Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLK9yGA",
+                  "number": 1359,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:52Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1AJBA",
+                "updatedAt": "2026-08-08T15:57:36Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLLEEqA",
+                  "number": 1365,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T15:57:34Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1423,
+                        "updatedAt": "2026-08-08T15:57:27Z",
+                        "headRefOid": "248941d9666cc907f3d49edc42708d9b3ef2bcbd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1AJBU",
+                "updatedAt": "2026-08-08T19:26:18Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLLELFw",
+                  "number": 1366,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T19:26:17Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1437,
+                        "updatedAt": "2026-08-08T19:26:16Z",
+                        "headRefOid": "48c0b1907c0516a4e51ec4a3df44b9f6a5127ab2",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1GpLM",
+                "updatedAt": "2026-08-08T14:19:55Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLRVuDw",
+                  "number": 1378,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:54Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1HMrE",
+                "updatedAt": "2026-08-08T14:19:57Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLR8uyQ",
+                  "number": 1380,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:55Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Bd_U",
+                "updatedAt": "2026-08-08T14:19:55Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLMRWIA",
+                  "number": 1372,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:53Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Fik0",
+                "updatedAt": "2026-08-04T02:55:47Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLQOr8w",
+                  "number": 1375,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T02:55:46Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1376,
+                        "updatedAt": "2026-08-04T02:55:43Z",
+                        "headRefOid": "1036839c085d67d4d4ab6138f3e3f4ea82543ba0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Gnpw",
+                "updatedAt": "2026-08-03T15:15:45Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLRUfKg",
+                  "number": 1377,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T15:15:44Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1HHEw",
+                "updatedAt": "2026-08-04T11:18:46Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLR2KMg",
+                  "number": 1379,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T11:18:44Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1381,
+                        "updatedAt": "2026-08-04T11:20:51Z",
+                        "headRefOid": "7d5b81b060f43666b13d4d48766effd6436a04ad",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1JqFA",
+                "updatedAt": "2026-08-04T11:00:03Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLUzLMg",
+                  "number": 1387,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T11:00:02Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1388,
+                        "updatedAt": "2026-08-04T10:59:57Z",
+                        "headRefOid": "e689506d4c48bfabc949d8d730eee674cf147b49",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1NjPA",
+                "updatedAt": "2026-08-08T18:40:46Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLYvgng",
+                  "number": 1391,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T18:40:45Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1392,
+                        "updatedAt": "2026-08-08T18:40:44Z",
+                        "headRefOid": "6d51099fa59edd2687d52bdb9ef2e9400bdf7cfd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1OXcA",
+                "updatedAt": "2026-08-09T06:37:54Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLZsISg",
+                  "number": 1393,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T06:37:52Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1493,
+                        "updatedAt": "2026-08-09T06:37:49Z",
+                        "headRefOid": "bd7809c1a6fa0887f94a0038a88a131609a24b7a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Pk1Y",
+                "updatedAt": "2026-08-04T16:21:00Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbCeWQ",
+                  "number": 1394,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T16:20:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1403,
+                        "updatedAt": "2026-08-04T16:20:57Z",
+                        "headRefOid": "998060e5b97223689d6e1d48d92d71175d25ffc3",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Pk2Y",
+                "updatedAt": "2026-08-04T16:00:17Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbCfFw",
+                  "number": 1395,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T16:00:16Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1400,
+                        "updatedAt": "2026-08-04T16:00:04Z",
+                        "headRefOid": "508c97277748d4ba3d77fdcb5758f85ef4acef6d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Pk3o",
+                "updatedAt": "2026-08-09T03:21:29Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbCgBg",
+                  "number": 1396,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:21:28Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1476,
+                        "updatedAt": "2026-08-09T03:21:23Z",
+                        "headRefOid": "b99f77d6e89cb7841f67f911c6543f9971ab3281",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1PoEo",
+                "updatedAt": "2026-08-04T15:53:51Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbGJcA",
+                  "number": 1398,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T15:53:49Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1399,
+                        "updatedAt": "2026-08-04T15:53:48Z",
+                        "headRefOid": "3899ac08db152404e6692110cb8ed72b46e94061",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1SykY",
+                "updatedAt": "2026-08-06T13:36:33Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLeVinw",
+                  "number": 1405,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:31Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1SylI",
+                "updatedAt": "2026-08-06T13:36:37Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLeV2KA",
+                  "number": 1406,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:35Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Syl8",
+                "updatedAt": "2026-08-06T13:36:38Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLeWKRw",
+                  "number": 1407,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:59Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1TuPk",
+                "updatedAt": "2026-08-08T22:29:30Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLfY2ng",
+                  "number": 1408,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T22:29:28Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1445,
+                        "updatedAt": "2026-08-08T22:32:22Z",
+                        "headRefOid": "5d2956d29447dcbd159ccf00043eaed941e80b7a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1UfJM",
+                "updatedAt": "2026-08-09T02:51:22Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLgJuKQ",
+                  "number": 1410,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:51:20Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1468,
+                        "updatedAt": "2026-08-09T02:51:16Z",
+                        "headRefOid": "0349a4a8f6f991453e06fe8a53726efd495d1ddb",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnQU",
+                "updatedAt": "2026-08-08T14:19:58Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLTeg",
+                  "number": 1411,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:56Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnRg",
+                "updatedAt": "2026-08-08T14:19:59Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLULw",
+                  "number": 1412,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnTc",
+                "updatedAt": "2026-08-08T15:57:38Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLU1w",
+                  "number": 1413,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T15:57:36Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1425,
+                        "updatedAt": "2026-08-08T15:57:31Z",
+                        "headRefOid": "cda263d1d24bdc09bfbedc352252c166159f730d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnUE",
+                "updatedAt": "2026-08-09T04:14:35Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLVkA",
+                  "number": 1414,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T04:14:33Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1487,
+                        "updatedAt": "2026-08-09T04:14:32Z",
+                        "headRefOid": "9a7c12330c33b075d0f21f44f3fa813c3c73fa64",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ci-Y",
+                "updatedAt": "2026-08-05T22:03:41Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLVpo9Q",
+                  "number": 1389,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-05T22:03:40Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1415,
+                        "updatedAt": "2026-08-05T22:03:37Z",
+                        "headRefOid": "8ca4fe233979cd0134d642d2094ac9a31956da82",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1iOFQ",
+                "updatedAt": "2026-08-06T13:36:35Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLuFK7w",
+                  "number": 1417,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:33Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzOA",
+                "updatedAt": "2026-08-08T18:40:47Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL9udBA",
+                  "number": 1420,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T18:40:46Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1426,
+                        "updatedAt": "2026-08-08T18:40:43Z",
+                        "headRefOid": "45711d410bc184786b9ec6107e81457538db12f4",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzOY",
+                "updatedAt": "2026-08-08T23:48:04Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL9udHA",
+                  "number": 1421,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T23:48:02Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1444,
+                        "updatedAt": "2026-08-08T23:47:42Z",
+                        "headRefOid": "4ae7689b717db01d66bdc2f23054b5f65672189a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzOs",
+                "updatedAt": "2026-08-09T03:16:46Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL9udOQ",
+                  "number": 1422,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:16:45Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1469,
+                        "updatedAt": "2026-08-09T03:16:44Z",
+                        "headRefOid": "f073e1346b05e9e3e988b1b44ff342c9898ba546",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzkE",
+                "updatedAt": "2026-08-09T01:12:42Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABK9EPnw",
+                  "number": 1275,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T01:12:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1463,
+                        "updatedAt": "2026-08-09T01:12:36Z",
+                        "headRefOid": "5eae1afff70fa022dd1bfe3492eb73801bcfb7cc",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzks",
+                "updatedAt": "2026-08-09T05:13:04Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLzAUWw",
+                  "number": 1419,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T05:13:03Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1490,
+                        "updatedAt": "2026-08-09T05:16:24Z",
+                        "headRefOid": "50c4badebdaf8572e64739f69f4e424b4bee5ec0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1x5Fc",
+                "updatedAt": "2026-08-09T02:54:13Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABJwrMwg",
+                  "number": 1045,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:54:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1473,
+                        "updatedAt": "2026-08-09T02:54:07Z",
+                        "headRefOid": "1abaf53e76bca5a426b5709b2ed5fcb6216314fd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ykUs",
+                "updatedAt": "2026-08-08T19:20:14Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-haRg",
+                  "number": 1427,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T19:20:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1430,
+                        "updatedAt": "2026-08-08T18:57:25Z",
+                        "headRefOid": "6487f1dd13ae52de6aabff36b93f34fd6b42ef14",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ykU8",
+                "updatedAt": "2026-08-08T19:23:30Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-hcww",
+                  "number": 1428,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T19:23:30Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1429,
+                        "updatedAt": "2026-08-08T19:23:29Z",
+                        "headRefOid": "89637cb038e3289049f9a8f99c5a79de011e7e12",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1y9EA",
+                "updatedAt": "2026-08-08T19:17:43Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-y3hg",
+                  "number": 1439,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T19:05:36Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1y9Es",
+                "updatedAt": "2026-08-09T01:12:43Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-1tbg",
+                  "number": 1440,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T01:12:42Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1465,
+                        "updatedAt": "2026-08-09T01:12:37Z",
+                        "headRefOid": "2baa6ea888ec07d02134b8823a1af018517a63ca",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zObc",
+                "updatedAt": "2026-08-09T13:47:55Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E1mA",
+                  "number": 1448,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T13:47:54Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1477,
+                        "updatedAt": "2026-08-09T13:47:50Z",
+                        "headRefOid": "0f719b232693edbf20180f2813821ec90795cdc4",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1y9FM",
+                "updatedAt": "2026-08-09T04:54:31Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-1ttA",
+                  "number": 1441,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T04:54:30Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1489,
+                        "updatedAt": "2026-08-09T04:55:14Z",
+                        "headRefOid": "2a4ad3150110f4b00e2a35bb41d51f7e35b557e4",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zBiQ",
+                "updatedAt": "2026-08-09T03:23:51Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLB4Nqw",
+                  "number": 1307,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:23:49Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zKk0",
+                "updatedAt": "2026-08-08T20:15:35Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_C1ug",
+                  "number": 1446,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T14:00:18Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOcI",
+                "updatedAt": "2026-08-09T13:46:59Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E2Ow",
+                  "number": 1449,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T13:46:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOcs",
+                "updatedAt": "2026-08-09T17:51:20Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E2lw",
+                  "number": 1450,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:51:19Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOdY",
+                "updatedAt": "2026-08-09T17:51:21Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E3EA",
+                  "number": 1451,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:51:20Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOeQ",
+                "updatedAt": "2026-08-09T17:51:22Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E4Hw",
+                  "number": 1452,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:51:21Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOfA",
+                "updatedAt": "2026-08-09T18:46:16Z",
+                "fieldValueByName": {
+                  "name": "Implement"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E4lg",
+                  "number": 1453,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T18:46:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOfc",
+                "updatedAt": "2026-08-09T17:54:15Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E5Dg",
+                  "number": 1454,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:54:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zUVg",
+                "updatedAt": "2026-08-08T20:41:17Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_Ij_A",
+                  "number": 1456,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T14:00:18Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zrV4",
+                "updatedAt": "2026-08-09T01:12:41Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_f4Sg",
+                  "number": 1458,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:55:44Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1466,
+                        "updatedAt": "2026-08-09T01:12:34Z",
+                        "headRefOid": "bc834641c4cffe9f1e111bc608b13643b85c0f65",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1z3SI",
+                "updatedAt": "2026-08-09T02:57:17Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_r9tA",
+                  "number": 1460,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:57:16Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1470,
+                        "updatedAt": "2026-08-09T02:57:12Z",
+                        "headRefOid": "5750a46132b17c894fee6dffe4104ad8f852e4bd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1z-e8",
+                "updatedAt": "2026-08-09T00:00:59Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_0aUQ",
+                  "number": 1462,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T00:00:57Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1z-uA",
+                "updatedAt": "2026-08-09T02:57:16Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_0qsg",
+                  "number": 1464,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:57:15Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1475,
+                        "updatedAt": "2026-08-09T02:57:10Z",
+                        "headRefOid": "741308a1003b52b3c7b1ed5df87fed5a778d2d20",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg10c10",
+                "updatedAt": "2026-08-09T03:42:25Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMATooQ",
+                  "number": 1482,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:42:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1485,
+                        "updatedAt": "2026-08-09T03:42:22Z",
+                        "headRefOid": "132639ba2878d3496ce7864560e3279d4d5fc769",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12Okw",
+                "updatedAt": "2026-08-09T14:56:19Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMCPl9A",
+                  "number": 1496,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T14:56:18Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1502,
+                        "updatedAt": "2026-08-09T14:56:12Z",
+                        "headRefOid": "d608e5ea48e0d55ce30411b7ca466813181ce8bf",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12OlE",
+                "updatedAt": "2026-08-09T17:51:55Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMCPmSQ",
+                  "number": 1497,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T17:51:53Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1505,
+                        "updatedAt": "2026-08-09T17:51:52Z",
+                        "headRefOid": "498cb6489d52d89ec4e189e6cf00e9be24fb496a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12Z-I",
+                "updatedAt": "2026-08-09T13:47:04Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMCQMfw",
+                  "number": 1498,
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T13:47:03Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12baQ",
+                "updatedAt": "2026-08-09T14:52:11Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMAHNsg",
+                  "number": 1472,
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T14:52:10Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "number": 1501,
+                        "updatedAt": "2026-08-09T14:52:03Z",
+                        "headRefOid": "50ab10218e1ef18eed5c9d4dbb2a26cdb8651497",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "source_url": "https://docs.github.com/public/fpt/schema.docs.graphql",
+  "fetched_at": "2026-08-09T18:07:55Z",
+  "notes": "GitHub's publicly documented GraphQL SDL schema for the free/pro/team product tier. Vendored offline so wire_contract_test.go can validate github/'s embedded query/mutation strings without live credentials. Refresh with scripts/wire-contract/refresh-schema.sh. See github/testdata/README.md for the staleness policy (wire_contract_test.go fails go test after 180 days)."
+}

@@ -144,6 +144,29 @@ func (c WarningsPaneComponent) dismissedCount() int {
 	return n
 }
 
+// warningsWindowOffset computes the scroll offset for a fixed-size render
+// window of windowRows over n entries, such that curIdx always falls inside
+// [offset, offset+windowRows-1]. It anchors the window to the top when
+// curIdx is above it, to the bottom when curIdx is below it, and clamps the
+// offset so the window never runs past the end of the entries.
+func warningsWindowOffset(curIdx, n, windowRows int) int {
+	if windowRows <= 0 {
+		return 0
+	}
+	offset := curIdx - windowRows + 1
+	if offset < 0 {
+		offset = 0
+	}
+	maxOffset := n - windowRows
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	return offset
+}
+
 // currentVisible returns the currently selected visible entry, or nil.
 func (c WarningsPaneComponent) currentVisible() *warnings.Entry {
 	visible := c.visibleEntries()
@@ -196,6 +219,9 @@ func (c WarningsPaneComponent) Height() int {
 	}
 	rows := min(len(visible), maxWarningRows)
 	h := 2 + 1 + rows // border (2) + title line (1) + entry rows
+	if len(visible) > maxWarningRows {
+		h++ // "… +N more" overflow line — kept in lockstep with View()'s own check
+	}
 	if c.expandedDetail {
 		entry := c.currentVisible()
 		if entry != nil {
@@ -279,10 +305,12 @@ func (c WarningsPaneComponent) View(width int) string {
 	lines = append(lines, title)
 
 	displayRows := min(len(visible), maxWarningRows)
+	offset := warningsWindowOffset(c.curIdx, len(visible), displayRows)
 	for i := 0; i < displayRows; i++ {
-		e := visible[i]
+		idx := offset + i
+		e := visible[idx]
 		prefix := "  "
-		if c.focused && i == c.curIdx {
+		if c.focused && idx == c.curIdx {
 			prefix = "▸ "
 		}
 		titleText := e.Title
@@ -299,13 +327,32 @@ func (c WarningsPaneComponent) View(width int) string {
 			label = dimStyle.Render(prefix + "✓ " + titleText + " (dismissed)")
 		} else {
 			line := prefix + titleText
-			if c.focused && i == c.curIdx {
+			if c.focused && idx == c.curIdx {
 				label = selectedStyle.Render(line)
 			} else {
 				label = line
 			}
 		}
 		lines = append(lines, label)
+	}
+	if len(visible) > displayRows {
+		hidden := len(visible) - displayRows
+		above := offset
+		below := hidden - above
+		var dir string
+		switch {
+		case above > 0 && below > 0:
+			dir = fmt.Sprintf(" (%d above, %d below)", above, below)
+		case above > 0:
+			dir = " above"
+			// No case for below>0-only (unscrolled): "… +N more" alone
+			// already means "below" by default, matching pre-fix wording and
+			// every byte-exact test predating scroll direction. Don't
+			// "balance" this by adding an explicit " below" suffix here —
+			// that changes rendered output and breaks
+			// TestWarningsView_OverflowIndicatorDirection.
+		}
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … +%d more%s", hidden, dir)))
 	}
 
 	// Expanded detail for the selected entry.

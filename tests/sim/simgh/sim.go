@@ -1,0 +1,299 @@
+// Package simgh implements a stateful, git-backed simulation of the GitHub
+// surface that Fabrik's engine talks to.
+//
+// It exists to fill the gap between engine/mocks_test.go — a per-call function
+// hook stub where nothing carries across poll cycles — and tests/e2e, which
+// drives a real daemon against real GitHub at real cost. simgh is a third
+// layer: a model faithful enough that a multi-poll transition sequence can be
+// asserted in an ordinary `go test` run.
+//
+// Two properties define it:
+//
+//   - It is stateful. A mutation is observable by every subsequent read, the
+//     way GitHub behaves. Read projections (gh.ProjectItem, gh.PRDetails,
+//     gh.BoardProbeItem) are computed fresh from the model on every call and
+//     never cached, so this is structural rather than something each test has
+//     to re-assert.
+//
+//   - It is backed by real git. Anything git can genuinely answer —
+//     mergeability, merge commits, commits-behind — is computed by running the
+//     real git binary against a real bare repository, not declared by the test.
+//     A fake that lets a test assert mergeability cannot catch a mergeability
+//     bug.
+//
+// What it is structurally blind to is documented in ../README.md; every place
+// it knowingly diverges from real GitHub is documented in FIDELITY.md. Read
+// FIDELITY.md before trusting a sim-backed test to cover a subtle behaviour.
+//
+// # Locking
+//
+// Two tiers, with a strict ordering invariant:
+//
+//   - Sim.mu guards all in-memory model state across every repo and project.
+//   - repoState.gitMu guards git subprocess invocations against that repo's
+//     bare directory. Git's own on-disk state (config, index, worktree list)
+//     is not concurrency-safe, so a Go-level mutex over the model alone is not
+//     enough.
+//
+// INVARIANT: never acquire mu while holding gitMu, and never hold mu across a
+// git subprocess call. The pattern used throughout is: take mu, copy out the
+// inputs, release mu; take gitMu, run git, release gitMu; take mu again to
+// write the result back. A violation of this ordering surfaces only as an
+// intermittent deadlock or -race failure, so it is enforced by review.
+//
+// The instrumentation layer adds two more mutexes — MutationLog's and
+// FaultTable's — and they add no edge to that ordering, because both are
+// acquired and released *before* control enters Sim and neither is ever held
+// across a Sim call. They are leaves. Sim's own code never touches them.
+//
+// # The instrumentation layer
+//
+// A faithful model is a GitHub stand-in; three further capabilities make it a
+// test instrument. Two are cross-cutting and live in a decorator, one is part
+// of the model itself.
+//
+//   - Clock-driven schedules (schedule.go, and the Seed*At / Seed*After methods
+//     in seed.go) enqueue a mutation for a future instant on the injected
+//     clock. A step is a *pending mutation applied on read*, not a read filter:
+//     when its time arrives it writes into the model permanently, so repeated
+//     reads at one instant are stable and later engine mutations to the same
+//     surface stay observable. Sequencing is clock-driven rather than
+//     read-count-driven because one poll is not one read — see schedule.go's
+//     file comment for the full reasoning.
+//
+//   - Fault injection (fault.go) makes any engine.GitHubClient method fail on
+//     demand. The error shape is the caller's choice and it matters: the engine
+//     classifies rate-limit shapes specially, so use the ghfault constructors.
+//     RateLimitStats is the one method it cannot fail — no error return — and
+//     registering a fault against it panics rather than sitting inert.
+//
+//   - The mutation log (mutationlog.go) records every intercepted call with its
+//     outcome, in order. Attempts, not just mutations: "N failures then the
+//     success" is unexpressible otherwise. Ordering is exact within a goroutine
+//     and reserve-order across goroutines; both halves of that contract are in
+//     FIDELITY.md, because a cross-goroutine ordering assertion that looks
+//     exact and is not is a flaky test waiting to happen.
+//
+// Wrap a seeded Sim with Instrument to get the latter two. The wrapper holds
+// its *Sim as a NAMED field, never an embedded one — see instrumented.go for
+// why that one word is load-bearing.
+//
+// Snapshot/Restore (snapshot.go) round-trip the model, the backing git
+// repositories, the fault schedule and the log, so a restart scenario can
+// discard the engine and rebuild against exactly the state GitHub would have
+// retained.
+//
+// # Adding a method
+//
+// Sim pins itself to engine.GitHubClient with a compile-time assertion, so any
+// future widening of that interface breaks this package's build immediately.
+// That is deliberate — it is how the layer detects drift. When it happens, add
+// the new method to the grouped file matching its concern (prs.go, ci.go,
+// reviews.go, board.go, labels.go, comments.go, issues.go, deps.go, misc.go),
+// give it a real if simplified implementation, and record any divergence in
+// FIDELITY.md. Do not add a stub that returns an error — an unimplemented
+// method that compiles is exactly the silent-green failure mode this layer
+// must not introduce.
+//
+// Instrumented pins itself the same way, and because it holds its *Sim as a
+// named field the new method must be wrapped there too or the build breaks.
+// Add the wrapper alongside its neighbours in instrumented.go; the
+// reflection-driven tests in mutationlog_test.go and fault_test.go will then
+// confirm it is actually instrumented and actually faultable.
+package simgh
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/handarbeit/fabrik/engine"
+)
+
+// Sim implements engine.GitHubClient against an in-memory model backed by real
+// local git repositories.
+var _ engine.GitHubClient = (*Sim)(nil)
+
+// Clock supplies the current time. Every time-bearing value the model
+// produces — label applied-at, comment timestamps, project updated-at, rate
+// limit windows — is read from it, so a test can drive the engine's
+// time-anchored gates (the review-gate timeout, the CI settle scan, the
+// Done-archive scan, all of which key off FetchLabelAppliedAt) without
+// wall-clock waiting.
+//
+// # An implementation must be safe for concurrent use
+//
+// Now is called from every engine worker goroutine, on every model read that
+// touches a timestamp, on every drain of a schedule (schedule.go), and on
+// every call intercepted by the instrumentation layer. Meanwhile the whole
+// point of a controllable clock is that the scenario *advances* it — and a
+// harness driving Engine.Run() advances it with workers in flight, because
+// there is no moment at which nothing is running.
+//
+// So an advanceable Clock must guard its own state. A plain time.Time field
+// written by Advance and read by Now is a data race that -race will report
+// from an arbitrary worker, far from the Advance that caused it. realClock is
+// trivially safe; the test clock in helpers_test.go carries a mutex for this
+// reason.
+type Clock interface {
+	Now() time.Time
+}
+
+// realClock is the default Clock, reading wall time.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+// Sim is a simulated GitHub instance. The zero value is not usable; construct
+// one with New.
+type Sim struct {
+	// baseDir is the directory holding every backing bare repository. Callers
+	// normally pass t.TempDir().
+	baseDir string
+
+	clock Clock
+
+	// seedRepoMu serialises SeedRepo end to end. It is the only seeding call
+	// that runs git before publishing its state, so the check-then-publish
+	// sequence needs to be atomic against a concurrent caller for the same key
+	// — there is no repoState, and so no gitMu, in existence yet to serialise
+	// the git init. Taken at the outermost level only; never acquired while
+	// holding mu or gitMu.
+	seedRepoMu sync.Mutex
+
+	// mu guards every field below it. See the package doc's locking invariant.
+	mu sync.Mutex
+
+	repos    map[string]*repoState    // keyed "owner/repo"
+	projects map[string]*projectState // keyed "owner:projectNum"
+
+	// defaultProject is the first project seeded, used by seeding helpers so a
+	// single-project scenario does not have to name it repeatedly.
+	defaultProject *projectState
+
+	nextCommentDatabaseID int
+	nextCheckRunID        int64
+
+	// seededCheckRunIDs is every check run ID handed out or explicitly seeded,
+	// so SeedCheckRun can refuse a duplicate. GitHub's check run IDs are unique
+	// across the instance, and production relies on their ordering to pick the
+	// latest rerun of a check name.
+	seededCheckRunIDs map[int64]bool
+
+	// restRate and graphqlRate back RateLimitStats. Modelled as static
+	// budgets that never deplete; see FIDELITY.md.
+	restRate    rateBudget
+	graphqlRate rateBudget
+
+	// seedErr holds the first error produced by a chained Seed* call. Checked
+	// with Err.
+	seedErr error
+}
+
+// rateBudget is the sim's static stand-in for a GitHub rate limit window.
+type rateBudget struct {
+	limit     int
+	remaining int
+	used      int
+	resetIn   time.Duration
+}
+
+// Option configures a Sim at construction.
+type Option func(*Sim)
+
+// WithClock substitutes the clock every time-bearing value is read from.
+func WithClock(c Clock) Option {
+	return func(s *Sim) { s.clock = c }
+}
+
+// WithRateLimits overrides the static rate-limit budgets reported by
+// RateLimitStats.
+func WithRateLimits(restLimit, restRemaining, graphqlLimit, graphqlRemaining int) Option {
+	return func(s *Sim) {
+		s.restRate = rateBudget{limit: restLimit, remaining: restRemaining, used: restLimit - restRemaining, resetIn: time.Hour}
+		s.graphqlRate = rateBudget{limit: graphqlLimit, remaining: graphqlRemaining, used: graphqlLimit - graphqlRemaining, resetIn: time.Hour}
+	}
+}
+
+// New constructs a Sim whose backing git repositories live under baseDir.
+// baseDir must exist and be writable; tests normally pass t.TempDir().
+func New(baseDir string, opts ...Option) *Sim {
+	s := &Sim{
+		baseDir:               baseDir,
+		clock:                 realClock{},
+		repos:                 make(map[string]*repoState),
+		projects:              make(map[string]*projectState),
+		nextCommentDatabaseID: 1000,
+		nextCheckRunID:        5000,
+		seededCheckRunIDs:     make(map[int64]bool),
+		restRate:              rateBudget{limit: 5000, remaining: 5000, resetIn: time.Hour},
+		graphqlRate:           rateBudget{limit: 5000, remaining: 5000, resetIn: time.Hour},
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// now reads the injected clock. Never call time.Now directly elsewhere in this
+// package — determinism for the engine's time-anchored gates depends on every
+// timestamp flowing through here.
+func (s *Sim) now() time.Time { return s.clock.Now() }
+
+// Err reports the first error recorded by a chained Seed* call, or nil. Seeding
+// uses the sticky-error builder idiom so a scenario reads as a short chain
+// rather than a ladder of error checks; call Err once at the end of setup.
+func (s *Sim) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seedErr
+}
+
+// fail records a seeding error if none has been recorded yet. Caller must hold mu.
+func (s *Sim) fail(format string, args ...any) {
+	if s.seedErr == nil {
+		s.seedErr = fmt.Errorf(format, args...)
+	}
+}
+
+// repoKey normalises an owner and repo into the model's repo key.
+func repoKey(owner, repo string) string { return owner + "/" + repo }
+
+// projectKey normalises a project's owner-scoped identity. Projects v2 are
+// owned by a user or organisation, not by a repository, so project state is
+// keyed by (owner, number) — a repo parameter on a fetch is a query input, not
+// part of the project's identity.
+func projectKey(owner string, num int) string { return fmt.Sprintf("%s:%d", owner, num) }
+
+// lookupRepo returns the repo state for owner/repo. Caller must hold mu.
+func (s *Sim) lookupRepo(owner, repo string) (*repoState, error) {
+	r, ok := s.repos[repoKey(owner, repo)]
+	if !ok {
+		return nil, fmt.Errorf("simgh: repo %s not seeded", repoKey(owner, repo))
+	}
+	return r, nil
+}
+
+// repoDir is the on-disk path of a repo's backing bare repository.
+// Owner and repo are separate path segments rather than joined with a
+// separator, because joining is not collision-free: "acme-widgets/foo" and
+// "acme/widgets-foo" both flatten to "acme-widgets-foo". SeedRepo's
+// already-seeded check is keyed on the full "owner/repo" string, so both would
+// be accepted and would produce two repoState values — each with its own gitMu
+// — pointing at one physical repository. That silently voids the per-repo git
+// serialisation the whole locking design rests on, and lets commits from one
+// logical repo land in the other. Both segments are validated as single
+// path-safe names (splitOwnerRepo), so nesting cannot escape baseDir.
+func (s *Sim) repoDir(owner, repo string) string {
+	return filepath.Join(s.baseDir, owner, repo+".git")
+}
+
+// ensureBaseDir creates baseDir if it does not exist.
+func (s *Sim) ensureBaseDir() error {
+	if err := os.MkdirAll(s.baseDir, 0o755); err != nil {
+		return fmt.Errorf("simgh: creating base dir %s: %w", s.baseDir, err)
+	}
+	return nil
+}

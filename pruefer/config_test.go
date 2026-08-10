@@ -55,6 +55,84 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if !cfg.TUI {
 		t.Errorf("TUI = false, want true (default on)")
 	}
+	if cfg.LogFile != DefaultLogPath {
+		t.Errorf("LogFile = %q, want %q", cfg.LogFile, DefaultLogPath)
+	}
+}
+
+func TestLoadConfig_LogFilePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	custom := filepath.Join(t.TempDir(), "custom.log")
+	fromEnv := filepath.Join(t.TempDir(), "env.log")
+	fromFlag := filepath.Join(t.TempDir(), "flag.log")
+
+	// YAML override.
+	path := writeYAMLConfig(t, dir, "log_file: "+custom)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != custom {
+		t.Errorf("LogFile = %q, want %q (from YAML)", cfg.LogFile, custom)
+	}
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_LOG_FILE", fromEnv)
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != fromEnv {
+		t.Errorf("LogFile = %q, want %q (env should override YAML)", cfg.LogFile, fromEnv)
+	}
+
+	// Flag overrides env.
+	cfg, err = LoadConfig([]string{"-config", path, "-log-file", fromFlag})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != fromFlag {
+		t.Errorf("LogFile = %q, want %q (flag should override env)", cfg.LogFile, fromFlag)
+	}
+}
+
+func TestLoadConfig_LogFileYAMLExplicitEmptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `log_file: ""`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "" {
+		t.Errorf("LogFile = %q, want empty (YAML log_file: \"\" should disable file logging)", cfg.LogFile)
+	}
+}
+
+func TestLoadConfig_LogFileEnvExplicitEmptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, "log_file: "+filepath.Join(t.TempDir(), "custom.log"))
+	t.Setenv("PRUEFER_LOG_FILE", "")
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "" {
+		t.Errorf("LogFile = %q, want empty (PRUEFER_LOG_FILE= should disable file logging, overriding YAML)", cfg.LogFile)
+	}
+}
+
+func TestLoadConfig_LogFileFlagExplicitEmptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, "log_file: "+filepath.Join(t.TempDir(), "custom.log"))
+
+	cfg, err := LoadConfig([]string{"-config", path, "-log-file", ""})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LogFile != "" {
+		t.Errorf("LogFile = %q, want empty (-log-file \"\" should disable file logging, overriding YAML)", cfg.LogFile)
+	}
 }
 
 func TestLoadConfig_TUIPrecedence(t *testing.T) {
@@ -87,6 +165,66 @@ func TestLoadConfig_TUIPrecedence(t *testing.T) {
 	}
 	if cfg.TUI {
 		t.Errorf("TUI = true, want false (-notui flag should override env)")
+	}
+}
+
+func TestLoadConfig_AutoUpgradeDefaultsOff(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = true, want false by default")
+	}
+}
+
+func TestLoadConfig_AutoUpgradePrecedence(t *testing.T) {
+	dir := t.TempDir()
+
+	// YAML can enable it.
+	path := writeYAMLConfig(t, dir, `auto_upgrade: true`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = false, want true (from YAML)")
+	}
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_AUTO_UPGRADE", "false")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = true, want false (env should override YAML)")
+	}
+
+	// --auto-upgrade flag overrides env.
+	t.Setenv("PRUEFER_AUTO_UPGRADE", "false")
+	cfg, err = LoadConfig([]string{"-config", path, "-auto-upgrade"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AutoUpgrade {
+		t.Errorf("AutoUpgrade = false, want true (--auto-upgrade flag should override env)")
+	}
+}
+
+func TestLoadConfig_VersionRequestedShortCircuits(t *testing.T) {
+	// --version must work even with no config file present and no other
+	// required flags set, so it short-circuits before YAML/env resolution.
+	cfg, err := LoadConfig([]string{"-version"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.VersionRequested {
+		t.Errorf("VersionRequested = false, want true")
+	}
+	if cfg.AppID != 0 || len(cfg.WatchedRepos) != 0 {
+		t.Errorf("expected short-circuited zero-value Config aside from VersionRequested, got %+v", cfg)
 	}
 }
 

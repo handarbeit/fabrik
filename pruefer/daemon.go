@@ -55,6 +55,15 @@ type Daemon struct {
 
 	// FabrikDir is the directory containing .pruefer/pruefer.lock. Defaults
 	// to "." (cwd) when empty.
+	//
+	// For the dev-build self-upgrade path (checkAndUpgrade → devBuildDir in
+	// upgrade.go) to work, FabrikDir must also be the root of the Fabrik
+	// source checkout — devBuildDir resolves <FabrikDir>/cmd/pruefer as the
+	// package to rebuild. This is not enforced: Execute() never sets this
+	// field explicitly, relying on the "" → cwd default, so it's on the
+	// operator to run Pruefer with its working directory at the checkout
+	// root for dev-mode auto-upgrade to work. A mismatch fails closed —
+	// selfupgrade.IsSourceCheckout simply returns false — rather than erroring.
 	FabrikDir string
 
 	// Emit, when non-nil, receives TUI observability events for poll cycles,
@@ -81,6 +90,76 @@ func (d *Daemon) emit(ev ptui.Event) {
 	if d.Emit != nil {
 		d.Emit(ev)
 	}
+}
+
+// NewDaemon is the sole production construction path for Daemon: it builds
+// the Daemon and, when cfg.LogFile is non-empty, opens a rotating file
+// logger and assigns it to the package-level pruefer.Logf hook so every
+// logf call in this package routes to a timestamped, mutex-serialized log
+// file instead of stderr (issue #1428, R1/R2). The returned close function
+// closes the log file and clears Logf; callers should defer it.
+//
+// Deliberately NOT called from Daemon's own methods (Run/poll) — daemon_test.go
+// builds Daemon{} literals directly and calls Run/poll without going through
+// NewDaemon, relying on Logf staying nil in that path (R1: "Logf staying nil
+// in tests must remain true"). Execute is the only production caller.
+//
+// In TUI mode (per useTUI(cfg)), stderr output would corrupt the bubbletea
+// display, so the file is the sole destination; in plain daemon mode,
+// logging is additive — lines are teed to both stderr and the file (R5).
+//
+// A log-file open failure is non-fatal: it's logged as a warning to stderr
+// and, outside TUI mode, Logf is left nil (falling back to stderr for every
+// line), mirroring engine/poll.go's own non-fatal fabrik.log open-failure
+// handling. In TUI mode, an open failure or an explicitly empty cfg.LogFile
+// both leave nothing routing pruefer/log.go's raw fmt.Fprintf(os.Stderr, ...)
+// fallback out of the way of the bubbletea display, so Logf is instead
+// assigned a discard function — the same corruption R5 wires the file-only
+// path to avoid, just for the case where there is no file to write to.
+func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker, clone CloneFunc, botLogin string) (*Daemon, func() error) {
+	d := &Daemon{
+		Clients:  clients,
+		Claude:   claude,
+		Clone:    clone,
+		Config:   cfg,
+		BotLogin: botLogin,
+	}
+
+	return d, wireLogf(cfg, useTUI(cfg))
+}
+
+// wireLogf assigns the package-level Logf hook according to cfg.LogFile and
+// tui (the caller's already-computed useTUI(cfg) result — split out as a
+// parameter purely so this decision table is unit-testable without a real
+// terminal, which useTUI itself requires). Returns the close function
+// NewDaemon should defer.
+func wireLogf(cfg Config, tui bool) func() error {
+	discardLog := func(int, string, string, ...any) {}
+	closeLog := func() error { return nil }
+
+	switch {
+	case cfg.LogFile != "":
+		fl, err := newFileLogger(cfg.LogFile, logRotateMaxBytes, logRotateBackups, !tui)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pruefer: could not open log file %s: %v (falling back to stderr)\n", cfg.LogFile, err)
+			if tui {
+				Logf = discardLog
+				closeLog = func() error { Logf = nil; return nil }
+			}
+		} else {
+			Logf = fl.Logf
+			closeLog = func() error {
+				Logf = nil
+				return fl.Close()
+			}
+		}
+	case tui:
+		// File logging explicitly disabled (log_file "") but TUI is active.
+		Logf = discardLog
+		closeLog = func() error { Logf = nil; return nil }
+	}
+
+	return closeLog
 }
 
 func (d *Daemon) lockPath() string {
@@ -161,8 +240,41 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	logf(0, "poll", "pruefer starting: watching %d repo(s), poll interval %s, concurrency %d\n",
 		len(d.Config.WatchedRepos), interval, d.effectiveConcurrency())
 
+	// lastUpgradeCheck is local to Run, not a Daemon field: Run is the sole
+	// sequential caller (both TUI and headless modes call d.Run), so there's
+	// no concurrent access to guard against. Zero value means the first
+	// iteration always checks.
+	var lastUpgradeCheck time.Time
+
 	for {
 		d.poll(ctx)
+
+		// The upgrade check runs after poll() returns — poll() already calls
+		// wg.Wait() before returning, so the in-flight review set is
+		// guaranteed empty here. This is the poll-boundary safety guarantee:
+		// re-exec'ing mid-review would orphan an ephemeral clone and a
+		// running claude subprocess with no review posted (see ADR-1197).
+		//
+		// The 30-minute throttle is a rate/cost control, not a safety
+		// requirement — it exists to bound git-fetch/GitHub-Releases-API
+		// chatter (Pruefer's own poll interval defaults to 120s, which would
+		// otherwise mean checking upstream roughly every 2 minutes).
+		//
+		// ctx.Err() == nil guards against racing a shutdown signal: neither
+		// selfupgrade.CheckAndRebuildDev nor PerformReleaseUpgrade take a
+		// context, and a successful upgrade ends in syscall.Exec — once
+		// started, nothing can abort it. Without this guard, a SIGINT/SIGTERM
+		// arriving while d.poll(ctx) is still finishing could be immediately
+		// followed by a full git-fetch/build/re-exec or download/replace/
+		// re-exec cycle instead of the loop reaching the <-ctx.Done() case
+		// below, silently discarding the shutdown request. Mirrors
+		// engine/poll.go's equivalent guard on its own checkAndUpgrade call
+		// sites.
+		if d.Config.AutoUpgrade && ctx.Err() == nil && time.Since(lastUpgradeCheck) >= upgradeCheckInterval {
+			lastUpgradeCheck = time.Now()
+			d.checkAndUpgrade()
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil

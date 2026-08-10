@@ -34,6 +34,7 @@ type mockGitHubClient struct {
 	fetchPRMergeableFn            func(owner, repo string, prNumber int) (*bool, error)
 	fetchPRMergedFn               func(owner, repo string, prNumber int) (bool, error)
 	fetchPRMergeableStateFn       func(owner, repo string, prNumber int) (string, error)
+	fetchPRDetailsFn              func(owner, repo string, prNumber int) (*gh.PRDetails, error)
 	fetchCheckRunsFn              func(owner, repo, sha string) ([]gh.CheckRun, error)
 	fetchCombinedStatusFn         func(owner, repo, ref string) ([]gh.CommitStatus, error)
 	getPRBaseFn                   func(owner, repo string, prNumber int) (string, error)
@@ -58,7 +59,7 @@ type mockGitHubClient struct {
 	fetchPRReviewRequestsFn       func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	fetchPRReviewDecisionFn       func(owner, repo string, prNumber int) (string, error)
 	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
-	createIssueFn                 func(owner, repo, title, body string) (int, string, error)
+	createIssueFn                 func(owner, repo, title, body string, assignees []string) (int, string, error)
 	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
 	addBlockedByIssueFn           func(issueNodeID, blockerNodeID string) error
 	enablePullRequestAutoMergeFn  func(owner, repo string, prNumber int, strategy string) error
@@ -66,7 +67,7 @@ type mockGitHubClient struct {
 	enqueuePullRequestFn          func(owner, repo string, prNumber int, expectedHeadOID string) error
 	dequeuePullRequestFn          func(owner, repo string, prNumber int) error
 	fetchCommitsBehindFn          func(owner, repo, base, head string) (int, error)
-	fetchAllowAutoMergeFn         func(owner, repo string) (bool, error)
+	fetchRepoAccessFn             func(owner, repo string) (gh.RepoAccess, error)
 	fetchIssueFn                  func(owner, repo string, issueNumber int) (*gh.IssueData, error)
 	createPRFn                    func(owner, repo, title, head, base, body string) (int, error)
 	listPRsFn                     func(owner, repo string) ([]gh.PRDetails, error)
@@ -115,6 +116,9 @@ type mockGitHubClient struct {
 	fetchCommitsBehindCalls          []fetchCommitsBehindCall
 	createPRCalls                    []createPRCall
 	listPRsCalls                     int
+
+	// Track calls for FetchItemDetails, by issue number.
+	fetchItemDetailsCalls []int
 }
 
 type createPRCall struct {
@@ -243,8 +247,12 @@ func (m *mockGitHubClient) ProbeProjectBoard(owner, repo string, projectNum int,
 }
 
 func (m *mockGitHubClient) FetchItemDetails(item *gh.ProjectItem) error {
-	if m.fetchItemDetailsFn != nil {
-		return m.fetchItemDetailsFn(item)
+	m.mu.Lock()
+	m.fetchItemDetailsCalls = append(m.fetchItemDetailsCalls, item.Number)
+	fn := m.fetchItemDetailsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(item)
 	}
 	return nil
 }
@@ -398,6 +406,16 @@ func (m *mockGitHubClient) FetchPRMergeableFields(owner, repo string, prNumber i
 	return nil, "", nil
 }
 
+func (m *mockGitHubClient) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+	m.mu.Lock()
+	fn := m.fetchPRDetailsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return nil, nil
+}
+
 func (m *mockGitHubClient) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
 	m.mu.Lock()
 	fn := m.fetchPRMergeableFn
@@ -514,14 +532,14 @@ func (m *mockGitHubClient) FetchLatestRelease(owner, repo string) (*gh.LatestRel
 	return nil, nil
 }
 
-func (m *mockGitHubClient) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+func (m *mockGitHubClient) FetchRepoAccess(owner, repo string) (gh.RepoAccess, error) {
 	m.mu.Lock()
-	fn := m.fetchAllowAutoMergeFn
+	fn := m.fetchRepoAccessFn
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo)
 	}
-	return true, nil
+	return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
 }
 
 func (m *mockGitHubClient) FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error) {
@@ -701,6 +719,7 @@ func (m *mockGitHubClient) LookupIssueProjectItem(projectID, repo string, issueN
 
 type createIssueCall struct {
 	owner, repo, title, body string
+	assignees                []string
 }
 
 type addProjectV2ItemCall struct {
@@ -814,13 +833,13 @@ func (m *mockGitHubClient) ListPRs(owner, repo string) ([]gh.PRDetails, error) {
 	return nil, nil
 }
 
-func (m *mockGitHubClient) CreateIssue(owner, repo, title, body string) (int, string, error) {
+func (m *mockGitHubClient) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {
 	m.mu.Lock()
-	m.createIssueCalls = append(m.createIssueCalls, createIssueCall{owner, repo, title, body})
+	m.createIssueCalls = append(m.createIssueCalls, createIssueCall{owner, repo, title, body, assignees})
 	fn := m.createIssueFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn(owner, repo, title, body)
+		return fn(owner, repo, title, body, assignees)
 	}
 	return 0, "NODE_ID_" + title, nil
 }

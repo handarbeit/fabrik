@@ -50,6 +50,16 @@ Set `model:` in a stage's YAML (e.g. `model: sonnet`) to fix the model for that 
 
 Worth knowing: Fabrik doesn't interpret the model name at all. Whatever you write — `sonnet`, `opus`, or a full model ID like `claude-sonnet-5` — is passed straight through to `claude --model`, and **Claude Code** resolves the alias. So `sonnet` means whatever your installed Claude Code CLI version maps it to, and it can shift when you upgrade the Claude Code CLI. There's no validation on Fabrik's side either — a typo just fails at the Claude call. If you want a model pinned regardless of Claude Code CLI aliasing, use its full model ID as the stage or label value.
 
+### A stage hit its turn limit — do I have to raise `max_turns` and restart?
+
+Almost never. Editing `max_turns` in a stage's YAML only changes the *baseline*, and that's the one lever that needs a restart, because stage config is read at startup. Everything else is runtime:
+
+- **`fabrik:extend-turns` label** — drop it on an issue and it pre-grants **2× the stage's budget** on the spot. No config edit, no restart. Add it while the issue is running, remove it whenever. It persists across that issue's stages until the issue reaches Done.
+- **Automatic extension on progress** — even *without* that label, a worker that hits the cap while it's still making real progress (new commits, resolved review threads, a dirty working tree) is resumed automatically with a fresh budget, up to **3× the cap** before it stops. So a productive worker isn't actually stopping at the number in your YAML — the cap only bites a worker that spent its turns going nowhere, which is exactly when you want it to stop.
+- **`max_turns: 0`** — set a stage's cap to `0` and there's no ceiling at all.
+
+And a genuine cap-hit doesn't strand the issue: it resumes on the next poll (bounded by `max_retries`), so it continues on its own without a daemon restart. Reach for the YAML-and-restart path only when you want to change the *default* budget for every issue, not to rescue one that's mid-flight.
+
 ### Does the resulting code come with tests and docs?
 
 Tests, yes — the default Implement stage treats them as non-optional, written alongside the code. Docs get updated where it makes sense. Anything more specific — ADRs, changelog discipline, a docs-sync step — you bake in by editing the skills, which is how Fabrik's own repo enforces its conventions.

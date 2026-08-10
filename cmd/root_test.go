@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/config"
 )
 
 // chdirTest changes to dir for the duration of the test, restoring original on cleanup.
@@ -33,6 +35,46 @@ func writeStageFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResolveGHESHost_FlagWins(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "env.example.com")
+	pc := config.ProjectConfig{GHESHost: "config.example.com"}
+	if got := resolveGHESHost("flag.example.com", pc); got != "flag.example.com" {
+		t.Errorf("resolveGHESHost = %q, want flag.example.com", got)
+	}
+}
+
+func TestResolveGHESHost_EnvBeatsConfig(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "env.example.com")
+	pc := config.ProjectConfig{GHESHost: "config.example.com"}
+	if got := resolveGHESHost("", pc); got != "env.example.com" {
+		t.Errorf("resolveGHESHost = %q, want env.example.com", got)
+	}
+}
+
+func TestResolveGHESHost_ConfigFallback(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "")
+	pc := config.ProjectConfig{GHESHost: "config.example.com"}
+	if got := resolveGHESHost("", pc); got != "config.example.com" {
+		t.Errorf("resolveGHESHost = %q, want config.example.com", got)
+	}
+}
+
+func TestResolveGHESHost_AllUnsetDefaultsEmpty(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "")
+	pc := config.ProjectConfig{}
+	if got := resolveGHESHost("", pc); got != "" {
+		t.Errorf("resolveGHESHost = %q, want empty (github.com default)", got)
+	}
+}
+
+func TestResolveGHESHost_Normalized(t *testing.T) {
+	t.Setenv("FABRIK_GHES_HOST", "")
+	pc := config.ProjectConfig{}
+	if got := resolveGHESHost("https://flag.example.com/", pc); got != "flag.example.com" {
+		t.Errorf("resolveGHESHost = %q, want normalized flag.example.com", got)
 	}
 }
 
@@ -379,6 +421,132 @@ func TestMaxEnqueueCycles_Default(t *testing.T) {
 	}
 	if got := maxEnqueueCycles(9); got != 9 {
 		t.Errorf("maxEnqueueCycles(9) = %d, want passthrough 9", got)
+	}
+}
+
+// TestCiWaitTimeout_DefaultUnchanged locks in ADR-1410/R8's compatibility
+// claim: CIWaitTimeout keeps its existing name, flag, env var, and ~30-minute
+// default — only its meaning changes (elapsed-time cap → liveness-stall
+// dwell), never its resolved value for an operator who never touched it.
+func TestCiWaitTimeout_DefaultUnchanged(t *testing.T) {
+	if got := ciWaitTimeout(0); got != 30*time.Minute {
+		t.Errorf("ciWaitTimeout(0) = %v, want unchanged default 30m", got)
+	}
+	if got := ciWaitTimeout(-1); got != 30*time.Minute {
+		t.Errorf("ciWaitTimeout(-1) = %v, want default 30m", got)
+	}
+	if got := ciWaitTimeout(45); got != 45*time.Minute {
+		t.Errorf("ciWaitTimeout(45) = %v, want passthrough 45m", got)
+	}
+}
+
+// TestCiBackstopTimeout_Default covers the new R5 setting: a 4-hour default,
+// independent of and much larger than CIWaitTimeout's own default — the
+// separate-justification requirement R5 asks for.
+func TestCiBackstopTimeout_Default(t *testing.T) {
+	if got := ciBackstopTimeout(0); got != 240*time.Minute {
+		t.Errorf("ciBackstopTimeout(0) = %v, want default 240m (4h)", got)
+	}
+	if got := ciBackstopTimeout(-1); got != 240*time.Minute {
+		t.Errorf("ciBackstopTimeout(-1) = %v, want default 240m (4h)", got)
+	}
+	if got := ciBackstopTimeout(60); got != 60*time.Minute {
+		t.Errorf("ciBackstopTimeout(60) = %v, want passthrough 60m", got)
+	}
+}
+
+func TestExecute_CIBackstopTimeoutFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--ci-backstop-timeout", "120"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --ci-backstop-timeout" {
+		t.Error("--ci-backstop-timeout flag not registered")
+	}
+}
+
+// TestExecute_CIBackstopTimeoutEnvDoesNotError verifies
+// FABRIK_CI_BACKSTOP_TIMEOUT is accepted by the same resolveInt/
+// explicitFlags pattern every other *_WAIT_TIMEOUT setting uses — a
+// non-numeric or otherwise-rejected env value would surface as an Execute()
+// error distinct from the expected "no stages" failure this fixture always
+// hits (mirrors TestExecute_EnvVarBeatsConfigYAML's black-box style, since
+// Execute() does not expose the resolved Config for direct inspection).
+func TestExecute_CIBackstopTimeoutEnvDoesNotError(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	t.Setenv("FABRIK_CI_BACKSTOP_TIMEOUT", "180")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if strings.Contains(err.Error(), "CI_BACKSTOP_TIMEOUT") || strings.Contains(err.Error(), "ci-backstop-timeout") {
+		t.Errorf("FABRIK_CI_BACKSTOP_TIMEOUT env resolution failed: %v", err)
+	}
+}
+
+func TestExecute_MaxSliceRetriesFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-slice-retries", "20"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --max-slice-retries" {
+		t.Error("--max-slice-retries flag not registered")
+	}
+}
+
+// TestMaxSliceRetries_Default covers the higher-than-MaxRetries default (#1199):
+// a turn-cap preemption is a resumable slice, not a failure, so its bound is
+// wider than max-retries's default of 3.
+func TestMaxSliceRetries_Default(t *testing.T) {
+	if got := maxSliceRetries(0); got != 10 {
+		t.Errorf("maxSliceRetries(0) = %d, want default 10", got)
+	}
+	if got := maxSliceRetries(-1); got != 10 {
+		t.Errorf("maxSliceRetries(-1) = %d, want default 10", got)
+	}
+	if got := maxSliceRetries(25); got != 25 {
+		t.Errorf("maxSliceRetries(25) = %d, want passthrough 25", got)
+	}
+}
+
+func TestExecute_MaxResumeFailuresFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-resume-failures", "5"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --max-resume-failures" {
+		t.Error("--max-resume-failures flag not registered")
+	}
+}
+
+// TestMaxResumeFailures_Default covers the lower-than-every-sibling-counter
+// default (#1414): a resume retry is provably identical each time (same
+// session id re-resumed), unlike a rebase or review cycle where each attempt
+// does something different, so a third attempt is pure waste.
+func TestMaxResumeFailures_Default(t *testing.T) {
+	if got := maxResumeFailures(0); got != 2 {
+		t.Errorf("maxResumeFailures(0) = %d, want default 2", got)
+	}
+	if got := maxResumeFailures(-1); got != 2 {
+		t.Errorf("maxResumeFailures(-1) = %d, want default 2", got)
+	}
+	if got := maxResumeFailures(5); got != 5 {
+		t.Errorf("maxResumeFailures(5) = %d, want passthrough 5", got)
 	}
 }
 

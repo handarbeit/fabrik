@@ -350,7 +350,7 @@ func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
 	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
 
 	t.Run("empty resumeSessionID omits --resume", func(t *testing.T) {
-		args := buildClaudeArgs(stage, "", "", 0, false, "")
+		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
 		for i, a := range args {
 			if a == "--resume" {
 				t.Fatalf("did not expect --resume in args, got %v (at index %d)", args, i)
@@ -359,7 +359,7 @@ func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
 	})
 
 	t.Run("non-empty resumeSessionID appends --resume <id>", func(t *testing.T) {
-		args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "")
+		args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "", "")
 		found := false
 		for i, a := range args {
 			if a == "--resume" {
@@ -372,6 +372,32 @@ func TestBuildClaudeArgs_ResumeArg(t *testing.T) {
 		if !found {
 			t.Fatalf("expected --resume in args, got %v", args)
 		}
+	})
+}
+
+func TestBuildClaudeArgs_DisallowedTools(t *testing.T) {
+	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
+
+	assertDisallowed := func(t *testing.T, args []string, tool string) {
+		t.Helper()
+		for i, a := range args {
+			if a == "--disallowedTools" && i+1 < len(args) && args[i+1] == tool {
+				return
+			}
+		}
+		t.Fatalf("expected --disallowedTools %s in args, got %v", tool, args)
+	}
+
+	t.Run("dontAsk path", func(t *testing.T) {
+		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
+		assertDisallowed(t, args, "ScheduleWakeup")
+		assertDisallowed(t, args, "Workflow")
+	})
+
+	t.Run("dangerously-skip-permissions path", func(t *testing.T) {
+		args := buildClaudeArgs(stage, "", "", 0, true, "", "")
+		assertDisallowed(t, args, "ScheduleWakeup")
+		assertDisallowed(t, args, "Workflow")
 	})
 }
 
@@ -1254,6 +1280,147 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 	})
 }
 
+// TestInvokeClaude_FabrikEnvVarsInjected covers #1288: the five FABRIK_*
+// invocation facts injected into the worker environment via buildClaudeEnv.
+// FABRIK_ISSUE/FABRIK_WORKTREE are derived directly from the issue/workDir
+// InvokeClaude already receives; FABRIK_REPO prefers issue.Repo but falls
+// back to opts.FabrikRepo (see the "falls back" subtest below); FABRIK_ROOT/
+// FABRIK_PR come from InvokeOptions (as resolved by the caller's
+// resolveFabrikEnvOpts, covered separately in fabrik_env_test.go). "Absent is
+// absent, never a misleading zero" is asserted directly by checking FABRIK_PR
+// is entirely absent from the env, not merely unequal to some value.
+func TestInvokeClaude_FabrikEnvVarsInjected(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"fabrik env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_fabrikenv","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "Implement it",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+
+	t.Run("all five vars present and correctly valued", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1288, Repo: "acme/widgets", Title: "Fabrik env test"}
+		opts := InvokeOptions{FabrikRoot: "/fabrik/root", PRNumber: 42}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		for _, want := range []string{
+			"FABRIK_ISSUE=1288",
+			"FABRIK_REPO=acme/widgets",
+			"FABRIK_WORKTREE=" + workDir,
+			"FABRIK_ROOT=/fabrik/root",
+			"FABRIK_PR=42",
+		} {
+			if !strings.Contains(env, want) {
+				t.Errorf("expected %q in env, got:\n%s", want, env)
+			}
+		}
+	})
+
+	t.Run("FABRIK_PR absent (never zero) when PRNumber is 0", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1289, Repo: "acme/widgets", Title: "No PR yet"}
+		opts := InvokeOptions{FabrikRoot: "/fabrik/root"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if strings.Contains(env, "FABRIK_PR=") {
+			t.Errorf("expected FABRIK_PR to be entirely absent, got:\n%s", env)
+		}
+		if !strings.Contains(env, "FABRIK_ISSUE=1289") {
+			t.Errorf("expected FABRIK_ISSUE=1289 in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("FABRIK_REPO reflects the item's repo, not a default", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1290, Repo: "other-owner/other-repo", Title: "Multi-repo test"}
+		opts := InvokeOptions{FabrikRepo: "should-not-be-used/default-repo"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "FABRIK_REPO=other-owner/other-repo") {
+			t.Errorf("expected FABRIK_REPO=other-owner/other-repo in env, got:\n%s", env)
+		}
+		if strings.Contains(env, "should-not-be-used") {
+			t.Errorf("expected opts.FabrikRepo to be ignored when issue.Repo is set, got:\n%s", env)
+		}
+	})
+
+	t.Run("FABRIK_REPO falls back to opts.FabrikRepo when issue.Repo is empty", func(t *testing.T) {
+		issue := gh.ProjectItem{Number: 1291, Title: "Bare item, no Repo backfilled yet"}
+		opts := InvokeOptions{FabrikRepo: "owner/default-repo"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "FABRIK_REPO=owner/default-repo") {
+			t.Errorf("expected FABRIK_REPO=owner/default-repo (fallback) in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("FABRIK_REPO is empty, not absent, when both issue.Repo and opts.FabrikRepo are empty — and never leaks an ambient value", func(t *testing.T) {
+		// A stale ambient FABRIK_REPO in the engine's own process environment
+		// (e.g. the distinct engine-startup-config FABRIK_REPO documented in
+		// USER_GUIDE.md) must never leak through to the worker just because
+		// Fabrik itself has nothing to supply for this invocation. buildClaudeEnv
+		// must always add a FABRIK_REPO key to overrides (even with an empty
+		// value) so mergeEnv has something to strip the ambient value with.
+		t.Setenv("FABRIK_REPO", "stale-ambient-owner/stale-ambient-repo")
+		issue := gh.ProjectItem{Number: 1292, Title: "No repo info at all"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if strings.Contains(env, "stale-ambient") {
+			t.Errorf("expected the ambient FABRIK_REPO value to be stripped, got:\n%s", env)
+		}
+		if !strings.Contains(env, "FABRIK_REPO=\n") {
+			t.Errorf("expected FABRIK_REPO= (empty, but present) in env, got:\n%s", env)
+		}
+	})
+}
+
 // TestInvokeClaude_GHTokenInjected verifies that the engine's resolved GitHub
 // token (claudeGHToken, set from Config.Token in Engine.New) is injected into
 // the worker's environment as both GH_TOKEN and GITHUB_TOKEN, that the
@@ -1366,6 +1533,207 @@ printf '%%s\n' '{"result":"gh token test\nFABRIK_STAGE_COMPLETE\n","session_id":
 			t.Errorf("expected neither GH_TOKEN nor GITHUB_TOKEN to be present when claudeGHToken is empty, got:\n%s", env)
 		}
 	})
+}
+
+// TestInvokeClaude_AnthropicNamespaceScrubbed asserts directly on the
+// literal constructed subprocess environment (#1346 acceptance: "asserted
+// directly on the constructed environment, not inferred from behavior")
+// that ambient ANTHROPIC_API_KEY and CLAUDE_CODE_* auth-selector variables
+// present in the engine's own process environment never reach the worker.
+func TestInvokeClaude_AnthropicNamespaceScrubbed(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"scrub test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_scrub","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ambient-should-not-leak")
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = ""
+	claudeAnthropicEnvPassthrough = nil
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1346, Title: "scrub subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
+		if strings.Contains(env, key+"=") {
+			t.Errorf("expected %s scrubbed from the constructed subprocess environment, got:\n%s", key, env)
+		}
+	}
+}
+
+// TestInvokeClaude_AnthropicAPIKeyOptIn covers the FABRIK_ANTHROPIC_API_KEY
+// translation end to end via a real subprocess invocation.
+func TestInvokeClaude_AnthropicAPIKeyOptIn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"api key opt-in test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_apikey","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = "sk-fabrik-opt-in"
+	claudeAnthropicEnvPassthrough = nil
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1347, Title: "opt-in subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "\nANTHROPIC_API_KEY=sk-fabrik-opt-in\n") {
+		t.Errorf("expected ANTHROPIC_API_KEY=sk-fabrik-opt-in in env, got:\n%s", env)
+	}
+	if strings.Contains(env, "FABRIK_ANTHROPIC_API_KEY=") {
+		t.Errorf("expected FABRIK_ANTHROPIC_API_KEY never forwarded, got:\n%s", env)
+	}
+}
+
+// TestInvokeClaude_AnthropicEnvPassthrough covers FABRIK_ANTHROPIC_ENV_PASSTHROUGH
+// end to end via a real subprocess invocation: a named variable is inherited,
+// an unnamed one is still scrubbed, and the passthrough variable itself is
+// never forwarded.
+func TestInvokeClaude_AnthropicEnvPassthrough(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"passthrough test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_passthrough","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = ""
+	claudeAnthropicEnvPassthrough = []string{"CLAUDE_CODE_USE_BEDROCK"}
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1348, Title: "passthrough subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "\nCLAUDE_CODE_USE_BEDROCK=1\n") {
+		t.Errorf("expected named passthrough CLAUDE_CODE_USE_BEDROCK=1 inherited, got:\n%s", env)
+	}
+	if strings.Contains(env, "CLAUDE_CODE_USE_VERTEX=") {
+		t.Errorf("expected non-passthrough-named CLAUDE_CODE_USE_VERTEX still scrubbed, got:\n%s", env)
+	}
+	if strings.Contains(env, "FABRIK_ANTHROPIC_ENV_PASSTHROUGH=") {
+		t.Errorf("expected FABRIK_ANTHROPIC_ENV_PASSTHROUGH never forwarded, got:\n%s", env)
+	}
+}
+
+// TestInvokeClaude_AnthropicAPIKeyOptInWinsOverPassthrough is the subprocess-
+// level confirmation of the ordering-dependent collision case R7 permits: a
+// passthrough entry and the FABRIK_ANTHROPIC_API_KEY translation both naming
+// ANTHROPIC_API_KEY. buildClaudeEnv emits both as separate "ANTHROPIC_API_KEY="
+// entries in Cmd.Env (mergeEnv does not deduplicate them), so this confirms
+// what the real subprocess's environment actually resolves to via os/exec's
+// documented last-occurrence-wins duplicate-key behavior — not just what
+// mergeEnv's returned slice contains. See also
+// TestBuildClaudeEnv_AnthropicAPIKeyOptIn's pure-function pin of the same
+// ordering at the mergeEnv-slice level.
+func TestInvokeClaude_AnthropicAPIKeyOptInWinsOverPassthrough(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"collision test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_collision","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("ANTHROPIC_API_KEY", "sk-passthrough-loses")
+
+	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	claudeAnthropicAPIKey = "sk-fabrik-wins"
+	claudeAnthropicEnvPassthrough = []string{"ANTHROPIC_API_KEY"}
+	t.Cleanup(func() {
+		claudeAnthropicAPIKey = prevKey
+		claudeAnthropicEnvPassthrough = prevPassthrough
+	})
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Implement", Prompt: "Implement it", Completion: stages.CompletionCriteria{Type: "claude"}}
+	issue := gh.ProjectItem{Number: 1349, Title: "collision subprocess test"}
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "\nANTHROPIC_API_KEY=sk-fabrik-wins\n") {
+		t.Errorf("expected ANTHROPIC_API_KEY=sk-fabrik-wins (the translation) to be what the real subprocess sees, got:\n%s", env)
+	}
+	if strings.Contains(env, "sk-passthrough-loses") {
+		t.Errorf("expected the passthrough value to not be what survives in the subprocess's actual environment, got:\n%s", env)
+	}
 }
 
 // TestBuildClaudeArgs_PermissionModeDontAsk verifies that --permission-mode dontAsk
@@ -1750,5 +2118,312 @@ printf '%s\n' '{"result":"comment done","session_id":"sess_cmt_pathological","nu
 	got := ReadSessionID("", 910, "")
 	if got != "sess_cmt_pathological" {
 		t.Errorf("ReadSessionID(\"\", 910, \"\") = %q, want %q — write/read path basename mismatch", got, "sess_cmt_pathological")
+	}
+}
+
+// TestParseNameFlagSupport covers the pure --help-text parser in isolation,
+// per Plan task 1.
+func TestParseNameFlagSupport(t *testing.T) {
+	tests := []struct {
+		name     string
+		helpText string
+		want     bool
+	}{
+		{
+			name:     "help text with --name <name>",
+			helpText: "Usage: claude [options]\n\n  -n, --name <name>  Set a display name for this session\n  -p, --print        Print mode\n",
+			want:     true,
+		},
+		{
+			name:     "help text without --name",
+			helpText: "Usage: claude [options]\n\n  -p, --print  Print mode\n  --model <model>  Set the model\n",
+			want:     false,
+		},
+		{
+			name:     "empty help text",
+			helpText: "",
+			want:     false,
+		},
+		{
+			name:     "help text mentions 'name' in unrelated prose but not the flag form",
+			helpText: "  --model <model>  Set the model name to use\n",
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseNameFlagSupport(tt.helpText); got != tt.want {
+				t.Errorf("parseNameFlagSupport(%q) = %v, want %v", tt.helpText, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProbeClaudeNameFlagSupport covers the subprocess-driving half of the
+// capability probe using a fake claude binary on PATH, per Plan task 2. The
+// fail-safe direction (return false) must hold for every non-happy-path.
+func TestProbeClaudeNameFlagSupport(t *testing.T) {
+	t.Run("fake claude --help exits 0 and advertises --name", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeClaude := filepath.Join(binDir, "claude")
+		script := "#!/bin/sh\nprintf '%s\\n' '  -n, --name <name>  Set a display name for this session'\nexit 0\n"
+		if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+		if got := probeClaudeNameFlagSupport(); !got {
+			t.Error("probeClaudeNameFlagSupport() = false, want true for a --help output advertising --name <name>")
+		}
+	})
+
+	t.Run("fake claude --help exits non-zero", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeClaude := filepath.Join(binDir, "claude")
+		script := "#!/bin/sh\nprintf '%s\\n' 'error: unknown command'\nexit 1\n"
+		if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+		if got := probeClaudeNameFlagSupport(); got {
+			t.Error("probeClaudeNameFlagSupport() = true, want false when claude --help exits non-zero")
+		}
+	})
+
+	t.Run("fake claude --help exits 0 but does not mention --name", func(t *testing.T) {
+		binDir := t.TempDir()
+		fakeClaude := filepath.Join(binDir, "claude")
+		script := "#!/bin/sh\nprintf '%s\\n' '  -p, --print  Print mode'\nexit 0\n"
+		if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+		if got := probeClaudeNameFlagSupport(); got {
+			t.Error("probeClaudeNameFlagSupport() = true, want false when --help doesn't advertise --name")
+		}
+	})
+
+	t.Run("no claude binary on PATH", func(t *testing.T) {
+		// An empty, isolated PATH guarantees exec.LookPath("claude") fails
+		// regardless of what's installed on the host running this test.
+		t.Setenv("PATH", t.TempDir())
+
+		if got := probeClaudeNameFlagSupport(); got {
+			t.Error("probeClaudeNameFlagSupport() = true, want false when claude is not on PATH")
+		}
+	})
+}
+
+// TestSessionNameSentinel covers sentinel construction, per Plan task 4:
+// normal inputs, the empty-repo fallback, whitespace collapsing in the stage
+// name, and determinism across repeated calls.
+func TestSessionNameSentinel(t *testing.T) {
+	tests := []struct {
+		name      string
+		repo      string
+		issueNum  int
+		stageName string
+		want      string
+	}{
+		{
+			name:      "normal owner/repo/issue/stage",
+			repo:      "handarbeit/fabrik",
+			issueNum:  1284,
+			stageName: "Implement",
+			want:      "fabrik:handarbeit/fabrik#1284:Implement",
+		},
+		{
+			name:      "empty repo falls back to unknown/repo",
+			repo:      "",
+			issueNum:  42,
+			stageName: "Research",
+			want:      "fabrik:unknown/repo#42:Research",
+		},
+		{
+			name:      "stage name with internal spaces collapsed",
+			repo:      "acme/widgets",
+			issueNum:  7,
+			stageName: "Custom Stage Name",
+			want:      "fabrik:acme/widgets#7:Custom-Stage-Name",
+		},
+		{
+			name:      "stage name with tabs and newlines collapsed",
+			repo:      "acme/widgets",
+			issueNum:  8,
+			stageName: "Weird\tStage\nName",
+			want:      "fabrik:acme/widgets#8:Weird-Stage-Name",
+		},
+		{
+			name:      "stage name with colon replaced to avoid delimiter collision",
+			repo:      "acme/widgets",
+			issueNum:  9,
+			stageName: "Review: Final",
+			want:      "fabrik:acme/widgets#9:Review--Final",
+		},
+		{
+			name:      "stage name with hash replaced to avoid delimiter collision",
+			repo:      "acme/widgets",
+			issueNum:  10,
+			stageName: "Review #2",
+			want:      "fabrik:acme/widgets#10:Review--2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionNameSentinel(tt.repo, tt.issueNum, tt.stageName)
+			if got != tt.want {
+				t.Errorf("sessionNameSentinel(%q, %d, %q) = %q, want %q", tt.repo, tt.issueNum, tt.stageName, got, tt.want)
+			}
+			if strings.ContainsAny(got, " \t\n") {
+				t.Errorf("sessionNameSentinel(%q, %d, %q) = %q contains whitespace, must stay a single token", tt.repo, tt.issueNum, tt.stageName, got)
+			}
+		})
+	}
+
+	t.Run("deterministic across repeated calls", func(t *testing.T) {
+		first := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement")
+		for i := 0; i < 5; i++ {
+			if got := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement"); got != first {
+				t.Errorf("sessionNameSentinel produced %q on call %d, want deterministic %q", got, i, first)
+			}
+		}
+	})
+}
+
+// TestBuildClaudeArgs_NameFlag verifies --name <sentinel> is present with the
+// expected value when the capability probe reports support, per Plan task 7.
+func TestBuildClaudeArgs_NameFlag(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Implement"}
+	sessionName := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement")
+	args := buildClaudeArgs(stage, "", "", 0, false, "", sessionName)
+
+	found := false
+	for i, a := range args {
+		if a == "--name" {
+			found = true
+			if i+1 >= len(args) || args[i+1] != sessionName {
+				t.Fatalf("expected --name %s, got %v", sessionName, args)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected --name in args, got %v", args)
+	}
+}
+
+// TestBuildClaudeArgs_NameFlagOmittedWhenUnsupported verifies --name is
+// omitted entirely when the capability probe reports no support, even though
+// a non-empty sessionName is supplied — per Plan task 7 and the issue's
+// critical backward-compatibility requirement.
+func TestBuildClaudeArgs_NameFlagOmittedWhenUnsupported(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = false
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Implement"}
+	sessionName := sessionNameSentinel("handarbeit/fabrik", 1284, "Implement")
+	args := buildClaudeArgs(stage, "", "", 0, false, "", sessionName)
+
+	for i, a := range args {
+		if a == "--name" {
+			t.Fatalf("did not expect --name in args when claudeNameFlagSupported is false, got %v (at index %d)", args, i)
+		}
+	}
+}
+
+// TestBuildClaudeArgs_NameFlagOmittedWhenSessionNameEmpty verifies --name is
+// omitted when no sentinel is supplied, regardless of capability support —
+// buildClaudeArgs never invents a name on its own.
+func TestBuildClaudeArgs_NameFlagOmittedWhenSessionNameEmpty(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Implement"}
+	args := buildClaudeArgs(stage, "", "", 0, false, "", "")
+
+	for i, a := range args {
+		if a == "--name" {
+			t.Fatalf("did not expect --name in args when sessionName is empty, got %v (at index %d)", args, i)
+		}
+	}
+}
+
+// TestBuildClaudeArgs_NameFlagWithResume verifies --name and --resume both
+// appear simultaneously without either being dropped, per Plan task 8 — the
+// issue's "must not disturb session resume" requirement, resolved by Plan to
+// pass --name unconditionally on resume once the capability probe passes.
+func TestBuildClaudeArgs_NameFlagWithResume(t *testing.T) {
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	stage := &stages.Stage{Name: "Plan"}
+	sessionName := sessionNameSentinel("handarbeit/fabrik", 1284, "Plan")
+	args := buildClaudeArgs(stage, "sess_xyz", "", 0, false, "", sessionName)
+
+	var gotResumeID, gotName string
+	for i, a := range args {
+		if a == "--resume" && i+1 < len(args) {
+			gotResumeID = args[i+1]
+		}
+		if a == "--name" && i+1 < len(args) {
+			gotName = args[i+1]
+		}
+	}
+	if gotResumeID != "sess_xyz" {
+		t.Errorf("expected --resume sess_xyz, got args %v", args)
+	}
+	if gotName != sessionName {
+		t.Errorf("expected --name %s, got args %v", sessionName, args)
+	}
+}
+
+// TestInvokeClaude_NameFlagInArgv is an end-to-end check (through InvokeClaude,
+// not the unexported buildClaudeArgs directly) that a real invocation with a
+// populated issue.Repo produces the documented sentinel in argv when the
+// capability probe is forced on.
+func TestInvokeClaude_NameFlagInArgv(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_name","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origSupported := claudeNameFlagSupported
+	claudeNameFlagSupported = true
+	defer func() { claudeNameFlagSupported = origSupported }()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "implement",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 1284, Title: "T", Repo: "handarbeit/fabrik"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	want := "--name fabrik:handarbeit/fabrik#1284:Implement"
+	if !strings.Contains(argsStr, want) {
+		t.Errorf("expected %q in args, got: %q", want, argsStr)
 	}
 }

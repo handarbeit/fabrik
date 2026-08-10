@@ -1,0 +1,291 @@
+{
+  "provenance": {
+    "operation": "fetch_pr_reviews",
+    "endpoint": "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+    "recorded_at": "2026-08-09T18:40:00Z",
+    "source_repo": "handarbeit/fabrik#1505 (read-only)",
+    "scrubbed": true
+  },
+  "response": [
+    {
+      "id": 4891820829,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5NDHQ",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "I reviewed `pruefer/claude.go`, `pruefer/review.go`, `pruefer/findings.go`, `github/prs.go`, `github/types.go`, and the accompanying tests/ADR for this PR (fetching prior review threads and feeding them into the review prompt, plus intra-pass finding deduplication). The implementation is well-tested, `go build`/`go vet`/`go test -race ./pruefer/... ./github/...` are clean, and the code matches the stated design fairly closely (degrade-not-fail thread fetch, `(Path, Line)` dedup keying reused from `partitionFindings`, ordered/capped thread rendering). Two real gaps stood out: a silent truncation of long review-thread comment histories that undermines the \"never silently drop\" principle the PR itself establishes for the thread cap, and a widened prompt-injection surface now that arbitrary (including non-collaborator, on public repos) review-comment bodies flow verbatim into the Claude prompt.",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891820829",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891820829"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T16:03:57Z",
+      "commit_id": "ce13f98456de8fc85324e5576aa5dab5a80dcd49"
+    },
+    {
+      "id": 4891864045,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5Pr7Q",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "## Review Summary\n\nI reviewed the diff between `main` (a7eb18b7) and the PR head (d1f5972), covering the new `FetchPRReviewThreads` GraphQL fetch and `PRReviewThread`/`PRReviewThreadComment` types in `github/`, the prompt-assembly changes (`renderReviewThreads`, `selectPromptThreads`, the R2/R5 wording) and `ReviewThreads` plumbing in `pruefer/claude.go`/`review.go`, and the new `dedupeFindings` in `pruefer/findings.go`. The change is well tested (boundary cases for the 20-thread cap, null-line fallback, comment truncation, severity-collision dedup, non-vacuous prompt-inclusion tests) and the accompanying ADR is unusually thorough, including an explicit, reasoned acceptance of the widened prompt-injection surface from interpolating untrusted thread-comment bodies \u2014 so I'm not re-raising that as a new finding since it's already identified and consciously accepted with rationale.\n\n`go build ./...`, `go vet ./...`, and `go test ./pruefer/... ./github/...` all pass locally (562 tests).\n\nOne real design gap: `dedupeFindings` collapses any two findings sharing `(Path, Line)` on the assumption they're the same defect restated, but nothing verifies that \u2014 and unlike `partitionFindings` (which happily emits multiple separate inline `ReviewComment`s at the same anchor, since GitHub's review API supports that), this new step will silently discard a genuinely distinct finding that happens to land on the same line as another, with no merge and no trace of what was dropped.",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891864045",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891864045"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T16:24:34Z",
+      "commit_id": "d1f5972f14cfab66890036821ddd0ffe598a5cba"
+    },
+    {
+      "id": 4891889876,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5RQ1A",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "## Review\n\nI reviewed the full diff for #1505 against `main` (the fetch/thread-context plumbing in `github/prs.go` and `github/types.go`, the prompt-assembly and dedup logic in `pruefer/claude.go`/`pruefer/findings.go`, the `ReviewPR` wiring in `pruefer/review.go`, and the accompanying tests and ADR). The change is well-scoped to the stated goal (R1\u2013R5), the degrade-not-fail behavior for thread-fetch errors is correctly wired and tested, `dedupeFindings`'s merge-not-discard fix (the subject of the most recent commit) is correct and covered by a dedicated collision test, and the `maxPromptThreads` cap/ordering is tested at and over the boundary. `go build`, `go vet`, and `go test ./pruefer/... ./github/...` all pass locally. The ADR is unusually thorough and explicitly documents the widened prompt-injection surface as an accepted, bounded trade-off, so I did not re-raise that as a fresh finding. Only one minor observation surfaced, below.",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891889876",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891889876"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T16:37:28Z",
+      "commit_id": "da11f609f79720fa19102df0f69261b58fec589f"
+    },
+    {
+      "id": 4891921754,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5TNWg",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "I reviewed this PR's core changes: `github.FetchPRReviewThreads` (new GraphQL fetch), `ReviewPR`'s wiring of thread context with non-fatal error degradation, `buildReviewPrompt`/`renderReviewThreads`/`selectPromptThreads`/`truncateCommentBody` in `pruefer/claude.go`, and `dedupeFindings`/`mergeFindings` in `pruefer/findings.go`, along with the corresponding `PRReviewThread` types and tests.\n\nThe implementation is careful and well-documented: the thread fetch is correctly treated as advisory (logged and degraded to `nil` on error, unlike the eligibility-gating `FetchPRReviews`), the prompt-size bound is layered at three levels (thread count, per-thread comment count, per-comment body length) with truncation always surfaced to the reviewer rather than silently dropped, and `dedupeFindings` merges same-anchor findings without discarding content (a safer choice than the PR description's \"keeping the higher-severity entry\" phrasing suggests, but functionally sound \u2014 it concatenates bodies and takes the max severity). Known tradeoffs (e.g., the 20-comment-per-thread GraphQL page missing a later resolving reply, `threadLastCommentTime` only seeing the fetched page) are explicitly acknowledged in comments rather than hidden. Test coverage for the new fetch, cap boundaries, and dedup collision cases looks appropriately targeted per the PR's test plan.\n\nNo bugs, security issues, or design problems found in the reviewed diff surface.",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891921754",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891921754"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T16:51:48Z",
+      "commit_id": "fc6b8be23f83b5168342d0b4c8f3ad54398ca068"
+    },
+    {
+      "id": 4891950355,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5U9Ew",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "I reviewed the pruefer prior-thread-context feature: `github.FetchPRReviewThreads` (GraphQL fetch of resolved/unresolved review threads), `pruefer/review.go`'s wiring into `ReviewRequest`, `pruefer/claude.go`'s `renderReviewThreads`/`selectPromptThreads`/`truncateCommentBody` prompt assembly, and `pruefer/findings.go`'s `dedupeFindings`, along with the accompanying ADR. Note: the checked-out repo is a single-commit shallow clone with no `main` ref available locally, so I reviewed the changed subsystem's current-state files directly.\n\nThe implementation is careful and well-tested: thread-fetch failures degrade non-fatally (unlike the fatal `FetchPRReviews` gate), the prompt is bounded on both thread count (`maxPromptThreads`) and per-comment size (`maxThreadCommentBodyChars`), truncation is always surfaced rather than silent, and `dedupeFindings` merges rather than discards on same-anchor collisions (a fix already applied earlier in this PR's history per the commit log). The ADR is unusually candid about trade-offs, including an explicitly accepted prompt-injection surface widening from interpolating untrusted thread-comment bodies into the prompt \u2014 I don't think there's a hidden issue there beyond what's already documented as accepted risk. Two smaller points below.",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891950355",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891950355"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T17:07:58Z",
+      "commit_id": "fc6b8be23f83b5168342d0b4c8f3ad54398ca068"
+    },
+    {
+      "id": 4891978413,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5WqrQ",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891978413",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4891978413"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T17:23:14Z",
+      "commit_id": "6248653dc0eeb115f776dae9799af5f4b1356c1d"
+    },
+    {
+      "id": 4892006985,
+      "node_id": "PRR_kwDOR2bN_c8AAAABI5YaSQ",
+      "user": {
+        "login": "handarbeit-pruefer[bot]",
+        "id": 309874312,
+        "node_id": "BOT_kgDOEnhOiA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/4408765?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D",
+        "html_url": "https://github.com/apps/handarbeit-pruefer",
+        "followers_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/handarbeit-pruefer%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "",
+      "state": "COMMENTED",
+      "html_url": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4892006985",
+      "pull_request_url": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505",
+      "author_association": "NONE",
+      "_links": {
+        "html": {
+          "href": "https://github.com/handarbeit/fabrik/pull/1505#pullrequestreview-4892006985"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/handarbeit/fabrik/pulls/1505"
+        }
+      },
+      "submitted_at": "2026-08-09T17:40:00Z",
+      "commit_id": "498cb6489d52d89ec4e189e6cf00e9be24fb496a"
+    }
+  ]
+}

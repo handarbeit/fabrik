@@ -261,10 +261,10 @@ func TestLookupIssueProjectItem(t *testing.T) {
 // FetchItemDetails GraphQL mock response, avoiding repetition across sub-tests.
 func minimalLinkedPRNode(id string, number int, extra map[string]interface{}) map[string]interface{} {
 	node := map[string]interface{}{
-		"id":         id,
-		"number":     number,
-		"headRefOid": "sha" + id,
-		"comments":   map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
+		"id":             id,
+		"number":         number,
+		"headRefOid":     "sha" + id,
+		"comments":       map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
 		"reviewRequests": map[string]interface{}{"nodes": []interface{}{}},
 		"latestReviews":  map[string]interface{}{"nodes": []interface{}{}},
 		"reviewThreads":  map[string]interface{}{"nodes": []interface{}{}},
@@ -387,6 +387,69 @@ func TestFetchItemDetailsQueueFields(t *testing.T) {
 		}
 		if item.LinkedPRMergeQueueEntry != nil {
 			t.Errorf("LinkedPRMergeQueueEntry non-nil when no PR: %+v", item.LinkedPRMergeQueueEntry)
+		}
+	})
+}
+
+// TestFetchItemDetails_IsClosed is a PR-review regression (pruefer): FetchItemDetails
+// now populates item.IsClosed from the Issue GraphQL fragment's `closed` field
+// (added for #1270's settleAwaitingCIScan closed-item race fix). ProjectItem.IsClosed
+// is documented (types.go) and tested elsewhere (TestFetchProjectBoard_IsClosed_PRItem,
+// TestProbeProjectBoard_IsClosed) as always false for PR-typed items — several engine
+// callers rely on that invariant without their own explicit !IsPR guard. This pins
+// both halves: an Issue-typed item picks up a fresh `closed: true`, and a PR-typed
+// item's IsClosed stays false even when the (deliberately unqueried, since the
+// PullRequest fragment has no `closed` field) node reports closed — proving the
+// invariant survives a deep-fetch, not just the shallow board fetch.
+func TestFetchItemDetails_IsClosed(t *testing.T) {
+	t.Run("Issue-typed item picks up closed=true from the fresh fetch", func(t *testing.T) {
+		_, client := makeLookupServer(t, func() interface{} {
+			resp := minimalFetchItemDetailsResponse([]interface{}{})
+			resp["data"].(map[string]interface{})["node"].(map[string]interface{})["closed"] = true
+			return resp
+		})
+
+		item := &ProjectItem{ID: "ISSUE_id", Number: 5, IsPR: false, IsClosed: false}
+		if err := client.FetchItemDetails(item); err != nil {
+			t.Fatalf("FetchItemDetails: %v", err)
+		}
+		if !item.IsClosed {
+			t.Error("IsClosed = false, want true — Issue fragment's closed:true was not applied")
+		}
+	})
+
+	t.Run("PR-typed item's IsClosed invariant survives a deep-fetch", func(t *testing.T) {
+		_, client := makeLookupServer(t, func() interface{} {
+			return map[string]interface{}{
+				"data": map[string]interface{}{
+					"node": map[string]interface{}{
+						// No "closed" key: the PullRequest GraphQL fragment
+						// deliberately does not query it (github/project.go),
+						// so this simulates the real response shape for a PR node.
+						"title":  "Test PR",
+						"body":   "",
+						"url":    "https://github.com/test/repo/pull/9",
+						"author": map[string]interface{}{"login": "alice"},
+						"labels": map[string]interface{}{
+							"nodes":    []interface{}{},
+							"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+						},
+						"assignees": map[string]interface{}{"nodes": []interface{}{}},
+						"comments": map[string]interface{}{
+							"nodes":    []interface{}{},
+							"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+						},
+					},
+				},
+			}
+		})
+
+		item := &ProjectItem{ID: "PR_id", Number: 9, IsPR: true, IsClosed: false}
+		if err := client.FetchItemDetails(item); err != nil {
+			t.Fatalf("FetchItemDetails: %v", err)
+		}
+		if item.IsClosed {
+			t.Error("IsClosed = true, want false — must stay false for PR-typed items regardless of deep-fetch (types.go invariant)")
 		}
 	})
 }

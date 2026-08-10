@@ -29,6 +29,13 @@ type Dependency struct {
 	Repo   string // "owner/repo" of the blocking issue; empty if same repo
 }
 
+// RepoAccess captures the write-access-relevant fields from GET /repos/{owner}/{repo}
+// for the authenticated token. CanPush reflects permissions.push on that response.
+type RepoAccess struct {
+	AllowAutoMerge bool
+	CanPush        bool
+}
+
 // ReviewRequest represents a pending review request on a pull request.
 type ReviewRequest struct {
 	Login string // GitHub login of the requested reviewer (user or bot)
@@ -86,6 +93,11 @@ type PRReview struct {
 	// PR's current head SHA or a stale one (Pruefer's GitHub-derived
 	// review-state mechanism; see ADR-1113).
 	CommitID string
+	// SubmittedAt is when the review was submitted (GraphQL "submittedAt" /
+	// REST "submitted_at"). Zero value if unparseable or absent — callers
+	// needing a display timestamp (e.g. buildReviewBodyComments, #1375) must
+	// fall back rather than assume this is always populated.
+	SubmittedAt time.Time
 }
 
 // MergeQueueEntry holds the merge-queue position and state for a pull request.
@@ -172,6 +184,36 @@ type Comment struct {
 	// push to the PR (the thread's diff no longer matches the current head).
 	// Only meaningful for review-thread comments (ReviewThreadID non-empty).
 	IsOutdated bool
+}
+
+// PRReviewThread is a single review thread on a pull request, grouped as
+// thread -> ordered comments rather than the flat per-comment shape Comment
+// uses — Pruefer needs to render "original finding, then author's reply" as
+// a coherent unit (see FetchPRReviewThreads, adrs/1497-pruefer-prior-review-thread-context.md).
+type PRReviewThread struct {
+	ID         string
+	Path       string
+	Line       int // GraphQL "line", falling back to "originalLine" when line is null (e.g. an outdated thread)
+	IsResolved bool
+	IsOutdated bool
+	Comments   []PRReviewThreadComment
+	// CommentsTruncated is true when the thread has more comments than
+	// FetchPRReviewThreads' per-thread page size (20) fetched — Comments
+	// holds only the oldest 20 (GitHub's comments connection has no orderBy
+	// argument to pin this explicitly; "oldest 20" reflects the connection's
+	// observed default order, see FetchPRReviewThreads), so a later reply
+	// (e.g. the one that actually resolved the thread) may be missing.
+	// Callers rendering thread content should surface this rather than
+	// presenting Comments as the complete history.
+	CommentsTruncated bool
+}
+
+// PRReviewThreadComment is a single comment within a PRReviewThread, in
+// thread order (the original finding first, followed by any replies).
+type PRReviewThreadComment struct {
+	Author    string
+	Body      string
+	CreatedAt time.Time
 }
 
 // ReviewComment is a single line-anchored inline comment to submit as part of

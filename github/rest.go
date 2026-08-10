@@ -33,6 +33,42 @@ var ErrUnprocessableEntity = errors.New("unprocessable entity")
 // detect unsupported operations (e.g. rebase merge not allowed by repo policy).
 var ErrMethodNotAllowed = errors.New("method not allowed")
 
+// ErrDiffTooLarge is returned by REST methods when the server responds with
+// 406 Not Acceptable and the body's errors[].code is "too_large" — GitHub's
+// deterministic refusal to render a diff exceeding its 20,000-line ceiling
+// on the .diff media type. This is a size verdict, not a transient failure:
+// it will reproduce identically on every retry until the PR's head changes.
+// Callers may use errors.Is(err, github.ErrDiffTooLarge) to distinguish this
+// from a generic request failure. A 406 with a different or unparseable
+// errors[].code is NOT classified as this sentinel and keeps the generic
+// error path — this is a narrow classification of one specific GitHub error
+// shape, not a broad "406 means fine".
+var ErrDiffTooLarge = errors.New("diff too large to render")
+
+// tooLargeErrorBody is the shape of GitHub's 406 too_large response body:
+// {"message":"...","errors":[{"resource":"PullRequest","field":"diff","code":"too_large"}],"status":"406"}
+type tooLargeErrorBody struct {
+	Errors []struct {
+		Code string `json:"code"`
+	} `json:"errors"`
+}
+
+// isDiffTooLarge reports whether a 406 response body matches GitHub's
+// too_large diff error shape (at least one errors[].code == "too_large").
+// An unparseable or differently-shaped body returns false.
+func isDiffTooLarge(body []byte) bool {
+	var parsed tooLargeErrorBody
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return false
+	}
+	for _, e := range parsed.Errors {
+		if e.Code == "too_large" {
+			return true
+		}
+	}
+	return false
+}
+
 // authErrorHint returns an actionable hint string for 401/403 HTTP errors and
 // an empty string for all other status codes. The hint advises users to switch
 // to a classic personal access token, which is required for GitHub Projects v2
@@ -74,7 +110,16 @@ func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*ht
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token())
+	// An empty token means "deliberately unauthenticated" (e.g. pruefer's
+	// release-check client against the public fabrik repo) — omit the header
+	// rather than sending "Bearer " with nothing after it. GitHub's REST API
+	// treats a blank bearer token as invalid credentials (401 Bad
+	// credentials), not as equivalent to no Authorization header at all
+	// (verified against the real API), so setting it unconditionally would
+	// break every unauthenticated caller.
+	if token := c.Token(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -99,6 +144,10 @@ func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*ht
 			return resp, respBody, fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
 		case 405:
 			return resp, respBody, fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
+		case 406:
+			if isDiffTooLarge(respBody) {
+				return resp, respBody, fmt.Errorf("GitHub API returned 406: %s: %w", string(respBody), ErrDiffTooLarge)
+			}
 		case 422:
 			return resp, respBody, fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
 		}

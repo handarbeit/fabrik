@@ -61,6 +61,17 @@ type ItemState struct {
 	StageState StageState
 	// CooldownAt maps reason → expiry time (e.g. "retry", "review-blocked", "ci-await").
 	CooldownAt map[string]time.Time
+	// LabelAppliedAt maps label name → the time the engine itself most recently
+	// applied that label to this issue (record-at-write, #1314). Deliberately a
+	// separate map from CooldownAt, not a repurposing of it: CooldownAt's
+	// HasExpiredCooldown treats any non-zero, past timestamp as "wake this item"
+	// (engine/poll.go), but an applied-at timestamp is always in the past the
+	// instant it's recorded — aliasing the two would make every recorded label
+	// application look like a permanently expired cooldown. Populated only for
+	// labels the engine writes exclusively through applyLabelAdd or an explicit
+	// recordLabelAppliedAtNow call (engine/mutate.go); a label this map has no
+	// entry for simply falls back to the live FetchLabelAppliedAt REST fetch.
+	LabelAppliedAt map[string]time.Time
 	// Worker is present when a worker is in-flight for this item.
 	Worker *WorkerHandle
 
@@ -224,10 +235,24 @@ type LinkedPRState struct {
 	// (HEAD unchanged before/after processComments). While the head SHA
 	// stays at this value, handleMergeAndCIGates skips further CI-fix
 	// dispatch/cycle-increment for it — a repeated no-op reinvoke burns
-	// nothing further; CIWaitTimeout remains the backstop if CI never
-	// resolves. Cleared implicitly once HeadSHA advances past it. Empty
-	// means "no no-op recorded for the current SHA."
+	// nothing further; settleAwaitingCIScan's CIBackstopTimeout remains the
+	// backstop if CI never resolves (ADR-1410 — a confirmed CI failure never
+	// consults CIWaitTimeout). Cleared implicitly once HeadSHA advances past
+	// it. Empty means "no no-op recorded for the current SHA."
 	LastCIFixNoOpSHA string
+
+	// LastCIProgressAt records when CI was last observed to make progress: a
+	// new check-run ID appeared, an existing one's Status/Conclusion
+	// transitioned, or the linked PR's HeadSHA advanced (a fresh push resets
+	// CI entirely, which is itself progress). Set by applyCheckRunCompleted
+	// and the PRHeadSHAUpdated case in store.go, both gated on an actual
+	// content change so a duplicate/no-op observation never bumps it. Zero
+	// means no progress has been observed since this process started — the
+	// safe cold-start default (ADR-1410) is to never escalate on a zero
+	// timestamp, only to re-observe, since the in-memory store has no
+	// persistence across a restart and GitHub exposes no change-history
+	// equivalent to backfill it from.
+	LastCIProgressAt time.Time
 }
 
 // StageState holds per-stage attempt counters and cycle counts.
@@ -247,8 +272,23 @@ type StageState struct {
 	// retry first attempts PR creation before re-invoking Claude.
 	PRCreationFailed map[string]bool
 	// ReviewCycles counts how many review iterations each stage has completed.
-	// Replaces engine.reviewCycleCount[stageKey].
+	// Replaces engine.reviewCycleCount[stageKey]. Subject to the #1045
+	// ReviewCycleDecremented refund whenever a reinvoke lands no new commit —
+	// see ReviewBlockedCycles below for the counter that refund cannot mask.
 	ReviewCycles map[string]int
+	// ReviewBlockedCycles counts review reinvokes dispatched while the review
+	// gate itself was still blocked/timed-out (an authoritative gate with an
+	// unresolved verdict, or a plain "nobody has responded" block that has
+	// aged past ReviewWaitTimeout). Unlike ReviewCycles, this counter is never
+	// refunded — a no-op-on-HEAD reinvoke that happened while the gate was
+	// still blocking is genuine non-convergence evidence, not the harmless
+	// junk-overview no-op #1045's ReviewCycleDecremented exists to forgive
+	// (that shape is dispatched with the gate already clear, so it never
+	// increments this counter). handleReviewGate compares
+	// max(ReviewCycles, ReviewBlockedCycles) against MaxReviewCycles so a
+	// refund-masked loop still terminates in pauseForReviewCycleLimit instead
+	// of falling through to pauseForReviewTimeout. See ADR-1518.
+	ReviewBlockedCycles map[string]int
 	// CIFixCycles counts how many CI-fix iterations each stage has completed.
 	// Replaces engine.ciFixCycleCount[stageKey].
 	CIFixCycles map[string]int
@@ -260,6 +300,12 @@ type StageState struct {
 	// queue-thrash loop (enqueue→eject→re-enqueue→eject) independently of the
 	// RebaseCycles/CIFixCycles that the conflict/CI sub-paths increment.
 	EnqueueCycles map[string]int
+	// SliceRetries counts how many turn-cap preemptions (CLI subtype
+	// error_max_turns) each stage has hit. Bounded by MaxSliceRetries,
+	// independently of Attempts/MaxRetries — a turn-cap exit is a resumable
+	// time-slice, not a failure (#1199), so it must not count against the
+	// failure counter, but a non-converging job still needs its own bound.
+	SliceRetries map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage

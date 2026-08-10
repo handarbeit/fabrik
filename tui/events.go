@@ -154,11 +154,46 @@ type CustomWorkflowEvent struct{}
 
 func (CustomWorkflowEvent) tuiEvent() {}
 
-// RateLimitAlertEvent is emitted by the engine when the GraphQL rate-limit state
-// transitions: Exhausted=true when a probe failure occurs while quota is low or
-// zero; Exhausted=false when quota recovers above rateLimitHealthyThreshold.
-// Reset is the time at which the quota is expected to reset (zero if unknown).
+// RateLimitBucket identifies which GitHub API rate-limit budget a
+// RateLimitAlertEvent concerns. REST and GraphQL are tracked, gated, and
+// recovered independently (see engine/backoff.go), so an event must name
+// its bucket rather than leaving it implicit — see #1482.
+type RateLimitBucket int
+
+const (
+	// RateLimitBucketGraphQL is the GraphQL API budget, gated by the 20%/50%
+	// hysteresis in nextRateLimitLow (ADR-028). This is the zero value so
+	// that any code path which forgets to set Bucket fails toward the
+	// historical (pre-#1482) implicit meaning rather than a silent new one.
+	RateLimitBucketGraphQL RateLimitBucket = iota
+	// RateLimitBucketREST is the REST/core API budget, gated by a hard
+	// near-zero (<=1%) pause (shouldPauseForRESTRateLimit) rather than
+	// GraphQL's hysteresis band — REST and GraphQL exhaustion are not
+	// symmetric conditions.
+	RateLimitBucketREST
+)
+
+// String returns the bucket's display name, as used in the alert banner text.
+func (b RateLimitBucket) String() string {
+	switch b {
+	case RateLimitBucketREST:
+		return "REST"
+	default:
+		return "GraphQL"
+	}
+}
+
+// RateLimitAlertEvent is emitted by the engine when a GitHub rate-limit
+// bucket's exhaustion state transitions: Exhausted=true when the bucket is
+// observed to be exhausted (REST: a hard near-zero pause; GraphQL: a probe
+// failure while quota is low, per ADR-028's hysteresis); Exhausted=false
+// when that same bucket recovers. Bucket identifies which of the two
+// independent budgets (REST or GraphQL) the event concerns — an
+// Exhausted=false for one bucket must never be treated as clearing an
+// alert raised by the other (#1482). Reset is the time at which that
+// bucket's quota is expected to reset (zero if unknown).
 type RateLimitAlertEvent struct {
+	Bucket    RateLimitBucket
 	Exhausted bool
 	Reset     time.Time
 }

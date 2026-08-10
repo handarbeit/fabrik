@@ -124,8 +124,10 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e conjunctive-ci-review-gate (%s)", stamp)
+	path := markerPath("TestConjunctiveCIReviewGate")
+	body := fmt.Sprintf(conjunctiveCIReviewGateBody, path, path)
 
-	num := FileIssue(t, env, env.RepoAlpha, title, conjunctiveCIReviewGateBody, "fabrik:yolo")
+	num := FileIssue(t, env, env.RepoAlpha, title, body, "fabrik:yolo")
 	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
 	SetIssueStatus(t, env, itemID, "Specify")
 	t.Logf("filed %s#%d — waiting for Implement to complete", env.RepoAlpha, num)
@@ -295,8 +297,10 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	}
 }
 
-// conjunctiveCIReviewGateBody is the issue body for TestConjunctiveCIReviewGate.
-// Claude makes a minimal change to README.md and includes "slow-ci-required"
+// conjunctiveCIReviewGateBody is the issue body template for
+// TestConjunctiveCIReviewGate. Both %s placeholders are the scenario's unique
+// marker file path (see markerPath in harness.go, #1394), repeated verbatim.
+// Claude makes a minimal change to that file and includes "slow-ci-required"
 // in the PR body to trigger the ~10-minute slow-gate required CI check, creating
 // a wide CI-await window for the conjunctive gate test.
 const conjunctiveCIReviewGateBody = `## Goal
@@ -307,8 +311,9 @@ review gate must both be satisfied before Validate advances the issue.
 
 ## The change
 
-Add exactly one new HTML comment to README.md, on its own line, immediately
-after the line containing "# fabrik-test-alpha". The comment must be EXACTLY:
+Add exactly one new HTML comment as a new line at the end of ` + "`%s`" + `
+(create the file first if it doesn't already exist). The comment must be
+EXACTLY:
 
     <!-- conjunctive-ci-review-gate-test -->
 
@@ -328,6 +333,6 @@ behaviour. Do NOT include ci-fix-sentinel-required in the PR body.
 
 ## Scope
 
-Single file (README.md). Minimal one-line change. No decomposition.
+Single file (` + "`%s`" + `). Minimal one-line change. No decomposition.
 Plan and Implement should be a one-commit change.
 `

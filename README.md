@@ -100,6 +100,8 @@ GitHub Project Board (source of truth)
 > **Big-board efficiency (v0.0.57):** On large project boards, the per-poll GraphQL cost drops ~5–10× via a lightweight `updatedAt`-only probe that gates the full deep-fetch — only items that changed since the last poll trigger a full query. Terminal items (issues in a cleanup/Done column with `stage:<name>:complete` and no active lifecycle labels) are skipped entirely from both the probe and deep-fetch evaluation.
 >
 > **Cold-start optimization (v0.0.58):** On startup, closed Done items are seeded from probe data as terminal without a deep-fetch, reducing cold-start GraphQL cost by ~80–90%. Combined with probe-driven polling, this makes running two Fabrik instances on a single token budget practical.
+>
+> **Anthropic auth namespace scrub (v0.0.77):** Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default (`ANTHROPIC_*` wildcard, plus an enumerated `CLAUDE_CODE_*` auth-selector list) — an ambient `ANTHROPIC_API_KEY` in the engine's environment can no longer silently redirect a stage from subscription billing to metered API billing. `FABRIK_ANTHROPIC_API_KEY` is the only supported opt-in for API billing; `apiKeyHelper` is refused outright, both at startup and per-invocation. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](docs/USER_GUIDE.md#anthropic-auth-namespace-scrub--apikeyhelper-refusal) in the User Guide.
 
 ### Webhook Mode (Optional)
 
@@ -285,7 +287,10 @@ CLI flag  >  shell env var  >  .env file  >  .fabrik/config.yaml  >  built-in de
 Run `fabrik init` to generate `.fabrik/config.yaml` in your project. This file holds
 all non-secret project settings and should be committed to git. See the
 [Configuration Reference](docs/USER_GUIDE.md#2-configuration-reference) in the User
-Guide for a full field-by-field description with examples and defaults.
+Guide for a full field-by-field description with examples and defaults, including
+`required_status_contexts` — per-repo required context names the CI gate must see
+confirmed `success` for, needed only when a repo's required CI signal is a classic
+commit status rather than a normal GitHub Actions check run.
 
 **Secrets** (GitHub tokens) belong in a gitignored `.env` file only:
 
@@ -389,6 +394,7 @@ Fabrik uses labels to track state:
 | `fabrik:awaiting-review` | Applied optimistically by the engine whenever a `wait_for_reviews: true` stage completes (reviewer request data may still be stale at that moment); removed when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`), at which point the issue is paused with `fabrik:awaiting-input` |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is deferred until CI passes (conjunctive gate). Triggers cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses, at which point the issue is paused with `fabrik:awaiting-input` |
 | `fabrik:rebase-needed` | Applied when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage (usually triggered by another PR merging into the base branch while this branch sits in the CI-await window); the engine dispatches a rebase re-invocation for Claude to resolve the conflict, and the label is cleared when the rebase lands and the PR becomes mergeable again |
+| `fabrik:api-key-helper-detected` | Applied when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper`; does not count against `max_retries`. Clears automatically once `apiKeyHelper` is removed and a later invocation reaches Claude successfully. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](docs/USER_GUIDE.md#anthropic-auth-namespace-scrub--apikeyhelper-refusal) in the User Guide. |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
@@ -396,8 +402,10 @@ Fabrik uses labels to track state:
 | `effort:<level>` | Override thinking effort for this issue only — valid values: `low`, `medium`, `high`, `max`; precedence: `max > high > medium > low`. Complements `model:` label. |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:auto-merge-enabled` | Applied when Fabrik enables GitHub's native auto-merge on a yolo PR after Validate completes; serves as the idempotency guard and convergence-budget start anchor; removed when the PR merges or is closed |
-| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
+| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only, bypassing the default `--permission-mode dontAsk` posture and the entire tool allowlist. Use only when a stage needs tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains). **Caution:** removes all tool restrictions. |
+| `review-authority:<mode>` | Override the stage's configured `review_authority` for this issue only (`advisory` or `authoritative`); only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](docs/USER_GUIDE.md#authoritative-mode) in the User Guide. |
+| `expected-reviewers:<mode>` | Override the stage's configured `expected_reviewers` for this issue only (`none` or `declared`); only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](docs/USER_GUIDE.md#declaring-expected-reviewers) in the User Guide. |
 | `fabrik:extend-turns` | Pre-grant 2× `max_turns` budget for the next invocation; auto-extends to 3× when stage progress is detected; auto-removed on successful stage completion. |
 | `fabrik:revalidate` | Force re-entry of the Validate stage — the engine clears `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, and itself, then re-runs Validate on the current HEAD SHA. Use as a one-action recovery for stuck-Validate, or as the manual fallback for items that completed Validate before SHA-change auto-revalidation was deployed. |
 | `base:<branch>` | Override the base branch for this issue — Fabrik forks from, rebases onto, and targets PRs at `<branch>` instead of the repository default. Must be set before Research. If the branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment. |

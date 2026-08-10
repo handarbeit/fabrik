@@ -59,6 +59,7 @@ func TestSmokeSingleRepoFullPipeline(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	marker := fmt.Sprintf("smoke-full-pipeline-%s", stamp)
+	path := markerPath("TestSmokeSingleRepoFullPipeline")
 	num := FileIssue(t, env, env.RepoAlpha,
 		fmt.Sprintf("e2e smoke full-pipeline (%s)", stamp),
 		`## Goal
@@ -67,7 +68,7 @@ End-to-end single-repo pipeline smoke. Verify Fabrik can take an issue from Spec
 
 ## Trivial change
 
-Append a single comment line to `+"`README.md`"+` at the very end of the file:
+Append a single comment line to `+"`"+path+"`"+` at the very end of the file (create the file first if it doesn't already exist):
 
 `+"```"+`
 <!-- `+marker+` -->
@@ -85,6 +86,6 @@ Single repo only — no cross-repo work. The Plan stage should NOT decompose.`,
 	t.Logf("filed %s#%d at Status=Specify, marker=%s", env.RepoAlpha, num, marker)
 
 	// Full pipeline can take up to ~30 min depending on Claude latency.
-	WaitForIssueClosed(t, env, env.RepoAlpha, num, 45*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 45*time.Minute)
 	t.Logf("%s#%d closed — full single-repo pipeline verified", env.RepoAlpha, num)
 }

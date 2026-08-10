@@ -217,6 +217,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
+	// Circuit breaker (#1089, moved earlier by #1413): record this invocation
+	// now that the working comment slice is final, before any setup side
+	// effect (👀 reactions, editing label, worktree setup) runs. Recording
+	// here — rather than just before the Claude invocation — means a setup
+	// failure (e.g. an editing-label API failure) DOES count as a cycle: the
+	// three setup-failure early-returns below each also call
+	// checkCommentBreaker so a persistently failing setup step trips the
+	// breaker instead of looping unbounded (see #1382/#1386).
+	e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
+
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 	startedAt := time.Now()
 	e.emitStructural(tui.JobStartedEvent{
@@ -241,6 +251,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
+		e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
 		return fmt.Errorf("adding editing label: %w", err)
 	} else {
 		e.syncLabelAdd(item, "fabrik:editing", true)
@@ -251,6 +262,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
+		e.checkCommentBreaker(item, fmt.Sprintf("resolving the base branch failed: %v", err))
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 	// Merge-queue awareness (ADR-058 D3): skip the preemptive rebase when the PR is
@@ -260,6 +272,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
+		e.checkCommentBreaker(item, fmt.Sprintf("setting up the worktree failed: %v", err))
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
@@ -280,7 +293,19 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	invokeOpts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
+	// Comment processing only ever runs on a stage that has already produced
+	// at least one prior attempt (there's output to comment on), so a
+	// CreateDraftPR stage's PR may already exist — pass resume=true.
+	fabrikRoot, prNumber := e.resolveFabrikEnvOpts(item, stage, true)
+	invokeOpts := InvokeOptions{
+		ModelOverride:     modelOverride,
+		EffortOverride:    effortOverride,
+		BaseBranch:        baseBranch,
+		FabrikRoot:        fabrikRoot,
+		PRNumber:          prNumber,
+		FabrikRepo:        e.defaultRepo(),
+		MaxResumeFailures: e.cfg.MaxResumeFailures,
+	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
 	}
@@ -288,13 +313,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Snapshot extend-turns label before loop (stable across any mid-loop FetchItemDetails re-fetch).
 	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
 
-	// Circuit breaker (#1089): record this invocation now that Claude is actually
-	// about to run — recording here (not up at the JobStartedEvent emission above)
-	// means an early return before this point (e.g. editing-label API failure)
-	// doesn't count as a wasted cycle. Capture the pre-invocation HEAD so a commit
-	// landed during this cycle resets the counter below.
+	// Capture the pre-invocation HEAD so a commit landed during this cycle
+	// resets the breaker counter below. The invocation itself was already
+	// recorded above, before setup — see the comment there.
 	preInvokeSHA, _ := gitHeadSHA(workDir)
-	e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
 
 	output, usage, invCompleted, err := e.runCommentExtensionLoop(ctx, stage, &item, comments, workDir, invokeOpts, hadExtendTurnsLabel)
 
@@ -302,14 +324,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.resetCommentBreaker(item)
 	}
 
-	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
-		if usage.MaxTurns > 0 {
-			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
-				usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000)
-		} else {
-			e.logf(item.Number, "stats", "used %d turns, %dk input / %dk output tokens\n",
-				usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000)
-		}
+	if line := formatStatsLogLine(usage); line != "" {
+		e.logf(item.Number, "stats", "%s\n", line)
 	}
 	func() {
 		e.mu.Lock()
@@ -362,11 +378,21 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			e.logf(item.Number, "claude-limit", "claude comment review hit the account usage limit; not counted toward the comment circuit breaker\n")
 			return nil
 		}
+		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
+		// unlike the usage-limit exclusion immediately above: a resume failure
+		// is specific to this issue's own session, not an account-wide
+		// condition, so it counts toward the comment circuit breaker exactly
+		// like *claudeAPIErrorExit already does (ADR-1458) — this path is the
+		// comment-processing loop's only bound, and exempting it would leave
+		// the comment-triggered dispatch path with no bound at all if a
+		// session kept failing to resume. The max_retries-equivalent exemption
+		// this type carries (see finalizeStageOutcome in item.go) is a
+		// separate, narrower guarantee that only applies to the stage path.
 		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		// A non-completing, erroring invocation is exactly the "no forward progress"
 		// case the circuit breaker exists to catch — check it here too, not only
 		// on the successful-completion path below.
-		e.checkCommentBreaker(item)
+		e.checkCommentBreaker(item, "")
 		return err
 	}
 	if err != nil {
@@ -380,7 +406,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Checked last so any reset applied above (stage-complete inside
 	// finalizeComments, or an issue-body update inside publishCommentOutput)
 	// takes effect before evaluating whether this cycle tripped the breaker.
-	e.checkCommentBreaker(item)
+	e.checkCommentBreaker(item, "")
 
 	return nil
 }
@@ -645,14 +671,21 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 }
 
 // isReviewReinvoke reports whether this processComments invocation originated
-// from a review-reinvoke dispatch (i.e., all comments are PR inline review
-// thread comments). Returns false for an empty slice.
+// from a review-reinvoke dispatch (i.e., every comment is either a PR inline
+// review thread comment or a synthetic review-body comment, Finding 4 —
+// buildReviewBodyComments). A comment counts as review-reinvoke-eligible when
+// c.ReviewThreadID != "" (a real thread comment) OR c.ID has the
+// reviewBodyIDPrefix ("review-body:") — a body-derived comment has no thread
+// to carry the marker, so it needs its own discriminator. This keeps a
+// mixed batch (some thread comments plus a review body) classified as a
+// review reinvoke, so publishCommentOutput still posts the PR feedback
+// summary for it. Returns false for an empty slice.
 func isReviewReinvoke(comments []gh.Comment) bool {
 	if len(comments) == 0 {
 		return false
 	}
 	for _, c := range comments {
-		if c.ReviewThreadID == "" {
+		if c.ReviewThreadID == "" && !strings.HasPrefix(c.ID, reviewBodyIDPrefix) {
 			return false
 		}
 	}

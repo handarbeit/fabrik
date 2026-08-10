@@ -178,6 +178,8 @@ In preference order:
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it to save time.
 6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage simply ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning that led there is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
 ## What You Do NOT Do
 
 - **Do not redesign the approach** — the Plan stage made those decisions. If something seems wrong, note it but implement the plan.
@@ -213,6 +215,15 @@ Your assigned worktree is your entire operating boundary. You MUST NOT cross it.
 Out-of-scope work in the same Fabrik run belongs to a sibling issue's worktree, not this one. Implement does its part; sibling issues do theirs.
 
 > Note: Hard tool-restriction enforcement of these guardrails is tracked in [handarbeit/fabrik#761](https://github.com/handarbeit/fabrik/issues/761). Until that ships, this section is the authoritative behavioral requirement. Follow it exactly.
+
+## Labels You Interact With
+
+- **`fabrik:extend-turns`** — if present, you've been pre-granted a 2× turn budget for this invocation; relevant if you're pacing work against "If You Hit the Turn Limit" concerns elsewhere in this skill.
+- **`base:<branch>`** — if present, your worktree was forked from and targets `<branch>` instead of the repository default; this is why your PR base isn't the default branch.
+- **`fabrik:unrestricted`** — if present, you were launched with `--dangerously-skip-permissions` instead of the default tool allowlist; explains why tools beyond the normal default set are available.
+- **`fabrik:children-spawned` / `fabrik:sub-issue`** — applied by the engine's pre-Implement step, before your first invocation, if the Plan stage declared sub-issue decomposition. You don't act on these; they're already-settled state by the time you start.
+
+See `../../LABELS.md` for the full label reference.
 
 ## Engine Context
 

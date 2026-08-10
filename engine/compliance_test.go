@@ -2,12 +2,12 @@ package engine
 
 // TestAddCommentCompliance verifies that every AddComment call site in the
 // engine source — plus every body/comment argument passed through the
-// e.postComment / e.postItemComment / e.pauseIssue mutation helpers (which
-// funnel into the single canonical e.client.AddComment call inside
-// postComment) — passes a body that begins with the canonical "🏭 **Fabrik"
-// header.  This ensures findNewComments' prefix dedup in comments.go catches
-// all engine-generated comments and prevents Fabrik from processing its own
-// output on the next poll.
+// e.postComment / e.postItemComment / e.pauseIssue / e.pauseInterruptedIssue
+// mutation helpers (which funnel into the single canonical e.client.AddComment
+// call inside postComment) — passes a body that begins with the canonical
+// "🏭 **Fabrik" header.  This ensures findNewComments' prefix dedup in
+// comments.go catches all engine-generated comments and prevents Fabrik from
+// processing its own output on the next poll.
 //
 // A body argument is compliant if and only if:
 //   - It is a call to formatOutputComment, formatPRSummaryComment,
@@ -20,8 +20,9 @@ package engine
 //
 // The e.client.AddComment call inside postComment itself (mutate.go) is
 // exempt from the literal check — it passes through postComment's own body
-// parameter, and callers of postComment/postItemComment/pauseIssue are
-// checked instead, at their own body/comment argument.
+// parameter, and callers of postComment/postItemComment/pauseIssue/
+// pauseInterruptedIssue are checked instead, at their own body/comment
+// argument.
 //
 // Test files (*_test.go) are excluded because mock AddComment implementations
 // may accept arbitrary bodies.
@@ -81,22 +82,27 @@ func TestAddCommentCompliance(t *testing.T) {
 // e.client.AddComment plus the e.postComment -> e.postItemComment /
 // e.pauseIssue mutation-helper call graph that funnels into it.
 var bodyBearingCalls = map[string]int{
-	"AddComment":      3, // (owner, repo string, issueNumber int, body string)
-	"postComment":     1, // (item, body string, react, echo bool)
-	"postItemComment": 1, // (item, body string, react bool)
-	"pauseIssue":      1, // (item, comment string, opts pauseOpts)
+	"AddComment":                3, // (owner, repo string, issueNumber int, body string)
+	"postComment":               1, // (item, body string, react, echo bool)
+	"postItemComment":           1, // (item, body string, react bool)
+	"pauseIssue":                1, // (item, comment string, opts pauseOpts)
+	"addLandedCommentWithRetry": 4, // (owner, repo string, issueNumber, prNum int, body string)
+	"pauseInterruptedIssue":     1, // (item, comment string)
 }
 
 // funnelSkips maps a function name to the single body-bearing call name that
 // function is exempt from checking on itself, because that call passes
 // through the function's own body/comment parameter — a pass-through, not a
 // new body. The funnel is: postComment (raw AddComment) <- postItemComment
-// (postComment) <- pauseIssue (postComment). Every function's *callers* are
-// still checked normally via bodyBearingCalls.
+// (postComment) <- pauseIssue (postComment) <- pauseInterruptedIssue
+// (pauseIssue). Every function's *callers* are still checked normally via
+// bodyBearingCalls.
 var funnelSkips = map[string]string{
-	"postComment":     "AddComment",
-	"postItemComment": "postComment",
-	"pauseIssue":      "postComment",
+	"postComment":               "AddComment",
+	"postItemComment":           "postComment",
+	"pauseIssue":                "postComment",
+	"addLandedCommentWithRetry": "AddComment",
+	"pauseInterruptedIssue":     "pauseIssue",
 }
 
 // checkAddCommentBody walks a function body, finds all AddComment (and

@@ -41,7 +41,8 @@ func TestCruiseFullPipeline(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	marker := fmt.Sprintf("cruise-pipeline-%s", stamp)
-	body := fmt.Sprintf(cruiseBodyTemplate, "`", "`", "```", marker, "```")
+	path := markerPath("TestCruiseFullPipeline")
+	body := fmt.Sprintf(cruiseBodyTemplate, "`", path, "`", "```", marker, "```")
 
 	num := FileIssue(t, env, env.RepoAlpha,
 		fmt.Sprintf("e2e cruise full pipeline (%s)", stamp),
@@ -106,20 +107,20 @@ func TestCruiseFullPipeline(t *testing.T) {
 	// R5: after the human merge, the engine detects the terminal PR state,
 	// advances the board to Done, and the issue closes (via GitHub's
 	// Closes #N auto-close on merge).
-	WaitForIssueClosed(t, env, env.RepoAlpha, num, 45*time.Minute)
+	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 45*time.Minute)
 	t.Logf("%s#%d closed after human merge — R5 verified (full cruise contract confirmed)", env.RepoAlpha, num)
 }
 
-// cruiseBodyTemplate is the issue body for TestCruiseFullPipeline. The five
-// %s placeholders are: backtick, backtick, codefence, marker, codefence
-// (Go raw strings can't contain backticks).
+// cruiseBodyTemplate is the issue body for TestCruiseFullPipeline. The six
+// %s placeholders are: backtick, marker path, backtick, codefence, marker,
+// codefence (Go raw strings can't contain backticks).
 const cruiseBodyTemplate = `## Goal
 
 End-to-end verification of the fabrik:cruise pipeline contract (#898).
 
 ## Trivial change
 
-Append a single HTML comment line to %sREADME.md%s at the very end of the file:
+Append a single HTML comment line to %s%s%s at the very end of the file (create the file first if it doesn't already exist):
 
 %s
 <!-- %s -->

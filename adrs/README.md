@@ -39,3 +39,4 @@ contributors and future maintainers.
 | [1216](1216-review-gate-at-landing-decision.md) | Review gate checked at the landing decision | Accepted |
 | [1222](1222-consolidate-merge-train-worker-liveness.md) | Consolidate Merge-Train Worker Liveness Into `itemstate.Store` | Accepted |
 | [1250](1250-review-authority-orthogonal-to-autonomy.md) | Review authority — advisory vs. authoritative, an axis orthogonal to autonomy | Accepted |
+| [1414](1414-resume-failure-session-abandonment.md) | Consecutive resume-failure session abandonment | Accepted |

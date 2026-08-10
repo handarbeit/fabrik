@@ -38,11 +38,17 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 	case PRMergeNoPR, PRMergeTerminal:
 		return false, false
 	case PRMergeUnsettled:
+		// #1303: this claim previously produced no log output at all, which
+		// let a stuck classification (e.g. a stale-cached CheckRunsPending
+		// read) stall an item silently for over an hour with nothing in the
+		// logs to point at. Every claim on this path must name itself.
+		e.logf(item.Number, "merge-gate", "claiming item — PRMergeUnsettled (%s)\n", settle.Reason)
 		return true, false
 	case PRMergeQueued:
 		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
 		// Block like PRMergeUnsettled (no conflict, no fabrik:rebase-needed churn) so a
 		// human-enqueued non-yolo PR at a gate-checked stage simply waits for the queue.
+		e.logf(item.Number, "merge-gate", "claiming item — PR in merge queue (%s)\n", settle.Reason)
 		return true, false
 	case PRMergeBlocked:
 		// CI has failed but there is no base-branch conflict. Clear the merge
@@ -342,7 +348,7 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		// applied-at (set at first enqueue) so it survives restarts. Guard on
 		// CIWaitTimeout > 0 so operators can disable the check.
 		if e.cfg.CIWaitTimeout > 0 {
-			appliedAt, faErr := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:auto-merge-enabled")
+			appliedAt, faErr := e.labelAppliedAt(item, owner, repo, "fabrik:auto-merge-enabled")
 			if faErr != nil {
 				e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at for stall check: %v\n", faErr)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.cfg.CIWaitTimeout {
@@ -386,7 +392,7 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 
 	// Check convergence budget.
 	if e.cfg.ConvergenceBudget > 0 {
-		budgetStart, berr := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:auto-merge-enabled")
+		budgetStart, berr := e.labelAppliedAt(item, owner, repo, "fabrik:auto-merge-enabled")
 		if berr != nil {
 			e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at: %v\n", berr)
 		} else if !budgetStart.IsZero() {
@@ -454,6 +460,8 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			}
 			maxCycles := e.cfg.MaxCiFixCycles
 			if cycleCount >= maxCycles {
+				// escalated return value intentionally discarded — same reasoning as
+				// the identical call in handleMergeAndCIGates (catch_up_handlers.go).
 				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
 			} else {
 				e.logf(item.Number, "auto-merge", "PR #%d ejected with failing CI — dispatching ci-fix reinvoke\n", pr.Number)
@@ -577,26 +585,72 @@ func summarizeCIRuns(runs []gh.CheckRun) string {
 	return fmt.Sprintf("✅ %d passed", passed)
 }
 
+// rebaseCyclePauseFragment is the stable prose fragment identifying a
+// pauseForRebaseCycleLimit pause comment, matched by hasPauseComment (#1460 R4).
+func rebaseCyclePauseFragment(stage *stages.Stage) string {
+	return fmt.Sprintf("The stage **%s** has been re-invoked to rebase onto the base branch", stage.Name)
+}
+
 // pauseForRebaseCycleLimit pauses the issue when rebase re-invocations have
 // been attempted too many times — usually a signal that the conflict needs
-// human judgment.
-func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+// human judgment — unless a pause comment for this episode already exists
+// (#1408/#1460 R4), in which case it reapplies the pause labels only, reusing
+// the existing comment rather than reposting.
+//
+// Applies itemstate.EnginePaused (#1460 R2) in both branches — the fresh
+// pause AND the reapply-existing-comment branch — so wasPaused becomes true
+// and the new handleEngineUnpause Phase 1 handler fires clearFailedStage on
+// resume, actually resetting RebaseCycles. Without this, removing
+// fabrik:paused was a no-op: RebaseCycles stayed pinned at the limit and the
+// item re-paused on its very next catch-up pass. Re-applying on the reapply
+// branch matters too: a resume clears PausedByEngine, so if the conflict
+// keeps recurring and the counter climbs back to the limit a second time,
+// this function runs again on the reapply branch (the old comment still
+// matches) and must re-arm PausedByEngine or the next resume would be a no-op.
+//
+// Returns escalated: true when a fresh pause comment was posted, false when
+// an existing episode's pause was merely reapplied.
+//
+// The pause message also asks the operator to remove fabrik:rebase-needed
+// alongside fabrik:paused (#1460 review finding: clearFailedStage, run by
+// handleEngineUnpause on resume, never touches fabrik:rebase-needed — it only
+// knows about EnginePaused/cycle-counter state, not this gate's own label).
+// Confirmed harmless either way: checkMergeabilityGate recomputes
+// fabrik:rebase-needed from GitHub's live mergeability on every catch-up
+// pass, independent of what clearFailedStage did — if the conflict is
+// resolved it clears the label itself (removeRebaseNeededLabel), and if the
+// conflict persists it re-applies the label (idempotent) and a fresh rebase
+// reinvoke is exactly what should happen against the just-reset RebaseCycles.
+// So a stale fabrik:rebase-needed left behind by a manual unpause self-heals
+// on the very next observation and never blocks or misleads the gate either
+// way; the message's instruction to remove it is a courtesy, not a
+// requirement.
+func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if hasPauseComment(item, rebaseCyclePauseFragment(stage)) {
+		e.logf(item.Number, "rebase-cycles", "rebase-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyPauseLabels(item)
+		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		return false
+	}
 	e.logf(item.Number, "rebase-cycles", "rebase cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
-		"🏭 **Fabrik — rebase cycle limit reached**\n\nThe stage **%s** has been re-invoked to rebase onto the base branch %d time(s), "+
+		"🏭 **Fabrik — rebase cycle limit reached**\n\n%s %d time(s), "+
 			"which has reached the configured limit of %d (override with `--max-rebase-cycles` or `FABRIK_MAX_REBASE_CYCLES`).\n\n"+
 			"GitHub still reports the PR as not mergeable. This usually means the conflict requires human judgment "+
 			"(for example: two PRs picked the same ADR number or migration slot, or a semantic overlap that cannot be "+
 			"resolved by automated rebase).\n\n"+
 			"Fabrik has paused this issue. Resolve the conflict manually, then remove the `fabrik:paused` and "+
 			"`fabrik:rebase-needed` labels to resume.",
-		stage.Name, cycleCount, maxCycles,
+		rebaseCyclePauseFragment(stage), cycleCount, maxCycles,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	return true
 }
 
 // advanceConvergedPRToDone removes the convergence labels and advances a merged
@@ -617,9 +671,12 @@ func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.Projec
 	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
 	e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
 	e.removeRebaseNeededLabel(owner, repo, item)
-	if err := e.advanceToNextStage(board, item, stage); err != nil {
+	if err := e.recordAdvanceOutcome(board, item, stage); err != nil {
 		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
 	}
+	// Runs unconditionally on a confirmed merge, regardless of the advance's
+	// outcome above — see awaitingAdvanceLabel's doc comment (advance_settle.go)
+	// for why that's safe even when recordAdvanceOutcome just failed.
 	if merged {
 		e.closeIssueIfNonDefaultBase(item, prNumber)
 	}
@@ -673,6 +730,8 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 	}
 	maxCycles := e.cfg.MaxEnqueueCycles
 	if cycleCount >= maxCycles {
+		// escalated return value intentionally discarded — same reasoning as
+		// the identical pauseForCIFixCycleLimit call above (#1460 R4).
 		e.pauseForEnqueueCycleLimit(board, item, stage, cycleCount, maxCycles)
 		return
 	}
@@ -695,27 +754,66 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 	e.store.Apply(itemstate.PREnqueueRecorded{Repo: repoStr, Number: item.Number, SHA: pr.HeadSHA})
 }
 
+// enqueueCyclePauseFragment is the stable prose fragment identifying a
+// pauseForEnqueueCycleLimit pause comment, matched by hasPauseComment (#1460
+// R4). Scoped by stage name, matching reviewCyclePauseFragment/
+// rebaseCyclePauseFragment — a prior version of this fragment was a bare,
+// stage-unscoped const, which would have matched a comment from *any* stage
+// the item passed through, not just the current one, once this pause is ever
+// reached from more than one stage (review finding on #1460's own PR).
+func enqueueCyclePauseFragment(stage *stages.Stage) string {
+	return fmt.Sprintf("The linked PR for stage **%s** has been re-enqueued into GitHub's merge queue", stage.Name)
+}
+
 // pauseForEnqueueCycleLimit pauses the issue when merge-queue re-enqueue trips
 // have been attempted too many times — a queue-thrash loop (enqueue → eject →
 // re-enqueue → eject) that no single sub-path cap (rebase / CI-fix) would catch.
 // Mirrors pauseForRebaseCycleLimit: structured comment naming --max-enqueue-cycles,
-// fabrik:paused + fabrik:awaiting-input (write-through). The EnqueueCycles counter
-// is cleared by clearFailedStage (EngineCyclesCleared) when the user unpauses.
-func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+// fabrik:paused + fabrik:awaiting-input (write-through) — unless a pause
+// comment for this episode already exists (#1408/#1460 R4), in which case it
+// reapplies the pause labels only, reusing the existing comment rather than
+// reposting.
+//
+// Applies itemstate.EnginePaused (#1460 R2) in both branches — the fresh
+// pause AND the reapply-existing-comment branch — so wasPaused becomes true
+// and the new handleEngineUnpause Phase 1 handler fires clearFailedStage on
+// resume, actually resetting EnqueueCycles. (This doc comment previously
+// claimed "the EnqueueCycles counter is cleared by clearFailedStage
+// (EngineCyclesCleared) when the user unpauses" — that was false: this
+// function never applied EnginePaused, so wasPaused was never true and
+// clearFailedStage never fired via processItem's gate. #1460 corrects this.)
+// Re-applying on the reapply branch matters too: a resume clears
+// PausedByEngine, so if the queue-thrash recurs and the counter climbs back
+// to the limit a second time, this function runs again on the reapply branch
+// (the old comment still matches) and must re-arm PausedByEngine or the next
+// resume would be a no-op.
+//
+// Returns escalated: true when a fresh pause comment was posted, false when
+// an existing episode's pause was merely reapplied.
+func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if hasPauseComment(item, enqueueCyclePauseFragment(stage)) {
+		e.logf(item.Number, "enqueue-cycles", "enqueue-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyPauseLabels(item)
+		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		return false
+	}
 	e.logf(item.Number, "enqueue-cycles", "merge-queue re-enqueue limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
-		"🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\nThe linked PR for stage **%s** has been re-enqueued into GitHub's merge queue %d time(s), "+
+		"🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\n%s %d time(s), "+
 			"which has reached the configured limit of %d (override with `--max-enqueue-cycles` or `FABRIK_MAX_ENQUEUE_CYCLES`).\n\n"+
 			"The PR keeps being ejected from the merge queue and re-enqueued without merging. This usually means the merge group repeatedly fails to build or test "+
 			"against the current base — for example a flaky required check, a missing `merge_group` CI trigger, or a persistent semantic conflict with other queued PRs.\n\n"+
 			"Fabrik has paused this issue. Investigate the merge-queue failures, then remove the `fabrik:paused` label to resume.",
-		stage.Name, cycleCount, maxCycles,
+		enqueueCyclePauseFragment(stage), cycleCount, maxCycles,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	return true
 }
 
 // pauseForMergeGroupStall pauses the issue when the linked PR has been in the

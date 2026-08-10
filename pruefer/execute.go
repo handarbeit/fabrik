@@ -31,6 +31,14 @@ func Execute() error {
 	if err != nil {
 		return err
 	}
+	if cfg.VersionRequested {
+		fmt.Println(Version)
+		return nil
+	}
+	// Deliberately no cfg.AppID == 0 hard error here (unlike pre-#1253
+	// behavior): a fresh install with no App ID yet is exactly what
+	// githubauth.Reconcile's manifest bootstrap flow below handles — see
+	// adrs/1253-github-app-manifest-auth-reconciler.md.
 	if len(cfg.WatchedRepos) == 0 {
 		return fmt.Errorf("no watched repos configured (set watched_repos, PRUEFER_REPOS, or --repos)")
 	}
@@ -104,14 +112,9 @@ func Execute() error {
 		clients[strings.ToLower(owner)] = client
 	}
 
-	daemon := &Daemon{
-		Clients:         clients,
-		Claude:          &RealClaudeInvoker{},
-		Clone:           CloneForReview,
-		Config:          cfg,
-		BotLogin:        auth.BotLogin(),
-		preAcquiredLock: lockFile,
-	}
+	daemon, closeLog := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, auth.BotLogin())
+	defer closeLog()
+	daemon.preAcquiredLock = lockFile
 
 	if useTUI(cfg) {
 		return runTUI(ctx, daemon)

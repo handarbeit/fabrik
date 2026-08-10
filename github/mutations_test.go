@@ -62,16 +62,30 @@ func TestAddComment_MissingID(t *testing.T) {
 	}
 }
 
+// TestAddLabelToIssue_Success serves github/testdata/recordings/add_label_to_issue.json
+// — a real response recorded against the disposable handarbeit/fabrik-test-alpha
+// sandbox (#1453 R2/R5/R3a) — for the "add label to issue" REST call, and
+// asserts the exact constructed path and method for both REST calls
+// AddLabelToIssue makes (R6): POST .../labels (ensureLabel) then
+// POST .../issues/{n}/labels (the actual add).
 func TestAddLabelToIssue_Success(t *testing.T) {
+	raw := loadRecording(t, "add_label_to_issue")
+
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if strings.HasSuffix(r.URL.Path, "/labels") && !strings.Contains(r.URL.Path, "/issues/") {
 			// ensureLabel call — create label
+			if r.Method != http.MethodPost {
+				t.Errorf("ensureLabel method = %s, want POST", r.Method)
+			}
 			w.WriteHeader(201)
 			return
 		}
 		// Add label to issue
+		if r.Method != http.MethodPost {
+			t.Errorf("add-label method = %s, want POST", r.Method)
+		}
 		if !strings.Contains(r.URL.Path, "/issues/10/labels") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -81,7 +95,9 @@ func TestAddLabelToIssue_Success(t *testing.T) {
 		if labels[0] != "fabrik:locked:user" {
 			t.Errorf("label = %v", labels[0])
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
@@ -113,7 +129,13 @@ func TestAddLabelToIssue_EnsureLabelAlreadyExists(t *testing.T) {
 	}
 }
 
+// TestUpdateProjectItemStatus_Success serves
+// github/testdata/recordings/update_project_item_status.json — a real
+// response recorded against a disposable item on the "Fabrik Test" sandbox
+// board (#1453 R2/R5/R3a) — instead of a hand-authored literal.
 func TestUpdateProjectItemStatus_Success(t *testing.T) {
+	raw := loadRecording(t, "update_project_item_status")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
 		json.NewDecoder(r.Body).Decode(&body)
@@ -122,7 +144,7 @@ func TestUpdateProjectItemStatus_Success(t *testing.T) {
 			t.Errorf("projectId = %v", vars["projectId"])
 		}
 		w.WriteHeader(200)
-		w.Write([]byte(`{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_1"}}}}`))
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
@@ -574,7 +596,14 @@ func TestAddBlockedByIssue_QueryShape(t *testing.T) {
 	}
 }
 
+// TestAddBlockedByIssue_Success serves github/testdata/recordings/add_blocked_by.json
+// — a real addBlockedBy mutation response recorded against two disposable
+// issues on handarbeit/fabrik-test-alpha (#1453 R2/R5/R3a; this is the exact
+// operation the addBlockedByIssue/addBlockedBy bug this issue exists to
+// catch was about) — instead of a hand-authored literal.
 func TestAddBlockedByIssue_Success(t *testing.T) {
+	raw := loadRecording(t, "add_blocked_by")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -593,7 +622,7 @@ func TestAddBlockedByIssue_Success(t *testing.T) {
 			t.Errorf("blockingIssueId = %v, want I_parent", vars["blockingIssueId"])
 		}
 		w.WriteHeader(200)
-		w.Write([]byte(`{"data":{"addBlockedBy":{"issue":{"id":"I_child"}}}}`))
+		w.Write(raw)
 	}))
 	defer srv.Close()
 

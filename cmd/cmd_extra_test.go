@@ -32,8 +32,8 @@ func (m *testGitHubUpgradeClient) FetchLatestRelease(owner, repo string) (*gh.La
 	}
 	return nil, nil
 }
-func (m *testGitHubUpgradeClient) FetchAllowAutoMerge(owner, repo string) (bool, error) {
-	return true, nil
+func (m *testGitHubUpgradeClient) FetchRepoAccess(owner, repo string) (gh.RepoAccess, error) {
+	return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
 }
 func (m *testGitHubUpgradeClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 	return &gh.ProjectBoard{}, nil
@@ -105,7 +105,7 @@ func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base, 
 func (m *testGitHubUpgradeClient) MarkPRReady(owner, repo string, prNumber int) error   { return nil }
 func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) error       { return nil }
 func (m *testGitHubUpgradeClient) CloseIssue(owner, repo string, issueNumber int) error { return nil }
-func (m *testGitHubUpgradeClient) CreateIssue(owner, repo, title, body string) (int, string, error) {
+func (m *testGitHubUpgradeClient) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {
 	return 0, "", nil
 }
 func (m *testGitHubUpgradeClient) AddProjectV2ItemById(projectID, contentNodeID string) (string, error) {
@@ -342,7 +342,7 @@ func TestRefreshPlugin_WritesFiles(t *testing.T) {
 // ── init buildConfigWithValues ────────────────────────────────────────────────
 
 func TestBuildConfigWithValues_AllFields(t *testing.T) {
-	result := buildConfigWithValues("myorg", "myrepo", "42", "", "myuser")
+	result := buildConfigWithValues("myorg", "myrepo", "42", "", "myuser", "")
 
 	if !strings.Contains(result, "owner: myorg") {
 		t.Errorf("owner not in output: %s", result)
@@ -359,7 +359,7 @@ func TestBuildConfigWithValues_AllFields(t *testing.T) {
 }
 
 func TestBuildConfigWithValues_EmptyFields_KeepsComments(t *testing.T) {
-	result := buildConfigWithValues("", "", "", "", "")
+	result := buildConfigWithValues("", "", "", "", "", "")
 
 	// Empty strings should leave commented lines untouched
 	if strings.Contains(result, "owner: ") && !strings.Contains(result, "# owner:") {
@@ -372,7 +372,7 @@ func TestBuildConfigWithValues_EmptyFields_KeepsComments(t *testing.T) {
 }
 
 func TestBuildConfigWithValues_PartialFields(t *testing.T) {
-	result := buildConfigWithValues("acme", "", "5", "", "")
+	result := buildConfigWithValues("acme", "", "5", "", "", "")
 
 	if !strings.Contains(result, "owner: acme") {
 		t.Errorf("owner not replaced: %s", result)
@@ -487,7 +487,7 @@ func TestWriteConfigTemplate_CreatesNewFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeConfigTemplate("", "", "", "", false); err != nil {
+	if err := writeConfigTemplate("", "", "", "", "", false); err != nil {
 		t.Fatalf("writeConfigTemplate: %v", err)
 	}
 	content, err := os.ReadFile(".fabrik/config.yaml")

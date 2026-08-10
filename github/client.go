@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +32,7 @@ func logf(issueNumber int, tag, format string, args ...any) {
 type Client struct {
 	token      string
 	baseURL    string
+	graphqlURL string
 	httpClient *http.Client
 
 	mu           sync.Mutex
@@ -77,8 +79,9 @@ func (c *Client) Token() string {
 
 func NewClient(token string) *Client {
 	return &Client{
-		token:   token,
-		baseURL: defaultBaseURL,
+		token:      token,
+		baseURL:    defaultBaseURL,
+		graphqlURL: defaultBaseURL + "/graphql",
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -92,13 +95,41 @@ func NewClient(token string) *Client {
 // (e.g. pruefer's mintAuth, which passes "" for the non-test case) built
 // clients whose requests hit "/repos/..." with no scheme/host ("unsupported
 // protocol scheme"). Tests always pass an httptest URL, so they never caught it.
+//
+// The GraphQL endpoint is always derived as baseURL+"/graphql" — this matches
+// github.com, where REST and GraphQL share a host. It does NOT match GitHub
+// Enterprise Server, where REST lives at <host>/api/v3 and GraphQL at
+// <host>/api/graphql (not a path suffix of the REST base). GHES callers must
+// use NewClientForHost instead.
 func NewClientWithBaseURL(token, baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
 	return &Client{
-		token:   token,
-		baseURL: baseURL,
+		token:      token,
+		baseURL:    baseURL,
+		graphqlURL: baseURL + "/graphql",
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// NewClientForHost creates a client targeting a GitHub Enterprise Server
+// instance identified by a bare hostname (e.g. "github.example.com"). Unlike
+// NewClientWithBaseURL, REST and GraphQL endpoints are derived independently
+// per GHES's actual layout: REST at https://<host>/api/v3, GraphQL at
+// https://<host>/api/graphql. host is defensively normalized — any
+// "http://"/"https://" scheme prefix and any trailing "/" are stripped before
+// the URLs are built, so callers may pass either a bare host or a full URL.
+func NewClientForHost(token, host string) *Client {
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimSuffix(host, "/")
+	return &Client{
+		token:      token,
+		baseURL:    "https://" + host + "/api/v3",
+		graphqlURL: "https://" + host + "/api/graphql",
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -143,11 +174,15 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 		return fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+"/graphql", bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", c.graphqlURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token())
+	// See doWithAccept in rest.go for why an empty token omits the header
+	// rather than sending a blank bearer credential.
+	if token := c.Token(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -198,15 +233,38 @@ func (c *Client) FetchLatestRelease(owner, repo string) (*LatestRelease, error) 
 	return &release, nil
 }
 
-// FetchAllowAutoMerge calls GET /repos/{owner}/{repo} and returns the value of
-// the allow_auto_merge field. Returns an error if the request fails.
-func (c *Client) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+// FetchRepoAccess calls GET /repos/{owner}/{repo} and returns the allow_auto_merge
+// setting alongside the authenticated token's push access (permissions.push) —
+// both decoded from the same response, so this adds no extra API round-trip
+// beyond what the allow_auto_merge check already required. Returns an error if
+// the request fails.
+func (c *Client) FetchRepoAccess(owner, repo string) (RepoAccess, error) {
 	url := c.baseURL + "/repos/" + owner + "/" + repo
 	var result struct {
 		AllowAutoMerge bool `json:"allow_auto_merge"`
+		Permissions    struct {
+			Push bool `json:"push"`
+		} `json:"permissions"`
 	}
 	if err := c.restGetJSON(url, &result); err != nil {
-		return false, fmt.Errorf("fetching allow_auto_merge for %s/%s: %w", owner, repo, err)
+		return RepoAccess{}, fmt.Errorf("fetching repo access for %s/%s: %w", owner, repo, err)
 	}
-	return result.AllowAutoMerge, nil
+	return RepoAccess{AllowAutoMerge: result.AllowAutoMerge, CanPush: result.Permissions.Push}, nil
+}
+
+// FetchInstalledVersion calls GET /meta and returns the installed_version
+// field. On github.com this endpoint has no installed_version (github.com
+// isn't versioned the way GHES is); on GHES it identifies the running
+// release (e.g. "3.19.8"). Used by the engine's GHES version-floor preflight
+// (FR-7) — never called on the github.com path. Requires no authentication,
+// but the client's existing Authorization header is harmless to send.
+func (c *Client) FetchInstalledVersion() (string, error) {
+	url := c.baseURL + "/meta"
+	var result struct {
+		InstalledVersion string `json:"installed_version"`
+	}
+	if err := c.restGetJSON(url, &result); err != nil {
+		return "", fmt.Errorf("fetching /meta: %w", err)
+	}
+	return result.InstalledVersion, nil
 }

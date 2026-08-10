@@ -231,6 +231,149 @@ func TestWarnStageDrift_CompletionNoOpOmitted(t *testing.T) {
 	}
 }
 
+// --- WarnUndeclaredReviewers (FR-7) ---
+
+func TestWarnUndeclaredReviewers_Fires(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "[startup] notice:") {
+		t.Errorf("expected a startup notice, got: %q", got)
+	}
+	if !strings.Contains(got, "Review") {
+		t.Errorf("expected the notice to name the stage, got: %q", got)
+	}
+	if !strings.Contains(got, "expected_reviewers") {
+		t.Errorf("expected the notice to mention expected_reviewers, got: %q", got)
+	}
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("warnings.Load: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Key == "undeclared_reviewers:Review" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected an undeclared_reviewers:Review entry recorded")
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenDeclaredNonEmpty(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	declared := []string{"handarbeit-pruefer"}
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue, ExpectedReviewers: &declared}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice once expected_reviewers is declared, got: %q", got)
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenDeclaredExplicitlyEmpty(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	none := []string{}
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue, ExpectedReviewers: &none}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice for explicit expected_reviewers: [], got: %q", got)
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenWaitForReviewsFalse(t *testing.T) {
+	setWarningsOverride(t)
+	waitFalse := false
+	s := &Stage{Name: "Implement", FilePath: filepath.Join(t.TempDir(), "implement.yaml"), WaitForReviews: &waitFalse}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice when wait_for_reviews is false, got: %q", got)
+	}
+}
+
+func TestWarnUndeclaredReviewers_AbsentWhenWaitForReviewsNil(t *testing.T) {
+	setWarningsOverride(t)
+	s := &Stage{Name: "Plan", FilePath: filepath.Join(t.TempDir(), "plan.yaml")}
+
+	var out strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice when wait_for_reviews is unset, got: %q", got)
+	}
+}
+
+// FR-7's core self-limiting requirement: once a declaration (including
+// explicit "none") is added, the previously-recorded entry is cleared, not
+// just left unrenewed.
+func TestWarnUndeclaredReviewers_ClearsOnceDeclared(t *testing.T) {
+	setWarningsOverride(t)
+	waitTrue := true
+	s := &Stage{Name: "Review", FilePath: filepath.Join(t.TempDir(), "review.yaml"), WaitForReviews: &waitTrue}
+
+	var out1 strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out1)
+	if !strings.Contains(out1.String(), "[startup] notice:") {
+		t.Fatalf("expected initial notice, got: %q", out1.String())
+	}
+
+	entries, _ := warnings.Load()
+	var recordedBefore bool
+	for _, e := range entries {
+		if e.Key == "undeclared_reviewers:Review" {
+			recordedBefore = true
+		}
+	}
+	if !recordedBefore {
+		t.Fatal("expected the entry to be recorded before the declaration is added")
+	}
+
+	// Operator adds a declaration.
+	declared := []string{"handarbeit-pruefer"}
+	s.ExpectedReviewers = &declared
+
+	var out2 strings.Builder
+	WarnUndeclaredReviewers([]*Stage{s}, &out2)
+	if got := out2.String(); got != "" {
+		t.Errorf("expected no notice after declaration is added, got: %q", got)
+	}
+
+	entries, _ = warnings.Load()
+	for _, e := range entries {
+		if e.Key == "undeclared_reviewers:Review" {
+			t.Error("expected undeclared_reviewers:Review entry to be cleared once declared, but it is still present")
+		}
+	}
+}
+
+func TestWarnUndeclaredReviewers_EmptyUserStages(t *testing.T) {
+	setWarningsOverride(t)
+
+	var out strings.Builder
+	WarnUndeclaredReviewers(nil, &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no notice for empty userStages, got: %q", got)
+	}
+}
+
 func TestMissingTopLevelKeys_ReturnsMissingKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stage.yaml")
@@ -293,6 +436,107 @@ func TestMissingTopLevelKeys_SortedOutput(t *testing.T) {
 	}
 	if missing[0] != "apple" || missing[1] != "mango" || missing[2] != "zebra" {
 		t.Errorf("expected sorted output [apple mango zebra], got: %v", missing)
+	}
+}
+
+func TestSweepStaleWarnings_ClearsRenamedOrRemovedStage(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:OldName", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := warnings.Record(warnings.Entry{Key: "undeclared_reviewers:OldName", Type: "undeclared_reviewers"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings([]*Stage{{Name: "NewName"}}, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 0 {
+		t.Fatalf("expected both stale entries cleared, got %v", entries)
+	}
+	if !strings.Contains(buf.String(), "stage_drift:OldName") || !strings.Contains(buf.String(), "undeclared_reviewers:OldName") {
+		t.Errorf("expected log to name both cleared keys, got: %q", buf.String())
+	}
+}
+
+func TestSweepStaleWarnings_PreservesConfiguredStage(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Implement", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings([]*Stage{{Name: "Implement"}}, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 || entries[0].Key != "stage_drift:Implement" {
+		t.Fatalf("expected still-configured stage's warning preserved, got %v", entries)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no log output when nothing stale, got: %q", buf.String())
+	}
+}
+
+func TestSweepStaleWarnings_IgnoresOtherTypes(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "allow_auto_merge:owner/repo", Type: "allow_auto_merge"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings(nil, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 || entries[0].Key != "allow_auto_merge:owner/repo" {
+		t.Fatalf("expected unrelated warning type untouched, got %v", entries)
+	}
+}
+
+// TestSweepStaleWarnings_EmptyUserStagesPreservesEntries guards against the
+// destructive-wipe shape flagged in review: without an early return for an
+// empty/nil userStages (matching WarnStageDrift's own guard), a present set
+// derived from zero stages would make every recorded stage_drift/
+// undeclared_reviewers entry look "absent" and clear them all in one pass.
+// cmd/root.go already fails startup before Run() is reached if stage loading
+// produces zero configs, so this is normally unreachable — the guard is
+// defense in depth for any future caller that bypasses that validation.
+func TestSweepStaleWarnings_EmptyUserStagesPreservesEntries(t *testing.T) {
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Implement", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := warnings.Record(warnings.Entry{Key: "undeclared_reviewers:Implement", Type: "undeclared_reviewers"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings(nil, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 2 {
+		t.Fatalf("expected both entries preserved when userStages is empty, got %v", entries)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no log output when the sweep is skipped, got: %q", buf.String())
+	}
+}
+
+func TestSweepStaleWarnings_IncludesUnmanagedStages(t *testing.T) {
+	// The sweep must be called with the unfiltered stage set (including
+	// Unmanaged stages) — otherwise a currently-valid Unmanaged stage's
+	// warning would be wrongly swept.
+	setWarningsOverride(t)
+	if err := warnings.Record(warnings.Entry{Key: "stage_drift:Backlog", Type: "stage_drift"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	SweepStaleWarnings([]*Stage{{Name: "Backlog", Unmanaged: true}}, &buf)
+
+	entries, _ := warnings.Load()
+	if len(entries) != 1 {
+		t.Fatalf("expected Unmanaged stage's warning preserved, got %v", entries)
 	}
 }
 

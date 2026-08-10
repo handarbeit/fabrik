@@ -62,8 +62,14 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 // reviewDecision computation treats COMMENTED as informational, not a state
 // transition, so a reviewer who requests changes and later leaves a comment-only
 // follow-up (without re-approving or dismissing) still has an active
-// CHANGES_REQUESTED verdict. Only when an author's *first* submission is
-// COMMENTED (no verdict established yet) does it become their collapsed entry.
+// CHANGES_REQUESTED verdict. Only when an author's *stored* entry is itself
+// COMMENTED (no verdict established yet) does a later COMMENTED submission
+// supersede it — so a comment-only reviewer's collapsed entry tracks their
+// latest submission, not just their first. States outside COMMENTED and the
+// three formal verdicts (e.g. PENDING, which is visible only to the token
+// that created it and may reflect an incomplete submission) are enumerated
+// explicitly as never eligible to establish or overwrite a collapsed entry —
+// first-seen or not — rather than being treated as a verdict by omission.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
@@ -72,9 +78,10 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		User *struct {
 			Login string `json:"login"`
 		} `json:"user"`
-		State    string `json:"state"`
-		Body     string `json:"body"`
-		CommitID string `json:"commit_id"`
+		State       string `json:"state"`
+		Body        string `json:"body"`
+		CommitID    string `json:"commit_id"`
+		SubmittedAt string `json:"submitted_at"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -88,21 +95,32 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		if r.User == nil || r.User.Login == "" {
 			continue
 		}
-		_, seen := latestByAuthor[r.User.Login]
+		if !canEstablishOrSupersedeReview(r.State) {
+			// PENDING (or any other state outside COMMENTED and the three
+			// formal verdicts) never establishes or overwrites a collapsed
+			// entry — a private/incomplete submission must not pin an
+			// author's review, first-seen or not.
+			continue
+		}
+		stored, seen := latestByAuthor[r.User.Login]
 		if !seen {
 			order = append(order, r.User.Login)
-		} else if r.State == "COMMENTED" {
+		} else if r.State == "COMMENTED" && isFormalReviewVerdict(stored.State) {
 			// A comment-only follow-up does not overwrite the author's
 			// existing formal verdict.
 			continue
 		}
-		latestByAuthor[r.User.Login] = PRReview{
+		review := PRReview{
 			Author:     r.User.Login,
 			State:      r.State,
 			Body:       r.Body,
 			DatabaseID: r.ID,
 			CommitID:   r.CommitID,
 		}
+		if t, err := parseTime(r.SubmittedAt); err == nil {
+			review.SubmittedAt = t
+		}
+		latestByAuthor[r.User.Login] = review
 	}
 	out := make([]PRReview, 0, len(order))
 	for _, author := range order {
@@ -110,6 +128,37 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 	}
 	return out, nil
 }
+
+// isFormalReviewVerdict reports whether state is one of GitHub's three
+// formal review verdicts — the states a COMMENTED follow-up must never
+// overwrite.
+func isFormalReviewVerdict(state string) bool {
+	switch state {
+	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		return true
+	}
+	return false
+}
+
+// canEstablishOrSupersedeReview reports whether an incoming submission's
+// state is ever eligible to become or replace an author's collapsed entry.
+// Only COMMENTED and the three formal verdicts qualify; every other state
+// (PENDING, or any state GitHub introduces in the future) is excluded
+// unconditionally, so it can neither establish a first entry nor silently
+// pin an author's collapsed review at a later submission.
+func canEstablishOrSupersedeReview(state string) bool {
+	return state == "COMMENTED" || isFormalReviewVerdict(state)
+}
+
+// fetchPRReviewDecisionQuery is the GraphQL query used by FetchPRReviewDecision.
+const fetchPRReviewDecisionQuery = `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewDecision
+    }
+  }
+}`
 
 // FetchPRReviewDecision returns GitHub's computed review-decision verdict for a
 // pull request via GraphQL, keyed on PR number — mirroring prNodeID's
@@ -127,14 +176,7 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 // not be folded into the same "" the no-branch-protection fallback treats as
 // meaningful data.
 func (c *Client) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
-	query := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewDecision
-    }
-  }
-}`
+	query := fetchPRReviewDecisionQuery
 	vars := map[string]interface{}{
 		"owner":  owner,
 		"repo":   repo,
@@ -156,6 +198,146 @@ query($owner: String!, $repo: String!, $number: Int!) {
 		return "", fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
 	}
 	return result.Data.Repository.PullRequest.ReviewDecision, nil
+}
+
+// fetchPRReviewThreadsQuery is the GraphQL query used by FetchPRReviewThreads.
+const fetchPRReviewThreadsQuery = `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50) {
+        totalCount
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 20) {
+            totalCount
+            nodes {
+              author { login }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+// FetchPRReviewThreads returns every review thread on a pull request —
+// resolved and unresolved alike — via GraphQL, keyed on PR number (same
+// base-independent shape as FetchPRReviewDecision, since Pruefer reviews PRs
+// directly with no linked issue in scope).
+//
+// Unlike applyLinkedPRs' engine-facing fetch (which discards resolved-thread
+// bodies and only counts them, since only unresolved feedback is actionable
+// for a reinvoke), this returns full thread content — including resolved
+// threads — because Pruefer's prompt-assembly use case needs to see how a
+// prior finding was addressed, not just that it was. See
+// adrs/1497-pruefer-prior-review-thread-context.md.
+//
+// Threads are capped at 50 (GraphQL's reviewThreads(first: 50), matching the
+// existing fetchItemDetailsQuery fragment's ceiling) and comments per thread
+// at 20; neither is paginated. A PR with more threads than that loses the
+// excess at this layer — out of scope for the caller's own prompt-level cap
+// (a much smaller number) — but not silently: the second return value,
+// threadsTruncated, is set from the reviewThreads connection's totalCount so
+// a caller can say so rather than presenting a partial thread list as
+// complete, mirroring PRReviewThread.CommentsTruncated's per-thread signal
+// for the same "tell the reviewer/log rather than silently drop" pattern.
+// Nodes arrive in the connection's default (creation) order with no orderBy
+// argument to bias toward unresolved threads, so on a truncated fetch the
+// dropped threads are the newest — disproportionately likely to be OPEN.
+//
+// comments(first: 20) has no orderBy argument — GitHub's schema doesn't
+// expose one for PullRequestReviewThread.comments (confirmed via
+// introspection), so which 20 of a longer thread are returned relies on the
+// connection's own default order, not something this query can pin
+// explicitly. Observed behavior returns them oldest-first (thread creation
+// order), which is what CommentsTruncated's doc comment and callers'
+// omission notes assume; if GitHub ever changes that default, the "oldest
+// 20" framing here would need revisiting.
+//
+// Returns an error (not an empty slice) when the query resolves with no
+// pullRequest node, matching FetchPRReviewDecision's convention.
+func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, bool, error) {
+	query := fetchPRReviewThreadsQuery
+	vars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest *struct {
+					ReviewThreads struct {
+						TotalCount int `json:"totalCount"`
+						Nodes      []struct {
+							ID           string `json:"id"`
+							IsResolved   bool   `json:"isResolved"`
+							IsOutdated   bool   `json:"isOutdated"`
+							Path         string `json:"path"`
+							Line         *int   `json:"line"`
+							OriginalLine *int   `json:"originalLine"`
+							Comments     struct {
+								TotalCount int `json:"totalCount"`
+								Nodes      []struct {
+									Author *struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									Body      string `json:"body"`
+									CreatedAt string `json:"createdAt"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return nil, false, fmt.Errorf("fetching PR #%d review threads: %w", prNumber, err)
+	}
+	if result.Data.Repository.PullRequest == nil {
+		return nil, false, fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	var threads []PRReviewThread
+	for _, n := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		line := 0
+		if n.Line != nil {
+			line = *n.Line
+		} else if n.OriginalLine != nil {
+			line = *n.OriginalLine
+		}
+		t := PRReviewThread{
+			ID:                n.ID,
+			Path:              n.Path,
+			Line:              line,
+			IsResolved:        n.IsResolved,
+			IsOutdated:        n.IsOutdated,
+			CommentsTruncated: n.Comments.TotalCount > len(n.Comments.Nodes),
+		}
+		for _, cm := range n.Comments.Nodes {
+			tc := PRReviewThreadComment{Body: cm.Body}
+			if cm.Author != nil {
+				tc.Author = cm.Author.Login
+			}
+			if ts, err := parseTime(cm.CreatedAt); err == nil {
+				tc.CreatedAt = ts
+			}
+			t.Comments = append(t.Comments, tc)
+		}
+		threads = append(threads, t)
+	}
+	rt := result.Data.Repository.PullRequest.ReviewThreads
+	threadsTruncated := rt.TotalCount > len(rt.Nodes)
+	return threads, threadsTruncated, nil
 }
 
 // FetchPRReviewRequests returns the outstanding requested reviewers for a pull
@@ -375,6 +557,21 @@ type CheckRun struct {
 	Name       string
 	Status     string // "queued", "in_progress", "completed"
 	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
+	// OutputSummary is the check run's output.summary field — a short
+	// Markdown summary the check author chose to surface. May be empty even
+	// on a failing run if the check never set it.
+	OutputSummary string
+	// OutputText is the check run's output.text field — the fuller Markdown
+	// body (e.g. a formatted log excerpt). May be empty even on a failing
+	// run if the check never set it.
+	OutputText string
+	// DetailsURL is the check run's details_url — the "Details" link GitHub
+	// shows in the checks UI, typically pointing at the CI provider's own
+	// run page.
+	DetailsURL string
+	// HTMLURL is the check run's html_url — the GitHub-hosted permalink to
+	// the check run itself.
+	HTMLURL string
 }
 
 // FetchCheckRuns retrieves check runs for a given commit SHA via the REST API.
@@ -386,6 +583,12 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
+			Output     struct {
+				Summary string `json:"summary"`
+				Text    string `json:"text"`
+			} `json:"output"`
+			DetailsURL string `json:"details_url"`
+			HTMLURL    string `json:"html_url"`
 		} `json:"check_runs"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
@@ -393,7 +596,16 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	}
 	out := make([]CheckRun, len(raw.CheckRuns))
 	for i, cr := range raw.CheckRuns {
-		out[i] = CheckRun{ID: cr.ID, Name: cr.Name, Status: cr.Status, Conclusion: cr.Conclusion}
+		out[i] = CheckRun{
+			ID:            cr.ID,
+			Name:          cr.Name,
+			Status:        cr.Status,
+			Conclusion:    cr.Conclusion,
+			OutputSummary: cr.Output.Summary,
+			OutputText:    cr.Output.Text,
+			DetailsURL:    cr.DetailsURL,
+			HTMLURL:       cr.HTMLURL,
+		}
 	}
 	return out, nil
 }
@@ -436,13 +648,26 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 }
 
 // MergeableStateAccepted reports whether GitHub's mergeable_state value
-// indicates the PR is mergeable per branch protection rules. "clean" means
-// fully ready; "unstable" means non-required checks have failed but the PR
-// is still mergeable. Other values ("blocked", "behind", "dirty", "draft",
-// "has_hooks", "unknown", "") fall through to the per-check classification.
+// indicates the PR is mergeable per branch protection rules alone. "clean"
+// means fully ready; "unstable" means non-required checks have failed but
+// GitHub itself still considers the PR mergeable. Other values ("blocked",
+// "behind", "dirty", "draft", "has_hooks", "unknown", "") fall through to the
+// per-check classification.
 //
 // "has_hooks" is treated as not-accepted here because pre-merge hooks may
 // modify the merge outcome; conservative to use the per-check path.
+//
+// ADR-1441: since that issue, this predicate is no longer consulted by the CI
+// *advance* gate (settlePRMergeState/checkCIGate, engine/pr_settle.go +
+// engine/ci.go) — "unstable" there now falls through to full check-run/
+// required-context classification instead of a green shortcut, so a
+// confirmed failure on a non-required check blocks the advance regardless of
+// what this function reports. Its remaining callers are all on the *merge*
+// side of ADR-1441's R3 split, which deliberately keeps deferring to branch
+// protection alone (ADR-072's operator note): MergePR's own ADR-072
+// self-gate, pollForMergeable's zero-check-runs fallback and pollTrainCI's
+// dirty pre-check + zero-check-runs green arm (engine/merge_train.go) — the
+// same "no per-check signal to fall back on" case in all three.
 func MergeableStateAccepted(mergeableState string) bool {
 	return mergeableState == "clean" || mergeableState == "unstable"
 }
@@ -625,6 +850,36 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 	return string(respBody), nil
 }
 
+// FetchPRFiles returns the list of file paths changed by a pull request via
+// the paginated GET /pulls/{n}/files endpoint, which has no line-count
+// ceiling (unlike the .diff media type FetchPRDiff uses) — the fallback path
+// for reconstructing a changed-path list when FetchPRDiff returns
+// ErrDiffTooLarge. Follows FetchLabelAppliedAt's pagination idiom: 100 per
+// page, stop on an empty page. Returns nil, nil on 404.
+func (c *Client) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	var out []string
+	for page := 1; ; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
+			c.baseURL, owner, repo, prNumber, page)
+		var raw []struct {
+			Filename string `json:"filename"`
+		}
+		if err := c.restGetJSON(apiURL, &raw); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("fetching files for PR #%d: %w", prNumber, err)
+		}
+		if len(raw) == 0 {
+			break
+		}
+		for _, f := range raw {
+			out = append(out, f.Filename)
+		}
+	}
+	return out, nil
+}
+
 // ReviewEvent selects the wire "event" value SubmitPRReview submits. Its
 // field is unexported so no package outside github can construct an
 // arbitrary value — the only way to obtain a ReviewEvent is to copy one of
@@ -691,12 +946,8 @@ func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, bod
 	return result.ID, nil
 }
 
-// prNodeID fetches the GraphQL node ID of a pull request by its REST number.
-// The node ID is required by every GraphQL mutation that operates on a PR
-// (markPullRequestReadyForReview, enablePullRequestAutoMerge, enqueuePullRequest,
-// dequeuePullRequest) since none of them accept a plain PR number.
-func (c *Client) prNodeID(owner, repo string, prNumber int) (string, error) {
-	fetchQuery := `
+// prNodeIDQuery is the GraphQL query used by prNodeID.
+const prNodeIDQuery = `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
@@ -704,6 +955,13 @@ query($owner: String!, $repo: String!, $number: Int!) {
     }
   }
 }`
+
+// prNodeID fetches the GraphQL node ID of a pull request by its REST number.
+// The node ID is required by every GraphQL mutation that operates on a PR
+// (markPullRequestReadyForReview, enablePullRequestAutoMerge, enqueuePullRequest,
+// dequeuePullRequest) since none of them accept a plain PR number.
+func (c *Client) prNodeID(owner, repo string, prNumber int) (string, error) {
+	fetchQuery := prNodeIDQuery
 	fetchVars := map[string]interface{}{
 		"owner":  owner,
 		"repo":   repo,
@@ -728,6 +986,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	return nodeID, nil
 }
 
+// markPRReadyMutation is the GraphQL mutation used by MarkPRReady.
+const markPRReadyMutation = `
+mutation($prId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+
 // MarkPRReady transitions a draft PR to ready-for-review.
 // Uses the GraphQL markPullRequestReadyForReview mutation, which is the supported
 // path — REST PATCH does not reliably support draft→ready transitions.
@@ -737,14 +1005,7 @@ func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!) {
-  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
-    pullRequest {
-      id
-    }
-  }
-}`
+	mutation := markPRReadyMutation
 	mutVars := map[string]interface{}{
 		"prId": nodeID,
 	}
@@ -836,14 +1097,8 @@ var ErrAutoMergeAlreadyClean = errors.New("PR is already in clean status — mer
 // strategy must be one of "MERGE", "SQUASH", or "REBASE". GitHub merges the PR
 // atomically when all branch-protection requirements are satisfied.
 //
-// Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
-func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
-	nodeID, err := c.prNodeID(owner, repo, prNumber)
-	if err != nil {
-		return err
-	}
-
-	mutation := `
+// enablePullRequestAutoMergeMutation is the GraphQL mutation used by EnablePullRequestAutoMerge.
+const enablePullRequestAutoMergeMutation = `
 mutation($prId: ID!, $method: PullRequestMergeMethod!) {
   enablePullRequestAutoMerge(input: { pullRequestId: $prId, mergeMethod: $method }) {
     pullRequest {
@@ -851,6 +1106,15 @@ mutation($prId: ID!, $method: PullRequestMergeMethod!) {
     }
   }
 }`
+
+// Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
+func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
+	}
+
+	mutation := enablePullRequestAutoMergeMutation
 	mutVars := map[string]interface{}{
 		"prId":   nodeID,
 		"method": strategy,
@@ -898,6 +1162,16 @@ func isAutoMergeAlreadyCleanError(err error) bool {
 // when an unresolved review thread appears on the current head during the
 // convergence window (#1207).
 //
+// disablePullRequestAutoMergeMutation is the GraphQL mutation used by DisablePullRequestAutoMerge.
+const disablePullRequestAutoMergeMutation = `
+mutation($prId: ID!) {
+  disablePullRequestAutoMerge(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+
 // Uses the same two-step pattern as EnablePullRequestAutoMerge: fetch the PR
 // node ID via GraphQL, then call the disablePullRequestAutoMerge mutation.
 func (c *Client) DisablePullRequestAutoMerge(owner, repo string, prNumber int) error {
@@ -906,14 +1180,7 @@ func (c *Client) DisablePullRequestAutoMerge(owner, repo string, prNumber int) e
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!) {
-  disablePullRequestAutoMerge(input: { pullRequestId: $prId }) {
-    pullRequest {
-      id
-    }
-  }
-}`
+	mutation := disablePullRequestAutoMergeMutation
 	mutVars := map[string]interface{}{
 		"prId": nodeID,
 	}
@@ -929,6 +1196,16 @@ mutation($prId: ID!) {
 // force-pushed since the caller read the SHA, the mutation fails safely
 // (optimistic concurrency).
 //
+// enqueuePullRequestMutation is the GraphQL mutation used by EnqueuePullRequest.
+const enqueuePullRequestMutation = `
+mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
+  enqueuePullRequest(input: { pullRequestId: $prId, expectedHeadOid: $expectedHeadOid }) {
+    mergeQueueEntry {
+      id
+    }
+  }
+}`
+
 // Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
 // GraphQL, then call the enqueuePullRequest mutation.
 func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error {
@@ -940,14 +1217,7 @@ func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHe
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
-  enqueuePullRequest(input: { pullRequestId: $prId, expectedHeadOid: $expectedHeadOid }) {
-    mergeQueueEntry {
-      id
-    }
-  }
-}`
+	mutation := enqueuePullRequestMutation
 	mutVars := map[string]interface{}{
 		"prId":            nodeID,
 		"expectedHeadOid": expectedHeadOID,
@@ -961,6 +1231,16 @@ mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
 
 // DequeuePullRequest removes a pull request from the repository's merge queue.
 //
+// dequeuePullRequestMutation is the GraphQL mutation used by DequeuePullRequest.
+const dequeuePullRequestMutation = `
+mutation($prId: ID!) {
+  dequeuePullRequest(input: { id: $prId }) {
+    mergeQueueEntry {
+      id
+    }
+  }
+}`
+
 // Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
 // GraphQL, then call the dequeuePullRequest mutation.
 func (c *Client) DequeuePullRequest(owner, repo string, prNumber int) error {
@@ -969,14 +1249,7 @@ func (c *Client) DequeuePullRequest(owner, repo string, prNumber int) error {
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!) {
-  dequeuePullRequest(input: { id: $prId }) {
-    mergeQueueEntry {
-      id
-    }
-  }
-}`
+	mutation := dequeuePullRequestMutation
 	mutVars := map[string]interface{}{
 		"prId": nodeID,
 	}

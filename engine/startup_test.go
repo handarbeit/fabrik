@@ -614,13 +614,67 @@ func TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOn(t *testi
 	}
 }
 
-// TestCheckStageColumnAlignment_HoldingStageExcludedWhenMergeTrainOff verifies
-// that a missing Queued column is not a fatal error when merge_train is off (default).
-func TestCheckStageColumnAlignment_HoldingStageExcludedWhenMergeTrainOff(t *testing.T) {
+// TestCheckStageColumnAlignment_HoldingStageMissingMergeTrainOffWarnsButBoots
+// verifies that a missing Queued column does NOT fail startup when
+// merge_train is off/unset (default) — instead Fabrik boots and emits a
+// startup warning naming the column and stating it must exist before
+// merge_train can be enabled. This is the exact configuration produced by
+// `fabrik init` (which extracts every embedded default stage, including
+// queued.yaml, unconditionally) plus the default config — the majority of
+// installs, not just ones that never intend to use the merge train — and it
+// must not fail startup (per the severity-split correction to R2: fatal
+// severity is keyed to reachability — merge_train: on — not to whether the
+// stage is configured). Restoring an unconditional hard-fail (treating a
+// missing holding-stage column as fatal regardless of merge_train's value)
+// turns this test red.
+func TestCheckStageColumnAlignment_HoldingStageMissingMergeTrainOffWarnsButBoots(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
-		// Board does NOT have a Queued column — fine when merge_train is off.
+		// Board does NOT have a Queued column — this must not fail startup
+		// while merge_train is off, since the column is unreachable by any
+		// code path today (ADR-1072) and `fabrik init` writes queued.yaml
+		// unconditionally, regardless of merge_train.
 		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	events := make(chan tui.Event, 16)
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	e.events = events
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("missing Queued column should not fail startup when merge_train: off, got: %v", err)
+	}
+	msgs := drainLogMessages(events)
+	if !anyContains(msgs, `"Queued"`) {
+		t.Errorf("expected a startup warning naming the missing Queued column, got: %v", msgs)
+	}
+	if !anyContains(msgs, "before enabling") {
+		t.Errorf("expected the warning to state the column is required before enabling merge_train, got: %v", msgs)
+	}
+}
+
+// TestCheckStageColumnAlignment_NonHoldingStageStillFatalWhenMergeTrainOff
+// verifies the severity split is scoped to holding stages only: a missing
+// non-holding, non-cleanup, non-unmanaged column (e.g. Plan) remains fatal
+// regardless of merge_train's value, exactly as before this issue.
+func TestCheckStageColumnAlignment_NonHoldingStageStillFatalWhenMergeTrainOff(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Plan is missing (non-holding) — fatal regardless of merge_train.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Implement", "Validate", "Queued"),
 	}
 	e := NewWithDeps(
 		Config{
@@ -638,8 +692,58 @@ func TestCheckStageColumnAlignment_HoldingStageExcludedWhenMergeTrainOff(t *test
 		NewWorktreeManager(t.TempDir()),
 	)
 	err := e.checkStageColumnAlignment(context.Background())
-	if err != nil {
-		t.Fatalf("holding stage missing from board should not be fatal when merge_train: off, got: %v", err)
+	if err == nil {
+		t.Fatal("expected error for missing Plan column, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should mention mismatch, got: %v", err)
+	}
+}
+
+// TestCheckStageColumnAlignment_FatalReportUsesDeferredFramingForCoOccurringHoldingMiss
+// covers a PR review finding on #1421: when merge_train is off and a
+// non-holding stage (fatal) and the holding stage (deferred) are missing at
+// the same time, the fatal report path — not the deferred-only path above —
+// is what runs. Before the fix, that path's per-holding-stage note omitted
+// the "not required to boot, must exist before enabling merge_train" framing
+// the deferred-only path carries, so the same holding-stage entry read
+// differently depending on what else happened to be missing. The fatal
+// report must carry that framing here too.
+func TestCheckStageColumnAlignment_FatalReportUsesDeferredFramingForCoOccurringHoldingMiss(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Both Plan (non-holding, fatal) and Queued (holding, deferred while
+		// off) are missing simultaneously.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Implement", "Validate"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing Plan column, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "terminal-only") {
+		t.Errorf("error should state the holding column's terminal-only role, got: %v", msg)
+	}
+	if !strings.Contains(msg, "Not required to boot while merge_train is off") {
+		t.Errorf("error should carry the same deferred framing as the deferred-only warning path, got: %v", msg)
+	}
+	if !strings.Contains(msg, "must exist on") {
+		t.Errorf("error should state the column must exist before enabling merge_train, got: %v", msg)
 	}
 }
 
@@ -668,6 +772,165 @@ func TestCheckStageColumnAlignment_HoldingStagePresent(t *testing.T) {
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("startup should succeed when Queued column present: %v", err)
+	}
+}
+
+// TestCheckStageColumnAlignment_HoldingStagePresentWhenMergeTrainOff mirrors
+// TestCheckStageColumnAlignment_HoldingStagePresent but with merge_train: off —
+// a board carrying every required option, including the holding stage's
+// column, must still boot clean regardless of mode (Acceptance #5).
+func TestCheckStageColumnAlignment_HoldingStagePresentWhenMergeTrainOff(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Validate", "Queued"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("startup should succeed when Queued column present, merge_train off: %v", err)
+	}
+}
+
+// TestCheckStageColumnAlignment_ErrorListsEveryRequiredStage verifies that the
+// returned error enumerates every required Status option and whether it is
+// present or missing — not just the first missing one (R3/Acceptance #3).
+func TestCheckStageColumnAlignment_ErrorListsEveryRequiredStage(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Board is missing both Plan and Queued; Research, Implement, Validate present.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Implement", "Validate"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"Research (order 1): present",
+		"Plan (order 2): MISSING",
+		"Implement (order 3): present",
+		"Validate (order 4): present",
+		"Queued (order 6): MISSING",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should contain %q, got: %v", want, msg)
+		}
+	}
+}
+
+// TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole verifies
+// that a missing holding-stage column's error text states its terminal-only
+// role and does not attribute the requirement to merge_train mode (R4).
+// TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole verifies
+// that a missing holding-stage column's FATAL error text states its
+// terminal-only role and does not attribute the requirement to merge_train
+// mode (R4). Uses merge_train: on, the only mode in which a missing Queued
+// column is fatal by itself under the severity split — the off/unset case is
+// covered by TestCheckStageColumnAlignment_HoldingStageMissingMergeTrainOffWarnsButBoots
+// below, which asserts the same R4 disambiguation appears in the deferred
+// warning text instead.
+func TestCheckStageColumnAlignment_ErrorStatesHoldingColumnTerminalRole(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "on",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "terminal-only") {
+		t.Errorf("error should state the holding column's terminal-only role, got: %v", msg)
+	}
+	if !strings.Contains(msg, "never a column to move items into") {
+		t.Errorf("error should disambiguate that the column is not a valid intake target, got: %v", msg)
+	}
+	if strings.Contains(msg, "required by merge_train: on") {
+		t.Errorf("error should not attribute the requirement to merge_train mode, got: %v", msg)
+	}
+}
+
+// TestCheckStageColumnAlignment_DeferredWarningStatesHoldingColumnTerminalRole
+// verifies that the R4 disambiguation (terminal-only role, never a manual
+// intake target) also appears in the deferred WARNING text emitted when
+// merge_train is off/unset and the holding column is missing — not just in
+// the fatal error text covered above.
+func TestCheckStageColumnAlignment_DeferredWarningStatesHoldingColumnTerminalRole(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	events := make(chan tui.Event, 16)
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	e.events = events
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error (deferred, not fatal), got: %v", err)
+	}
+	msgs := drainLogMessages(events)
+	if !anyContains(msgs, "terminal-only") {
+		t.Errorf("warning should state the holding column's terminal-only role, got: %v", msgs)
+	}
+	if !anyContains(msgs, "never a column to move") {
+		t.Errorf("warning should disambiguate that the column is not a valid intake target, got: %v", msgs)
 	}
 }
 
@@ -723,8 +986,8 @@ func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return false, nil
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -748,8 +1011,8 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return true, nil
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: true, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -763,12 +1026,78 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 	}
 }
 
+// TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning verifies AC2/R2: a repo
+// with no write access produces no allow_auto_merge warning even when
+// AllowAutoMerge is false — the unfixable-without-admin-rights warning must
+// not fire for a repo the operator can't administer at all.
+func TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: false}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("expected no WARNING for a repo with no write access, even with allow_auto_merge disabled; got: %q", out)
+	}
+	if strings.Contains(out, "gh api -X PATCH") {
+		t.Errorf("expected no admin-only remediation for a repo with no write access; got: %q", out)
+	}
+}
+
+// TestCheckAllowAutoMerge_NoWriteAccessClearsStaleWarning verifies that a
+// previously recorded allow_auto_merge warning is cleared, not left immortal,
+// when a later run finds the repo's write access has been revoked. Without
+// this, the !CanPush early return would skip past checkAllowAutoMerge's own
+// Clear branch forever, since checkedAutoMergeRepos never lets this function
+// re-run for the repo a second time in the same process (raised in PR review
+// on #1347).
+func TestCheckAllowAutoMerge_NoWriteAccessClearsStaleWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+
+	if err := warnings.Record(warnings.Entry{
+		Key:    "allow_auto_merge:owner/repo",
+		Type:   "allow_auto_merge",
+		Title:  "allow_auto_merge disabled on owner/repo",
+		Detail: "stale entry from a prior run when access was still present",
+	}); err != nil {
+		t.Fatalf("seeding stale warning: %v", err)
+	}
+
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: false}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	eng.checkAllowAutoMerge("owner", "repo")
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	for _, e := range entries {
+		if e.Key == "allow_auto_merge:owner/repo" {
+			t.Errorf("expected stale allow_auto_merge warning to be cleared once access is revoked; still present: %+v", e)
+		}
+	}
+}
+
 func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
-			return false, errors.New("network error")
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			return gh.RepoAccess{}, errors.New("network error")
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -778,7 +1107,9 @@ func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 		eng.checkAllowAutoMerge("owner", "repo")
 	})
 
-	// No WARNING block should be emitted for an API error.
+	// No WARNING block should be emitted for an API error. A probe error fails
+	// open (CanPush: true, AllowAutoMerge: true), so no allow_auto_merge
+	// warning fires either.
 	if strings.Contains(out, "WARNING") {
 		t.Errorf("should not print WARNING on API error; got: %q", out)
 	}
@@ -789,9 +1120,9 @@ func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	var callCount int
 	client := &mockGitHubClient{
-		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
 			callCount++
-			return false, nil
+			return gh.RepoAccess{AllowAutoMerge: false, CanPush: true}, nil
 		},
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})

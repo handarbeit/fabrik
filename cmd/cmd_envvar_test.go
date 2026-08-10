@@ -119,6 +119,26 @@ func TestExecute_EnvMaxRetries_Valid(t *testing.T) {
 	executeAndStop(t)
 }
 
+func TestExecute_EnvMaxSliceRetries_Valid(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_MAX_SLICE_RETRIES", "20")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	executeAndStop(t)
+}
+
+func TestExecute_EnvMaxResumeFailures_Valid(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_MAX_RESUME_FAILURES", "5")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	executeAndStop(t)
+}
+
 func TestExecute_EnvPluginDir(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
 	chdirTest(t, dir)
@@ -212,6 +232,90 @@ func executeWithConfigHook(t *testing.T) Config {
 		t.Fatal("testResolvedConfigHook was not invoked")
 	}
 	return captured
+}
+
+func TestExecute_GHESHostFlag(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--ghes-host", "github.example.com"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.GHESHost != "github.example.com" {
+		t.Errorf("cfg.GHESHost = %q, want github.example.com", cfg.GHESHost)
+	}
+}
+
+func TestExecute_GHESHostEnv(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_GHES_HOST", "github.example.com")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.GHESHost != "github.example.com" {
+		t.Errorf("cfg.GHESHost = %q, want github.example.com", cfg.GHESHost)
+	}
+}
+
+func TestExecute_GHESHostConfigYAML(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("ghes_host: github.example.com\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.GHESHost != "github.example.com" {
+		t.Errorf("cfg.GHESHost = %q, want github.example.com", cfg.GHESHost)
+	}
+}
+
+func TestExecute_GHESHostFlagBeatsEnvAndConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("ghes_host: config.example.com\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_GHES_HOST", "env.example.com")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--ghes-host", "flag.example.com"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.GHESHost != "flag.example.com" {
+		t.Errorf("cfg.GHESHost = %q, want flag.example.com (flag should win)", cfg.GHESHost)
+	}
+}
+
+func TestExecute_GHESHostDefaultEmpty(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.GHESHost != "" {
+		t.Errorf("cfg.GHESHost = %q, want empty (github.com default)", cfg.GHESHost)
+	}
+}
+
+func TestExecute_GHESHostNormalized(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--ghes-host", "https://github.example.com/"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.GHESHost != "github.example.com" {
+		t.Errorf("cfg.GHESHost = %q, want normalized github.example.com", cfg.GHESHost)
+	}
 }
 
 func TestExecute_MergeTrainConfigOnly(t *testing.T) {

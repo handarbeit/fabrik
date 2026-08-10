@@ -174,6 +174,417 @@ func TestInvokeClaude_MaxWallTimeKillsWithoutComplete(t *testing.T) {
 	}
 }
 
+// TestInvokeClaude_ExtendTurnsScalesWallTime verifies #1206: a fabrik:extend-turns
+// first-invocation pre-grant (opts.MaxTurnsOverride = 2x stage.MaxTurns) scales the
+// max_wall_time deadline by the same 2x factor, so an invocation that runs past the
+// *unscaled* deadline but within the *scaled* one is not killed.
+func TestInvokeClaude_ExtendTurnsScalesWallTime(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Sleeps past the unscaled 800ms deadline but well within the scaled 1600ms one,
+	// then emits a valid completion. Margins (400ms on each side) are kept generous so
+	// this doesn't flake under CPU contention from sibling subprocess tests.
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 1.2\n" +
+		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\\nFABRIK_STAGE_COMPLETE\\n\",\"session_id\":\"sess_scaled\",\"num_turns\":150,\"total_cost_usd\":0.001,\"is_error\":false}'\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Implement",
+		Prompt:      "Do implement",
+		MaxTurns:    100,
+		MaxWallTime: 800 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "ExtendTurnsScalesWallTime"}
+	opts := InvokeOptions{MaxTurnsOverride: 200} // 2x stage.MaxTurns, as the extend-turns pre-grant sets
+
+	type result struct {
+		output    string
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		ch <- result{output, completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("InvokeClaude: %v (expected the scaled 1600ms deadline to cover the 1.2s sleep)", res.err)
+		}
+		if !res.completed {
+			t.Errorf("expected completed=true; output=%q", res.output)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("InvokeClaude did not return within 10s")
+	}
+}
+
+// TestInvokeClaude_ExtendTurnsStillKilledAtScaledDeadline verifies #1206's "proportionate,
+// not unlimited" guardrail: an extend-turns invocation is still killed once it runs past
+// its *scaled* deadline, not just the unscaled one.
+func TestInvokeClaude_ExtendTurnsStillKilledAtScaledDeadline(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Never completes — sleeps well past the scaled 1200ms deadline.
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	// killProcGroupGraceful sleeps out the full grace window before re-probing
+	// liveness, regardless of how quickly the signalled process actually exits —
+	// so the default 10s/10s production grace windows would swamp the timing
+	// assertions below. Shrink them to isolate the max_wall_time deadline itself.
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 100 * time.Millisecond
+	claudeKillGraceSigTerm = 100 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Implement",
+		Prompt:      "Do implement",
+		MaxTurns:    100,
+		MaxWallTime: 800 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "ExtendTurnsStillKilledAtScaledDeadline"}
+	opts := InvokeOptions{MaxTurnsOverride: 200} // 2x stage.MaxTurns -> scaled deadline ~1600ms
+
+	start := time.Now()
+	type result struct {
+		output    string
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		ch <- result{output, completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		elapsed := time.Since(start)
+		if res.completed {
+			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE); output=%q", res.output)
+		}
+		// Must run past the unscaled 800ms deadline (proves scaling applied), but must
+		// still be killed well short of the 60s sleep (proves the deadline is a real,
+		// proportionate bound, not unlimited).
+		if elapsed < 900*time.Millisecond {
+			t.Errorf("killed too early (elapsed=%v) — scaled deadline (~1600ms) was not honored", elapsed)
+		}
+		if elapsed > 6*time.Second {
+			t.Errorf("killed too late (elapsed=%v) — deadline scaling may be unbounded", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("InvokeClaude did not return within 15s after max_wall_time kill")
+	}
+}
+
+// TestInvokeClaude_NoExtensionStillKilledAtUnscaledDeadline verifies that an invocation
+// whose MaxTurnsOverride equals the stage's base budget (i.e. no extension in effect,
+// as with a genuine runaway carrying no fabrik:extend-turns label) is killed at the
+// unscaled deadline — scaling must not accidentally widen the ordinary-case bound.
+func TestInvokeClaude_NoExtensionStillKilledAtUnscaledDeadline(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 100 * time.Millisecond
+	claudeKillGraceSigTerm = 100 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Implement",
+		Prompt:      "Do implement",
+		MaxTurns:    100,
+		MaxWallTime: 500 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "NoExtensionStillKilledAtUnscaledDeadline"}
+	opts := InvokeOptions{MaxTurnsOverride: 100} // == stage.MaxTurns: no extension in effect
+
+	start := time.Now()
+	type result struct {
+		output    string
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, opts)
+		ch <- result{output, completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		elapsed := time.Since(start)
+		if res.completed {
+			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE); output=%q", res.output)
+		}
+		if elapsed > 3*time.Second {
+			t.Errorf("killed too late (elapsed=%v) — expected the unscaled ~500ms deadline, not a scaled one", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("InvokeClaude did not return within 15s after max_wall_time kill")
+	}
+}
+
+// TestInvokeClaudeForComments_ExtendTurnsScalesWallTime is the comment-processing-path
+// sibling of TestInvokeClaude_ExtendTurnsScalesWallTime — engine/comments.go's
+// runCommentExtensionLoop pre-grants the identical 2x turn budget on its first
+// invocation, via the same InvokeOptions.MaxTurnsOverride -> InvokeClaudeForComments
+// -> runClaude path, so it must scale max_wall_time the same way.
+func TestInvokeClaudeForComments_ExtendTurnsScalesWallTime(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Sleeps past the unscaled 800ms deadline but well within the scaled 1600ms one —
+	// see the identical margin rationale in TestInvokeClaude_ExtendTurnsScalesWallTime.
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 1.2\n" +
+		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"comment done\",\"session_id\":\"sess_cmt_scaled\",\"num_turns\":90,\"total_cost_usd\":0.001,\"is_error\":false}'\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Implement",
+		Prompt:      "Do implement",
+		MaxTurns:    50,
+		MaxWallTime: 800 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "CommentsExtendTurnsScalesWallTime"}
+	comments := []gh.Comment{{Author: "user", Body: "please continue", CreatedAt: time.Now()}}
+	opts := InvokeOptions{MaxTurnsOverride: 100} // 2x commentMaxTurns(stage) (== stage.MaxTurns here)
+
+	type result struct {
+		output    string
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		output, completed, _, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, opts)
+		ch <- result{output, completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("InvokeClaudeForComments: %v (expected the scaled 1600ms deadline to cover the 1.2s sleep)", res.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("InvokeClaudeForComments did not return within 10s")
+	}
+}
+
+// TestInvokeClaudeForComments_ExtendTurnsStillKilledAtScaledDeadline is the
+// comment-processing-path sibling of TestInvokeClaude_ExtendTurnsStillKilledAtScaledDeadline.
+func TestInvokeClaudeForComments_ExtendTurnsStillKilledAtScaledDeadline(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 100 * time.Millisecond
+	claudeKillGraceSigTerm = 100 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Implement",
+		Prompt:      "Do implement",
+		MaxTurns:    50,
+		MaxWallTime: 800 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "CommentsExtendTurnsStillKilledAtScaledDeadline"}
+	comments := []gh.Comment{{Author: "user", Body: "please continue", CreatedAt: time.Now()}}
+	opts := InvokeOptions{MaxTurnsOverride: 100} // 2x commentMaxTurns(stage) -> scaled deadline ~1600ms
+
+	start := time.Now()
+	type result struct {
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		_, completed, _, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, opts)
+		ch <- result{completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		elapsed := time.Since(start)
+		if res.completed {
+			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE)")
+		}
+		if elapsed < 900*time.Millisecond {
+			t.Errorf("killed too early (elapsed=%v) — scaled deadline (~1600ms) was not honored", elapsed)
+		}
+		if elapsed > 6*time.Second {
+			t.Errorf("killed too late (elapsed=%v) — deadline scaling may be unbounded", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("InvokeClaudeForComments did not return within 15s after max_wall_time kill")
+	}
+}
+
+// TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime verifies #1472's
+// non-degenerate case: mergeTrainMaxTurnsOverride (engine/merge_train.go) derives
+// resolveConflictWithClaude's fabrik:extend-turns pre-grant from
+// commentMaxTurns(holdingStg), not holdingStg.MaxTurns. Unlike the ExtendTurns*
+// siblings above (whose fixture stages leave CommentMaxTurns unset, so it falls back
+// to MaxTurns and the old-buggy/new-fixed formulas coincide — exactly the vacuity
+// trap #1472 warns about), this fixture sets MaxTurns:100 and CommentMaxTurns:50 to
+// different values, mirroring this repo's real pipeline-stage convention. It also
+// calls the real mergeTrainMaxTurnsOverride function rather than hand-computing
+// opts.MaxTurnsOverride, so it fails if that function regresses to scale off
+// holdingStg.MaxTurns again:
+//   - fixed:  commentMaxTurns(holdingStg)*2 = 50*2 = 100 -> scaledWallTime(800ms,100,50)  = 1600ms (correct 2x)
+//   - buggy:  holdingStg.MaxTurns*2         = 100*2 = 200 -> scaledWallTime(800ms,200,50) = 3200ms (the old 4x bug)
+//
+// The [1400ms, 2500ms] bracket sits around the correct ~1600-1900ms (with kill-grace
+// overhead) observed elapsed time while excluding the buggy ~3200-3500ms case with
+// wide margin on both sides.
+func TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 100 * time.Millisecond
+	claudeKillGraceSigTerm = 100 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	// Mirrors .fabrik/stages' real pipeline-stage convention (max_turns: 100 /
+	// comment_max_turns: 50) rather than this repo's queued.yaml (a bare holding
+	// stage with none of these fields set, on which the bug is inert — see #1472).
+	holdingStg := &stages.Stage{
+		Name:            "Queued",
+		HoldingStage:    true,
+		MaxTurns:        100,
+		CommentMaxTurns: 50,
+		MaxWallTime:     800 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 99, Title: "MergeTrainOverrideScalesWallTime"}
+	comments := []gh.Comment{{Author: "user", Body: "conflict comment", CreatedAt: time.Now()}}
+	opts := InvokeOptions{MaxTurnsOverride: mergeTrainMaxTurnsOverride(holdingStg, true)}
+
+	workDir := t.TempDir()
+	start := time.Now()
+	type result struct {
+		completed bool
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		_, completed, _, err := InvokeClaudeForComments(context.Background(), holdingStg, issue, comments, workDir, opts)
+		ch <- result{completed, err}
+	}()
+
+	select {
+	case res := <-ch:
+		elapsed := time.Since(start)
+		if res.completed {
+			t.Errorf("expected completed=false (no FABRIK_STAGE_COMPLETE)")
+		}
+		if elapsed < 1400*time.Millisecond {
+			t.Errorf("killed too early (elapsed=%v) — correct scaled deadline (~1600ms) was not honored", elapsed)
+		}
+		if elapsed > 2500*time.Millisecond {
+			t.Errorf("killed too late (elapsed=%v) — deadline may have used the old buggy 4x multiplier (~3200ms)", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("InvokeClaudeForComments did not return within 15s after max_wall_time kill")
+	}
+}
+
 // TestKillProcGroupGraceful_StructuredLog (SC-1) verifies that the kill escalation
 // sequence emits structured log lines for each signal sent to the process group,
 // with the correct signal name and reason code (max_wall_time in this case).

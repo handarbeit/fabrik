@@ -43,9 +43,12 @@ type Config struct {
 	PollSeconds               int
 	MaxConcurrent             int
 	MaxRetries                int
+	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
+	MaxResumeFailures         int    // Max consecutive failed --resume attempts per (issue, stage) session before discarding the session pointer and cold-starting; 0 means use default (2; #1414)
 	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
 	MaxReviewCycles           int    // 0 means use default (5)
-	CIWaitTimeout             int    // minutes; 0 means use default (30)
+	CIWaitTimeout             int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
+	CIBackstopTimeout         int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
 	WorkerStaleMins           int    // minutes; 0 means use default (5)
 	MaxCiFixCycles            int    // 0 means use default (5)
 	MaxRebaseCycles           int    // 0 means use default (3)
@@ -65,6 +68,7 @@ type Config struct {
 	PostPushDwell             int    // seconds; 0 means use default (90)
 	KillGraceSigInt           string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
 	KillGraceSigTerm          string // Go duration string; "" means use default (10s)
+	DrainDeadline             string // Go duration string; "" means use default (30s); bounds the clean-stop drain (ADR-1393)
 	DebugOutput               bool
 	SymlinkEnv                bool
 	WorktreeBoundaryAudit     bool
@@ -80,6 +84,7 @@ type Config struct {
 	SessionRetentionDays      int    // days; 14 = default; 0 disables age-based session pruning
 	ArchiveAfter              string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone               string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
+	GHESHost                  string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
 }
 
 func Execute() error {
@@ -149,9 +154,12 @@ func Execute() error {
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
+	flag.IntVar(&cfg.MaxResumeFailures, "max-resume-failures", 0, "Maximum number of consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting — independent of max-retries, since a failed resume attempt is not charged against it (0 = use default of 2; also FABRIK_MAX_RESUME_FAILURES; #1414)")
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
-	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
+	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
+	flag.IntVar(&cfg.CIBackstopTimeout, "ci-backstop-timeout", 0, "Absolute cap in minutes on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (0 = use default of 240 = 4h; also FABRIK_CI_BACKSTOP_TIMEOUT; ADR-1410)")
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
@@ -184,8 +192,10 @@ func Execute() error {
 	flag.IntVar(&cfg.SessionRetentionDays, "session-retention-days", 14, "Delete .session files older than this many days; 0 disables age-based pruning (also FABRIK_SESSION_RETENTION_DAYS)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
+	flag.StringVar(&cfg.DrainDeadline, "drain-deadline", "", "Bound on a clean stop's worker drain (SIGINT/SIGTERM): after this deadline elapses, Run() returns even if workers are still shutting down (Go duration: 30s, 1m; also FABRIK_DRAIN_DEADLINE; default 30s — must exceed kill-grace-sigint + kill-grace-sigterm, see ADR-1393)")
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
+	flag.StringVar(&cfg.GHESHost, "ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST; default: unset, meaning github.com)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -276,6 +286,7 @@ func Execute() error {
 	if !cfg.GitSSH {
 		cfg.GitSSH = resolveBool("FABRIK_GIT_SSH", pc.GitSSH)
 	}
+	cfg.GHESHost = resolveGHESHost(cfg.GHESHost, pc)
 	if cfg.PollSeconds == 30 {
 		if v := os.Getenv("FABRIK_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -321,6 +332,12 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["max-slice-retries"] {
+		cfg.MaxSliceRetries = resolveInt(cfg.MaxSliceRetries, "FABRIK_MAX_SLICE_RETRIES", "", 10)
+	}
+	if !explicitFlags["max-resume-failures"] {
+		cfg.MaxResumeFailures = resolveInt(cfg.MaxResumeFailures, "FABRIK_MAX_RESUME_FAILURES", "", 2)
+	}
 	if !explicitFlags["review-wait-timeout"] {
 		cfg.ReviewWaitTimeout = resolveInt(cfg.ReviewWaitTimeout, "FABRIK_REVIEW_WAIT_TIMEOUT", "of minutes", 15)
 	}
@@ -329,6 +346,9 @@ func Execute() error {
 	}
 	if !explicitFlags["ci-wait-timeout"] {
 		cfg.CIWaitTimeout = resolveInt(cfg.CIWaitTimeout, "FABRIK_CI_WAIT_TIMEOUT", "of minutes", 30)
+	}
+	if !explicitFlags["ci-backstop-timeout"] {
+		cfg.CIBackstopTimeout = resolveInt(cfg.CIBackstopTimeout, "FABRIK_CI_BACKSTOP_TIMEOUT", "of minutes", 240)
 	}
 	if !explicitFlags["worker-stale-timeout"] {
 		cfg.WorkerStaleMins = resolveInt(cfg.WorkerStaleMins, "FABRIK_WORKER_STALE_TIMEOUT", "of minutes", 5)
@@ -570,6 +590,9 @@ func Execute() error {
 	if !explicitFlags["kill-grace-sigterm"] {
 		cfg.KillGraceSigTerm = resolveDuration(cfg.KillGraceSigTerm, "FABRIK_KILL_GRACE_SIGTERM") // validated in killGraceSigTerm() helper
 	}
+	if !explicitFlags["drain-deadline"] {
+		cfg.DrainDeadline = resolveDuration(cfg.DrainDeadline, "FABRIK_DRAIN_DEADLINE") // validated in drainDeadline() helper
+	}
 	if !explicitFlags["archive-after"] {
 		cfg.ArchiveAfter = resolveDuration(cfg.ArchiveAfter, "FABRIK_ARCHIVE_AFTER") // validated in archiveAfter() helper
 	}
@@ -697,6 +720,8 @@ func Execute() error {
 		} else {
 			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
 		}
+		fmt.Printf("  max-slice-retries: %d\n", maxSliceRetries(cfg.MaxSliceRetries))
+		fmt.Printf("  max-resume-failures: %d\n", maxResumeFailures(cfg.MaxResumeFailures))
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
@@ -738,9 +763,12 @@ func Execute() error {
 		PollSeconds:               cfg.PollSeconds,
 		MaxConcurrent:             cfg.MaxConcurrent,
 		MaxRetries:                cfg.MaxRetries,
+		MaxSliceRetries:           maxSliceRetries(cfg.MaxSliceRetries),
+		MaxResumeFailures:         maxResumeFailures(cfg.MaxResumeFailures),
 		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
+		CIBackstopTimeout:         ciBackstopTimeout(cfg.CIBackstopTimeout),
 		RequiredStatusContexts:    pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
 		PostPushDwell:             postPushDwell(cfg.PostPushDwell),
 		WorkerStaleTimeout:        workerStaleTimeout(cfg.WorkerStaleMins),
@@ -762,6 +790,7 @@ func Execute() error {
 		ClaudeWaitDelay:           claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:           killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:          killGraceSigTerm(cfg.KillGraceSigTerm),
+		DrainDeadline:             drainDeadline(cfg.DrainDeadline),
 		DebugOutput:               cfg.DebugOutput,
 		SymlinkEnv:                cfg.SymlinkEnv,
 		WorktreeBoundaryAudit:     cfg.WorktreeBoundaryAudit,
@@ -778,6 +807,7 @@ func Execute() error {
 		SessionRetentionDays:      cfg.SessionRetentionDays,
 		ArchiveAfter:              archiveAfter(cfg.ArchiveAfter),
 		ArchiveDone:               archiveDoneMode(cfg.ArchiveDone),
+		GHESHost:                  cfg.GHESHost,
 		ReadyCh:                   testReadyCh,
 	})
 	if err != nil {
@@ -791,7 +821,7 @@ func Execute() error {
 	var skillsStaleCount int
 	var customWorkflow bool
 	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
-		cw, upgradeNeeded, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+		cw, upgradeNeeded, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 		if cwErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", cwErr)
 		} else {
@@ -816,7 +846,7 @@ func Execute() error {
 		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, stopCh, skillsStaleCount, customWorkflow)
 	}
 	if customWorkflow {
-		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin"))
 	} else if skillsStaleCount > 0 {
 		if refreshErr := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); refreshErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill refresh failed: %v\n", refreshErr)
@@ -837,6 +867,24 @@ func resolveBool(envVar string, pcVal bool) bool {
 		return lv == "true" || lv == "1" || lv == "yes"
 	}
 	return pcVal
+}
+
+// resolveGHESHost resolves the GHES host from flag > FABRIK_GHES_HOST env var
+// > config.yaml's ghes_host, normalizing whichever value wins (stripping a
+// scheme and trailing slash) so downstream consumers always see a bare
+// hostname. flagVal is the already-parsed --ghes-host value; pass "" if no
+// flag was set. Shared by both the daemon (cmd/root.go) and `fabrik watch`
+// (cmd/watch.go) so the two entry points can't drift on precedence.
+func resolveGHESHost(flagVal string, pc config.ProjectConfig) string {
+	host := flagVal
+	if host == "" {
+		if v := os.Getenv("FABRIK_GHES_HOST"); v != "" {
+			host = v
+		} else {
+			host = pc.GHESHost
+		}
+	}
+	return config.NormalizeGHESHost(host)
 }
 
 // resolveInt resolves an integer config value from an environment variable
@@ -882,11 +930,11 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 		return
 	}
 	os.Unsetenv(envVar)
-	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 	if stateErr != nil {
 		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed%s: %v\n", msgSuffix, stateErr)
 	} else if customWorkflow {
-		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin"))
 	} else if upgradeNeeded {
 		if _, err := fabrikplugin.RefreshPlugin(); err != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed%s: %v\n", msgSuffix, err)
@@ -896,6 +944,22 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 	} else {
 		fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
 	}
+}
+
+// pluginCustomizationWarning builds the "local customizations" startup warning,
+// naming the specific files that differ between pluginDir and the currently
+// embedded plugin (the same comparison basis diffingPluginFiles uses for stale-
+// skill detection in cmd/upgrade.go), so the warning is directly actionable
+// rather than a bare assertion. Falls back to the assertion alone if the diff
+// itself fails or reports no differences (e.g. a race with a concurrent
+// refresh) rather than raising an error to the caller.
+func pluginCustomizationWarning(pluginDir string) string {
+	msg := "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh"
+	if diffing, diffErr := diffingPluginFiles(pluginDir); diffErr == nil && len(diffing) > 0 {
+		msg += fmt.Sprintf(" (differing: %s)", strings.Join(diffing, ", "))
+	}
+	msg += "; run 'fabrik upgrade --force' to overwrite\n"
+	return msg
 }
 
 // reviewWaitTimeout converts a ReviewWaitTimeout config value (minutes) to a
@@ -918,9 +982,22 @@ func maxReviewCycles(n int) int {
 
 // ciWaitTimeout converts a CIWaitTimeout config value (minutes) to a
 // time.Duration. When minutes is 0 (unset), the default of 30 minutes is used.
+// ADR-1410: this now governs the CI-gate liveness-stall dwell, not total CI
+// wait time — see ciBackstopTimeout for the absolute cap.
 func ciWaitTimeout(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 30 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// ciBackstopTimeout converts a CIBackstopTimeout config value (minutes) to a
+// time.Duration. When minutes is 0 (unset), the default of 240 minutes (4h)
+// is used. Bounds how long an item may sit in fabrik:awaiting-ci under any
+// classification, independent of any suite's expected duration (ADR-1410, R5).
+func ciBackstopTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 240 * time.Minute
 	}
 	return time.Duration(minutes) * time.Minute
 }
@@ -969,6 +1046,33 @@ func maxCiFixCycles(n int) int {
 func maxRebaseCycles(n int) int {
 	if n <= 0 {
 		return 3
+	}
+	return n
+}
+
+// maxSliceRetries returns the configured MaxSliceRetries value, defaulting to
+// 10 when n is 0 (unset). The default is higher than max-retries because a
+// turn-cap preemption is a resumable time-slice, not a failure — a job
+// legitimately needing several slices is routine and must not be conflated
+// with a stage that keeps genuinely failing (#1199).
+func maxSliceRetries(n int) int {
+	if n <= 0 {
+		return 10
+	}
+	return n
+}
+
+// maxResumeFailures returns the configured MaxResumeFailures value, defaulting
+// to 2 when n is 0 (unset). The default is lower than every sibling counter
+// (3–5) because a resume retry is provably identical each time — the same
+// session id re-resumed, re-appending to a transcript that is already the
+// cause — unlike a rebase or review cycle, where each retry does something
+// different (rebase against a moved base, address new feedback). A second
+// attempt tolerates a genuinely transient failure; a third is pure waste
+// (#1414).
+func maxResumeFailures(n int) int {
+	if n <= 0 {
+		return 2
 	}
 	return n
 }
@@ -1056,6 +1160,29 @@ func killGraceSigTerm(s string) time.Duration {
 	if d < 0 {
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGTERM=%q is negative; using default 10s\n", s)
 		return 10 * time.Second
+	}
+	return d
+}
+
+// drainDeadline parses the drain-deadline string (Go duration syntax) into a
+// time.Duration. An empty string returns the default of 30 seconds. Unlike
+// kill_grace's "0s = skip this step" convention, a clean stop has no
+// unbounded-wait sentinel — that is the exact defect ADR-1393/#1393 fixes —
+// so a non-positive value (after parsing) falls back to the 30s default with
+// a warning rather than being honored as "wait forever". Negative values and
+// invalid syntax likewise log a warning and return the default.
+func drainDeadline(s string) time.Duration {
+	if s == "" {
+		return 30 * time.Second
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_DRAIN_DEADLINE=%q is invalid (Go duration syntax required, e.g. 30s, 1m); using default 30s\n", s)
+		return 30 * time.Second
+	}
+	if d <= 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_DRAIN_DEADLINE=%q is not positive — a clean stop has no unbounded-wait mode; using default 30s\n", s)
+		return 30 * time.Second
 	}
 	return d
 }
@@ -1200,6 +1327,9 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 		Repo:          repo,
 		Version:       version,
 		FabrikVersion: Version,
+		// Same resolver the startup notice uses, so the footer and the log can
+		// never disagree about which account this instance is billing.
+		ClaudeAccount: engine.ClaudeProfileAccount(os.Getenv("CLAUDE_CONFIG_DIR")),
 	}
 }
 

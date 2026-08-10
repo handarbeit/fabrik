@@ -11,6 +11,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // testEngineForMergeWithRealWM is like testEngineForMerge but registers a real
@@ -287,6 +288,64 @@ func TestCheckMergeabilityGate_PRMergeQueued_BlocksNoChurn(t *testing.T) {
 	}
 	if len(client.removeLabelCalls) != 0 {
 		t.Errorf("PRMergeQueued must not remove any label (no churn), got %d remove(s)", len(client.removeLabelCalls))
+	}
+}
+
+// TestCheckMergeabilityGate_PRMergeUnsettled_LogsClaim is a #1303 regression:
+// checkMergeabilityGate's PRMergeUnsettled branch used to claim the item
+// (blocked=true) with no log line at all — a stuck classification (e.g. a
+// stale-cached CheckRunsPending read) could then stall an item silently for
+// over an hour with nothing in the logs to point at. This asserts the claim
+// now logs under the "merge-gate" tag, naming both the branch and settle's
+// own reason string.
+func TestCheckMergeabilityGate_PRMergeUnsettled_LogsClaim(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	events := make(chan tui.Event, 16)
+	eng.events = events
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable=null (GitHub computing)"}
+
+	eng.checkMergeabilityGate(item, stage, settle)
+
+	close(events)
+	var found bool
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "merge-gate" && strings.Contains(le.Message, "PRMergeUnsettled") && strings.Contains(le.Message, settle.Reason) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a merge-gate log line naming PRMergeUnsettled and the settle reason on claim")
+	}
+}
+
+// TestCheckMergeabilityGate_PRMergeQueued_LogsClaim mirrors
+// TestCheckMergeabilityGate_PRMergeUnsettled_LogsClaim for the PRMergeQueued
+// branch — the other previously-silent claim path in this switch.
+func TestCheckMergeabilityGate_PRMergeQueued_LogsClaim(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	events := make(chan tui.Event, 16)
+	eng.events = events
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeQueued, Reason: "PR in merge queue", PR: &gh.PRDetails{Number: 42}}
+
+	eng.checkMergeabilityGate(item, stage, settle)
+
+	close(events)
+	var found bool
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "merge-gate" && strings.Contains(le.Message, "merge queue") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a merge-gate log line naming the merge-queue claim reason")
 	}
 }
 
@@ -1488,5 +1547,338 @@ func TestReenableAutoMergeAfterRebase_NotInConvergenceFlow_NoOp(t *testing.T) {
 	}
 	if len(client.mergePRCalls) != 0 {
 		t.Errorf("MergePR must not be called without fabrik:auto-merge-enabled, got %d call(s)", len(client.mergePRCalls))
+	}
+}
+
+// ---- #1460 R2/AC1/AC2: pauseForRebaseCycleLimit resumability ----
+
+// TestRebaseCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles is the
+// AC1/AC2 regression for #1460's confirmed site #3: before this fix,
+// pauseForRebaseCycleLimit never applied itemstate.EnginePaused, so removing
+// fabrik:paused was a no-op — RebaseCycles stayed pinned at the limit.
+//
+// Drives through the real catchUpPhase1Handlers chain (runPhase1Chain), and
+// drives the pause itself through the real dispatchWithCycleLimit ->
+// pauseForRebaseCycleLimit path (RebaseCycles pre-set to the limit, PR
+// genuinely classified PRMergeConflicting via the mock client, so
+// handleMergeAndCIGates's checkMergeabilityGate reaches the pause branch for
+// real) rather than seeding itemstate.EnginePaused directly — see the review
+// site's identical test for why that distinction matters.
+//
+// AC3: reverting pauseForRebaseCycleLimit's two itemstate.EnginePaused apply
+// lines turns this test red at the Step 1 PausedByEngine assertion (verified
+// by hand).
+func TestRebaseCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing.T) {
+	notMergeable := false
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open", HeadSHA: "cafebabe"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return &notMergeable, "dirty", nil // PRMergeConflicting
+		},
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	waitForCI := true
+	stgs := []*stages.Stage{{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &waitForCI}}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxRebaseCycles = 2
+	stage := stgs[0]
+	board := &gh.ProjectBoard{}
+	const repo = "owner/repo"
+	const number = 40
+
+	// Step 1: drive a REAL pause through the actual code path. RebaseCycles
+	// pre-set to exactly the limit; the mock client makes settlePRMergeState
+	// classify PRMergeConflicting on every call, so checkMergeabilityGate's
+	// dispatchWithCycleLimit reaches the pause branch and calls the real
+	// pauseForRebaseCycleLimit.
+	for i := 0; i < eng.cfg.MaxRebaseCycles; i++ {
+		eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: repo, Number: number, StageName: "Validate"})
+	}
+	item := gh.ProjectItem{Number: number, Repo: repo, Labels: []string{"stage:Validate:complete"}}
+	pctx := &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+	claimed := runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected the cycle-limit pause branch to claim the item")
+	}
+
+	client.mu.Lock()
+	pausedApplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedApplied = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedApplied {
+		t.Fatal("expected fabrik:paused to be applied by the real cycle-limit pause")
+	}
+	snap, _ := eng.store.Get(repo, number)
+	if !snap.PausedByEngine("Validate") {
+		t.Fatal("R2: pauseForRebaseCycleLimit must apply itemstate.EnginePaused so wasPaused becomes true on resume — PausedByEngine(Validate) is false after the real pause")
+	}
+
+	// Step 2 (AC1): simulate the operator removing fabrik:paused (label set no
+	// longer carries it) and run another pass — checkMergeabilityGate will
+	// re-claim the item again once the reset lands (RebaseCycles resets to 0
+	// first, in the same pass, ahead of the cycle-limit check), so this
+	// asserts the RESET happened by reading the counter right after.
+	item.Labels = []string{"stage:Validate:complete"}
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+	runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+
+	snap, _ = eng.store.Get(repo, number)
+	if snap.PausedByEngine("Validate") {
+		t.Error("PausedByEngine(Validate) must be cleared after the reset pass")
+	}
+	// Note: unlike the review site, this pass's own dispatchWithCycleLimit
+	// call also fires (the mock keeps returning PRMergeConflicting every
+	// call, so there is always "actionable" work) — RebaseCycles is reset to
+	// 0 by handleEngineUnpause and then immediately incremented to 1 by this
+	// same pass's dispatch. That increment is itself proof of the reset: a
+	// still-stuck counter would have re-hit cycleCount(2) >= maxCycles(2) and
+	// paused again instead.
+	if got := snap.RebaseCycles("Validate"); got != 1 {
+		t.Fatalf("AC1: RebaseCycles(Validate) after unpause = %d; want 1 — the counter must have reset to 0 before this pass's own dispatch incremented it, not stayed pinned at the limit", got)
+	}
+
+	// Step 3 (AC2): confirm at least one further cycle proceeds without
+	// re-pausing (baseline excludes Step 1's legitimate pause).
+	client.mu.Lock()
+	baseline := len(client.addLabelCalls)
+	client.mu.Unlock()
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool)}
+	claimed = runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected a second rebase-reinvoke dispatch to claim the item")
+	}
+	snap, _ = eng.store.Get(repo, number)
+	if got := snap.RebaseCycles("Validate"); got != 2 {
+		t.Errorf("AC2: RebaseCycles(Validate) = %d; want 2 — a genuinely reset counter must permit more than one further cycle before re-hitting the limit", got)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls[baseline:] {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("AC2: fabrik:paused must not be re-added — RebaseCycles(2) has not yet reached MaxRebaseCycles(%d) again", eng.cfg.MaxRebaseCycles)
+		}
+	}
+}
+
+// ---- #1460 R2/AC1/AC2: pauseForEnqueueCycleLimit resumability ----
+
+// TestEnqueueCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles is the
+// AC1/AC2 regression for #1460's confirmed site #4: before this fix,
+// pauseForEnqueueCycleLimit never applied itemstate.EnginePaused (its own doc
+// comment falsely claimed the counter was already cleared by
+// clearFailedStage — #1460 also corrects that comment), so removing
+// fabrik:paused was a no-op — EnqueueCycles stayed pinned at the limit.
+//
+// Reaches pauseForEnqueueCycleLimit via the real leftQueue ejection-recovery
+// ladder: handleAutoMergeConvergence (chain handler) -> checkAutoMergeConvergence
+// -> reEnqueueOrPause -> pauseForEnqueueCycleLimit, driven through
+// runPhase1Chain exactly as poll.go/ci_settle.go do (priorInQueue:true on the
+// phase1Ctx simulates "in the merge queue last poll, ejected now" — the
+// leftQueue edge that TestCheckAutoMergeConvergence_LeftQueue_CleanAtCap_Pauses
+// exercises via a direct call; this test goes through the full chain instead
+// so handleEngineUnpause's reset is genuinely exercised).
+//
+// AC3: reverting pauseForEnqueueCycleLimit's two itemstate.EnginePaused apply
+// lines turns this test red at the Step 1 PausedByEngine assertion (verified
+// by hand).
+func TestEnqueueCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles(t *testing.T) {
+	mergeableTrue := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 88, State: "open", AutoMergeEnabled: false, HeadSHA: "cafe1234"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return &mergeableTrue, "clean", nil // PRMergeReady (ADR-033 shortcut)
+		},
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	stgs := []*stages.Stage{{Name: "Validate", Order: 1, Prompt: "validate"}}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxEnqueueCycles = 2
+	stage := stgs[0]
+	board := &gh.ProjectBoard{}
+	const repo = "owner/repo"
+	const number = 50
+
+	// Step 1: drive a REAL pause. EnqueueCycles pre-set to the limit; the mock
+	// client makes settlePRMergeState classify PRMergeReady on every call, and
+	// priorInQueue:true simulates the leftQueue ejection edge every pass, so
+	// reEnqueueOrPause's cycle-limit check reaches the real
+	// pauseForEnqueueCycleLimit.
+	for i := 0; i < eng.cfg.MaxEnqueueCycles; i++ {
+		eng.store.Apply(itemstate.EnqueueCycleIncremented{Repo: repo, Number: number, StageName: "Validate"})
+	}
+	item := gh.ProjectItem{
+		Number: number, Repo: repo,
+		Labels:                      []string{"stage:Validate:complete", "fabrik:auto-merge-enabled"},
+		LinkedPRIsMergeQueueEnabled: true,
+	}
+	pctx := &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool), priorInQueue: true}
+	claimed := runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected the cycle-limit pause branch to claim the item")
+	}
+
+	client.mu.Lock()
+	pausedApplied := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedApplied = true
+		}
+	}
+	client.mu.Unlock()
+	if !pausedApplied {
+		t.Fatal("expected fabrik:paused to be applied by the real cycle-limit pause")
+	}
+	snap, _ := eng.store.Get(repo, number)
+	if !snap.PausedByEngine("Validate") {
+		t.Fatal("R2: pauseForEnqueueCycleLimit must apply itemstate.EnginePaused so wasPaused becomes true on resume — PausedByEngine(Validate) is false after the real pause")
+	}
+
+	// Step 2 (AC1): simulate the operator removing fabrik:paused and run
+	// another pass. As with the rebase site, the mock keeps returning
+	// "actionable" (leftQueue) state every call, so this same pass's own
+	// dispatch fires right after the reset — the counter reading 1 (not the
+	// still-stuck 2) is itself proof the reset landed.
+	item.Labels = []string{"stage:Validate:complete", "fabrik:auto-merge-enabled"}
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool), priorInQueue: true}
+	runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+
+	snap, _ = eng.store.Get(repo, number)
+	if snap.PausedByEngine("Validate") {
+		t.Error("PausedByEngine(Validate) must be cleared after the reset pass")
+	}
+	if got := snap.EnqueueCycles("Validate"); got != 1 {
+		t.Fatalf("AC1: EnqueueCycles(Validate) after unpause = %d; want 1 — the counter must have reset to 0 before this pass's own re-enqueue incremented it, not stayed pinned at the limit", got)
+	}
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected exactly 1 re-enqueue call after the reset, got %d", len(client.enqueuePullRequestCalls))
+	}
+
+	// Step 3 (AC2): confirm a further cycle proceeds without re-pausing
+	// (baseline excludes Step 1's legitimate pause).
+	client.mu.Lock()
+	baseline := len(client.addLabelCalls)
+	client.mu.Unlock()
+	pctx = &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stage, hasComplete: true, advancedItems: make(map[string]bool), priorInQueue: true}
+	claimed = runPhase1Chain(eng, pctx)
+	eng.wg.Wait()
+	if !claimed {
+		t.Fatal("expected a second re-enqueue to claim the item")
+	}
+	snap, _ = eng.store.Get(repo, number)
+	if got := snap.EnqueueCycles("Validate"); got != 2 {
+		t.Errorf("AC2: EnqueueCycles(Validate) = %d; want 2 — a genuinely reset counter must permit more than one further cycle before re-hitting the limit", got)
+	}
+	if len(client.enqueuePullRequestCalls) != 2 {
+		t.Errorf("expected a second re-enqueue call, got %d total", len(client.enqueuePullRequestCalls))
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls[baseline:] {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("AC2: fabrik:paused must not be re-added — EnqueueCycles(2) has not yet reached MaxEnqueueCycles(%d) again", eng.cfg.MaxEnqueueCycles)
+		}
+	}
+}
+
+// TestPauseForRebaseCycleLimit_ExistingComment_NoRepost is the AC4 regression
+// for #1460's confirmed site #3: when a pause comment for this episode
+// already exists, pauseForRebaseCycleLimit must reapply fabrik:paused +
+// fabrik:awaiting-input (re-arming itemstate.EnginePaused too) without
+// posting a duplicate comment.
+func TestPauseForRebaseCycleLimit_ExistingComment_NoRepost(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	stage := &stages.Stage{Name: "Validate"}
+	item := gh.ProjectItem{
+		Number: 41, Repo: "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "C1", Body: "🏭 **Fabrik — rebase cycle limit reached**\n\nThe stage **Validate** has been re-invoked to rebase onto the base branch 2 time(s), " +
+				"which has reached the configured limit of 2 (override with `--max-rebase-cycles` or `FABRIK_MAX_REBASE_CYCLES`)."},
+		},
+	}
+
+	escalated := eng.pauseForRebaseCycleLimit(&gh.ProjectBoard{}, item, stage, 2, 2)
+
+	if escalated {
+		t.Error("expected escalated=false when an existing pause comment is reused")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("AC4: expected no new comment posted when one already exists for this episode, got %d", len(client.addCommentCalls))
+	}
+	pausedApplied, awaitingInputApplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedApplied = true
+		case "fabrik:awaiting-input":
+			awaitingInputApplied = true
+		}
+	}
+	if !pausedApplied || !awaitingInputApplied {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input to be reapplied, got paused=%v awaitingInput=%v", pausedApplied, awaitingInputApplied)
+	}
+	snap, _ := eng.store.Get("owner/repo", 41)
+	if !snap.PausedByEngine("Validate") {
+		t.Error("R2: expected itemstate.EnginePaused to be (re-)applied even on the reapply branch")
+	}
+}
+
+// TestPauseForEnqueueCycleLimit_ExistingComment_NoRepost is the AC4
+// regression for #1460's confirmed site #4: when a pause comment for this
+// episode already exists, pauseForEnqueueCycleLimit must reapply
+// fabrik:paused + fabrik:awaiting-input (re-arming itemstate.EnginePaused
+// too) without posting a duplicate comment.
+func TestPauseForEnqueueCycleLimit_ExistingComment_NoRepost(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	stage := &stages.Stage{Name: "Validate"}
+	item := gh.ProjectItem{
+		Number: 51, Repo: "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "C1", Body: "🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\nThe linked PR for stage **Validate** has been re-enqueued into GitHub's merge queue 2 time(s), " +
+				"which has reached the configured limit of 2 (override with `--max-enqueue-cycles` or `FABRIK_MAX_ENQUEUE_CYCLES`)."},
+		},
+	}
+
+	escalated := eng.pauseForEnqueueCycleLimit(&gh.ProjectBoard{}, item, stage, 2, 2)
+
+	if escalated {
+		t.Error("expected escalated=false when an existing pause comment is reused")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("AC4: expected no new comment posted when one already exists for this episode, got %d", len(client.addCommentCalls))
+	}
+	pausedApplied, awaitingInputApplied := false, false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			pausedApplied = true
+		case "fabrik:awaiting-input":
+			awaitingInputApplied = true
+		}
+	}
+	if !pausedApplied || !awaitingInputApplied {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input to be reapplied, got paused=%v awaitingInput=%v", pausedApplied, awaitingInputApplied)
+	}
+	snap, _ := eng.store.Get("owner/repo", 51)
+	if !snap.PausedByEngine("Validate") {
+		t.Error("R2: expected itemstate.EnginePaused to be (re-)applied even on the reapply branch")
 	}
 }

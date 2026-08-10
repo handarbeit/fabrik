@@ -23,6 +23,14 @@ type phase1Ctx struct {
 	// in poll.go before ItemDeepFetched overwrites the store. checkAutoMergeConvergence
 	// uses it to detect the poll-native "left the queue" edge (ADR-058 D4 OQ-3).
 	priorInQueue bool
+	// reachedCIGate is set true by handleMergeAndCIGates immediately before it
+	// calls checkCIGate — the one call site that matters. #1303: settleAwaitingCIScan's
+	// gateReached counter previously incremented unconditionally at the end of every
+	// loop iteration regardless of which handler claimed the item (or whether any
+	// did), so its log line ("N reached the CI gate") reported a count that did not
+	// match what it claimed to measure. Reading this field after the handler loop
+	// instead makes the count accurate.
+	reachedCIGate bool
 }
 
 // catchUpHandler is a named Phase 1 gate/recovery handler. The name field lets
@@ -45,10 +53,109 @@ type catchUpHandler struct {
 //     (GitHub owns the merge decision)
 //   - mergeAndCIGates: merge-conflict gate runs before the CI gate (ADR-028)
 var catchUpPhase1Handlers = []catchUpHandler{
+	{name: "engineUnpause", run: (*Engine).handleEngineUnpause},
 	{name: "dependencies", run: (*Engine).handleDependencies},
 	{name: "reviewGate", run: (*Engine).handleReviewGate},
 	{name: "autoMergeConvergence", run: (*Engine).handleAutoMergeConvergence},
 	{name: "mergeAndCIGates", run: (*Engine).handleMergeAndCIGates},
+}
+
+// handleEngineUnpause is the actual resume trigger for the four cycle-limit
+// pause sites (pauseForReviewCycleLimit, pauseForCIFixCycleLimit,
+// pauseForRebaseCycleLimit, pauseForEnqueueCycleLimit — #1460 R2). It must run
+// first, unconditionally, ahead of every other Phase 1 handler, so a
+// just-reset counter is what the rest of this same pass evaluates.
+//
+// Why this can't live in processItem's existing wasPaused-gate instead
+// (engine/item.go, around the clearFailedStage call): that gate is reachable
+// only when processItem itself is dispatched for the item, and itemNeedsWork
+// returns false the moment stage:<name>:complete is already present and there
+// is no new comment — which is exactly the state all four cycle-limit pause
+// sites leave the item in. They fire from this very handler chain
+// (handleReviewGate / handleMergeAndCIGates), which — per poll.go's
+// deepFetchCandidates loop and settleAwaitingCIScan's identical loop — is
+// only reached for items that are NOT currently paused (both entry points
+// skip fabrik:paused items outright) but ARE already stage-complete. So the
+// instant a human removes fabrik:paused, the item re-enters this chain
+// directly; processItem is never invoked for it, and its unpause gate is
+// unreachable. Without a reset trigger inside this chain, the freshly
+// unpaused item hits the same stuck cycleCount >= maxCycles check on its very
+// next pass and re-pauses immediately (confirmed live on #1208: five seconds
+// from unpause to re-pause, with no comment involved).
+//
+// PausedByEngine being true here means: this item reached the handler chain
+// (so fabrik:paused is currently absent, per both admission filters above)
+// while still carrying a stale EnginePaused record from before the label was
+// removed. That is precisely "a human unpaused a cycle-limit-paused item" —
+// clearFailedStage is safe to reuse as-is: it removes stage:<name>:failed (a
+// harmless no-op, since these four sites never apply it), clears
+// PausedByEngine, resets LastAttemptAt, zeroes ReviewCycles/ReviewBlockedCycles/
+// CIFixCycles/RebaseCycles/EnqueueCycles via EngineCyclesCleared, and resets
+// the comment circuit breaker — the identical reset already used by
+// escalateFailedStage/escalatePRCreationFailure/handleBoundaryViolation via
+// processItem's gate, and by pauseForSliceLimit via that same gate (a
+// different call path — slice-limit pauses mid-stage, before completion, so
+// processItem's gate remains reachable for it; see pauseForSliceLimit's doc
+// comment).
+//
+// Always returns false: this handler only resets state, it never claims the
+// item — the rest of the chain (including the cycle-limit checks that would
+// otherwise re-pause) must still run in the same pass so a genuine resume
+// converges in one poll (AC2), not two.
+//
+// Scope note (#1460 review finding): the check below is `snap.PausedByEngine`
+// for the item's current stage, not specifically one of the four named sites
+// — it fires for *any* stage whose EnginePaused record is stale when the item
+// reaches this chain, including escalateFailedStage/escalatePRCreationFailure/
+// handleBoundaryViolation/pauseForSliceLimit's own EnginePaused applications.
+// This is currently safe, not merely idempotent-by-luck: every one of those
+// other appliers pauses strictly *before* stage:<name>:complete is set for
+// that stage (mid-invocation, on a non-terminal Claude exit), and this chain
+// is reachable only for items that are already stage-complete (or carrying
+// fabrik:awaiting-ci) — see the reachability argument above. So a stage
+// paused by one of those sites can never simultaneously be in the
+// stage-complete-or-awaiting-ci state this chain requires; by the time such a
+// stage does reach stage:<name>:complete, processItem's own gate has already
+// cleared its EnginePaused record on the resuming dispatch, well before this
+// chain would ever see it. If a future pause site ever applies EnginePaused
+// after its stage is already marked complete, it would be picked up here too
+// — which is the intended, general behavior (any stale EnginePaused record on
+// a stage-complete item should reset), not a defect to guard against.
+//
+// This safety argument is enforced by convention (every current applier's own
+// call-site ordering), not by a compile-time or runtime assertion — nothing
+// stops a future EnginePaused applier from being added after a stage's
+// completion point. That gap is deliberately not closed here: the reset
+// behavior in that case is still correct by design (see the paragraph above),
+// so there is nothing to guard against, only a scenario to keep verified.
+// TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse exercises
+// exactly that shape directly (EnginePaused applied to a stage that is
+// simultaneously stage:<name>:complete) and asserts the reset still lands
+// cleanly, regardless of which applier produced the record. A future site
+// that violates today's "pause before completion" convention would still
+// pass through this handler correctly — this doc note exists so the next
+// person adding an EnginePaused applier sees this discussion rather than
+// rediscovering it (#1460 review finding).
+//
+// Cost note (#1460 review finding): this handler adds one unconditional
+// e.store.Get per stage-complete-or-awaiting-ci item, per poll pass, ahead of
+// every other Phase 1 handler. store.Get's fast path (the overwhelming
+// majority of calls, since these items are already tracked) is an in-memory
+// RLock + map lookup + snapshot copy — no GitHub API call — and every
+// downstream handler in this same chain (handleReviewGate, handleMergeAndCIGates,
+// etc.) already performs its own store.Get calls per item per pass, so this is
+// not a new class of cost, just one more instance of an existing pattern.
+// Accounted for explicitly in ADR-1460's Consequences/Negative section, not an
+// oversight.
+func (e *Engine) handleEngineUnpause(pctx *phase1Ctx) bool {
+	repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
+	snap, err := e.store.Get(repoStr, pctx.item.Number)
+	if err != nil || !snap.PausedByEngine(pctx.stage.Name) {
+		return false
+	}
+	e.logf(pctx.item.Number, "unpause", "stale engine-pause record found for stage %q with fabrik:paused absent — clearing (#1460)\n", pctx.stage.Name)
+	e.clearFailedStage(pctx.item, pctx.stage)
+	return false
 }
 
 // handleDependencies claims the item when it has unresolved blocking
@@ -61,11 +168,29 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 // active when the stage has genuinely completed (hasComplete == true); during
 // the CI-await window (fabrik:awaiting-ci && !hasComplete) the gate is skipped
 // to prevent spurious fabrik:awaiting-review re-application (#617).
+//
+// Reinvoke-governs-working, authoritative-governs-merging (R1, #1375,
+// amending ADR-1250): actionable review feedback (buildReviewFeedbackComments —
+// unresolved inline thread comments plus unaddressed review bodies, Finding 4)
+// is checked and dispatched *before* consuming checkReviewGate's blocked/timedOut
+// return values, not after. This is what makes the reinvoke reachable at all
+// under review_authority: authoritative — an unresolved CHANGES_REQUESTED verdict
+// keeps checkReviewGate returning blocked=true (or, once its own timeout has
+// separately elapsed, timedOut=true) indefinitely, which used to short-circuit
+// this function before the reinvoke path was ever reached (Finding 1). A
+// CHANGES_REQUESTED review always has a body per GitHub's REST contract, so
+// there is always something actionable to reinvoke on; only a bare "nobody has
+// reviewed yet" block (nothing actionable) still falls through to the original
+// cooldown-record/pause tail below, unchanged. The reinvoke loop is bounded by
+// MaxReviewCycles/dispatchWithCycleLimit exactly as it was for the
+// naturally-cleared case — R7's dedup (buildReviewFeedbackComments only
+// returns unprocessed feedback) is what stops this from firing every poll for
+// the same review.
 func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	if !pctx.hasComplete {
 		return false
 	}
-	blocked, timedOut, terminated := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+	blocked, timedOut, terminated, resolvedReviews := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
 	if terminated {
 		// checkReviewGate already paused the item directly via
 		// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
@@ -74,41 +199,51 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// ciTerminated check. See ADR-1223.
 		return true
 	}
-	if blocked {
-		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
-		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
-		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
-		// non-responsive bot reviewer (issue #495).
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		e.store.Apply(itemstate.CooldownRecorded{
-			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
-			Number: pctx.item.Number,
-			Reason: "review-blocked",
-			Until:  time.Now().Add(cooldown),
-		})
-		return true
-	}
-	if timedOut {
-		e.pauseForReviewTimeout(pctx.board, pctx.item, pctx.stage)
-		return true
-	}
-	// Gate cleared naturally — if reviews with actionable body text were
-	// submitted, re-invoke the stage agent to address the feedback before
-	// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
-	// have nothing to address; fall through to Phase 2.
-	if syntheticComments := e.buildReviewThreadComments(pctx.item); len(syntheticComments) > 0 {
+	// Actionable review feedback (thread comments and/or review bodies) is
+	// dispatched regardless of blocked/timedOut — see the doc comment above.
+	//
+	// Delegates to buildReviewFeedbackCommentsFromReviews/
+	// currentHeadReviewFeedbackCommentsFromReviews (reviews.go) rather than
+	// hand-rolling the thread+body composition here (Pruefer review finding,
+	// #1375) — one definition of "actionable feedback" shared with
+	// dispatchReviewReinvoke's build(), instead of two that could silently
+	// drift. resolvedReviews is checkReviewGate's own already-resolved
+	// reviews slice (a second Pruefer finding, #1375): for a base:<branch>
+	// item, checkReviewGate — called two lines above — already issued the
+	// live FetchPRReviews REST call needed to compute blocked/timedOut, so
+	// resolving again here would silently repeat that exact same call for an
+	// answer that cannot have changed since (nothing async runs between the
+	// two calls). dispatchReviewReinvoke's build() deliberately does not
+	// reuse this value — it runs inside the reinvoke goroutine after an
+	// unbounded semaphore wait, where review state may genuinely have moved
+	// on, so it resolves fresh via the no-arg buildReviewFeedbackComments.
+	syntheticComments := e.buildReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews)
+	if len(syntheticComments) > 0 {
+		// Observability (Pruefer review finding, #1375): when timedOut is also
+		// true here, checkAwaitingReviewTimeout has already removed
+		// fabrik:awaiting-review as its own side effect, but the reinvoke below
+		// — not pauseForReviewTimeout — is what actually happens. Without this
+		// line, a real ReviewWaitTimeout elapsing produces no visible signal in
+		// the logs; only the eventual MaxReviewCycles pause would. blocked is
+		// not logged the same way — it is the common, expected steady state
+		// while a reinvoke is outstanding, not a noteworthy transition.
+		if timedOut {
+			e.logf(pctx.item.Number, "review-gate", "review wait timeout reached, but actionable feedback exists — dispatching reinvoke instead of pausing\n")
+		}
 		// #1207 guard 2: an item already in the GitHub auto-merge convergence
-		// flow (fabrik:auto-merge-enabled present) that has grown a fresh
-		// unresolved thread on its current head must have auto-merge disabled
+		// flow (fabrik:auto-merge-enabled present) that has grown fresh
+		// unresolved feedback on its current head must have auto-merge disabled
 		// now — on this same poll, before the dispatch below — so GitHub
 		// cannot merge underneath the reinvoke this handler is about to fire.
-		// Scoped to current-head threads (excludes GitHub-marked isOutdated)
-		// so a thread against a superseded commit never triggers a needless
-		// disable. handleAutoMergeConvergence (Handler 3) never runs this poll
-		// for this item regardless — Handler 2 always claims and stops the
-		// chain below — so the disable must happen here, not there.
+		// Scoped to current-head feedback (excludes GitHub-marked isOutdated
+		// thread comments; review-body comments are always treated as
+		// current-head per R8) so a thread against a superseded commit never
+		// triggers a needless disable. handleAutoMergeConvergence (Handler 3)
+		// never runs this poll for this item regardless — Handler 2 always
+		// claims and stops the chain below — so the disable must happen here,
+		// not there.
 		if hasLabel(pctx.item.Labels, "fabrik:auto-merge-enabled") {
-			if blocking := e.currentHeadReviewThreadComments(pctx.item); len(blocking) > 0 {
+			if blocking := e.currentHeadReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews); len(blocking) > 0 {
 				e.disableAutoMergeForReviewThreads(pctx.item, len(blocking))
 			}
 		}
@@ -121,17 +256,81 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		return e.dispatchWithCycleLimit(
 			pctx,
 			"review-reinvoke",
-			func(snap itemstate.Snapshot) int { return snap.ReviewCycles(pctx.stage.Name) },
+			func(snap itemstate.Snapshot) int {
+				// max, not ReviewCycles alone (ADR-1518): #1045's ReviewCycleDecremented
+				// refund can hold ReviewCycles below MaxReviewCycles indefinitely when
+				// every reinvoke happens to land no new commit. ReviewBlockedCycles is
+				// the never-refunded counterpart incremented below whenever a reinvoke
+				// is dispatched while the gate itself is still blocked/timed-out, so a
+				// refund-masked loop still reaches the limit here.
+				return max(snap.ReviewCycles(pctx.stage.Name), snap.ReviewBlockedCycles(pctx.stage.Name))
+			},
 			e.cfg.MaxReviewCycles,
 			nil,
 			func(repoStr string) {
 				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+				if blocked || timedOut {
+					// Genuine non-convergence evidence (ADR-1518): this reinvoke is
+					// being dispatched while the gate itself is still failing to
+					// clear, so unlike ReviewCycles this counter is never refunded,
+					// even if the reinvoke turns out to be a no-op on HEAD. A
+					// reinvoke dispatched with the gate already clear (the #1045
+					// junk-overview shape, blocked == timedOut == false) never
+					// reaches this branch, so it stays forgivable.
+					e.store.Apply(itemstate.ReviewBlockedCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+				}
 			},
-			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
+			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — this claim
+				// (dispatchWithCycleLimit always returns true) is correct whether the
+				// call posted a fresh pause or reused an existing one (#1460 R4).
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
 		)
+	}
+	// Nothing actionable to reinvoke on this poll — fall back to the
+	// pre-existing blocked/timedOut handling (the plain "waiting for a
+	// response" cases where there is genuinely nothing to reinvoke on).
+	//
+	// Terminal check independent of this poll's dedup outcome (R1/R2,
+	// ADR-1518). Without it, a gate that is still blocked/timed-out but whose
+	// currently-outstanding feedback has already been deduped as processed
+	// (snap.CommentProcessed, via buildReviewFeedbackCommentsFromReviews)
+	// falls through to the timedOut branch below and pauses with
+	// pauseForReviewTimeout — the wrong diagnosis once cycles have actually
+	// been spent trying to converge. Gated on blocked||timedOut so the
+	// naturally-cleared case (both false) is untouched; cycleCount is read
+	// fresh from the store (defaulting to 0, hence a no-op, on a read error)
+	// so a genuine "nobody has ever reviewed" block — which can only have
+	// cycleCount == 0 — is structurally unaffected (R4).
+	if blocked || timedOut {
+		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
+		if snap, err := e.store.Get(repoStr, pctx.item.Number); err == nil {
+			cycleCount := max(snap.ReviewCycles(pctx.stage.Name), snap.ReviewBlockedCycles(pctx.stage.Name))
+			if cycleCount >= e.cfg.MaxReviewCycles {
+				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
+				return true
+			}
+		}
+	}
+	if blocked {
+		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
+		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
+		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
+		// non-responsive bot reviewer (issue #495).
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
+			Number: pctx.item.Number,
+			Reason: "review-blocked",
+			Until:  e.now().Add(cooldown),
+		})
+		return true
+	}
+	if timedOut {
+		e.pauseForReviewTimeout(pctx.board, pctx.item, pctx.stage)
+		return true
 	}
 	return false
 }
@@ -234,17 +433,26 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchRebaseReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — same reasoning as
+				// the review-reinvoke pause callback above (#1460 R4).
 				e.pauseForRebaseCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxRebaseCycles)
 			},
 		)
 	}
 	if mergeBlocked {
+		// #1303: this claim previously produced no log output — combined with
+		// checkMergeabilityGate's own previously-silent PRMergeUnsettled/
+		// PRMergeQueued branches, a stuck classification could claim an item
+		// every poll with zero trace in the logs. checkCIGate is never
+		// reached while this is true.
+		e.logf(pctx.item.Number, "ci-gate", "claiming item — merge gate blocked, checkCIGate not reached (%s)\n", settle.Reason)
 		return true // mergeability not yet computed; re-evaluate on next poll
 	}
 
 	// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 	// Runs in Phase 1 (unconditional) so CI failures are fixed regardless of
 	// auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut, terminated).
+	pctx.reachedCIGate = true
 	ciBlocked, ciFailure, ciTimedOut, ciTerminated := e.checkCIGate(pctx.board, pctx.item, pctx.stage, settle)
 	if ciTerminated {
 		// checkCIGate already paused the item directly (e.g. PR closed without
@@ -256,6 +464,9 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		return true
 	}
 	if ciTimedOut {
+		// escalated return value intentionally discarded here: this claim (return
+		// true) is correct whether the call posted a fresh pause or reused an
+		// existing one (issue #1408) — the caller doesn't need to distinguish them.
 		e.pauseForCITimeout(pctx.board, pctx.item, pctx.stage)
 		return true
 	}
@@ -273,7 +484,10 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 				// The last CI-fix reinvoke for this exact head SHA pushed no new
 				// commit — dispatching again would just repeat the same no-op
 				// and burn cycle budget for nothing. Wait for the SHA to advance
-				// (a genuine fix) or for CIWaitTimeout to fire (#958 leg 2).
+				// (a genuine fix) or for settleAwaitingCIScan's CIBackstopTimeout
+				// backstop to fire (#958 leg 2; ADR-1410 — a confirmed CI failure
+				// never consults CIWaitTimeout, so that's no longer what unsticks
+				// this item).
 				e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — no-op already recorded for head %s\n",
 					lastNoOpSHA[:min(8, len(lastNoOpSHA))])
 				return true
@@ -283,6 +497,9 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			},
 			func() { e.dispatchCIFixReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle) },
 			func(cycleCount int) {
+				// escalated return value intentionally discarded — see the ciTimedOut
+				// branch above; this pause callback doesn't need to distinguish a
+				// fresh post from a reused one either.
 				e.pauseForCIFixCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxCiFixCycles)
 			},
 		)

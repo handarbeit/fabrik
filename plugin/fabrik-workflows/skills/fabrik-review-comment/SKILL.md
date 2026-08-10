@@ -44,7 +44,32 @@ When you encounter a review thread comment:
    ```
    to see the full list of review comments with their positions.
 
-Comments without `**File:**` / `**Diff context:**` headers are regular PR body or issue comments; handle them as before.
+Comments without `**File:**` / `**Diff context:**` headers are regular PR body or issue comments — handle them as before, **unless** they carry a `[Bot Review Finding]` marker (see below).
+
+## Bot-Authored Findings (Not a User Decision)
+
+A comment marked `[Bot Review Finding]` — e.g. `**@copilot-pull-request-reviewer[bot]** (2026-01-15 10:30) [Bot Review Finding]:` — is **not** a human's decision on a prior finding. It is a bot review's own content, surfaced to you in one of two ways:
+
+- A plain PR body or issue comment with no formal review submission at all (e.g. `@copilot review` posting its findings as a regular comment instead of a review).
+- The body of a `COMMENTED` or `APPROVED` review from a reviewer whose body carries substantive findings (e.g. Pruefer).
+
+The rest of this skill's "act on the user's decision" framing — fix / dismiss / defer / clarify — does not apply to these. There is no user decision to act on yet; the bot's content **is** the finding. Treat it the same way you treat an inline review thread comment:
+
+1. **Evaluate each finding on its merits** — read the bot's comment and judge whether it identifies a real, actionable problem.
+2. **Fix valid findings autonomously** — apply the minimal targeted fix, the same as you would for a `**File:**`-tagged thread comment. Do not wait for a human to confirm the bot is right first; that is the gap this marker exists to close (a prior version of this skill refused with "this is new feedback from a bot, not an explicit decision from you," which left real findings unaddressed until the review gate timed out).
+3. **No actionable findings → see the No-Op Contract below.** A generic "Pull request overview" or "LGTM" summary with nothing concrete to act on is common from some bots (Copilot, Gemini) — recognize it as such and do not manufacture a response.
+
+This carve-out is scoped to comments carrying the `[Bot Review Finding]` marker only. A comment from a human, or a bot comment without the marker (older engine builds, or a delivery path that doesn't apply it), still follows the ordinary "act on the user's decision" rules above.
+
+## No-Op Contract
+
+If, after evaluating a bot review's findings (marked or unmarked) or a user's comment, you conclude there is **nothing actionable** — no valid finding to fix, no change the codebase needs — then **change nothing and complete**. Do not:
+
+- Invent a plausible-sounding fix for feedback that didn't actually ask for one.
+- Make a speculative change "just in case" it's what the reviewer meant.
+- Push a commit to demonstrate activity when the correct action is no action.
+
+A confabulated commit on a PR that's about to merge is worse than doing nothing: it can draw a fresh bot review with a new `DatabaseID`, which bypasses dedup and consumes another review cycle on feedback that was never real in the first place. "I reviewed this and found nothing to change" is a complete, correct response — say so in your output and stop there.
 
 ## What You Do
 
@@ -97,6 +122,10 @@ In preference order:
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite — rather than backgrounding it.
 6. **If backgrounding is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver it, so the stage ends without `FABRIK_STAGE_COMPLETE`. Poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
+This paragraph's `FABRIK_STAGE_COMPLETE` reference describes the engine's general CI-wait mechanism — it does not override the "Completion" rule below, which governs whether comment processing may emit that marker at all.
+
 ## Numbering findings in your output
 
 When you list or summarize multiple review findings (e.g., distinguishing one Copilot comment from another, or grouping Gemini suggestions), **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
@@ -107,6 +136,13 @@ Use bracketed or descriptive numbering instead:
 - ❌ `Gemini #1`, `Copilot #2`
 
 The same rule applies any time you number something in output that posts to a GitHub comment — threads, files, findings, or list items.
+
+## Labels You Interact With
+
+- **`fabrik:awaiting-review`** — the review-gate label; may already be present if you're processing a comment from a reviewer rather than a user decision on findings. You don't act on it directly.
+- **`fabrik:bot-reprompted`** — may be present if the engine already re-prompted an unresponsive bot reviewer this gate cycle; informational only from this skill's perspective.
+
+See `../../LABELS.md` for the full label reference.
 
 ## Completion
 
@@ -121,7 +157,8 @@ Prefer committing incremental progress over trying to finish everything in one s
 ## What You Do NOT Do
 
 - **Do not signal stage completion** — never output `FABRIK_STAGE_COMPLETE`
-- **Do not apply fixes the user did not request** — act only on what was explicitly decided
+- **Do not apply fixes the user did not request** — act only on what was explicitly decided. This does not apply to `[Bot Review Finding]`-marked content (see the "Bot-Authored Findings" section above): those are evaluated and fixed autonomously on their merits, not gated on a user decision.
+- **Do not confabulate a fix for a bot comment with no actionable findings** — see the No-Op Contract above; change nothing and say so.
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full review** — focus on the specific findings the user addressed
 - **Do not make unrelated changes** while applying fixes

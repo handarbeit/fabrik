@@ -33,6 +33,28 @@ func TestRestPost_Success(t *testing.T) {
 	}
 }
 
+// TestRestPost_EmptyTokenOmitsAuthHeader guards the fix for a production 401:
+// doWithAccept must omit the Authorization header entirely when the token is
+// empty ("deliberately unauthenticated", e.g. pruefer's release-check client
+// against the public fabrik repo), rather than sending "Bearer " with nothing
+// after it — GitHub's REST API treats a blank bearer token as invalid
+// credentials, not as equivalent to no Authorization header at all.
+func TestRestPost_EmptyTokenOmitsAuthHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, present := r.Header["Authorization"]; present {
+			t.Errorf("Authorization header present with value %q, want header entirely absent", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("", srv.URL)
+	err := c.restPost(srv.URL+"/test", map[string]string{"key": "value"})
+	if err != nil {
+		t.Fatalf("restPost: %v", err)
+	}
+}
+
 func TestRestPost_4xxError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(422)
@@ -289,6 +311,54 @@ func TestDo_405MapsToErrMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestDo_406TooLargeMapsToErrDiffTooLarge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(406)
+		w.Write([]byte(`{"message":"Sorry, the diff exceeded the maximum number of lines (20000)","errors":[{"resource":"PullRequest","field":"diff","code":"too_large"}],"status":"406"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("GET", srv.URL+"/test", nil)
+	if !errors.Is(err, ErrDiffTooLarge) {
+		t.Fatalf("do: expected ErrDiffTooLarge, got %v", err)
+	}
+}
+
+func TestDo_406OtherCodeDoesNotMapToErrDiffTooLarge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(406)
+		w.Write([]byte(`{"message":"Not Acceptable","errors":[{"resource":"PullRequest","field":"diff","code":"something_else"}],"status":"406"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("GET", srv.URL+"/test", nil)
+	if err == nil {
+		t.Fatal("expected error for 406 response")
+	}
+	if errors.Is(err, ErrDiffTooLarge) {
+		t.Errorf("406 with a non-too_large code should not map to ErrDiffTooLarge, got %v", err)
+	}
+}
+
+func TestDo_406UnparseableBodyDoesNotMapToErrDiffTooLarge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(406)
+		w.Write([]byte(`not json`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("GET", srv.URL+"/test", nil)
+	if err == nil {
+		t.Fatal("expected error for 406 response")
+	}
+	if errors.Is(err, ErrDiffTooLarge) {
+		t.Errorf("406 with an unparseable body should not map to ErrDiffTooLarge, got %v", err)
+	}
+}
+
 func TestDo_422MapsToErrUnprocessableEntity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(422)
@@ -315,8 +385,25 @@ func TestDo_Generic5xxError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrMethodNotAllowed) || errors.Is(err, ErrUnprocessableEntity) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrMethodNotAllowed) || errors.Is(err, ErrUnprocessableEntity) || errors.Is(err, ErrDiffTooLarge) {
 		t.Errorf("500 should not map to a sentinel, got %v", err)
+	}
+}
+
+// TestDo_404And422DoNotMapToErrDiffTooLarge pins acceptance criterion 1's
+// negative case for statuses other than 406: 404 and 422 must never satisfy
+// errors.Is(err, ErrDiffTooLarge), even though they map to their own sentinels.
+func TestDo_404And422DoNotMapToErrDiffTooLarge(t *testing.T) {
+	for _, status := range []int{404, 422} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			w.Write([]byte(`{"message":"nope"}`))
+		}))
+		_, _, err := NewClientWithBaseURL("token", srv.URL).do("GET", srv.URL+"/test", nil)
+		srv.Close()
+		if errors.Is(err, ErrDiffTooLarge) {
+			t.Errorf("status %d should not map to ErrDiffTooLarge, got %v", status, err)
+		}
 	}
 }
 

@@ -17,26 +17,48 @@ import (
 //
 // The gate is only active when stage.WaitForCI is true. All PR state (mergeable
 // fields, check runs) is consumed from the settle parameter — no additional
-// GitHub API calls are made by this function.
+// GitHub API calls are made by this function (a store lookup for the liveness
+// signal is not a GitHub call).
 //
 // Returns (blocked, ciFailure, timedOut, terminated):
 //
 //   - (false, false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
-//     This includes: no PR, PR merged, all checks green, ADR-033 shortcut (clean/unstable).
+//     This includes: no PR, PR merged, all checks green, ADR-033/ADR-1441 shortcut
+//     (mergeable_state=="clean" only — "unstable" no longer short-circuits; see PRMergeReady below).
 //
 //   - (true, false, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
-//     Covers: checks still pending, transient/unsettled state, R3 dwell not elapsed.
-//     fabrik:awaiting-ci is NOT modified.
+//     Covers: checks still pending and progressing, transient/unsettled state, R3/mergeable-state
+//     dwell not elapsed. fabrik:awaiting-ci is NOT modified.
 //
-//   - (true, true, false, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
+//   - (true, true, false, false)   — CI failed (check-run or required-context verdict); fabrik:awaiting-ci
+//     applied; caller should dispatch CI-fix. Fires unconditionally regardless of elapsed time (R3) —
+//     never conflated with timedOut.
 //
-//   - (false, false, true, false)  — CI wait timeout elapsed; caller should pause the issue.
+//   - (false, false, true, false)  — a genuine liveness dwell elapsed: check runs are pending but have
+//     shown no observable progress for ciWaitTimeout (classifyCIFromCheckRuns), or
+//     R3/mergeable-state-blocks-with-no-checks (classifyCIFromMergeableState) — never for a confirmed
+//     failure or for merely-elapsed time on healthy, progressing CI (R1). Caller should pause the issue.
 //     fabrik:awaiting-ci is removed before returning.
 //
 //   - (false, false, false, true)  — processing already terminated via a direct pauseIssue call
 //     (e.g. PR closed without merging, or R3's required-check-never-runs case). The caller MUST
 //     claim the item (do not treat this as "gate cleared") so Phase 2 does not advance an item
 //     that was just paused in this same pass. See ADR-1223.
+//
+// IMPORTANT — production reachability: this function is never reached at all for a
+// merely-pending CI state via the async settle pipeline. checkMergeabilityGate
+// (merge_gate.go) unconditionally claims settlePRMergeState's PRMergeUnsettled
+// classification — which is the *only* classification "CI checks pending" ever
+// produces (pr_settle.go) — and handleMergeAndCIGates returns before ever calling
+// checkCIGate. classifyCIFromCheckRuns's pending-liveness-dwell branch is therefore
+// exercised only by a direct unit-level call to checkCIGate (as engine/ci_test.go
+// does), never by real poll traffic. What actually bounds a stalled-but-pending CI
+// state in production is settleAwaitingCIScan's own unconditional CIBackstopTimeout
+// backstop (ci_settle.go) — an elapsed-time cap, not the liveness dwell described
+// above. See ADR-1410's "Architectural discovery during implementation" section for
+// the full analysis and why this was accepted rather than restructured.
+//
+// See ADR-1410 for the liveness-vs-elapsed-time redesign this outcome table reflects.
 func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) (blocked, ciFailure, timedOut, terminated bool) {
 	if stage.WaitForCI == nil || !*stage.WaitForCI {
 		return false, false, false, false
@@ -68,7 +90,11 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return false, false, false, true
 
 	case PRMergeReady:
-		// ADR-033 shortcut (clean/unstable) or all CI checks green — gate clears.
+		// ADR-033/ADR-1441 shortcut (mergeable_state=="clean") or all CI checks
+		// (and required contexts) passed — gate clears. "unstable" is no
+		// longer a shortcut into this case; settlePRMergeState only reaches
+		// PRMergeReady for "unstable" via the full per-check classification
+		// chain below finding nothing blocking.
 		e.logf(item.Number, "ci-gate", "CI gate clears (%s)\n", settle.Reason)
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false, false
@@ -83,6 +109,10 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		// fall-through) so the queue owns the merge decision while it waits.
 		return true, false, false, false
 	}
+
+	// R4 (ADR-1441): log once per repo/stage when this gate's coverage looks
+	// degenerate — informational only, never affects the classification below.
+	e.warnIfCIGateCoverageDegenerate(owner, repo, item, stage, settle)
 
 	// ADR-933: a confirmed required-context failure takes precedence over
 	// check-run/mergeable_state classification below — it can be driven
@@ -106,8 +136,81 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	return e.classifyCIFromMergeableState(board, item, stage, owner, repo, prNum, settle.MergeableState)
 }
 
-// ciWaitTimeout returns the configured CI wait timeout, defaulting to 30
-// minutes when unconfigured.
+// warnIfCIGateCoverageDegenerate logs a one-time-per-repo/stage warning (R4,
+// ADR-1441) when a stage configured with wait_for_ci: true is gating a PR
+// whose observed check runs the operator's opt-in RequiredStatusContexts
+// config (ADR-933) does not cover — either nothing is configured for the repo
+// at all, or none of the configured names match a check name actually
+// observed on this settle pass. This is Fabrik's only notion of "required
+// check": a live read of GitHub's own branch-protection required-checks list
+// is not viable (ADR-933 found it 403s for non-admin classic PATs), so this
+// is a config-vs-observed-checks comparison, not a live branch-protection
+// audit. A gate with no coverage still gates correctly post-ADR-1441 (any
+// confirmed check-run failure blocks, required or not — R5's strict policy),
+// but the operator loses the ability to tell "this failure is on a check I
+// consider load-bearing" from "this failure is on a check I don't" — worth
+// surfacing rather than passing silently.
+//
+// Gated on len(settle.CheckRuns) > 0 so it costs nothing beyond data already
+// fetched by settlePRMergeState for this poll — it never fires for a repo
+// whose CI is entirely classic-commit-status-based with zero check runs (a
+// known, accepted limitation rather than a false negative worth an
+// unconditional extra FetchCombinedStatus call to close — see ADR-1441).
+// Log-only, deduplicated per "owner/repo|stage" for the lifetime of the
+// process (mirrors baseBranchWarnedSet) — re-warns after a restart, which is
+// acceptable (arguably desirable: an operator who just restarted wants
+// visibility, not silence).
+func (e *Engine) warnIfCIGateCoverageDegenerate(owner, repo string, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
+	if len(settle.CheckRuns) == 0 {
+		return
+	}
+
+	required := e.requiredContextsForRepo(owner, repo)
+	covered := false
+	if len(required) > 0 {
+		observed := make(map[string]bool, len(settle.CheckRuns))
+		for _, cr := range settle.CheckRuns {
+			observed[cr.Name] = true
+		}
+		for _, name := range required {
+			if observed[name] {
+				covered = true
+				break
+			}
+		}
+	}
+	if covered {
+		return
+	}
+
+	warnKey := owner + "/" + repo + "|" + stage.Name
+	if _, already := e.ciGateCoverageWarnedSet.LoadOrStore(warnKey, true); already {
+		return
+	}
+
+	names := make([]string, 0, len(settle.CheckRuns))
+	for _, cr := range settle.CheckRuns {
+		names = append(names, cr.Name)
+	}
+	if len(required) == 0 {
+		e.logf(item.Number, "warn", "stage %q has wait_for_ci: true but no required_status_contexts are configured for %s/%s (ADR-933) — the CI gate cannot distinguish a required check from an optional one; observed checks: %s\n",
+			stage.Name, owner, repo, strings.Join(names, ", "))
+	} else {
+		e.logf(item.Number, "warn", "stage %q has wait_for_ci: true but none of the configured required_status_contexts %v for %s/%s match any check observed on this PR (%s) — the CI gate cannot confirm required-check coverage\n",
+			stage.Name, required, owner, repo, strings.Join(names, ", "))
+	}
+}
+
+// ciWaitTimeout returns the configured CI liveness-stall dwell, defaulting to
+// 30 minutes when unconfigured. Despite the name (kept for R8 config
+// compatibility — see ADR-1410), this no longer bounds total CI wait time: it
+// governs only the two genuine liveness dwells left after the redesign —
+// "check runs present but showing no observable progress"
+// (ciProgressStalledSince, classifyCIFromCheckRuns/classifyCIFromRequiredContexts)
+// and "no check runs ever, or a blocking mergeable_state with none visible"
+// (classifyCIFromMergeableState, unchanged). See ciBackstopTimeout for the
+// separate, much larger absolute cap on how long an item may sit in
+// fabrik:awaiting-ci regardless of classification (R5).
 func (e *Engine) ciWaitTimeout() time.Duration {
 	if e.cfg.CIWaitTimeout > 0 {
 		return e.cfg.CIWaitTimeout
@@ -115,57 +218,103 @@ func (e *Engine) ciWaitTimeout() time.Duration {
 	return 30 * time.Minute
 }
 
+// ciBackstopTimeout returns the configured absolute backstop (R5), defaulting
+// to 4 hours when unconfigured. Used only by settleAwaitingCIScan's
+// unconditional guard and merge-train's blocking polls (R6) — it exists
+// purely to bound per-poll cost (or, for merge-train, worker-goroutine
+// lifetime) for an item that never resolves under any classification, not to
+// bound how long a healthy CI suite may legitimately run. Sized independently
+// of, and much larger than, ciWaitTimeout's liveness-stall dwell — see
+// ADR-1410.
+func (e *Engine) ciBackstopTimeout() time.Duration {
+	if e.cfg.CIBackstopTimeout > 0 {
+		return e.cfg.CIBackstopTimeout
+	}
+	return 4 * time.Hour
+}
+
+// ciProgressStalledSince returns the time CI was last observed to make
+// progress for item's linked PR (LinkedPRState.LastCIProgressAt), and whether
+// that value is meaningful. "Progress" is set by applyCheckRunCompleted
+// (internal/itemstate/store.go) whenever upsertCheckRunByID's
+// reflect.DeepEqual reports the upserted gh.CheckRun differs at all from the
+// prior entry for that ID — not just a Status/Conclusion transition, but also
+// OutputSummary/OutputText/DetailsURL/HTMLURL changing on an otherwise-unchanged
+// run (weaker evidence of liveness, but still a GitHub-reported change) — plus
+// a new check-run ID appearing, or the head SHA advancing. ok is false when no
+// progress has ever been recorded for this item in the current process's
+// lifetime — a cold start after restart, or a store lookup miss — which is
+// the safe default (ADR-1410): never escalate on an absent signal, only keep
+// re-observing. The itemstate store is entirely in-memory and has no
+// persistence across a restart, and GitHub exposes no change-history
+// equivalent to backfill it from (unlike labelAppliedAt's REST fallback).
+func (e *Engine) ciProgressStalledSince(owner, repo string, item gh.ProjectItem) (time.Time, bool) {
+	snap, err := e.store.Get(owner+"/"+repo, item.Number)
+	if err != nil {
+		return time.Time{}, false
+	}
+	lpr := snap.LinkedPR()
+	if lpr == nil || lpr.LastCIProgressAt.IsZero() {
+		return time.Time{}, false
+	}
+	return lpr.LastCIProgressAt, true
+}
+
 // classifyCIFromCheckRuns classifies the CI gate when check runs are
-// available: it applies R7's CIWaitTimeout guard (covering both "still
-// pending" and "failed" states, since fabrik:awaiting-ci is present from the
-// moment handleStageComplete fires under ADR-032), then classifies pending vs
-// failed via the shared gh.ClassifyCheckRuns helper (pending always wins over
-// failed) and applies fabrik:awaiting-ci idempotently on a confirmed failure.
+// available. A confirmed failure (status == CheckRunsFailed) is a verdict,
+// not a wait: it always returns ciFailure=true immediately, regardless of how
+// long the gate has been open, routing to the existing CI-fix reinvocation
+// path (R3) rather than ever being reported as a timeout. Otherwise checks
+// are still pending, and the only clock that can fire is the liveness-stall
+// dwell: escalate only once CI has shown no observable progress
+// (ciProgressStalledSince) for ciWaitTimeout, never merely because elapsed
+// time has passed while CI is alive and reporting (R1).
+//
+// NOT REACHED VIA REAL POLL TRAFFIC for the pending branch specifically: see
+// checkCIGate's doc comment above ("production reachability") and ADR-1410's
+// "Architectural discovery during implementation" — checkMergeabilityGate
+// claims settlePRMergeState's PRMergeUnsettled classification (which is what
+// "CI checks pending" always produces) before this function is ever called
+// from the async settle pipeline. This pending-liveness-dwell code remains
+// correct and tested at the unit level, and is defensive against a future
+// change to the merge-gate claim priority, but settleAwaitingCIScan's
+// unconditional CIBackstopTimeout backstop — not this dwell — is what
+// actually bounds a stalled pending-CI item in production today.
 func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem, checkRuns []gh.CheckRun) (blocked, ciFailure, timedOut bool) {
 	status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
 
-	if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
-		if err != nil {
-			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
-			allNames := make([]string, 0, len(pending)+len(failed))
-			for _, cr := range pending {
-				allNames = append(allNames, cr.Name+" (pending)")
-			}
-			for _, cr := range failed {
-				allNames = append(allNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
-			}
-			e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — checks: %s\n", strings.Join(allNames, ", "))
-			e.removeAwaitingCILabel(owner, repo, item)
-			return false, false, true
+	if status == gh.CheckRunsFailed {
+		// CI failed — apply fabrik:awaiting-ci idempotently. A verdict, never
+		// a timeout (R3): fires unconditionally regardless of elapsed time.
+		failedNames := make([]string, 0, len(failed))
+		for _, cr := range failed {
+			failedNames = append(failedNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
 		}
-	}
+		e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
 
-	if status != gh.CheckRunsFailed {
-		// Checks still running (pending takes precedence over any failed
-		// run, whether a sibling check or a stale entry for the same
-		// name superseded by a fresh rerun).
-		names := make([]string, 0, len(pending))
-		for _, cr := range pending {
-			names = append(names, cr.Name)
+		if !hasLabel(item.Labels, "fabrik:awaiting-ci") {
+			e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
 		}
-		e.logf(item.Number, "ci-gate", "CI still running — pending: %s\n", strings.Join(names, ", "))
-		return true, false, false
+
+		return true, true, false
 	}
 
-	// CI failed — apply fabrik:awaiting-ci idempotently.
-	failedNames := make([]string, 0, len(failed))
-	for _, cr := range failed {
-		failedNames = append(failedNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
+	// Checks still running (pending takes precedence over any failed
+	// run, whether a sibling check or a stale entry for the same
+	// name superseded by a fresh rerun).
+	names := make([]string, 0, len(pending))
+	for _, cr := range pending {
+		names = append(names, cr.Name)
 	}
-	e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
+	e.logf(item.Number, "ci-gate", "CI still running — pending: %s\n", strings.Join(names, ", "))
 
-	if !hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
+	if stalledSince, ok := e.ciProgressStalledSince(owner, repo, item); ok && time.Since(stalledSince) >= e.ciWaitTimeout() {
+		e.logf(item.Number, "warn", "CI progress stalled for %s (no check-run change since); pausing issue — checks: %s\n", e.ciWaitTimeout(), strings.Join(names, ", "))
+		e.removeAwaitingCILabel(owner, repo, item)
+		return false, false, true
 	}
 
-	return true, true, false
+	return true, false, false
 }
 
 // classifyCIFromRequiredContexts classifies the CI gate when a configured
@@ -173,24 +322,15 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 // SHA. This can be driven solely by a classic commit status with no
 // corresponding check run — a signal classifyCIFromCheckRuns' checkRuns-only
 // view never sees — so it must be checked ahead of (not folded into) that
-// classification. Applies fabrik:awaiting-ci idempotently and the same
-// CIWaitTimeout guard used by classifyCIFromCheckRuns; a required context
-// that is merely missing/pending (not failed) is left to the normal
-// check-run/mergeable_state fallback below, since nothing has regressed.
+// classification. This is a verdict, not a wait (R3): applies
+// fabrik:awaiting-ci idempotently and always returns ciFailure=true
+// unconditionally, regardless of elapsed time — never reported as a timeout.
+// A required context that is merely missing/pending (not failed) is left to
+// the normal check-run/mergeable_state fallback below, since nothing has
+// regressed.
 func (e *Engine) classifyCIFromRequiredContexts(owner, repo string, item gh.ProjectItem, settle PRSettleResult) (blocked, ciFailure, timedOut bool) {
 	if settle.RequiredContextsStatus != gh.RequiredContextsFailed {
 		return false, false, false
-	}
-
-	if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
-		if err != nil {
-			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
-			e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — required context(s) failed: %s\n", strings.Join(settle.RequiredFailed, ", "))
-			e.removeAwaitingCILabel(owner, repo, item)
-			return false, false, true
-		}
 	}
 
 	e.logf(item.Number, "ci-gate", "required status context(s) failed: %s\n", strings.Join(settle.RequiredFailed, ", "))
@@ -206,7 +346,12 @@ func (e *Engine) classifyCIFromRequiredContexts(owner, repo string, item gh.Proj
 // other branch-protection blocking signals Fabrik cannot see via check_runs
 // (e.g. Commit Status / legacy Statuses API), applying CIWaitTimeout as a
 // false-positive guard in both cases before falling through to the generic
-// Unsettled case.
+// Unsettled case. Unlike classifyCIFromCheckRuns/classifyCIFromRequiredContexts
+// (whose dwell now anchors on observed CI progress), both cases here have no
+// check-run signal to observe progress on at all — there is nothing coming
+// without human intervention — so they keep the original labelAppliedAt-anchored
+// elapsed-time dwell (ADR-1410): the only classifier for which a plain elapsed
+// clock remains the right instrument.
 //
 // The R3 pause branch reports terminated=true (rather than reusing the
 // all-false "gate cleared" tuple) since it calls pauseForRequiredNeverRunningCheck
@@ -216,7 +361,7 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 		// R3: OPEN+BLOCKED+no check runs ever observed — a required check is
 		// configured but never triggered by PR events.
 		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
@@ -231,7 +376,7 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 
 	if mergeableState != "" && mergeableState != "unknown" {
 		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
@@ -245,7 +390,9 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 	}
 
 	// Generic Unsettled: hadChecks/dwell/HeadSHA-empty/mergeable=nil/unknown.
-	// Block and re-evaluate on next poll.
+	// Block and re-evaluate on next poll. #1303: every other branch in this
+	// function already logs its claim; this fallback previously did not.
+	e.logf(item.Number, "ci-gate", "PR #%d mergeable_state=%q, no check_runs — CI state unsettled; blocking\n", prNum, mergeableState)
 	return true, false, false, false
 }
 
@@ -432,10 +579,46 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 	})
 }
 
+// hasCIGatePauseComment reports whether item already carries a Fabrik CI-gate
+// pause comment (CI wait timeout or CI-fix cycle limit) for the given stage.
+// The match is unscoped by time — it scans the issue's entire comment
+// history, not just "this poll" — so it identifies a single timeout/cycle-
+// limit *episode* rather than a single call. That's deliberate: it's what
+// lets pauseForCITimeout/pauseForCIFixCycleLimit (below) tell a genuine
+// same-poll duplicate call (e.g. the two-call label-swap race in
+// addCompleteLabelAndRemoveCI — see settleAwaitingCIScan's doc comment) apart
+// from a later re-escalation of the *same* unresolved episode after a human
+// resumed the item by removing fabrik:paused (issue #1408) — both hit this
+// same check, but only the fix's caller-side context decides which one it is.
+// Mirrors hasSkippedComment's precedent (no_work_needed_settle.go): match on
+// the stable prose fragment rather than the full message, since cycleCount can
+// differ between the two posts.
+func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
+	timeoutWant := fmt.Sprintf("The CI gate for stage **%s** timed out", stage.Name)
+	cycleWant := fmt.Sprintf("The stage **%s** has been re-invoked to fix CI failures", stage.Name)
+	return hasPauseComment(item, timeoutWant, cycleWant)
+}
+
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
 // loop elapses. It posts an explanatory comment and applies fabrik:paused +
-// fabrik:awaiting-input.
-func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+// fabrik:awaiting-input, unless hasCIGatePauseComment finds this episode
+// already has a pause comment — in which case (issue #1408) it reapplies the
+// pause labels only, reusing the existing comment rather than reposting.
+// Every caller of this function has already done a live CI read this poll
+// (either the settleAwaitingCIScan backstop's own fresh-episode branch, or
+// checkCIGate/classifyCIFrom* via handleMergeAndCIGates) — reapplying labels
+// unconditionally here would be wrong the moment CI actually went green,
+// which is why the backstop itself never calls this in the suppressed case
+// (see ci_settle.go).
+//
+// Returns escalated: true when a fresh pause comment was posted (a genuine
+// new episode), false when an existing episode's pause was merely reapplied.
+func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (escalated bool) {
+	if hasCIGatePauseComment(item, stage) {
+		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyPauseLabels(item)
+		return false
+	}
 	e.logf(item.Number, "ci-timeout", "CI wait timeout elapsed — pausing for human intervention\n")
 
 	msg := fmt.Sprintf(
@@ -447,11 +630,35 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	return true
 }
 
 // pauseForCIFixCycleLimit pauses the issue when the maximum CI-fix
-// re-invocation cycle count is reached.
-func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+// re-invocation cycle count is reached. See pauseForCITimeout's doc comment
+// for the reapply-without-repost behavior on an existing episode (issue
+// #1408) — identical shape, applied here for R5.
+//
+// Applies itemstate.EnginePaused (#1460 R2) in both branches — the fresh
+// pause AND the reapply-existing-comment branch. This is one of the four
+// confirmed one-way-door sites: CIFixCycles has no reset path other than
+// clearFailedStage's EngineCyclesCleared, and clearFailedStage only fires
+// when PausedByEngine is true. It must be (re-)applied even on the reapply
+// branch: a resume clears PausedByEngine via handleEngineUnpause, so if CI
+// keeps failing and the counter climbs back to the limit a second time, this
+// function is called again (reapply branch, since the old comment still
+// matches) and must re-arm PausedByEngine or the next resume would be a
+// no-op.
+//
+// Returns escalated: true when a fresh pause comment was posted, false when
+// an existing episode's pause was merely reapplied.
+func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) (escalated bool) {
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if hasCIGatePauseComment(item, stage) {
+		e.logf(item.Number, "ci-cycles", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
+		e.reapplyPauseLabels(item)
+		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		return false
+	}
 	e.logf(item.Number, "ci-cycles", "CI-fix cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
@@ -466,11 +673,24 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	return true
 }
 
 // pauseForPRClosedNotMerged pauses the issue when the linked PR was closed
 // without merging (R2). Posts an explanatory comment naming the PR, applies
-// fabrik:paused + fabrik:awaiting-input, and removes fabrik:awaiting-ci.
+// fabrik:paused + fabrik:awaiting-input, and removes all three gate labels
+// (fabrik:awaiting-ci, fabrik:awaiting-review, fabrik:rebase-needed) — not
+// just fabrik:awaiting-ci — so a closed-unmerged item carrying any one of
+// them doesn't get permanently stranded with that label once paused. This
+// matters specifically for a closed item at Validate (ADR-1387, R6):
+// cleanupClosedIssueTransientLabels now withholds these three labels from its
+// generic sweep there on the assumption the settle-owner
+// (advanceValidateTerminalItem, which calls this function on the
+// closed-and-not-merged branch) clears them atomically as part of its own
+// transition. Once fabrik:paused is set, subsequent polls short-circuit
+// before ever reaching this function again, so this is the only chance to
+// clear them.
 func (e *Engine) pauseForPRClosedNotMerged(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "ci-gate", "PR #%d closed without merging — pausing for human intervention\n", prNumber)
@@ -488,6 +708,8 @@ func (e *Engine) pauseForPRClosedNotMerged(_ *gh.ProjectBoard, item gh.ProjectIt
 		reactRocket:   true,
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
+	e.removeAwaitingReviewLabel(owner, repo, item)
+	e.removeRebaseNeededLabel(owner, repo, item)
 }
 
 // pauseForRequiredNeverRunningCheck pauses the issue when the linked PR is

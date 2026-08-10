@@ -142,39 +142,45 @@ func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
 	}
 }
 
-// TestCheckCIGate_Pending_TimedOut verifies that when CI checks are stuck in
-// pending indefinitely, CIWaitTimeout fires (R7 — covers the full CI-await window).
-// Under ADR 032, fabrik:awaiting-ci is present from handleStageComplete so the
-// timeout tracks the whole pending window, not just confirmed-failure windows.
-func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
-			// Simulate fabrik:awaiting-ci applied over 1 hour ago — well past any timeout.
-			return time.Now().Add(-2 * time.Hour), nil
-		},
-	}
+// TestCheckCIGate_Pending_ProgressStalled_TimesOut verifies the new
+// liveness-stall dwell (ADR-1410, R2): check runs pending with no observable
+// progress (no check-run content change recorded in the store) for
+// CIWaitTimeout still escalates — the liveness path must be shown to
+// actually fire, not merely to never fire. Progress is anchored on
+// LinkedPRState.LastCIProgressAt, not the fabrik:awaiting-ci label's own
+// applied-at time (mockGitHubClient's fetchLabelAppliedAtFn is deliberately
+// left unset — this path must not consult it at all).
+func TestCheckCIGate_Pending_ProgressStalled_TimesOut(t *testing.T) {
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
-	eng.cfg.CIWaitTimeout = 30 * time.Minute
+	eng.cfg.CIWaitTimeout = 1 * time.Nanosecond // tiny dwell
+
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	// Link the SHA and record one check-run observation, stamping
+	// LastCIProgressAt — then let the tiny dwell elapse with no further
+	// observation, simulating CI that stopped reporting.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha_stalled"})
+	eng.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: "sha_stalled", Run: gh.CheckRun{ID: 1, Name: "slow-ci", Status: "in_progress"}})
+	time.Sleep(20 * time.Millisecond) // let even a low-resolution clock see the dwell elapsed
 
 	settle := PRSettleResult{
 		Status: PRMergeUnsettled,
 		Reason: "CI checks pending",
 		CheckRuns: []gh.CheckRun{
-			{Name: "slow-ci", Status: "in_progress"},
+			{ID: 1, Name: "slow-ci", Status: "in_progress"},
 		},
-		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha_pending_timeout"},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha_stalled"},
 	}
 	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !timedOut {
-		t.Error("expected timedOut=true when CI is pending and CIWaitTimeout elapsed")
+		t.Error("expected timedOut=true when CI progress has stalled past CIWaitTimeout")
 	}
 	if blocked || ciFailure {
-		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
+		t.Errorf("expected blocked=false ciFailure=false on stall timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
-	// fabrik:awaiting-ci must be removed on timeout
 	foundRemove := false
 	for _, c := range client.removeLabelCalls {
 		if c.labelName == "fabrik:awaiting-ci" {
@@ -182,7 +188,88 @@ func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 		}
 	}
 	if !foundRemove {
-		t.Error("expected fabrik:awaiting-ci to be removed on timeout")
+		t.Error("expected fabrik:awaiting-ci to be removed on stall timeout")
+	}
+}
+
+// TestCheckCIGate_Pending_Progressing_NeverTimesOut is the #342 repro (R1):
+// CI that keeps showing progress (a fresh check-run observation just
+// recorded) must never time out, no matter how long the fabrik:awaiting-ci
+// label itself has been applied. fetchLabelAppliedAtFn is set to a value far
+// past CIWaitTimeout specifically to prove the pending path no longer
+// consults it at all — under the pre-ADR-1410 engine this exact setup times
+// out (see TestCheckCIGate_Pending_ProgressStalled_TimesOut's predecessor,
+// the old TestCheckCIGate_Pending_TimedOut, which asserted timedOut=true from
+// an old labelAppliedAt with no progress signal involved), which is precisely
+// the #342 defect: a suite slower than the constant got paused while green.
+func TestCheckCIGate_Pending_Progressing_NeverTimesOut(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			// The awaiting-ci label itself was applied long ago — well past
+			// CIWaitTimeout — but this must not matter while CI progresses.
+			return time.Now().Add(-2 * time.Hour), nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.CIWaitTimeout = 10 * time.Millisecond
+
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha_progressing"})
+	// Fresh progress observed just now — well within the dwell.
+	eng.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: "sha_progressing", Run: gh.CheckRun{ID: 1, Name: "slow-ci", Status: "in_progress"}})
+
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "CI checks pending",
+		CheckRuns: []gh.CheckRun{
+			{ID: 1, Name: "slow-ci", Status: "in_progress"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha_progressing"},
+	}
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
+	if timedOut {
+		t.Error("expected timedOut=false — CI is observably progressing, elapsed label age must not matter (R1, #342)")
+	}
+	if !blocked || ciFailure {
+		t.Errorf("expected blocked=true ciFailure=false while progressing, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	}
+}
+
+// TestCheckCIGate_Pending_ColdStart_NeverEscalates verifies the Open
+// Questions cold-start default (ADR-1410): with no LastCIProgressAt ever
+// recorded in this process's store (e.g. immediately after an engine
+// restart), the pending path must never escalate blind — it re-observes
+// instead, even when the awaiting-ci label itself looks old.
+func TestCheckCIGate_Pending_ColdStart_NeverEscalates(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-2 * time.Hour), nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.CIWaitTimeout = 1 * time.Nanosecond
+
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	// No store seeding at all — simulates a cold restart with no progress
+	// observed yet in this process's lifetime.
+
+	settle := PRSettleResult{
+		Status:    PRMergeUnsettled,
+		Reason:    "CI checks pending",
+		CheckRuns: []gh.CheckRun{{ID: 1, Name: "ci", Status: "in_progress"}},
+		PR:        &gh.PRDetails{Number: 5, HeadSHA: "sha_cold"},
+	}
+	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
+	if timedOut {
+		t.Error("expected timedOut=false on cold start (no LastCIProgressAt observed yet) — must re-observe, never escalate blind")
+	}
+	if !blocked || ciFailure {
+		t.Errorf("expected blocked=true ciFailure=false on cold start, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
 }
 
@@ -282,7 +369,14 @@ func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
 	}
 }
 
-func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
+// TestCheckCIGate_Failed_NeverTimesOut_RegardlessOfElapsedTime replaces the
+// pre-ADR-1410 TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut,
+// which pinned the R3 bug this issue fixes: a confirmed CI failure occurring
+// after CIWaitTimeout used to be misreported as a timeout, bypassing
+// MaxCiFixCycles entirely. A CI failure is now a verdict, not a wait — it
+// always routes to the CI-fix path regardless of how long fabrik:awaiting-ci
+// has been applied.
+func TestCheckCIGate_Failed_NeverTimesOut_RegardlessOfElapsedTime(t *testing.T) {
 	appliedAt := time.Now().Add(-2 * time.Hour) // well past any timeout
 	client := &mockGitHubClient{
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
@@ -291,7 +385,7 @@ func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 	}
 	stgs := testStagesWithValidate()
 	eng := testEngineWithStages(t, client, stgs)
-	eng.cfg.CIWaitTimeout = 1 * time.Millisecond // tiny timeout
+	eng.cfg.CIWaitTimeout = 1 * time.Millisecond // tiny timeout — must not matter
 
 	tr := true
 	// Item already has fabrik:awaiting-ci
@@ -307,21 +401,18 @@ func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha5"},
 	}
 	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
-	if blocked || ciFailure {
-		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	if timedOut {
+		t.Error("expected timedOut=false — a CI failure is a verdict, never a timeout (R3)")
 	}
-	if !timedOut {
-		t.Error("expected timedOut=true when timeout elapses")
+	if !blocked || !ciFailure {
+		t.Errorf("expected blocked=true ciFailure=true regardless of elapsed time, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
-	// fabrik:awaiting-ci should be removed
-	found := false
+	// fabrik:awaiting-ci must stay applied (idempotent add), not be removed —
+	// this is the CI-fix path, not a timeout pause.
 	for _, c := range client.removeLabelCalls {
 		if c.labelName == "fabrik:awaiting-ci" {
-			found = true
+			t.Error("fabrik:awaiting-ci must NOT be removed on a CI failure — that only happens on a timeout pause")
 		}
-	}
-	if !found {
-		t.Error("expected fabrik:awaiting-ci to be removed on timeout")
 	}
 }
 
@@ -968,9 +1059,17 @@ func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 	}
 }
 
-// TestCheckCIGate_MergeableStateUnstable_ClearsGate verifies that
-// mergeable_state=unstable (non-required checks failing) also clears the gate.
-// This is the "Cleanup artifacts failed but PR is otherwise mergeable" case.
+// TestCheckCIGate_MergeableStateUnstable_ClearsGate verifies checkCIGate
+// still clears the gate whenever it receives PRMergeReady, regardless of the
+// MergeableState value carried alongside it — checkCIGate's case PRMergeReady
+// dispatches purely on settle.Status, never re-inspecting MergeableState (see
+// checkCIGate's doc comment). Post-ADR-1441, settlePRMergeState no longer
+// produces this combination via the old shortcut — "unstable" now only
+// reaches PRMergeReady after the full per-check classification below finds
+// nothing blocking (e.g. all observed checks passed, or R5's
+// skipped/neutral/cancelled-only case). This test pins checkCIGate's own
+// contract at the unit level, independent of how settlePRMergeState arrived
+// at it.
 func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
@@ -978,7 +1077,8 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	// mergeable_state=unstable → PRMergeReady shortcut
+	// PRMergeReady with MergeableState=unstable, e.g. because every observed
+	// check run passed for this unstable-but-not-failing PR.
 	settle := PRSettleResult{
 		Status:         PRMergeReady,
 		MergeableState: "unstable",
@@ -987,6 +1087,47 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate clear for unstable, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+}
+
+// TestCheckCIGate_MergeableStateUnstable_FailedCheckRun_DoesNotClearGate is
+// the direct AC1 regression test: checkCIGate's tuple for the settle-result
+// shape settlePRMergeState now actually produces for an unstable PR carrying
+// a confirmed check-run failure (PRMergeBlocked, MergeableState="unstable",
+// a failed CheckRun) — the gate must not clear, ciFailure must be true, and
+// fabrik:awaiting-ci must be applied. This must fail against pre-ADR-1441
+// main's settlePRMergeState (which never produced PRMergeBlocked for an
+// accepted mergeable_state at all — see pr_settle_test.go's sibling
+// regression test for the settle-layer half of this).
+func TestCheckCIGate_MergeableStateUnstable_FailedCheckRun_DoesNotClearGate(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: nil}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status:         PRMergeBlocked,
+		Reason:         "CI checks failed",
+		MergeableState: "unstable",
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "shaB"},
+	}
+	blocked, ciFailure, timedOut, terminated := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked || !ciFailure || timedOut || terminated {
+		t.Errorf("expected blocked=true ciFailure=true timedOut=false terminated=false for unstable+failed check, got blocked=%v ciFailure=%v timedOut=%v terminated=%v",
+			blocked, ciFailure, timedOut, terminated)
+	}
+	found := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected fabrik:awaiting-ci to be applied on confirmed CI failure")
 	}
 }
 
@@ -1244,6 +1385,46 @@ func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
 	}
 }
 
+// TestClassifyCIFromMergeableState_GenericUnsettled_LogsClaim is a #1303
+// regression: classifyCIFromMergeableState's generic "Unsettled" fallback
+// (hadChecks/dwell/HeadSHA-empty/mergeable=nil/unknown, no check_runs) used
+// to claim the item (blocked=true) with no log line — the one branch in this
+// function that didn't name itself, unlike every sibling branch. Reuses the
+// exact settle shape from TestCheckCIGate_PostPushDwell_WithinDwell_Blocks
+// (empty MergeableState, no check runs) to confirm the fallback now logs
+// under the "ci-gate" tag.
+func TestClassifyCIFromMergeableState_GenericUnsettled_LogsClaim(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	eventsCh := make(chan tui.Event, 16)
+	eng.events = eventsCh
+
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "post-push dwell active",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-fresh", State: "open"},
+	}
+
+	blocked, _, _, _ := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked {
+		t.Fatal("expected blocked=true for the generic Unsettled fallback")
+	}
+
+	close(eventsCh)
+	var found bool
+	for ev := range eventsCh {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "ci-gate" && strings.Contains(le.Message, "CI state unsettled") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a ci-gate log line naming the generic Unsettled claim")
+	}
+}
+
 // TestCheckCIGate_PostPushDwell_DwellElapsed_Clears covers SC-2:
 // mergeable_state="unknown" + check_runs=[] + hadChecks=false + dwell elapsed
 // → gate clears as "no CI configured" (existing fallthrough preserved).
@@ -1384,12 +1565,14 @@ func TestCheckCIGate_RequiredContextFailed_BlocksAndAddsLabel(t *testing.T) {
 	}
 }
 
-// TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut
-// mirrors TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut for the
-// required-context failure path: once fabrik:awaiting-ci has been applied
-// past CIWaitTimeout, checkCIGate must pause (timedOut=true) rather than
-// re-block indefinitely.
-func TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
+// TestCheckCIGate_RequiredContextFailed_NeverTimesOut_RegardlessOfElapsedTime
+// replaces the pre-ADR-1410
+// TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut,
+// mirroring TestCheckCIGate_Failed_NeverTimesOut_RegardlessOfElapsedTime for
+// the required-context failure path (R3): a confirmed required-context
+// failure is a verdict, never a timeout, no matter how long
+// fabrik:awaiting-ci has been applied.
+func TestCheckCIGate_RequiredContextFailed_NeverTimesOut_RegardlessOfElapsedTime(t *testing.T) {
 	appliedAt := time.Now().Add(-2 * time.Hour)
 	client := &mockGitHubClient{
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
@@ -1412,11 +1595,11 @@ func TestCheckCIGate_RequiredContextFailed_AlreadyLabeledWithTimeout_TimesOut(t 
 		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha-rc-failed-timeout"},
 	}
 	blocked, ciFailure, timedOut, _ := eng.checkCIGate(nil, item, stage, settle)
-	if blocked || ciFailure {
-		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	if timedOut {
+		t.Error("expected timedOut=false — a required-context failure is a verdict, never a timeout (R3)")
 	}
-	if !timedOut {
-		t.Error("expected timedOut=true when timeout elapses for a required-context failure")
+	if !blocked || !ciFailure {
+		t.Errorf("expected blocked=true ciFailure=true regardless of elapsed time, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
 }
 
@@ -1454,5 +1637,131 @@ func TestCheckCIGate_RequiredContextPending_FallsThroughToNormalHandling(t *test
 		if c.labelName == "fabrik:awaiting-ci" {
 			t.Error("fabrik:awaiting-ci must NOT be added for a merely-pending required context")
 		}
+	}
+}
+
+// ── R4: degenerate CI-gate coverage warning (ADR-1441) ───────────────────────
+//
+// warnIfCIGateCoverageDegenerate has no externally observable side effect
+// besides the log line itself and the ciGateCoverageWarnedSet dedup entry —
+// these tests are in-package so they can inspect that unexported sync.Map
+// directly as the proxy for "fired".
+
+func TestWarnIfCIGateCoverageDegenerate_FiresWhenUnconfigured(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client) // RequiredStatusContexts left unconfigured (nil)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected warning to fire (and be recorded) when no required_status_contexts are configured")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_FiresWhenNoIntersection(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"some-other-check"}}
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected warning to fire when configured required_status_contexts don't match any observed check")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_DoesNotFireWhenCovered(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.RequiredStatusContexts = map[string][]string{"owner/repo": {"Test and vet"}}
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); warned {
+		t.Error("expected no warning when a configured required_status_context matches an observed check")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_DoesNotFireOnEmptyCheckRuns(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{} // no CheckRuns observed this pass
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); warned {
+		t.Error("expected no warning when settle.CheckRuns is empty (gated on data already fetched)")
+	}
+}
+
+func TestWarnIfCIGateCoverageDegenerate_DedupesAcrossCalls(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+	eng.warnIfCIGateCoverageDegenerate("owner", "repo", item, stage, settle)
+
+	// LoadOrStore-based dedup: the key exists and further calls are no-ops.
+	// Not directly assertable beyond "still exactly one entry for this key"
+	// since sync.Map has no count; the load succeeding is the contract.
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected warned-set entry to persist across repeated calls")
+	}
+}
+
+// TestCheckCIGate_WiresCoverageWarning confirms checkCIGate itself calls
+// warnIfCIGateCoverageDegenerate on the fall-through path (not just that the
+// helper works in isolation) — a wiring-level check per the codebase's
+// "neutralize check" convention (#1422).
+func TestCheckCIGate_WiresCoverageWarning(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client) // RequiredStatusContexts unconfigured
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "Test and vet", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha-cov"},
+	}
+	eng.checkCIGate(nil, item, stage, settle)
+
+	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
+		t.Error("expected checkCIGate to invoke warnIfCIGateCoverageDegenerate on the fall-through path")
 	}
 }

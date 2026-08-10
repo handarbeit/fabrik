@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,6 +84,130 @@ func pollStatusClear() {
 	}
 }
 
+// ClaudeProfileAccount returns the account email the profile at configDir is
+// currently logged in as, read from that directory's .claude.json
+// (oauthAccount.emailAddress). Returns "" on any failure — a missing,
+// unreadable, or unrecognised file is not an error worth surfacing at startup,
+// since the notice degrades to naming the directory alone.
+//
+// The directory name does NOT determine the account: a profile dir is whatever
+// account it was last `/login`-ed as, so a dir named after one account can hold
+// another's credentials. That is precisely the ambiguity this read exists to
+// remove, so it must come from the file rather than being inferred from the path.
+func ClaudeProfileAccount(configDir string) string {
+	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		OAuthAccount struct {
+			EmailAddress string `json:"emailAddress"`
+		} `json:"oauthAccount"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return ""
+	}
+	return parsed.OAuthAccount.EmailAddress
+}
+
+// logClaudeConfigDir is the testable core of the R1/R3 startup notice: when
+// CLAUDE_CONFIG_DIR is set in the engine's environment, Claude Code invocations
+// use that directory's credentials/profile instead of the default account, and
+// this is otherwise unobservable (ps eww only shows exec-time env, not vars set
+// by godotenv during startup — see #1350). A no-op when configDir is empty, so
+// the unset case stays byte-for-byte silent (R2). Emitted once, from the
+// environment snapshot at process start — if CLAUDE_CONFIG_DIR ever became
+// reloadable without a full re-exec, this notice would go stale.
+//
+// The notice names the resolved account alongside the directory when it can be
+// read. Naming only the directory is not enough to answer "which account is
+// this instance billing?", because the two are independent — a profile dir
+// holds whatever account it was last logged in as. Operating three instances
+// against one profile dir and inferring the account from its name cost a long
+// diagnostic detour once; printing the email makes it a glance.
+func logClaudeConfigDir(configDir string, w io.Writer) {
+	if configDir == "" {
+		return
+	}
+	account := ""
+	if email := ClaudeProfileAccount(configDir); email != "" {
+		account = fmt.Sprintf(" (logged in as %s)", email)
+	}
+	fmt.Fprintf(w, "[startup] notice: CLAUDE_CONFIG_DIR is set to %q%s — Claude invocations will use this profile "+
+		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir, account)
+}
+
+// logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
+// notice: CIWaitTimeout's meaning changed from "cap on total CI wait" to
+// "CI-gate liveness-stall dwell" — an operator who tuned it must not
+// discover this silently. Unconditional (unlike logAnthropicAPIKeyOptIn/
+// logAnthropicEnvPassthrough, which are gated on an active opt-in): every
+// operator running the daemon needs this once per startup, whether or not
+// they've customized the value, since the setting's meaning changed under
+// them regardless of whether they ever touch it.
+func logCIWaitTimeoutSemantics(w io.Writer) {
+	fmt.Fprintf(w, "[startup] notice: CIWaitTimeout/--ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT now governs the "+
+		"CI-gate liveness-stall dwell (escalates only when CI shows no observable progress), not total CI wait "+
+		"time — a healthy, progressing CI suite waits indefinitely. See CIBackstopTimeout/--ci-backstop-timeout/"+
+		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
+}
+
+// warnCIBackstopTimeoutOrdering is the testable core of the ADR-1410/R5
+// startup check: CIBackstopTimeout (settleAwaitingCIScan's unconditional
+// backstop) is only "much larger than" the liveness dwell by convention — no
+// code path enforces it. If an operator sets ciBackstopTimeout at or below
+// ciWaitTimeout, the backstop fires before classifyCIFromCheckRuns' liveness
+// dwell ever gets a chance to distinguish "stalled" from "progressing",
+// silently reintroducing #342's spurious-pause behavior through the back
+// door the redesign otherwise closed (PR review, pruefer). A warning, not a
+// hard startup failure — consistent with every other cross-field config
+// check in this codebase (e.g. WarnStageDrift), and because a merely
+// suboptimal ordering (both timeouts remain valid, positive durations) should
+// not prevent the daemon from starting.
+func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duration, w io.Writer) {
+	if ciBackstopTimeout > ciWaitTimeout {
+		return
+	}
+	fmt.Fprintf(w, "[startup] warning: CIBackstopTimeout (%s) is not greater than CIWaitTimeout (%s) — the "+
+		"unconditional per-poll-cost backstop (settleAwaitingCIScan) will fire before the CI-gate liveness dwell "+
+		"(classifyCIFromCheckRuns) ever gets a chance to distinguish a stalled CI run from one that is actively "+
+		"progressing, reintroducing the spurious-pause behavior ADR-1410 fixed. Set --ci-backstop-timeout/"+
+		"FABRIK_CI_BACKSTOP_TIMEOUT well above --ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT. See docs/USER_GUIDE.md "+
+		"and ADR-1410.\n", ciBackstopTimeout, ciWaitTimeout)
+}
+
+// warnDrainDeadlineOrdering is the ADR-1393/R4 startup check: the drain
+// deadline must exceed the worst-case kill escalation (sigIntGrace +
+// sigTermGrace elapses after cancel() fires, before SIGKILL lands) or the
+// drain will preempt the escalation mid-flight — Run() would return, and any
+// caller relying on process exit (e.g. a wrapping supervisor) would see the
+// process still alive past what the drain deadline implied. Mirrors
+// warnCIBackstopTimeoutOrdering: a warning, not a hard startup failure, since
+// both values remain valid, positive durations and only their relative
+// ordering is suboptimal.
+func warnDrainDeadlineOrdering(drainDeadline, sigIntGrace, sigTermGrace time.Duration, w io.Writer) {
+	killEscalation := sigIntGrace + sigTermGrace
+	if drainDeadline > killEscalation {
+		return
+	}
+	fmt.Fprintf(w, "[startup] warning: DrainDeadline (%s) is not greater than the kill escalation window "+
+		"KillGraceSigInt+KillGraceSigTerm (%s) — a clean stop's bounded wait (waitGroupTimeout) will fire before "+
+		"killProcGroupGraceful's SIGINT->SIGTERM->SIGKILL escalation has a chance to let a worker exit on its own, "+
+		"preempting the escalation and defeating its purpose. Set --drain-deadline/FABRIK_DRAIN_DEADLINE well above "+
+		"--kill-grace-sigint + --kill-grace-sigterm. See docs/USER_GUIDE.md and ADR-1393.\n", drainDeadline, killEscalation)
+}
+
+// drainDeadline returns the configured bound on a clean stop's worker drain,
+// defaulting to 30 seconds when unconfigured (ADR-1393). <= 0 is treated the
+// same as unconfigured — see Config.DrainDeadline's doc comment for why a
+// clean stop has no "0 = wait forever" sentinel, unlike kill_grace.
+func (e *Engine) drainDeadline() time.Duration {
+	if e.cfg.DrainDeadline > 0 {
+		return e.cfg.DrainDeadline
+	}
+	return 30 * time.Second
+}
+
 func (e *Engine) Run() error {
 	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
 	// processing the same project board concurrently. The lock file lives in
@@ -118,17 +243,51 @@ func (e *Engine) Run() error {
 		}()
 	}
 
-	// Emit stage-config drift warnings to both stderr (visible at startup) and
-	// fabrik.log (durable for post-mortems). Without the log copy, recurrences
-	// of "same drift bit us again" are invisible from the persistent log alone.
+	// Emit stage-config drift warnings, and the FR-7 undeclared-expected_reviewers
+	// notice, to both stderr (visible at startup) and fabrik.log (durable for
+	// post-mortems). Without the log copy, recurrences of "same drift bit us
+	// again" are invisible from the persistent log alone.
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if e.logFile != nil {
-		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, io.MultiWriter(os.Stderr, e.logFile))
+		w := io.MultiWriter(os.Stderr, e.logFile)
+		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
+		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
+		stages.SweepStaleWarnings(e.cfg.Stages, w)
+		logClaudeConfigDir(configDir, w)
+		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", w)
+		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
+		logCIWaitTimeoutSemantics(w)
+		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), w)
+		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, w)
 	} else {
 		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
+		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
+		stages.SweepStaleWarnings(e.cfg.Stages, os.Stderr)
+		logClaudeConfigDir(configDir, os.Stderr)
+		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", os.Stderr)
+		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
+		logCIWaitTimeoutSemantics(os.Stderr)
+		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), os.Stderr)
+		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// drainComplete is closed when Run() is about to return, for any reason —
+	// distinct from ctx.Done(), which closes the instant the first
+	// SIGINT/SIGTERM's cancel() fires. #1393/ADR-1393 R5/AC4 fix: the
+	// second-signal (force-quit) listener below used to race against
+	// ctx.Done() instead of this channel, and since ctx.Done() is already
+	// closed by the time that listener starts (this same goroutine just
+	// called cancel()), select would immediately take the already-ready
+	// ctx.Done() case and return — the listener exited before a human could
+	// physically press Ctrl-C a second time, so force-quit was practically
+	// unreachable. Waiting on drainComplete instead means the listener stays
+	// parked on sigCh for the entire drain and only gives up once Run() is
+	// actually exiting on its own.
+	drainComplete := make(chan struct{})
+	defer close(drainComplete)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -149,13 +308,11 @@ func (e *Engine) Run() error {
 		select {
 		case sig := <-sigCh:
 			fmt.Fprintf(os.Stderr, "\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
-			// Annotate all in-flight per-issue contexts with the shutdown reason so
-			// the kill log emits "daemon_shutdown" rather than "context_cancel".
-			e.issueCtxs.Range(func(_, val any) bool {
-				val.(issueCtxEntry).holder.val.Store("daemon_shutdown")
-				return true
-			})
-			cancel()
+			// R1/R2 (#1393, ADR-1393): annotate in-flight contexts, register and
+			// launch the durable clean-stop pause, then cancel — see
+			// beginShutdownPause's doc comment for why the internal ordering is
+			// load-bearing and must not be reordered inline here.
+			e.beginShutdownPause(cancel)
 		case <-ctx.Done():
 			return
 		}
@@ -169,7 +326,7 @@ func (e *Engine) Run() error {
 				fn()
 			}
 			os.Exit(1)
-		case <-ctx.Done():
+		case <-drainComplete:
 		}
 	}()
 
@@ -189,6 +346,21 @@ func (e *Engine) Run() error {
 				}
 			}
 		}()
+	}
+
+	// apiKeyHelper preflight (R10-R12): an unconditional security/billing
+	// gate, independent of board configuration, so it runs before the
+	// board-column check — a misconfigured install should see this failure
+	// first rather than have it masked behind an unrelated mismatch.
+	if err := e.checkAPIKeyHelper(); err != nil {
+		return err
+	}
+
+	// GHES version-floor preflight (FR-7): a no-op unless a GHES host is
+	// configured. Runs alongside the other unconditional startup gates,
+	// before the board-column check.
+	if err := e.checkGHESVersionFloor(); err != nil {
+		return err
 	}
 
 	// Validate stage names against project board columns before first poll.
@@ -221,8 +393,10 @@ func (e *Engine) Run() error {
 		stageNames = append(stageNames, s.Name)
 	}
 	if e.cfg.Repo != "" {
-		if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
-			e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+		if e.resolveRepoAccess(e.cfg.Owner, e.cfg.Repo).CanPush {
+			if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
+				e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+			}
 		}
 		e.mu.Lock()
 		e.seededRepos[e.cfg.Owner+"/"+e.cfg.Repo] = true
@@ -413,7 +587,7 @@ func (e *Engine) Run() error {
 			if !restRateLimitPaused {
 				e.logf(0, "warn", "REST rate limit exhausted (%d/%d remaining) — pausing all work until reset at %s\n",
 					restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
-				e.emitStructural(tui.RateLimitAlertEvent{Exhausted: true, Reset: restStats.Reset})
+				e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
 				restRateLimitPaused = true
 			}
 			ticker.Reset(time.Until(restStats.Reset) + rateLimitResetBuffer)
@@ -422,7 +596,7 @@ func (e *Engine) Run() error {
 		if restRateLimitPaused {
 			e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
 				restStats.Remaining, restStats.Limit)
-			e.emitStructural(tui.RateLimitAlertEvent{Exhausted: false})
+			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
 			restRateLimitPaused = false
 		}
 
@@ -462,7 +636,7 @@ func (e *Engine) Run() error {
 				} else {
 					e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
 				}
-				e.emitStructural(tui.RateLimitAlertEvent{Exhausted: false})
+				e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketGraphQL, Exhausted: false})
 			}
 			rateLimitLow = newRateLimitLow
 			if rateLimitLow {
@@ -537,6 +711,7 @@ func (e *Engine) Run() error {
 	if firstPollErr == nil {
 		e.runStartupCleanup()
 		e.runStartupOrphanedInProgressScan()
+		e.runStartupBareInProgressScan()
 		e.runStartupTransientLabelScan()
 		e.runStartupTerminalScan()
 		if e.cfg.JanitorIntervalHours > 0 {
@@ -574,22 +749,10 @@ func (e *Engine) Run() error {
 		if e.wakeCh != nil {
 			select {
 			case <-ctx.Done():
-				e.cleanupLockedIssues()
-				e.wg.Wait()
-				if e.sighupRequested.Load() {
-					performSighupRestart(e, lockFile)
-					close(restartDone) // reached only on exec failure
-				}
-				return nil
+				return e.drainAndExit(lockFile, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					e.cleanupLockedIssues()
-					e.wg.Wait()
-					if e.sighupRequested.Load() {
-						performSighupRestart(e, lockFile)
-						close(restartDone) // reached only on exec failure
-					}
-					return nil
+					return e.drainAndExit(lockFile, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -607,22 +770,10 @@ func (e *Engine) Run() error {
 		} else {
 			select {
 			case <-ctx.Done():
-				e.cleanupLockedIssues()
-				e.wg.Wait()
-				if e.sighupRequested.Load() {
-					performSighupRestart(e, lockFile)
-					close(restartDone) // reached only on exec failure
-				}
-				return nil
+				return e.drainAndExit(lockFile, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					e.cleanupLockedIssues()
-					e.wg.Wait()
-					if e.sighupRequested.Load() {
-						performSighupRestart(e, lockFile)
-						close(restartDone) // reached only on exec failure
-					}
-					return nil
+					return e.drainAndExit(lockFile, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -705,16 +856,62 @@ var transientLifecycleLabels = []string{
 	"fabrik:revalidate",
 	"fabrik:claude-limit",
 	"fabrik:clear-claude-limit",
+	"fabrik:api-key-helper-detected",
+}
+
+// gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
+// that settleClosedValidateAdvance / runValidatePRTerminalAdvance clear
+// themselves, atomically, as part of a real merge/pause transition (ADR-1387,
+// R6). For a closed item resolved to the Validate stage specifically,
+// cleanupClosedIssueTransientLabels must not strip these out from under the
+// settle-owner before it gets a chance to observe them: doing so was the
+// second half of the mechanism behind the pre-ADR-1387 unbounded post-close
+// dispatch loop — the generic sweep removed fabrik:awaiting-ci (the label
+// suppressing re-dispatch) without ever supplying the stage:Validate:complete
+// it was deferring, leaving the item with neither. fabrik:auto-merge-enabled
+// is deliberately NOT included: attemptMergeOnValidate's auto-merge/enqueue/
+// direct-merge branches only ever apply it once stage:Validate:complete
+// already exists, so it never participates in the stranding mechanism and
+// excluding it here would be a no-op, not a fix.
+var gateSettleOwnedTransientLabels = map[string]struct{}{
+	"fabrik:awaiting-ci":     {},
+	"fabrik:awaiting-review": {},
+	"fabrik:rebase-needed":   {},
 }
 
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
 // closed issues on the board. It runs every poll cycle as a defensive sweep so
 // issues do not carry stale operational labels into terminal state (#617).
+//
+// For a closed item resolved specifically to the Validate stage — not
+// stageIsGateChecked generally, which also matches any other stage configured
+// with wait_for_reviews: true (e.g. the default Review stage): the settle-
+// owner pair (runValidatePRTerminalAdvance / settleClosedValidateAdvance)
+// only ever processes stage.Name == "Validate" (a pre-existing, deliberately
+// unchanged inconsistency — see ADR-1387), so excluding a label at any other
+// gate-checked stage would strand it with no owner left to clear it — the
+// labels in gateSettleOwnedTransientLabels are skipped (R6, ADR-1387). They
+// are owned by that settle-owner pair, which clears them itself as part of a
+// real transition; this sweep racing ahead of that transition previously
+// stranded the item with neither the gate label nor the completion label it
+// was deferring.
 func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 	for _, item := range board.Items {
 		if !item.IsClosed {
 			continue
 		}
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		atValidateStage := stage != nil && stage.Name == "Validate"
+		// A closed item at a gate-checked stage other than Validate (e.g. the
+		// shipped default Review stage, wait_for_reviews: true — see
+		// stages/examples/review.yaml) has its gate label swept unconditionally
+		// below, same as any non-Validate stage. This is safe: settleClosedItemsToDone
+		// (engine/closed_item_advance_settle.go) owns every closed item except
+		// Validate, unconditionally of label state, so sweeping the gate label
+		// here does not strand the item — it advances to Done regardless (ADR-1387
+		// follow-up, caught in review on PR #1388; a first version of this fix
+		// excluded stageIsGateChecked(stage) generally instead of stage.Name ==
+		// "Validate" specifically, which left exactly this case with no owner).
 		labelSet := make(map[string]struct{}, len(item.Labels))
 		for _, l := range item.Labels {
 			labelSet[l] = struct{}{}
@@ -725,12 +922,23 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 			if _, has := labelSet[label]; !has {
 				continue
 			}
+			if atValidateStage {
+				if _, owned := gateSettleOwnedTransientLabels[label]; owned {
+					continue
+				}
+			}
 			if err := e.client.RemoveLabelFromIssue(owner, repo, num, label); err != nil {
 				if errors.Is(err, gh.ErrNotFound) {
 					// Label already absent on GitHub — desired state achieved; sync cache.
 					if c := e.cache(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 					}
+					// #1314: this sweep bypasses syncLabelRemoval (it does its own
+					// narrower cache write-through above), so it must also clear the
+					// record-at-write cache directly — otherwise a stale entry survives
+					// a reopen and could suppress recordLabelAppliedAtNow's next
+					// genuine re-application.
+					e.clearLabelAppliedAtNow(item, label)
 				} else {
 					e.logf(num, "warn", "could not remove transient label %q from closed issue: %v\n", label, err)
 				}
@@ -739,6 +947,7 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 				if c := e.cache(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 				}
+				e.clearLabelAppliedAtNow(item, label)
 			}
 		}
 	}
@@ -749,6 +958,30 @@ type pollResult struct {
 	ItemCount  int
 	Dispatched int
 	SeenRepos  map[string]bool // all repos observed on the board in this poll
+}
+
+// PollOnce runs exactly one poll cycle and reports only whether it errored —
+// pollResult stays internal, so this seam cannot be used to reach into engine
+// internals beyond triggering a cycle. It is a thin, deliberately bare
+// delegation to the unexported poll, added as a test seam (ADR-1449) so an
+// external package (tests/sim) can drive the engine deterministically —
+// looping Engine.Run() against a tiny PollSeconds and cancelling after a
+// while would reintroduce exactly the wall-clock nondeterminism a
+// poll-advancement-driven test harness exists to eliminate.
+//
+// PollOnce deliberately does NOT replicate any part of Run()'s preamble
+// (the exclusive .fabrik/fabrik.lock flock, opening .fabrik/fabrik.log and
+// assigning the package-level pollLogFile global, or the startup stage-drift
+// warnings). poll() itself depends on none of that setup, and reproducing it
+// here would be actively wrong for a test harness: the flock is cross-process
+// mutual exclusion that would make concurrently-run scenarios contend with or
+// deadlock each other; pollLogFile is a package-level global that is unsafe
+// to assign from parallel scenarios; the drift warnings are one-time startup
+// diagnostics with no bearing on a single poll cycle. Do not "restore" any of
+// this later as a fix for some unrelated symptom — it was omitted on purpose.
+func (e *Engine) PollOnce(ctx context.Context) error {
+	_, err := e.poll(ctx)
+	return err
 }
 
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
@@ -901,7 +1134,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 					Number: item.Number,
 					Reason: "periodic-re-eval",
-					Until:  time.Now().Add(cooldown),
+					Until:  e.now().Add(cooldown),
 				})
 			}
 		}
@@ -932,6 +1165,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "poll", "repos on board: %v\n", repos)
 	}
 
+	// Clear any allow_auto_merge warning whose subject repo has left the
+	// board entirely — see sweepStaleAllowAutoMergeWarnings for why this
+	// can't be reached by checkAllowAutoMerge's own Clear branch (#1348).
+	e.sweepStaleAllowAutoMergeWarnings(seenRepos)
+
 	// Seed labels on repos discovered for the first time this process run.
 	// seededRepos is guarded by e.mu; the poll loop is single-goroutine but
 	// lock for future-safety consistent with other Engine maps.
@@ -961,8 +1199,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				continue
 			}
 			e.checkAllowAutoMerge(owner, repo)
-			if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
-				e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+			if e.resolveRepoAccess(owner, repo).CanPush {
+				if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
+					e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+				}
 			}
 			e.mu.Lock()
 			e.seededRepos[ownerRepo] = true
@@ -986,14 +1226,18 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
 	//
-	// Phase 1 (unconditional): for every non-paused, non-cleanup item with a
-	// stage:<X>:complete label OR fabrik:awaiting-ci (on a wait_for_ci stage),
-	// run dependency check, review gate, CI gate, and review reinvoke regardless
-	// of yolo/cruise/auto_advance. This ensures inline PR review thread comments
-	// (Copilot, Gemini, human inline) are addressed on all issues, and that the
-	// CI gate is evaluated every poll cycle during CI await.
+	// Phase 1 (unconditional): for every non-paused, non-cleanup item with
+	// stage:<X>:complete, run dependency check, review gate, CI gate, and review
+	// reinvoke regardless of yolo/cruise/auto_advance. This ensures inline PR
+	// review thread comments (Copilot, Gemini, human inline) are addressed on all
+	// issues. fabrik:awaiting-ci items are handled separately by
+	// settleAwaitingCIScan (#1270), not here — see its doc comment.
 	//
-	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance.
+	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance. Shared
+	// with settleAwaitingCIScan via runCatchUpPhase2 so the ADR-1216 same-poll
+	// joint-clearing handoff (CI gate clears → landing decision reached in the same
+	// pass) still applies to awaiting-ci items now that they route through the
+	// dedicated scan instead of this loop.
 	for _, item := range deepFetchCandidates {
 		// Skip paused items in both phases.
 		if hasLabel(item.Labels, "fabrik:paused") {
@@ -1005,12 +1249,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		hasComplete := hasLabel(item.Labels, completeLabel)
-		hasAwaitingCI := hasLabel(item.Labels, "fabrik:awaiting-ci")
-		// Admit items with fabrik:awaiting-ci on a wait_for_ci stage even when
-		// stage:X:complete is absent — handleStageComplete now defers the
-		// completion label until checkCIGate confirms CI is green (R4).
-		isWaitForCI := stage.WaitForCI != nil && *stage.WaitForCI
-		if !hasComplete && !(hasAwaitingCI && isWaitForCI) {
+		// fabrik:awaiting-ci items are NOT admitted here (#1270): CI-gate
+		// evaluation for a not-yet-complete awaiting-ci item is owned exclusively
+		// by settleAwaitingCIScan, which is sourced directly from board.Items and
+		// therefore immune to whatever silently excluded awaiting-ci items from
+		// this admission-gated path in the field. Since fabrik:awaiting-ci and
+		// stage:X:complete are mutually exclusive in steady state, every
+		// awaiting-ci item is !hasComplete and is routed there, never here, until
+		// the gate clears — so this plain hasComplete check never double-dispatches
+		// against the dedicated scan.
+		if !hasComplete {
+			if hasLabel(item.Labels, "fabrik:awaiting-ci") {
+				e.logf(item.Number, "poll", "awaiting-ci item owned by dedicated settle scan, not Phase 1\n")
+			}
 			continue
 		}
 
@@ -1039,55 +1290,48 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 
-		// Phase 2: gated stage advancement.
-		// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
-		isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
-		if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
-			continue
-		}
-		// cruise and yolo labels override auto_advance:false on individual stages;
-		// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
-		if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
-			continue
-		}
-
-		if stage.Name == "Validate" {
-			// auto-merge is yolo-only — cruise and auto_advance:true stop here.
-			yoloActive := e.cfg.Yolo || hasYoloLabel(item)
-			if !yoloActive {
-				continue
-			}
-			// Items with fabrik:auto-merge-enabled are already in the GitHub
-			// auto-merge convergence flow; checkAutoMergeConvergence (Phase 1)
-			// monitors them and advances to Done when the PR merges.
-			if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
-				continue
-			}
-			_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
-			if mergeErr != nil {
-				e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
-			}
-			// Auto-merge enabled (or failed); Done advancement is handled by
-			// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
-			continue
-		}
-		if newComments := e.findNewComments(item); len(newComments) > 0 {
-			e.logf(item.Number, "advance", "skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
-			continue
-		}
-		if err := e.advanceToNextStage(board, item, stage); err != nil {
-			e.logf(item.Number, "warn", "could not advance: %v\n", err)
-		}
-		// Mark as advanced so the defer doesn't re-cache the old updatedAt.
-		// Board column moves don't bump updatedAt, so re-caching would
-		// make the item look "unchanged" on the next poll.
-		advancedItems[issueKey(item, e.defaultRepo())] = true
+		e.runCatchUpPhase2(ctx, board, item, stage, advancedItems)
 	}
 
 	// Single-owner PR terminal advance: the authoritative path for all
 	// "Validate-stage PR merged → advance to Done" transitions (ADR-056 D2).
 	// Runs regardless of which gate label is present; no label negation required.
+	// Open-item half only (ADR-1387) — sourced from deepFetchCandidates, which
+	// no longer admits closed items at Validate. The closed-item half is the
+	// board-sourced settleClosedValidateAdvance immediately below.
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
+
+	// Closed-item Validate terminal advance settle scan (ADR-1387): the
+	// exclusive owner of closed items at Validate specifically — not "any
+	// gate-checked stage" (advanceValidateTerminalItem hardcodes
+	// stage.Name == "Validate", not stageIsGateChecked; a closed item at a
+	// non-Validate gate-checked stage, e.g. the shipped default Review,
+	// wait_for_reviews: true, is instead handled by settleClosedItemsToDone's
+	// plain move-to-Done — see its doc comment). Runs over the raw board
+	// snapshot, not deepFetchCandidates — the whole point is independence
+	// from dispatch admission, which after ADR-1387 no longer admits closed
+	// items at Validate. See its doc comment.
+	e.settleClosedValidateAdvance(board, advancedItems)
+
+	// Awaiting-advance settle scan (#1422): the exclusive owner of a terminal
+	// advance (advanceToNextStage) that failed to move the board Status
+	// forward — most commonly a missing target Status option. Runs over the
+	// raw board snapshot, not deepFetchCandidates, for the same reason as the
+	// settle scans around it: a stranded item's stage is already complete and
+	// admission does not reliably see it. Deliberately placed after
+	// settleClosedValidateAdvance immediately above so it shares this poll's
+	// advancedItems map — that pair already retries a closed Validate item's
+	// advance unconditionally every poll, so this scan is a no-op there and
+	// only does real work for the two gaps that pair doesn't cover (see its
+	// own doc comment).
+	e.settleAwaitingAdvanceScan(board, advancedItems)
+
+	// Awaiting-CI settle scan (#1270): the sole per-poll evaluator of the CI gate
+	// for open, not-yet-complete fabrik:awaiting-ci items. Runs over the raw board
+	// snapshot, not deepFetchCandidates — the whole point is independence from the
+	// itemMayNeedWork/selectDeepFetchCandidates/Phase-1-admission-gate pipeline
+	// that field evidence showed can silently exclude these items.
+	e.settleAwaitingCIScan(ctx, board, advancedItems)
 
 	// No-work-needed settle scan: retries the outstanding Done-move/close for any
 	// item carrying fabrik:awaiting-done, independent of item.Status. Runs over
@@ -1122,6 +1366,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Runs every poll cycle when merge_train: on. No dispatch, no mutation — D1 skeleton only.
 	if e.cfg.MergeTrain == "on" {
 		e.handleMergeTrainBatch(ctx, board)
+	}
+
+	// Queued review-finding settle scan (#1208): detects unresolved review-thread
+	// feedback arriving on a Queued merge-train member's linked PR — a window the
+	// HoldingStage exclusion in itemMayNeedWork/Phase 1's admission gate otherwise
+	// blacks out entirely — and ejects the member off Queued so the ordinary
+	// review-reinvoke path can address it. Gated on merge_train: on, same as
+	// handleMergeTrainBatch: the internal train (and its ejectMember mechanism) is
+	// the only Queued landing engine this scan's ejection semantics apply to.
+	if e.cfg.MergeTrain == "on" {
+		e.settleQueuedReviewFindings(board)
 	}
 
 	// Merge-train member-issue close settle scan (ADR-061): retries the outstanding
@@ -1165,9 +1420,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// deepFetchCandidates and is never dispatched again — its worktree leaks and
 	// it never gets archived. Sourced from board.Items directly, same rationale
 	// as the child-placement scan above. Gate-checked stages (Validate) are
-	// excluded — those closed items remain the exclusive responsibility of
-	// runValidatePRTerminalAdvance, to avoid double-advance/racing between the
-	// two settle-owners.
+	// excluded — those closed items remain the exclusive responsibility of the
+	// settleClosedValidateAdvance/runValidatePRTerminalAdvance pair (ADR-1387),
+	// to avoid double-advance/racing between the settle-owners.
 	e.settleClosedItemsToDone(board)
 
 	// Done-item archival (ADR-068): archives board items that have sat in the Done
@@ -1191,6 +1446,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "stats", "cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
 			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
 	}
+
+	// Source-checkout staleness check (#1464): reports (never acts on) how far
+	// a dev-build daemon's running binary is behind origin/main, via the
+	// warnings/ lifecycle. Runs unconditionally every poll (throttled
+	// internally to once per stalenessCheckPollInterval polls) — deliberately
+	// outside the dispatched==0 block below, so it stays reachable on a board
+	// that dispatches work every single cycle and never reaches idleCount's
+	// threshold. This is purely additive: it never touches idleCount,
+	// checkAndUpgrade, or checkVersionSkew, all of which remain gated exactly
+	// as before.
+	e.maybeCheckSourceStaleness()
 
 	if dispatched == 0 {
 		// Check whether any workers from a previous poll cycle — or a merge-train
@@ -1224,6 +1490,60 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		Dispatched: dispatched,
 		SeenRepos:  seenRepos,
 	}, nil
+}
+
+// runCatchUpPhase2 performs the gated stage-advancement step for an item that
+// passed Phase 1 unclaimed: yolo/cruise/auto_advance-gated advancement to the
+// next stage, or (at Validate) yolo-gated auto-merge enablement via
+// attemptMergeOnValidate. Shared by the main per-item catch-up loop (for items
+// with stage:X:complete already present) and settleAwaitingCIScan (#1270, for
+// fabrik:awaiting-ci items whose CI gate cleared on this exact poll pass) so the
+// ADR-1216 same-poll joint-clearing handoff — CI clears → the landing decision
+// must be reached immediately, not deferred to the next poll — applies
+// regardless of which of the two owns a given item's admission this poll.
+func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, advancedItems map[string]bool) {
+	// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
+	isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
+	if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
+		return
+	}
+	// cruise and yolo labels override auto_advance:false on individual stages;
+	// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
+	if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		return
+	}
+
+	if stage.Name == "Validate" {
+		// auto-merge is yolo-only — cruise and auto_advance:true stop here.
+		yoloActive := e.cfg.Yolo || hasYoloLabel(item)
+		if !yoloActive {
+			return
+		}
+		// Items with fabrik:auto-merge-enabled are already in the GitHub
+		// auto-merge convergence flow; checkAutoMergeConvergence (Phase 1)
+		// monitors them and advances to Done when the PR merges.
+		if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
+			return
+		}
+		_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
+		if mergeErr != nil {
+			e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
+		}
+		// Auto-merge enabled (or failed); Done advancement is handled by
+		// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
+		return
+	}
+	if newComments := e.findNewComments(item); len(newComments) > 0 {
+		e.logf(item.Number, "advance", "skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
+		return
+	}
+	if err := e.advanceToNextStage(board, item, stage); err != nil {
+		e.logf(item.Number, "warn", "could not advance: %v\n", err)
+	}
+	// Mark as advanced so the defer doesn't re-cache the old updatedAt.
+	// Board column moves don't bump updatedAt, so re-caching would
+	// make the item look "unchanged" on the next poll.
+	advancedItems[issueKey(item, e.defaultRepo())] = true
 }
 
 // dispatchCandidates checks each deep-fetch candidate against itemNeedsWork and
@@ -1344,18 +1664,29 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// An item is eligible for deep-fetch evaluation if:
 		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
 		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
-		//   (c) it has a bypass label (awaiting-ci, awaiting-review, or rebase-needed need per-poll eval), OR
+		//   (c) it has a bypass label (awaiting-review or rebase-needed need per-poll
+		//       eval; fabrik:awaiting-ci does NOT — as of #1270 it is evaluated by the
+		//       dedicated settleAwaitingCIScan, sourced from board.Items directly and
+		//       independent of this pre-filter, so bypassing it here would only force a
+		//       redundant deep-fetch with no functional benefit), OR
 		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed), OR
 		//   (e) it is not yet recorded in the engine store (first poll / fresh startup).
 		// Items with an active CooldownAt but no other signal are suppressed.
 		item := board.Items[i]
 		iKey := issueKey(item, e.defaultRepo())
+		repo := itemOwnerRepoString(item, e.defaultRepo())
+		// Single store lookup for this item, reused below by the terminal skip, the
+		// cooldown check, and the paused-deep-fetch gate (#1379) — folded into one
+		// call rather than three redundant e.store.Get calls per item per poll.
+		// Safe to reuse after the TerminalFlagSet Apply below: that mutation only
+		// touches the Terminal field, which none of the later reuses inspect.
+		admitSnap, admitErr := e.store.Get(repo, item.Number)
 		// Terminal skip: skip items flagged terminal while still in the same cleanup
 		// stage — external board activity (label-bot, PR comments, GitHub bookkeeping)
 		// bumps updatedAt but Fabrik has nothing left to do for them.
 		// item.Status == admitSnap.Status() guards against items that moved between two
 		// cleanup stages: in that case we must process normally to update the store.
-		if admitSnap, admitErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); admitErr == nil {
+		if admitErr == nil {
 			if admitSnap.IsTerminal() {
 				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree && item.Status == admitSnap.Status() {
 					continue // terminal + still in same cleanup stage: skip entirely
@@ -1363,7 +1694,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				// Status changed (left cleanup or moved to a different cleanup stage) —
 				// clear the flag and fall through.
 				e.store.Apply(itemstate.TerminalFlagSet{
-					Repo:     itemOwnerRepoString(item, e.defaultRepo()),
+					Repo:     repo,
 					Number:   item.Number,
 					Terminal: false,
 				})
@@ -1373,14 +1704,13 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:rebase-needed") || hasLabel(item.Labels, "fabrik:awaiting-review") || hasLabel(item.Labels, "fabrik:auto-merge-enabled") || hasLabel(item.Labels, "fabrik:revalidate")
+			hasAwaitingLabel := hasLabel(item.Labels, "fabrik:rebase-needed") || hasLabel(item.Labels, "fabrik:awaiting-review") || hasLabel(item.Labels, "fabrik:auto-merge-enabled") || hasLabel(item.Labels, "fabrik:revalidate")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
-				repo := itemOwnerRepoString(item, e.defaultRepo())
-				if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
-					now := time.Now()
-					hasExpiredCooldown = snap.HasExpiredCooldown(now)
-					if snap.HasActiveCooldown(now) && !hasExpiredCooldown {
+				if admitErr == nil {
+					now := e.now()
+					hasExpiredCooldown = admitSnap.HasExpiredCooldown(now)
+					if admitSnap.HasActiveCooldown(now) && !hasExpiredCooldown {
 						continue // within cooldown window: no change + no expired window
 					}
 				} else {
@@ -1403,6 +1733,28 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			e.logf(0, "poll", "skipping deep-fetch for cleanup-stage item #%d\n", board.Items[i].Number)
 			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 			continue
+		}
+		// fabrik:paused means "a human must act before anything else happens" — that
+		// should suppress the per-item FetchItemDetails cost too, not just dispatch
+		// (#1379). Gated on !cycleSet[iKey], not on pause alone: item.Labels is always
+		// this poll's live snapshot (refreshed by the probe/webhook path independent of
+		// this gate), so removing fabrik:paused on GitHub is visible here on the very
+		// next poll with no extra plumbing (R2/AC2). cycleSet[iKey] guards the case
+		// where the item has genuinely changed (new comment, label mutation) — those
+		// changes land in cycleSet via the mayNeedWork observer and must still fetch so
+		// itemNeedsWork's human-comment-resume check (item.go) sees fresh item.Comments.
+		// The item is still appended to deepFetchCandidates (unfetched) so downstream
+		// consumers that only need list membership — runValidatePRTerminalAdvance's
+		// merged-while-paused self-heal (ADR-056 D2) and settleRevalidateScan's FR-5
+		// guarantee — are unaffected; only the FetchItemDetails call itself is skipped.
+		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
+			if admitErr == nil {
+				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
+				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
+				continue
+			}
+			// Not yet in the store (first sighting): fall through and fetch once to
+			// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
 		}
 		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)

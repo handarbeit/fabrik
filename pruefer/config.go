@@ -31,6 +31,7 @@ const (
 	// client ID/secret, installation cache) — see internal/githubauth.
 	// Never written into config.yaml itself.
 	DefaultAppStatePath = ".pruefer/app-state.json"
+	DefaultLogPath      = ".pruefer/pruefer.log"
 )
 
 // Config holds Pruefer's fully-resolved runtime configuration, after
@@ -49,7 +50,7 @@ type Config struct {
 	// convention: absent/zero = uncapped.
 	MaxWallTime     time.Duration
 	ExcludedAuthors []string
-	ExcludedPaths   []string // glob patterns; a PR is skipped only if ALL touched paths match
+	ExcludedPaths   []string // glob patterns, applied per file before max_diff_bytes is measured (#1462); a PR is skipped whole only if ALL touched paths match
 	ExcludedLabels  []string // a PR is skipped if ANY label matches
 
 	// RequestChangesThreshold gates Pruefer's severity-based REQUEST_CHANGES
@@ -69,6 +70,13 @@ type Config struct {
 	// gates this on a real terminal being detected (see tui_run.go's useTUI).
 	TUI bool
 
+	// LogFile is the path Pruefer's daemon log lines are written to, resolved
+	// relative to the process cwd (the same way DefaultConfigPath and
+	// AppPrivateKeyPath are resolved). Defaults to DefaultLogPath. An
+	// explicitly empty value (YAML `log_file: ""`, PRUEFER_LOG_FILE=, or
+	// --log-file "") disables file logging entirely.
+	LogFile string
+
 	AppID             int64
 	AppPrivateKeyPath string
 	// AppInstallationID is a legacy pin/escape hatch: when set (non-zero),
@@ -86,6 +94,18 @@ type Config struct {
 	// regardless. Set this in headless/SSH/CI environments where no local
 	// browser exists to launch.
 	NoBrowser bool
+
+	// AutoUpgrade enables self-upgrade checks at the poll boundary (see
+	// Daemon.checkAndUpgrade in pruefer/upgrade.go). Default false, mirroring
+	// cmd/root.go's -auto-upgrade default — an operator opts in deliberately
+	// rather than the daemon silently replacing its own binary. See
+	// ADR-1197.
+	AutoUpgrade bool
+
+	// VersionRequested is set when --version is passed. Execute checks this
+	// before validating required config (AppID/WatchedRepos) so `pruefer
+	// --version` works without a fully configured environment.
+	VersionRequested bool
 }
 
 // yamlConfig is the shape of Pruefer's YAML config file. All fields are
@@ -109,6 +129,8 @@ type yamlConfig struct {
 	AppStatePath            string   `yaml:"github_app_state_path"`
 	NoBrowser               *bool    `yaml:"no_browser"`
 	TUI                     *bool    `yaml:"tui"`
+	LogFile                 *string  `yaml:"log_file"`
+	AutoUpgrade             *bool    `yaml:"auto_upgrade"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
@@ -148,6 +170,9 @@ type flagValues struct {
 	noBrowser               bool
 	configPath              string
 	noTUI                   bool
+	logFile                 string
+	autoUpgrade             bool
+	versionRequested        bool
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -167,7 +192,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.maxDiffBytes, "max-diff-bytes", 0, "Skip PRs whose diff exceeds this many bytes")
 	fs.IntVar(&fv.maxWallTimeSec, "max-wall-time", 0, "Wall-clock cap in seconds for a single claude review invocation (0 = no cap)")
 	fs.StringVar(&fv.excludedAuthors, "excluded-authors", "", "Comma-separated PR authors to skip")
-	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs to skip (all touched paths must match)")
+	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs, filtered per file before max_diff_bytes is measured; a PR is skipped whole only if all touched paths match")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
@@ -177,8 +202,15 @@ func LoadConfig(args []string) (Config, error) {
 	fs.BoolVar(&fv.noBrowser, "no-browser", false, "Skip attempting to open a local browser during first-run GitHub App setup")
 	fs.StringVar(&fv.configPath, "config", DefaultConfigPath, "Path to Pruefer's YAML config file")
 	fs.BoolVar(&fv.noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
+	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
+	fs.BoolVar(&fv.autoUpgrade, "auto-upgrade", false, "At each poll boundary (never mid-review), check GitHub Releases for a newer version and self-upgrade; dev builds (built from the fabrik source checkout) rebuild from origin/main instead")
+	fs.BoolVar(&fv.versionRequested, "version", false, "Print the pruefer version and exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
+	}
+
+	if fv.versionRequested {
+		return Config{VersionRequested: true}, nil
 	}
 
 	explicit := make(map[string]bool)
@@ -209,12 +241,17 @@ func LoadConfig(args []string) (Config, error) {
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
 		AppStatePath:      DefaultAppStatePath,
 		TUI:               true,
+		LogFile:           DefaultLogPath,
+		AutoUpgrade:       false,
 	}
 	if yc.RequestChangesThreshold != "" {
 		cfg.RequestChangesThreshold = Severity(yc.RequestChangesThreshold)
 	}
 	if yc.TUI != nil {
 		cfg.TUI = *yc.TUI
+	}
+	if yc.AutoUpgrade != nil {
+		cfg.AutoUpgrade = *yc.AutoUpgrade
 	}
 	if yc.PollIntervalSec != nil {
 		cfg.PollInterval = time.Duration(*yc.PollIntervalSec) * time.Second
@@ -248,6 +285,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.NoBrowser != nil {
 		cfg.NoBrowser = *yc.NoBrowser
+	}
+	if yc.LogFile != nil {
+		cfg.LogFile = *yc.LogFile
 	}
 
 	applyEnv(&cfg)
@@ -302,6 +342,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["notui"] {
 		cfg.TUI = !fv.noTUI
+	}
+	if explicit["log-file"] {
+		cfg.LogFile = fv.logFile
+	}
+	if explicit["auto-upgrade"] {
+		cfg.AutoUpgrade = fv.autoUpgrade
 	}
 
 	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
@@ -379,6 +425,18 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_TUI"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.TUI = b
+		}
+	}
+	// Unlike every other PRUEFER_* var above, an explicitly empty
+	// PRUEFER_LOG_FILE must be distinguished from "unset" (R2: empty
+	// disables file logging entirely). os.LookupEnv, not the v != "" idiom
+	// used above, is what makes that distinction possible.
+	if v, ok := os.LookupEnv("PRUEFER_LOG_FILE"); ok {
+		cfg.LogFile = v
+	}
+	if v := os.Getenv("PRUEFER_AUTO_UPGRADE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.AutoUpgrade = b
 		}
 	}
 }
