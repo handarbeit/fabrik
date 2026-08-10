@@ -752,6 +752,10 @@ mutate "a refused SeedPR(Merged: true) still reserves the number" \
   'TestSeedPRRefusedMergeDoesNotBurnTheNumber' \
   'seed.go::s{(if state == "" \{\n\t\tstate = "open"\n\t\}\n)\ts\.mu\.Unlock\(\)\n}{$1\tr.reserveNumber(num)\n\ts.mu.Unlock()\n}'
 
+mutate "a refused auto-assigned SeedPR still burns nextNumber" \
+  'TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber' \
+  'seed.go::s{\t\tnum = r\.nextNumber\n}{\t\tnum = r.allocNumber()\n}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

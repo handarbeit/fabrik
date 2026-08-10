@@ -611,6 +611,41 @@ func TestSeedPRRefusedMergeDoesNotBurnTheNumber(t *testing.T) {
 	}
 }
 
+// TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber pins a follow-up review
+// finding on #1498: the fix above only covered an explicitly-seeded number.
+// For an auto-assigned one (Number left at 0), SeedPR previously called
+// allocNumber — which commits the number by advancing nextNumber immediately
+// — before the Merged+Draft/Merged+open validation checks even ran, so a
+// validation failure (not just a refused merge) permanently burned an
+// auto-assigned number for a PR that was never created. Uses a clean
+// divergence rather than a conflict, so the refusal is unambiguously the
+// Merged+Draft validation check, not tryMerge.
+func TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	s.mu.Lock()
+	before := r.nextNumber
+	s.mu.Unlock()
+
+	s.SeedPR(repoName, PRSeed{Head: headBranch, Base: "main", Title: "auto-assigned but invalid", Merged: true, Draft: true})
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedPR(Merged: true, Draft: true) with an auto-assigned number was accepted; want refusal")
+	}
+
+	s.mu.Lock()
+	after := r.nextNumber
+	s.mu.Unlock()
+	if after != before {
+		t.Fatalf("nextNumber = %d after a refused auto-assigned Merged+Draft seed, want unchanged %d — "+
+			"the auto-assigned number was burned despite no PR record being created", after, before)
+	}
+}
+
 // countLooseObjects parses `git count-objects -v`'s "count:" line — the
 // number of loose objects sitting outside any pack, which is exactly where an
 // orphaned probe merge commit lives before it is packed or pruned. Caller

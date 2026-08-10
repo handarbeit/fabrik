@@ -1040,13 +1040,21 @@ then refusing the merge would have burned that number from `nextNumber`'s
 free-above invariant for a PR that was never created — unlike every other
 validation failure in `SeedPR`, which fails before the sequence moves at all,
 and unlike real GitHub, where a failed create never consumes a number either.
+The same holds for an auto-assigned number (`Number` left at `0`): `SeedPR`
+peeks the candidate off `nextNumber` rather than allocating it, so a
+subsequent validation failure (an invalid state, or `Merged` combined with
+`Draft` or an open state) or a refused merge never advances the sequence
+either — a review finding on #1498 caught this asymmetry between the two
+paths after the explicit-number fix above had already landed.
 
 **Risk:** low. `TestSeedPRMergedTruePerformsRealMerge` pins the merge commit
 and the auto-close together; `TestSeedPRMergedTrueRefusesConflict` pins the
-refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` pins that a refused
-merge leaves `nextNumber` untouched. Fixed in #1498 — this was previously the
-one seeding shape whose *consequences* went unmodelled (medium risk), which
-made a merge-train scenario's "this member already landed" seed assert against
+refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` and
+`TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber` pin that a refused
+explicit-number merge and a validation-refused auto-assigned seed both leave
+`nextNumber` untouched. Fixed in #1498 — this was previously the one seeding
+shape whose *consequences* went unmodelled (medium risk), which made a
+merge-train scenario's "this member already landed" seed assert against
 unmerged git history and open issues that `assembleTrialBranch` (pure real
 git) would then faithfully build on top of, passing for the wrong reason.
 

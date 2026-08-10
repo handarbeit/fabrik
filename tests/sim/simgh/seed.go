@@ -378,7 +378,17 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	num := seed.Number
 	switch {
 	case num == 0:
-		num = r.allocNumber()
+		// Peek the candidate rather than calling allocNumber: allocNumber
+		// commits the number immediately by advancing nextNumber, which is
+		// exactly the leak a review finding on #1498 caught — a state/Draft
+		// validation failure below, or a refused merge further down, would
+		// still burn an auto-assigned number for a PR that was never
+		// created, even though the equivalent case for an explicit number
+		// is already deferred (see reserveNumber below). r.nextNumber is
+		// only actually advanced once reserveNumber(num) runs, at the same
+		// point an explicit number is reserved — after the whole seed has
+		// succeeded.
+		num = r.nextNumber
 	case num < 0:
 		s.fail("simgh: PR number %d is not valid; use 0 to auto-assign", num)
 		s.mu.Unlock()
@@ -436,9 +446,10 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	// before the record is built) rather than called here: reserving num now
 	// and then refusing the merge would burn the number from the shared
 	// sequence — nextNumber advancing past it — for a PR that was never
-	// actually created, unlike every other
-	// validation failure in this function, which fails before nextNumber
-	// moves at all.
+	// actually created, unlike every other validation failure in this
+	// function, which fails before nextNumber moves at all. That invariant
+	// now holds for an auto-assigned number too (num == 0 above peeks
+	// nextNumber instead of allocating it), not just an explicit one.
 	if seed.Merged {
 		msg := fmt.Sprintf("Merge pull request #%d from %s\n\n%s", num, seed.Head, seed.Title)
 		r.gitMu.Lock()
