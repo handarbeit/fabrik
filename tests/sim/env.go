@@ -268,7 +268,21 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		opts.ConfigureCfg(&cfg)
 	}
 
-	eng := engine.NewWithDeps(cfg, inst, claude, wm)
+	// Multi-repo Envs (SecondRepo set, cfg.Repo == "") register a
+	// WorktreeManager per repo directly via the RegisterWorktreeManagerForTest
+	// seam, rather than through NewWithDeps's single-repo `worktrees` param —
+	// see that method's doc comment for why the single-key registration
+	// NewWithDeps does on its own is a no-op (registered under a key no real
+	// repo matches) once cfg.Repo is "".
+	var eng *engine.Engine
+	if opts.SecondRepo != nil {
+		eng = engine.NewWithDeps(cfg, inst, claude, nil)
+		eng.RegisterWorktreeManagerForTest(ownerRepo, wm)
+		wmBeta := buildWorktreeManager(t, simModel, ownerRepoBeta)
+		eng.RegisterWorktreeManagerForTest(ownerRepoBeta, wmBeta)
+	} else {
+		eng = engine.NewWithDeps(cfg, inst, claude, wm)
+	}
 	eng.SetClock(clk)
 
 	return &Env{
