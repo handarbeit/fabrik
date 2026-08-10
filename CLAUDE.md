@@ -171,8 +171,7 @@ review_authority: authoritative # Optional: advisory (default) | authoritative. 
                                 # dropped; the accepted trade-off is that a generic bot summary (e.g.
                                 # Copilot/Gemini's COMMENTED overview) can also trigger a reinvoke, whose
                                 # cost is capped by the no-op cycle exemption — a reinvoke landing no
-                                # commit reverses the cycle-counter increment (ReviewCycleDecremented)),
-                                # bounded by
+                                # commit reverses the cycle-counter increment (ReviewCycleDecremented)), bounded by
                                 # MaxReviewCycles, with pauseForReviewCycleLimit as the terminal fallback
                                 # only if the loop never converges — never as the first response to a
                                 # change request. yolo/cruise
