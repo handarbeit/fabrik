@@ -272,8 +272,23 @@ type StageState struct {
 	// retry first attempts PR creation before re-invoking Claude.
 	PRCreationFailed map[string]bool
 	// ReviewCycles counts how many review iterations each stage has completed.
-	// Replaces engine.reviewCycleCount[stageKey].
+	// Replaces engine.reviewCycleCount[stageKey]. Subject to the #1045
+	// ReviewCycleDecremented refund whenever a reinvoke lands no new commit —
+	// see ReviewBlockedCycles below for the counter that refund cannot mask.
 	ReviewCycles map[string]int
+	// ReviewBlockedCycles counts review reinvokes dispatched while the review
+	// gate itself was still blocked/timed-out (an authoritative gate with an
+	// unresolved verdict, or a plain "nobody has responded" block that has
+	// aged past ReviewWaitTimeout). Unlike ReviewCycles, this counter is never
+	// refunded — a no-op-on-HEAD reinvoke that happened while the gate was
+	// still blocking is genuine non-convergence evidence, not the harmless
+	// junk-overview no-op #1045's ReviewCycleDecremented exists to forgive
+	// (that shape is dispatched with the gate already clear, so it never
+	// increments this counter). handleReviewGate compares
+	// max(ReviewCycles, ReviewBlockedCycles) against MaxReviewCycles so a
+	// refund-masked loop still terminates in pauseForReviewCycleLimit instead
+	// of falling through to pauseForReviewTimeout. See ADR-1518.
+	ReviewBlockedCycles map[string]int
 	// CIFixCycles counts how many CI-fix iterations each stage has completed.
 	// Replaces engine.ciFixCycleCount[stageKey].
 	CIFixCycles map[string]int

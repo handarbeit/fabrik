@@ -256,11 +256,29 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		return e.dispatchWithCycleLimit(
 			pctx,
 			"review-reinvoke",
-			func(snap itemstate.Snapshot) int { return snap.ReviewCycles(pctx.stage.Name) },
+			func(snap itemstate.Snapshot) int {
+				// max, not ReviewCycles alone (ADR-1518): #1045's ReviewCycleDecremented
+				// refund can hold ReviewCycles below MaxReviewCycles indefinitely when
+				// every reinvoke happens to land no new commit. ReviewBlockedCycles is
+				// the never-refunded counterpart incremented below whenever a reinvoke
+				// is dispatched while the gate itself is still blocked/timed-out, so a
+				// refund-masked loop still reaches the limit here.
+				return max(snap.ReviewCycles(pctx.stage.Name), snap.ReviewBlockedCycles(pctx.stage.Name))
+			},
 			e.cfg.MaxReviewCycles,
 			nil,
 			func(repoStr string) {
 				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+				if blocked || timedOut {
+					// Genuine non-convergence evidence (ADR-1518): this reinvoke is
+					// being dispatched while the gate itself is still failing to
+					// clear, so unlike ReviewCycles this counter is never refunded,
+					// even if the reinvoke turns out to be a no-op on HEAD. A
+					// reinvoke dispatched with the gate already clear (the #1045
+					// junk-overview shape, blocked == timedOut == false) never
+					// reaches this branch, so it stays forgivable.
+					e.store.Apply(itemstate.ReviewBlockedCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+				}
 			},
 			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
 			func(cycleCount int) {
@@ -271,10 +289,31 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			},
 		)
 	}
-	// Nothing actionable to reinvoke on — fall back to the pre-existing
-	// blocked/timedOut handling (R5's terminal fallback for a gate that never
-	// converges, and the plain "waiting for a response" cases where there is
-	// genuinely nothing to reinvoke on).
+	// Nothing actionable to reinvoke on this poll — fall back to the
+	// pre-existing blocked/timedOut handling (the plain "waiting for a
+	// response" cases where there is genuinely nothing to reinvoke on).
+	//
+	// Terminal check independent of this poll's dedup outcome (R1/R2,
+	// ADR-1518). Without it, a gate that is still blocked/timed-out but whose
+	// currently-outstanding feedback has already been deduped as processed
+	// (snap.CommentProcessed, via buildReviewFeedbackCommentsFromReviews)
+	// falls through to the timedOut branch below and pauses with
+	// pauseForReviewTimeout — the wrong diagnosis once cycles have actually
+	// been spent trying to converge. Gated on blocked||timedOut so the
+	// naturally-cleared case (both false) is untouched; cycleCount is read
+	// fresh from the store (defaulting to 0, hence a no-op, on a read error)
+	// so a genuine "nobody has ever reviewed" block — which can only have
+	// cycleCount == 0 — is structurally unaffected (R4).
+	if blocked || timedOut {
+		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
+		if snap, err := e.store.Get(repoStr, pctx.item.Number); err == nil {
+			cycleCount := max(snap.ReviewCycles(pctx.stage.Name), snap.ReviewBlockedCycles(pctx.stage.Name))
+			if cycleCount >= e.cfg.MaxReviewCycles {
+				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
+				return true
+			}
+		}
+	}
 	if blocked {
 		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
 		// re-evaluates this item every 10 × PollSeconds even when nothing bumps

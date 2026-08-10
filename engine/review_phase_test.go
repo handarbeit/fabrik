@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -405,6 +406,126 @@ func TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindi
 		}
 	}
 	client.mu.Unlock()
+}
+
+// TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCycles
+// is the R3/ARM2 regression test for issue #1518. #1045's ReviewCycleDecremented
+// refund can hold ReviewCycles at 0 indefinitely when every reinvoke happens to
+// land no new commit — but unlike the advisory junk-overview shape
+// TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed
+// pins (where the refund must forgive forever, by design), these no-op
+// reinvokes are each dispatched while an authoritative gate is still blocked
+// on an unresolved CHANGES_REQUESTED verdict. ReviewBlockedCycles — never
+// refunded — is what makes the loop still terminate: reverting
+// handleReviewGate to use ReviewCycles alone as dispatchWithCycleLimit's
+// comparand (undoing the max(ReviewCycles, ReviewBlockedCycles) change) turns
+// this test red — the loop would keep dispatching no-op reinvokes forever,
+// never reaching MaxReviewCycles.
+func TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCycles(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Every reinvoke is a no-op on HEAD, regardless of content — the point
+			// of this test is that ReviewBlockedCycles does not care.
+			return "Looked at it, no commit pushed.", false, TokenUsage{}, nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
+	eng.cfg.MaxReviewCycles = 3
+
+	// See TestHandleReviewGate_NoOpReinvoke_LeavesCycleCounterUnchanged's
+	// comment: the no-op check needs a pre-existing worktree to compare HEAD
+	// against, matching the real "Implement already ran" precondition.
+	if _, err := eng.worktreesFor("owner/repo").EnsureWorktree(32, "main", false); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	baseItem := gh.ProjectItem{
+		Number:         32,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete"},
+		LinkedPRNumber: 101,
+	}
+
+	dispatchRound := func(review gh.PRReview) bool {
+		item := baseItem
+		item.LinkedPRReviews = []gh.PRReview{review}
+		advancedItems := make(map[string]bool)
+		pctx := &phase1Ctx{
+			ctx:           context.Background(),
+			board:         board,
+			item:          item,
+			stage:         stgs[0],
+			hasComplete:   true,
+			advancedItems: advancedItems,
+		}
+		if got := eng.handleReviewGate(pctx); !got {
+			t.Fatalf("handleReviewGate: expected true (item claimed) for review %d, got false", review.DatabaseID)
+		}
+		eng.wg.Wait()
+		return advancedItems["owner/repo#32"]
+	}
+
+	// MaxReviewCycles rounds, each against a fresh, distinct, still-blocking
+	// CHANGES_REQUESTED review — every one dispatches (ReviewCycles nets back
+	// to 0 via the #1045 refund, but ReviewBlockedCycles keeps climbing since
+	// blocked was true at each dispatch).
+	for i := 0; i < eng.cfg.MaxReviewCycles; i++ {
+		dispatched := dispatchRound(gh.PRReview{
+			Author:     "alice",
+			State:      "CHANGES_REQUESTED",
+			Body:       fmt.Sprintf("please address finding %d", i),
+			DatabaseID: 3000 + i,
+		})
+		if !dispatched {
+			t.Fatalf("round %d: expected reinvoke dispatch, got none", i+1)
+		}
+		snap, _ := eng.store.Get("owner/repo", 32)
+		if got := snap.ReviewCycles("Implement"); got != 0 {
+			t.Errorf("round %d: ReviewCycles(Implement) = %d; want 0 (no-op refund, #1045)", i+1, got)
+		}
+		if got := snap.ReviewBlockedCycles("Implement"); got != i+1 {
+			t.Errorf("round %d: ReviewBlockedCycles(Implement) = %d; want %d (never refunded)", i+1, got, i+1)
+		}
+	}
+
+	// One more round: max(ReviewCycles, ReviewBlockedCycles) is now at
+	// MaxReviewCycles — must pause instead of dispatching yet another no-op.
+	dispatched := dispatchRound(gh.PRReview{
+		Author:     "alice",
+		State:      "CHANGES_REQUESTED",
+		Body:       "please address finding 999",
+		DatabaseID: 3999,
+	})
+	if dispatched {
+		t.Error("expected NO further reinvoke dispatch once ReviewBlockedCycles reached MaxReviewCycles")
+	}
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused via pauseForReviewCycleLimit once ReviewBlockedCycles reached MaxReviewCycles; labels added: %v", labelNames)
+	}
 }
 
 // TestProcessComments_MergesReviewThreadComments verifies that processComments

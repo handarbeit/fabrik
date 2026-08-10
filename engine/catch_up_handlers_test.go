@@ -980,6 +980,174 @@ func TestHandleReviewGate_AuthoritativeBlocked_CycleLimitReached_Pauses(t *testi
 	}
 }
 
+// TestHandleReviewGate_AuthoritativeBlocked_AlreadyProcessed_AtCycleLimit_PausesForCycleLimit
+// is A3 (issue #1518): the exact shape that was unreachable before this fix —
+// the currently-outstanding review body has already been deduped as processed
+// (syntheticComments is empty on this poll, exactly as in the sibling
+// ..._FallsThroughToCooldown test above) but the underlying verdict is still
+// blocking and ReviewCycles is already at MaxReviewCycles. This must
+// terminate in pauseForReviewCycleLimit, not fall through to the
+// cooldown/timeout tail the cycleCount==0 sibling correctly uses. Reverting
+// the new terminal check added to handleReviewGate's fallback tail (R1/R2)
+// turns this test red — it regresses to asserting the old
+// CooldownAt("review-blocked") behavior instead, identically to the sibling
+// test at cycleCount==0.
+func TestHandleReviewGate_AuthoritativeBlocked_AlreadyProcessed_AtCycleLimit_PausesForCycleLimit(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+		addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 3
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete"},
+		LinkedPRNumber: 55,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 900},
+		},
+	}
+	// Simulate the review body already having been addressed by a prior reinvoke.
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 10, CommentID: "review-body:900", At: time.Now()})
+	// ...and that the loop already spent every cycle trying to converge.
+	for i := 0; i < eng.cfg.MaxReviewCycles; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: 10, StageName: "Implement"})
+	}
+
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	if advancedItems["owner/repo#10"] {
+		t.Error("expected NO reinvoke dispatch — the review body was already processed")
+	}
+	eng.wg.Wait()
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused via pauseForReviewCycleLimit even though syntheticComments was empty this poll; labels added: %v", labelNames)
+	}
+}
+
+// TestHandleReviewGate_TimedOut_NoReviewsEver_PausesForTimeout is A4 (issue
+// #1518): a genuine "nobody has ever responded" block — a human reviewer was
+// requested, ReviewWaitTimeout has elapsed, and nothing has ever been
+// submitted (so ReviewCycles/ReviewBlockedCycles are both structurally 0 — a
+// reinvoke can only ever fire in response to actual review content) — must
+// still terminate in pauseForReviewTimeout, not the new cycle-limit check
+// added for R1/R2. Explicit non-regression pin for R4: the new terminal
+// check in handleReviewGate's fallback tail is gated on
+// max(ReviewCycles, ReviewBlockedCycles) >= MaxReviewCycles, which a
+// structurally-zero pair can never satisfy.
+func TestHandleReviewGate_TimedOut_NoReviewsEver_PausesForTimeout(t *testing.T) {
+	client := &mockGitHubClient{}
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true)},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 3
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"stage:Implement:complete", "fabrik:awaiting-review"},
+		LinkedPRNumber: 55,
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "bob", IsBot: false},
+		},
+		// No LinkedPRReviews at all — nobody has ever reviewed.
+	}
+
+	// Sanity check, mirroring TestHandleReviewGate_TimedOutButActionable_DispatchesReinvokeNotPause:
+	// confirm checkReviewGate reports the exact (blocked, timedOut) shape this
+	// test means to exercise before asserting on handleReviewGate's outcome.
+	blocked, timedOut, terminated, _ := eng.checkReviewGate(board, item, stgs[0])
+	if blocked || !timedOut || terminated {
+		t.Fatalf("checkReviewGate(...) = (blocked=%v, timedOut=%v, terminated=%v); want (false, true, false) for this test to exercise the intended interaction", blocked, timedOut, terminated)
+	}
+
+	advancedItems := make(map[string]bool)
+	pctx := &phase1Ctx{
+		ctx:           context.Background(),
+		board:         board,
+		item:          item,
+		stage:         stgs[0],
+		hasComplete:   true,
+		advancedItems: advancedItems,
+	}
+
+	got := eng.handleReviewGate(pctx)
+
+	if !got {
+		t.Error("handleReviewGate: expected true (item claimed), got false")
+	}
+	if advancedItems["owner/repo#10"] {
+		t.Error("expected NO reinvoke dispatch — nothing actionable has ever been submitted")
+	}
+	snap, _ := eng.store.Get("owner/repo", 10)
+	if got := snap.ReviewCycles("Implement"); got != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0", got)
+	}
+	if got := snap.ReviewBlockedCycles("Implement"); got != 0 {
+		t.Errorf("ReviewBlockedCycles(Implement) = %d; want 0", got)
+	}
+	client.mu.Lock()
+	labelNames := make([]string, len(client.addLabelCalls))
+	for i, c := range client.addLabelCalls {
+		labelNames[i] = c.labelName
+	}
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labelNames {
+		if l == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Errorf("expected fabrik:paused via pauseForReviewTimeout; labels added: %v", labelNames)
+	}
+}
+
 // ---- handleMergeAndCIGates rebase reinvoke dispatch tests ----
 
 // makeMergeGatePctx returns a phase1Ctx for merge-gate/CI-gate handler tests.
