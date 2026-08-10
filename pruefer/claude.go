@@ -79,6 +79,17 @@ type ReviewRequest struct {
 	// (nil ReviewThreads) fetch. buildReviewPrompt notes this so a PR that
 	// has grown past the fetch ceiling doesn't silently look complete.
 	ReviewThreadsTruncated bool
+	// OmittedExcludedPaths lists files review.go's per-file exclusion
+	// pipeline dropped via cfg.ExcludedPaths before measuring the diff
+	// against max_diff_bytes (R2). Disjoint from OmittedTrimmedPaths — a
+	// file is dropped by exactly one of the two passes, never both.
+	OmittedExcludedPaths []string
+	// OmittedTrimmedPaths lists files review.go's size guard additionally
+	// dropped (largest first) because the diff still exceeded
+	// max_diff_bytes after exclusion (R4). Both fields are disclosed to the
+	// model so it never silently assumes it saw the whole change — see
+	// renderOmittedPaths.
+	OmittedTrimmedPaths []string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -219,6 +230,45 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, thread
 	b.WriteString("Policy for the threads above: do not raise a finding that restates an [OPEN] thread — it is already tracked. Do not restate a [RESOLVED] thread unless the fix (or the current diff) introduces a new defect, in which case say so explicitly and reference the prior thread. Where a thread was answered with a reasoned reply, engage with that reasoning or drop the point — do not simply repeat the original observation.\n\n")
 }
 
+// renderOmittedPaths writes a short, additive prompt section naming files
+// review.go's diff-size guard omitted from what it measured and from
+// inline-comment anchoring (R4). This is load-bearing, not cosmetic: unlike
+// the diff text itself, Claude never receives it as prompt content — it
+// independently re-derives its own view via git tool calls against the full
+// clone, so a passive "FYI, these were excluded" note would not by itself
+// stop it from reading (or diffing) an omitted file directly, which in the
+// motivating scenario (a 17 MB JSONL corpus) could blow its own context. The
+// concrete `git diff ... -- . ':!path'` pathspec gives it an actionable way
+// to exclude the same files from its own inspection, backstopped by
+// validRightAnchors demoting any finding Claude reports on an omitted file
+// anyway (R6) rather than trusting the instruction alone.
+func renderOmittedPaths(b *strings.Builder, baseBranch string, excluded, trimmed []string) {
+	if len(excluded) == 0 && len(trimmed) == 0 {
+		return
+	}
+	b.WriteString("## Files omitted from this review\n\n")
+	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. Do not review them, and exclude them from your own `git diff` invocations with a pathspec, e.g.:\n\n")
+	ref := "HEAD"
+	if baseBranch != "" {
+		ref = baseBranch + "...HEAD"
+	}
+	fmt.Fprintf(b, "```\ngit diff %s -- .", ref)
+	for _, p := range excluded {
+		fmt.Fprintf(b, " ':!%s'", p)
+	}
+	for _, p := range trimmed {
+		fmt.Fprintf(b, " ':!%s'", p)
+	}
+	b.WriteString("\n```\n\n")
+	for _, p := range excluded {
+		fmt.Fprintf(b, "- %s (excluded by `excluded_paths`)\n", p)
+	}
+	for _, p := range trimmed {
+		fmt.Fprintf(b, "- %s (dropped to fit within max_diff_bytes)\n", p)
+	}
+	b.WriteString("\n")
+}
+
 // buildReviewPrompt constructs the prompt sent to claude via stdin.
 func buildReviewPrompt(req ReviewRequest) string {
 	var b strings.Builder
@@ -227,6 +277,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 	if req.BaseBranch != "" {
 		fmt.Fprintf(&b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
 	}
+	renderOmittedPaths(&b, req.BaseBranch, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
 	if req.Body != "" {
 		b.WriteString("## PR description\n\n")
 		b.WriteString(req.Body)
