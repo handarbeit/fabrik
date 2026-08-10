@@ -527,3 +527,63 @@ func TestBuildReviewPrompt_ContainsSummaryDelimiterMarkers(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildReviewPrompt_NoOmittedPaths_NoSection pins the additive-only
+// contract of renderOmittedPaths (#1462 R4): a request with nothing omitted
+// must not add the section at all.
+func TestBuildReviewPrompt_NoOmittedPaths_NoSection(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{})
+	if strings.Contains(prompt, "Files omitted from this review") {
+		t.Error("expected no omitted-files section when nothing was omitted")
+	}
+}
+
+// TestBuildReviewPrompt_OmittedExcludedPaths_NamedWithPathspec pins R4: an
+// excluded path is named in the prompt, tagged as excluded_paths, and
+// appears in the actionable git diff pathspec example so Claude has a
+// concrete way to keep it out of its own inspection (not just a passive
+// FYI note it could ignore).
+func TestBuildReviewPrompt_OmittedExcludedPaths_NamedWithPathspec(t *testing.T) {
+	req := ReviewRequest{BaseBranch: "main", OmittedExcludedPaths: []string{"data/corpus.jsonl"}}
+	prompt := buildReviewPrompt(req)
+
+	if !strings.Contains(prompt, "Files omitted from this review") {
+		t.Fatalf("expected the omitted-files section, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "data/corpus.jsonl (excluded by `excluded_paths`)") {
+		t.Errorf("expected data/corpus.jsonl labeled as excluded_paths, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "':!data/corpus.jsonl'") {
+		t.Errorf("expected an actionable git diff pathspec excluding the file, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "git diff main...HEAD") {
+		t.Errorf("expected the pathspec example to use the PR's base branch, got:\n%s", prompt)
+	}
+}
+
+// TestBuildReviewPrompt_OmittedTrimmedPaths_NamedDistinctlyFromExcluded pins
+// R4: a trimmed-for-size file is disclosed with a distinct reason from an
+// excluded_paths match, so a human (or the model) can tell "operator
+// configured this out" from "the size guard dropped it" apart.
+func TestBuildReviewPrompt_OmittedTrimmedPaths_NamedDistinctlyFromExcluded(t *testing.T) {
+	req := ReviewRequest{OmittedTrimmedPaths: []string{"pkg/generated.go"}}
+	prompt := buildReviewPrompt(req)
+
+	if !strings.Contains(prompt, "pkg/generated.go (dropped to fit within max_diff_bytes)") {
+		t.Errorf("expected pkg/generated.go labeled as trimmed-for-size, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "pkg/generated.go (excluded by") {
+		t.Error("a trimmed file must not be mislabeled as excluded_paths")
+	}
+}
+
+// TestBuildReviewPrompt_OmittedPaths_NoBaseBranch_FallsBackToHEAD pins the
+// pathspec example's fallback when BaseBranch is unset.
+func TestBuildReviewPrompt_OmittedPaths_NoBaseBranch_FallsBackToHEAD(t *testing.T) {
+	req := ReviewRequest{OmittedExcludedPaths: []string{"vendor/lib.go"}}
+	prompt := buildReviewPrompt(req)
+
+	if !strings.Contains(prompt, "git diff HEAD -- .") {
+		t.Errorf("expected the pathspec example to fall back to plain HEAD, got:\n%s", prompt)
+	}
+}
