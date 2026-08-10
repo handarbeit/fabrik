@@ -23,6 +23,28 @@ import (
 // suite's "ci-fix-sentinel" check.
 const ciFixSentinel = "ci-fix-sentinel"
 
+// ciFixCycleLimitCommentPrefix is the literal prefix of
+// pauseForCIFixCycleLimit's own comment (engine/ci.go). Copied here rather
+// than imported (unexported) — mirrors no_work_needed_test.go's identical
+// copy-the-literal-prefix pattern for the same reason (#1320: HasPrefix, not
+// Contains, so a stage-output comment quoting the marker text in prose can
+// never satisfy it).
+const ciFixCycleLimitCommentPrefix = "🏭 **Fabrik — CI fix cycle limit reached**"
+
+// hasCommentWithPrefix reports whether comments contains one whose body
+// starts with prefix — the shared shape of every "genuine engine-authored
+// comment, not prose quoting the marker text" check in this package (see
+// no_work_needed_test.go's hasNoWorkNeededSkipComment, the same idea kept
+// local there since it has its own file-specific prefix constant).
+func hasCommentWithPrefix(comments []gh.Comment, prefix string) bool {
+	for _, c := range comments {
+		if strings.HasPrefix(c.Body, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ciFixReinvokeSeq gives every ciFixCommentScript call a unique commit —
 // mirrors simclaude's own commitStageMarker (invocationSeq in
 // tests/sim/simclaude/git.go), which this package cannot call directly
@@ -410,19 +432,19 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 
 	// #1320: the engine-authored cycle-limit comment must be matched by
 	// HasPrefix, never Contains — a stage-output comment quoting the marker
-	// text in prose must not satisfy this check. simgh has no comment-body
-	// fetch on the GitHubClient interface exposed to a scenario the way the
-	// live harness's `gh issue view --json comments` is, so this port
-	// substitutes the equally-discriminating, equally engine-only signal
-	// CLAUDE.md documents for this exact transition: fabrik:paused +
-	// fabrik:awaiting-input applied together IS pauseForCIFixCycleLimit's
-	// own signature (see its call sites) — nothing else in this pipeline
-	// (no review gate, no rebase gate) can produce that pair. This is
-	// recorded as a fidelity/coverage gap in the coverage matrix (R4): the
-	// live test's HasPrefix discriminator itself has no direct sim
-	// equivalent because sim's Sim/Instrumented never exposes issue-comment
-	// bodies back to a scenario at all (comments are write-only from the
-	// scenario's side — see FIDELITY.md).
+	// text in prose must not satisfy this check. Unlike an earlier draft of
+	// this port, this IS directly checkable: projectItem's Comments field
+	// (populated from both the issue and its linked PR — see
+	// buildProjectItem, tests/sim/simgh/board.go) already exposes comment
+	// bodies to a scenario, exactly as no_work_needed_test.go's
+	// hasNoWorkNeededSkipComment relies on for its own engine-authored-comment
+	// discriminator. Carrying that same technique forward here closes the
+	// gap a previous revision of this file recorded as unfixable.
+	if !hasCommentWithPrefix(projectItem(t, env, num).Comments, ciFixCycleLimitCommentPrefix) {
+		t.Fatalf("no engine-authored CI-fix cycle-limit comment (prefix %q) found on #%d — the issue paused, but not provably via pauseForCIFixCycleLimit",
+			ciFixCycleLimitCommentPrefix, num)
+	}
+	t.Logf("#1320 verified: #%d carries the genuine cycle-limit comment (matched by prefix, not Contains)", num)
 
 	// #1323 non-vacuity: the cycle-limit path was reached via maxCycles
 	// genuinely distinct commits, not a single no-op latch — gitCommitCount
