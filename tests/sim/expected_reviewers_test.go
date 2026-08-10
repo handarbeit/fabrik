@@ -185,18 +185,39 @@ func TestExpectedReviewersFastAdvanceComposesWithAuthoritative(t *testing.T) {
 // empty from the start, which is the state under test; the live suite's
 // RequestPRReviewer call exists purely for its own #1312 workaround, which,
 // per this file's divergence note, has no sim analogue and is not ported.
+//
+// Non-vacuity fix (found auditing this port, #1450): an earlier revision of
+// this test used newReviewAuthorityEnv's near-real-time clock and asserted
+// fabrik:bot-reprompted's absence after only ~2s of real time (RunPolls'
+// workerYield cost) against a 15-minute ReviewWaitTimeout —
+// checkAwaitingReviewTimeout's own real-time-anchored guard
+// (`time.Since(appliedAt) < timeout`) made the allBots branch this test
+// claims to cover structurally unreachable within that budget, so the
+// assertion held whether or not Finding 2's fix (engine/reviews.go's `&&
+// authorityReason == ""` clause on allBots) was present at all — confirmed
+// by reverting that clause locally and observing this test still pass.
+// Fixed by reusing newExpectedReviewersTimeoutEnv's backdated-StartTime
+// technique (the same one TestExpectedReviewersDeclaredWaitsAndReprompts
+// uses to make the timeout branch genuinely reachable) and seeding the
+// human's blocking review BEFORE the first poll ever runs, so authorityReason
+// is already non-empty (and allBots therefore already false, per the fix)
+// the very first time checkAwaitingReviewTimeout's now-immediately-overdue
+// timeout gate is evaluated — the exact race Finding 2 closes.
 func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	t.Parallel()
-	env := newReviewAuthorityEnv(t, 15*time.Minute, 5) // must not fire in this test — the ladder must never engage
+	env := newExpectedReviewersTimeoutEnv(t) // backdated StartTime — see doc comment above
 
 	num, prNum := seedReviewGateItem(t, env, "Review", "declared-bot-no-defer",
 		"review-authority:authoritative", "expected-reviewers:declared")
+	// Seeded before any poll runs, so the human's blocking verdict is already
+	// present (authorityReason already non-empty) the first time the gate is
+	// ever evaluated — closing the window a post-hoc SeedReview would leave
+	// open (allBots briefly true before the review lands).
+	seedActionableReview(t, env, prNum, "reviewer-human", "CHANGES_REQUESTED", "please address this")
+	t.Logf("PR #%d: human REQUEST_CHANGES review pre-seeded before the first poll — declared bot still unresponsive", prNum)
 
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
-	t.Logf("fabrik:awaiting-review confirmed on #%d before any review submitted — bot declared, nothing requested", num)
-
-	seedActionableReview(t, env, prNum, "reviewer-human", "CHANGES_REQUESTED", "please address this")
-	t.Logf("submitted REQUEST_CHANGES review on PR #%d — outstanding now empty, declared bot still unresponsive", prNum)
+	t.Logf("fabrik:awaiting-review confirmed on #%d with the human verdict already in place", num)
 
 	// The human path must win: the reinvoke fires to address the feedback
 	// (Finding 1, #1375) — this alone would already fail against a
@@ -211,12 +232,15 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	t.Logf("review-reinvoke dispatched for #%d on the human's CHANGES_REQUESTED verdict", num)
 
 	// Drive a further settle window and confirm the declared bot's ladder
-	// never engages — if reviewGateAllBots incorrectly read allBots=true for
-	// the still-outstanding declared bot once the human's verdict dropped
+	// never engages — the backdated clock means checkAwaitingReviewTimeout's
+	// real-time gate has been satisfied since the very first poll, so this is
+	// a genuine test of the allBots branch, not a budget that never reaches
+	// it: if reviewGateAllBots incorrectly read allBots=true for the
+	// still-outstanding declared bot once the human's verdict dropped
 	// outstanding to empty, fabrik:bot-reprompted would appear here.
 	RunPolls(t, env, 20)
 	if hasLabel(IssueLabels(t, env, num), "fabrik:bot-reprompted") {
 		t.Fatal("fabrik:bot-reprompted applied — the declared bot's re-prompt ladder fired instead of deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)")
 	}
-	t.Logf("AC2 verified: #%d — declared bot never re-prompted; human's authoritative CHANGES_REQUESTED escalation won", num)
+	t.Logf("AC2 verified: #%d — declared bot never re-prompted despite an already-overdue timeout window; human's authoritative CHANGES_REQUESTED escalation won", num)
 }
