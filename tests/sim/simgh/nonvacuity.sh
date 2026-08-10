@@ -127,7 +127,7 @@ mutate "blockedBy state is frozen at seed time" \
 
 mutate "ResolveReviewThread is a no-op" \
   'TestReviewThreadResolutionIsObservable' \
-  'comments.go::s{^\t\t\t\tc\.threadResolved = true$}{\t\t\t\t// neutralised}m'
+  'comments.go::s{^\t\t\t\t\tc\.threadResolved = true$}{\t\t\t\t\t// neutralised}m'
 
 mutate "reviewDecision ignores missing branch protection" \
   'TestReviewDecisionEmptyWithoutBranchProtection' \
