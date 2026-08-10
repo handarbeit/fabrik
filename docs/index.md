@@ -534,6 +534,20 @@ fabrik --auto-upgrade</pre>
           Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default, so an ambient API key can never silently flip a stage from subscription to metered billing — with an explicit opt-in and an outright refusal of <code>apiKeyHelper</code>.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#github-enterprise-server-support" aria-label="GitHub Enterprise Server Support — open documentation">
+        <span class="feature-icon">🏢</span>
+        <div class="feature-title">GitHub Enterprise Server Support</div>
+        <div class="feature-desc">
+          Runs against a GHES instance instead of github.com via pure endpoint/host configuration — dual REST/GraphQL endpoints, host-aware git layer, and <code>GH_HOST</code> propagated to every stage worker's <code>gh</code> CLI calls.
+        </div>
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#graceful-shutdown" aria-label="Graceful Shutdown — open documentation">
+        <span class="feature-icon">🛑</span>
+        <div class="feature-title">Graceful Shutdown</div>
+        <div class="feature-desc">
+          SIGINT/SIGTERM triggers a clean stop, not a kill — in-flight issues are paused durably and worktree progress is committed and pushed, all within a bounded drain deadline. Force-quit stays available if it gets stuck.
+        </div>
+      </a>
     </div>
 
     <div class="factory-callout">
