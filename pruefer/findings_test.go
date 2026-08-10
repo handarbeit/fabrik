@@ -10,7 +10,7 @@ func TestParseReviewFindings_WellFormedFence(t *testing.T) {
 		`[{"path":"engine/claude.go","line":954,"body":"missing edge case"}]` +
 		"\n```\n"
 
-	summary, findings := parseReviewFindings(text)
+	summary, findings, _ := parseReviewFindings(text)
 	if summary != "Overall looks good, one nit below." {
 		t.Errorf("summary = %q", summary)
 	}
@@ -27,7 +27,7 @@ func TestParseReviewFindings_MultipleFindings(t *testing.T) {
 		`[{"path":"a.go","line":1,"body":"finding a"},{"path":"b.go","line":2,"body":"finding b"}]` +
 		"\n```\n"
 
-	summary, findings := parseReviewFindings(text)
+	summary, findings, _ := parseReviewFindings(text)
 	if summary != "Summary text." {
 		t.Errorf("summary = %q", summary)
 	}
@@ -38,7 +38,7 @@ func TestParseReviewFindings_MultipleFindings(t *testing.T) {
 
 func TestParseReviewFindings_NoFence_WholeTextAsSummary(t *testing.T) {
 	text := "Looks fine, one nit."
-	summary, findings := parseReviewFindings(text)
+	summary, findings, _ := parseReviewFindings(text)
 	if summary != text {
 		t.Errorf("summary = %q, want %q", summary, text)
 	}
@@ -49,7 +49,7 @@ func TestParseReviewFindings_NoFence_WholeTextAsSummary(t *testing.T) {
 
 func TestParseReviewFindings_MalformedJSONInFence_FallsBack(t *testing.T) {
 	text := "Some review text.\n\n```json\nnot valid json at all\n```\n"
-	summary, findings := parseReviewFindings(text)
+	summary, findings, _ := parseReviewFindings(text)
 	if want := strings.TrimSpace(text); summary != want {
 		t.Errorf("summary = %q, want the whole original text (trimmed) as fallback: %q", summary, want)
 	}
@@ -60,7 +60,7 @@ func TestParseReviewFindings_MalformedJSONInFence_FallsBack(t *testing.T) {
 
 func TestParseReviewFindings_EmptyFindingsArray(t *testing.T) {
 	text := "Nothing to flag.\n\n```json\n[]\n```\n"
-	summary, findings := parseReviewFindings(text)
+	summary, findings, _ := parseReviewFindings(text)
 	if summary != "Nothing to flag." {
 		t.Errorf("summary = %q", summary)
 	}
@@ -71,7 +71,7 @@ func TestParseReviewFindings_EmptyFindingsArray(t *testing.T) {
 
 func TestParseReviewFindings_IgnoresNonJSONFence(t *testing.T) {
 	text := "Consider this fix:\n\n```go\nfunc foo() {}\n```\n\nOtherwise fine."
-	summary, findings := parseReviewFindings(text)
+	summary, findings, _ := parseReviewFindings(text)
 	if summary != text {
 		t.Errorf("summary = %q, want whole text (no ```json fence present)", summary)
 	}
