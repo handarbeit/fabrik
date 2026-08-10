@@ -858,11 +858,30 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 // cleanupTrialArtifacts or an equivalent direct CleanupTrainWorktree call, regardless of
 // outcome.
 //
+// This is a thin wrapper over assembleAndValidateInner that also records the trial against
+// the runaway guard's counter — but only when the result is not TrainCIGreen (#1528). A green
+// result is, by construction, either the landing attempt itself or a bisection sub-trial that
+// just proved a sub-batch clean — never a "zero successful lands" event, which is the guard's
+// entire premise. Counting it turned a successful bisection into a false runaway trip: the
+// survivor-validation trial that was about to land got counted as a failure one second before
+// landing. Red results, TrainCIPending, and assembly errors are still counted unconditionally —
+// they represent no progress, exactly as before this fix.
+func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
+	survivors, result, prNum, diag, err := e.assembleAndValidateInner(ctx, p, members, trialName)
+	if result != TrainCIGreen {
+		e.recordTrial(p.owner + "/" + p.repo)
+	}
+	return survivors, result, prNum, diag, err
+}
+
+// assembleAndValidateInner is assembleAndValidate's actual implementation (git assembly, draft
+// CI PR, and CI polling), split out so the wrapper can decide whether the trial counts toward
+// the runaway guard based on the outcome. See assembleAndValidate's doc comment.
+//
 // When e.trainValidateFn is set (tests), it short-circuits the whole git/CI path, keying the
 // result (and diagnostic) on batch membership alone (ADR-059 D4 test seam). This is the ONLY
 // combined validation on the common path — a green result must never trigger bisection (D-d).
-func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
-	e.recordTrial(p.owner + "/" + p.repo)
+func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
 	if e.trainValidateFn != nil {
 		result, diag := e.trainValidateFn(ctx, members)
 		return members, result, 0, diag, nil
@@ -2074,7 +2093,10 @@ func (e *Engine) effectiveTrialWindow() (int, time.Duration) {
 }
 
 // recordTrial appends a timestamp for repoKey, prunes entries older than the window,
-// and returns the current count. Called at the start of every assembleAndValidate.
+// and returns the current count. Called by assembleAndValidate's wrapper for every
+// non-TrainCIGreen outcome — a green result never counts, since it represents progress
+// (a landing or a productive bisection narrowing), not the "zero successful lands" signal
+// the guard exists to detect (#1528).
 func (e *Engine) recordTrial(repoKey string) int {
 	_, m := e.effectiveTrialWindow()
 	now := time.Now()
@@ -2134,7 +2156,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 		repoKey, count, m, len(items))
 	for _, item := range items {
 		msg := fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
-			"The merge-train has created **%d trial branches** for `%s` within the last %s "+
+			"The merge-train has run **%d trial(s)** for `%s` within the last %s "+
 			"with **zero successful landings**. This indicates a persistent infra failure "+
 			"(e.g. billing-blocked CI, broken base branch, or all required checks erroring) "+
 			"rather than a code-composition issue.\n\n"+
