@@ -31,6 +31,43 @@ type repoState struct {
 	// sufficient. Never acquire Sim.mu while holding this.
 	gitMu sync.Mutex
 
+	// numberMu serialises every path that allocates or reserves a number from
+	// this repo's shared issue-and-PR sequence — CreateIssue, CreatePR,
+	// SeedIssue, and SeedPR — end to end, for the full span from "the
+	// candidate number is decided" to "the record naming it is published".
+	//
+	// SeedPR{Merged: true} is the one path that releases Sim.mu in the middle
+	// of that span, to run the git-side merge without mu held (mu and gitMu
+	// must never be held at once — see git.go's locking invariant): an
+	// explicitly-numbered PR is only checked against numberTaken before that
+	// release and not actually reserved until after the merge completes and
+	// mu is re-acquired, and an auto-assigned number (Number: 0) is only
+	// peeked off nextNumber, not reserved, until the same point. Without this
+	// lock, any other numbering path — every one of which is otherwise
+	// atomic under mu alone, with no release in the middle — could allocate
+	// and commit the exact same number during that window: a peeked number
+	// does not advance nextNumber, so it is invisible to allocNumber's own
+	// bookkeeping, and a concurrent SeedPR call for the same explicit number
+	// could pass its own numberTaken check and insert its record before this
+	// call resumes. Either way the later unconditional r.prs[num] = pr (or
+	// r.issues[num] = iss) would silently clobber, or coexist with, a record
+	// the rest of this package treats the shared number space as ruling out.
+	//
+	// Every numbering path takes this lock, even the three whose own critical
+	// section never releases mu, so the race is closed symmetrically rather
+	// than only hardening the one caller found to need the long window.
+	//
+	// Scoped per repo, like gitMu, rather than as a single Sim-wide mutex: the
+	// invariant it protects (nextNumber, numberTaken) is entirely per-repo —
+	// GitHub's issue-and-PR number sequence never spans repos — so a
+	// Sim-wide lock would serialise numbering operations (and, transitively,
+	// the git subprocess calls CreatePR's branch check and SeedPR's merge run
+	// while holding it) against completely unrelated repos, contention this
+	// package's own concurrent-behavior modelling has no reason to impose.
+	// Taken at the outermost level, before Sim.mu; never acquired while
+	// holding Sim.mu or gitMu.
+	numberMu sync.Mutex
+
 	// probesSinceGC counts read-only mergeability probes (tryMerge with
 	// commit=false) since the last housekeeping `git gc`, so the unreferenced
 	// merge-commit objects each one leaves behind do not accumulate without

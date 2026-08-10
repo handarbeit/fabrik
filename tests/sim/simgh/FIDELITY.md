@@ -1059,6 +1059,36 @@ explicit-number fix's original `seedPRMu`) now serialises all four paths
 against each other for the full span from "the candidate is decided" to "the
 record naming it is published," not just `SeedPR` against itself.
 
+A subsequent review finding caught that `numberMu` had been placed on `Sim`
+rather than `repoState`: the invariant it protects (`nextNumber`,
+`numberTaken`) is entirely per-repo, so a `Sim`-wide lock serialised
+numbering operations — and, transitively, the real git subprocesses
+`CreatePR`'s branch check and `SeedPR`'s merge run while holding it — against
+every unrelated repo in the same `Sim`, not just the one whose number
+sequence was actually at risk. It now lives on `repoState`, alongside
+`gitMu`, scoped the same way for the same reason.
+
+The same review round also caught that only `SeedIssue`'s specific lock
+acquisition was independently pinned; `CreateIssue`'s and `CreatePR`'s (the
+two paths the engine itself calls, not just test scenarios) were claimed but
+unverified — a regression dropping either would have passed the full suite
+and the mutation sweep silently.
+`TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers` closes that gap for
+`CreateIssue`, whose in-memory-only critical section races a `SeedPR` merge's
+release window the same way `SeedIssue`'s does. `CreatePR` is exercised
+concurrently in the same test (proving it does not corrupt state under load)
+but is not independently pinned by its own mutation: its own critical section
+is gated behind the same per-repo `gitMu` a `SeedPR` merge holds for the
+entire exploitable window, and structurally always loses the race to
+`SeedPR`'s reserve-and-publish step, which requests `mu` the instant it
+releases `gitMu` with no intervening work — manual testing against a
+deliberately reverted lock, scaled up to 40 hammer goroutines and 30
+concurrent merges, produced zero catches. Registering a mutation that cannot
+reliably turn red would add flakiness to the sweep rather than real coverage;
+`CreatePR`'s correctness instead rests on code symmetry with `CreateIssue`
+and `SeedIssue`, which share the identical "look up the repo, then
+`r.numberMu.Lock()` before touching `nextNumber`" shape.
+
 **Risk:** low. `TestSeedPRMergedTruePerformsRealMerge` pins the merge commit
 and the auto-close together; `TestSeedPRMergedTrueRefusesConflict` pins the
 refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` and
@@ -1066,11 +1096,14 @@ refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` and
 explicit-number merge and a validation-refused auto-assigned seed both leave
 `nextNumber` untouched; `TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers`
 pins that a concurrent auto-assigning `SeedIssue` and `SeedPR{Merged: true}`
-never land on the same number. Fixed in #1498 — this was previously the one
-seeding shape whose *consequences* went unmodelled (medium risk), which made
-a merge-train scenario's "this member already landed" seed assert against
-unmerged git history and open issues that `assembleTrialBranch` (pure real
-git) would then faithfully build on top of, passing for the wrong reason.
+never land on the same number;
+`TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers` pins the same
+invariant for `CreateIssue` and `CreatePR`. Fixed in #1498 — this was
+previously the one seeding shape whose *consequences* went unmodelled (medium
+risk), which made a merge-train scenario's "this member already landed" seed
+assert against unmerged git history and open issues that `assembleTrialBranch`
+(pure real git) would then faithfully build on top of, passing for the wrong
+reason.
 
 ### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
 

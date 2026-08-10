@@ -154,19 +154,19 @@ func (s *Sim) CreatePR(owner, repo, title, head, base, body string) (int, error)
 }
 
 func (s *Sim) createPR(owner, repo, title, head, base, body string, issueNumber int, draft bool) (int, error) {
-	// See numberMu's doc comment (tests/sim/simgh/sim.go): this call's own
-	// critical section never releases mu, but SeedPR{Merged: true}'s does,
-	// and an auto-assigned candidate it peeked off nextNumber is invisible to
-	// allocNumber's bookkeeping until that call's merge succeeds. Without
-	// this lock, allocNumber below could claim that exact peeked number
-	// while a concurrent SeedPR is mid-merge.
-	s.numberMu.Lock()
-	defer s.numberMu.Unlock()
-
 	r, err := s.repoByKey(repoKey(owner, repo))
 	if err != nil {
 		return 0, err
 	}
+
+	// See repoState.numberMu's doc comment (model.go): this call's own
+	// critical section never releases Sim.mu, but SeedPR{Merged: true}'s
+	// does, and an auto-assigned candidate it peeked off nextNumber is
+	// invisible to allocNumber's bookkeeping until that call's merge
+	// succeeds. Without this lock, allocNumber below could claim that exact
+	// peeked number while a concurrent SeedPR is mid-merge on this repo.
+	r.numberMu.Lock()
+	defer r.numberMu.Unlock()
 
 	// GitHub refuses to open a PR for a head ref that does not exist; so does
 	// the model, since every git-derived answer about the PR depends on it.

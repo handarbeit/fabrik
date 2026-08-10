@@ -303,12 +303,16 @@ mutate_race "SeedRepo's creation lock is removed (concurrent callers race in git
 
 mutate_race "the numbering lock is removed entirely (concurrent callers for one explicit PR number race and clobber)" \
   'TestConcurrentSeedPRDoesNotClobber' \
-  'sim.go::s|\tnumberMu sync\.Mutex|\tnumberMu noopSeedMutex|' \
+  'model.go::s|\tnumberMu sync\.Mutex|\tnumberMu noopSeedMutex|' \
   'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
 
 mutate_race "SeedIssue does not take the numbering lock (races a concurrent auto-assigning SeedPR merge and clobbers)" \
   'TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers' \
-  'seed.go::s{\ts\.numberMu\.Lock\(\)\n\tdefer s\.numberMu\.Unlock\(\)\n\n\tr, ok := s\.repoForSeed\(ownerRepo\)\n\tif !ok \{\n\t\treturn s\n\t\}\n\n\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n}{\tr, ok := s.repoForSeed(ownerRepo)\n\tif !ok {\n\t\treturn s\n\t}\n\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n}'
+  'seed.go::s|\tr\.numberMu\.Lock\(\)\n\tdefer r\.numberMu\.Unlock\(\)\n\n\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n\n\tnum := seed\.Number\n\tswitch \{\n\tcase num == 0:\n\t\tnum = r\.allocNumber\(\)\n|\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\n\tnum := seed.Number\n\tswitch {\n\tcase num == 0:\n\t\tnum = r.allocNumber()\n|'
+
+mutate_race "CreateIssue does not take the numbering lock (races a concurrent auto-assigning SeedPR merge and clobbers)" \
+  'TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers' \
+  'issues.go::s|\tr\.numberMu\.Lock\(\)\n\tdefer r\.numberMu\.Unlock\(\)\n\n\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n\tnum := r\.allocNumber\(\)\n|\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tnum := r.allocNumber()\n|'
 
 # The two halves of the re-add drift are neutralised separately, because each
 # path had been missing a different one and a single mutation could not show
