@@ -7,95 +7,87 @@ import (
 	"testing"
 )
 
+// TestFetchProjectBoard_Success serves github/testdata/recordings/fetch_project_board.json
+// — a real response recorded from the live handarbeit/fabrik board (#1453 R2/R5) — instead
+// of a hand-authored fixture literal.
+//
+// AC5 finding: the hand-authored fixture this test used to serve included
+// "body", "url", "author", and "assignees" keys on the issue content that
+// the real fetchProjectBoardQueryTemplate query (github/project.go) never
+// requests, and that itemNode (also project.go) has no struct fields to
+// receive — GitHub would never actually return those keys for this query.
+// The assertions below already documented this ("shallow query does not
+// populate body/author/assignees") but the fixture silently included fields
+// the real response can't contain; the recording only has the fields the
+// query actually asks for.
 func TestFetchProjectBoard_Success(t *testing.T) {
+	raw := loadRecording(t, "fetch_project_board")
+
+	var recorded struct {
+		Data struct {
+			Organization struct {
+				ProjectV2 struct {
+					Items struct {
+						Nodes []json.RawMessage `json:"nodes"`
+					} `json:"items"`
+				} `json:"projectV2"`
+			} `json:"organization"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatalf("parsing recorded response: %v", err)
+	}
+	realNodeCount := len(recorded.Data.Organization.ProjectV2.Items.Nodes)
+	if realNodeCount == 0 {
+		t.Fatal("recorded fixture has no items to test against")
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]interface{}{
-			"data": map[string]interface{}{
-				"user": map[string]interface{}{
-					"projectV2": map[string]interface{}{
-						"id":    "PVT_123",
-						"title": "My Board",
-						"items": map[string]interface{}{
-							"nodes": []interface{}{
-								map[string]interface{}{
-									"id": "PVTI_001",
-									"fieldValueByName": map[string]interface{}{
-										"name": "In Progress",
-									},
-									"content": map[string]interface{}{
-										"id":     "I_abc",
-										"number": 42,
-										"title":  "Fix the bug",
-										"body":   "It is broken",
-										"url":    "https://github.com/owner/repo/issues/42",
-										"author": map[string]interface{}{
-											"login": "alice",
-										},
-										"labels": map[string]interface{}{
-											"nodes": []interface{}{
-												map[string]interface{}{"name": "bug"},
-												map[string]interface{}{"name": "priority"},
-											},
-										},
-										"assignees": map[string]interface{}{
-											"nodes": []interface{}{
-												map[string]interface{}{"login": "bob"},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-		json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
+	board, err := c.FetchProjectBoard("handarbeit", "fabrik", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
 
-	if board.ProjectID != "PVT_123" {
+	if board.ProjectID != "PVT_kwDOENB0Ac4BW0n_" {
 		t.Errorf("ProjectID = %q", board.ProjectID)
 	}
-	if board.Title != "My Board" {
-		t.Errorf("Title = %q, want %q", board.Title, "My Board")
+	if board.Title != "Fabrik" {
+		t.Errorf("Title = %q, want %q", board.Title, "Fabrik")
 	}
-	if board.OwnerType != "user" {
-		t.Errorf("OwnerType = %q, want %q", board.OwnerType, "user")
+	if board.OwnerType != "organization" {
+		t.Errorf("OwnerType = %q, want %q", board.OwnerType, "organization")
 	}
-	if len(board.Items) != 1 {
-		t.Fatalf("items count = %d, want 1", len(board.Items))
+	if len(board.Items) != realNodeCount {
+		t.Fatalf("items count = %d, want %d (recorded node count)", len(board.Items), realNodeCount)
 	}
 
+	// Spot-check the first recorded item: real content from the live board,
+	// not invented values.
 	item := board.Items[0]
-	if item.ID != "I_abc" {
+	if item.ID != "I_kwDOR2bN_c8AAAABL_NaWQ" {
 		t.Errorf("ID = %q", item.ID)
 	}
-	if item.ItemID != "PVTI_001" {
+	if item.ItemID != "PVTI_lADOENB0Ac4BW0n_zg1zXpw" {
 		t.Errorf("ItemID = %q", item.ItemID)
 	}
-	if item.Number != 42 {
+	if item.Number != 1457 {
 		t.Errorf("Number = %d", item.Number)
 	}
-	if item.Title != "Fix the bug" {
-		t.Errorf("Title = %q", item.Title)
-	}
-	if item.Status != "In Progress" {
+	if item.Status != "Plan" {
 		t.Errorf("Status = %q", item.Status)
 	}
-	// Shallow query retains labels(first:5) for cleanupClosedIssueLocks.
-	// Response includes 2 labels so both should be present.
-	if len(item.Labels) != 2 || item.Labels[0] != "bug" {
-		t.Errorf("Labels = %v", item.Labels)
+	if len(item.Labels) == 0 {
+		t.Error("Labels = empty, want at least one recorded label")
 	}
 	// Body, Author, Assignees are not populated from the shallow board query —
-	// they are fetched in FetchItemDetails (deep fetch).
+	// they are fetched in FetchItemDetails (deep fetch), and (per the AC5
+	// finding above) the real query response has no such keys at all.
 	if item.Body != "" {
 		t.Errorf("Body = %q, want empty (shallow query does not populate body)", item.Body)
 	}

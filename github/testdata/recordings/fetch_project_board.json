@@ -1,0 +1,4638 @@
+{
+  "provenance": {
+    "operation": "fetch_project_board",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-08-09T19:05:00Z",
+    "source_repo": "handarbeit/fabrik (project #1, read-only, single full page: first=100)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "organization": {
+        "projectV2": {
+          "id": "PVT_kwDOENB0Ac4BW0n_",
+          "title": "Fabrik",
+          "items": {
+            "totalCount": 94,
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "Y3Vyc29yOnYyOpK5MDAwMDAwMDAuMDAxNDEyNDI5Mzc4NTMxMM4Ndm2k"
+            },
+            "nodes": [
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zXpw",
+                "updatedAt": "2026-08-09T18:29:26Z",
+                "fieldValueByName": {
+                  "name": "Plan"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_NaWQ",
+                  "number": 1457,
+                  "title": "test: simgh scripting, fault injection, mutation log, and snapshot/restore",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T18:29:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "model:opus"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtnw0U",
+                "updatedAt": "2026-07-26T19:31:00Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDMefTw",
+                  "number": 774,
+                  "title": "fabrik: re-enable Done-stage auto-archive with completion-anchored timing",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:30:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtsWSQ",
+                "updatedAt": "2026-08-02T21:25:32Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDQvz9g",
+                  "number": 815,
+                  "title": "fix: prevent stage Claude from posting via gh issue comment directly (skill + tool allowlist)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:25:31Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "reconsider"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgv_E0Y",
+                "updatedAt": "2026-08-02T21:25:43Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABFvM0aQ",
+                  "number": 884,
+                  "title": "feat(stages): skip redundant test runs when required checks already green on HEAD",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:25:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "reconsider"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgykwOs",
+                "updatedAt": "2026-07-26T19:13:23Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABIitXew",
+                  "number": 971,
+                  "title": "e2e: full suite oversubscribes the shared bed \u2192 cascading timeouts (harness parallelism cap)",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:14:11Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0B8kQ",
+                "updatedAt": "2026-07-27T01:13:11Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKHDEvg",
+                  "number": 1065,
+                  "title": "Plan/Research stage output posted verbatim as a bare @file reference \u2014 add skill guardrail + engine degenerate-output guard",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-27T01:13:08Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-07-26T20:15:21Z",
+                        "number": 1068,
+                        "headRefOid": "93f17c8959b8ab81b38b144b9a61833f26f33598",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0B88s",
+                "updatedAt": "2026-07-26T19:41:16Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKHDkJw",
+                  "number": 1066,
+                  "title": "feat(review): add independent adversarial pass to the Review stage",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-07-26T19:41:15Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0CcSs",
+                "updatedAt": "2026-07-25T04:40:17Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKHwsjw",
+                  "number": 1071,
+                  "title": "[design] De-fragilize the review gate \u2014 it single-sources on formal-review bots (Gemini SPOF)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-29T19:32:02Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zgtvZ4Y",
+                "updatedAt": "2026-07-27T20:42:55Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABDUIKLw",
+                  "number": 825,
+                  "title": "feat(init): wire Fabrik Claude Code plugin into project .claude/settings.json so it auto-installs via the marketplace",
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-27T20:42:54Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0KYr8",
+                "updatedAt": "2026-07-27T01:29:06Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKQnopg",
+                  "number": 1142,
+                  "title": "Multi-repo webhook subscription silently covers only one repo (--repo is not repeatable in gh webhook forward)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-27T01:29:05Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0PYQo",
+                "updatedAt": "2026-07-27T14:24:22Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKV0zgg",
+                  "number": 1177,
+                  "title": "feat(engine): risk-tier signal \u2014 sticky ratcheted risk:<tier> issue label + fail-safe auto-merge gate (yolo\u2192cruise at Validate)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-07-27T14:23:56Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0Sieg",
+                "updatedAt": "2026-08-08T23:47:16Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZH77w",
+                  "number": 1199,
+                  "title": "Turn-cap preemption counts against max_retries, pausing jobs that are progressing normally",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T23:47:15Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T23:46:00Z",
+                        "number": 1447,
+                        "headRefOid": "254e4c157216bc9308aa738fa9afd7a4288b2a52",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T23:45:29Z",
+                        "number": 1461,
+                        "headRefOid": "08145b44f281ce1c2a1acb183169b911bd3e0804",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0Sogs",
+                "updatedAt": "2026-08-09T02:51:25Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZa9Qg",
+                  "number": 1206,
+                  "title": "fabrik:extend-turns pre-grants 2x turns in one invocation but max_wall_time is not scaled to match",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:51:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T02:51:16Z",
+                        "number": 1467,
+                        "headRefOid": "e5908eb8579ba076c19c350100d0aa80c550f52d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T02:51:15Z",
+                        "number": 1479,
+                        "headRefOid": "a96dece73dd098efc892a4979459475c3e06eaa5",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0Sr_c",
+                "updatedAt": "2026-08-08T23:35:35Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZfZow",
+                  "number": 1208,
+                  "title": "merge-train: Queued members process no PR feedback \u2014 review findings and comments are ignored for a whole batch cycle",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T23:35:34Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T23:35:25Z",
+                        "number": 1455,
+                        "headRefOid": "56950e074e0fdaac867240c816021a0557513fe0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0m1L4",
+                "updatedAt": "2026-08-03T16:15:42Z",
+                "fieldValueByName": {
+                  "name": "Validate"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKvM6og",
+                  "number": 1253,
+                  "title": "feat(pruefer): per-user GitHub App auth reconciler (manifest flow, no shared key)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-03T16:15:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "fabrik:paused"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T17:56:07Z",
+                        "number": 1256,
+                        "headRefOid": "2885fb75199fe7b6b5511117b6da1e034d76973e",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0m1MU",
+                "updatedAt": "2026-08-03T16:15:43Z",
+                "fieldValueByName": {
+                  "name": "Validate"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKvM7XQ",
+                  "number": 1254,
+                  "title": "feat(pruefer): webhook event ingestion via Hookdeck (EventSource; test bed for fabrik)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-03T16:15:42Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "fabrik:paused"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T17:57:36Z",
+                        "number": 1255,
+                        "headRefOid": "f1e1ac53cb8d684f4452dd11302455c8c2f97ee8",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0z8fE",
+                "updatedAt": "2026-08-09T00:05:24Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABK9BrPg",
+                  "number": 1274,
+                  "title": "pruefer: one oversized file silently suppresses review of the whole PR",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T00:05:23Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg00uuU",
+                "updatedAt": "2026-08-02T21:47:02Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABK9zQbQ",
+                  "number": 1285,
+                  "title": "[design] Attachable/remote-controllable worker sessions as a live debugging aid",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T21:47:00Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "reconsider"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg04Bko",
+                "updatedAt": "2026-08-02T20:56:09Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLBjHpQ",
+                  "number": 1301,
+                  "title": "Per-stage token stats report 0k input: cached-context tokens are collected but never displayed",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T20:56:08Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-02T20:56:02Z",
+                        "number": 1302,
+                        "headRefOid": "981183b6f21c8330655fb94e012b5a4a86ede874",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg053II",
+                "updatedAt": "2026-08-02T21:13:03Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLDxQmQ",
+                  "number": 1319,
+                  "title": "test(e2e): PrecedenceGuard passes regardless of expected_reviewers resolution",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T21:13:01Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Done:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-nvk",
+                "updatedAt": "2026-08-03T03:12:07Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJYTWQ",
+                  "number": 1337,
+                  "title": "feat(plan): FABRIK_SPAWN_CHILD cannot express sibling ordering \u2014 ordered slices spawn as a parallel star",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:06Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-03T03:12:03Z",
+                        "number": 1354,
+                        "headRefOid": "0e06c499dd50f84369e931ada736c01c5c71855e",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-03T03:11:57Z",
+                        "number": 1370,
+                        "headRefOid": "84b7cfd0570137d5dfec1dd989c520c412a89f9b",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uF0",
+                "updatedAt": "2026-08-03T03:12:08Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgU-Q",
+                  "number": 1339,
+                  "title": "Ship Fabrik label knowledge to the stage skills that reach consumer projects",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:06Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-03T03:11:58Z",
+                        "number": 1368,
+                        "headRefOid": "47a1e96eb5a453b4080fe227a3adb4c10df31d84",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-03T03:11:57Z",
+                        "number": 1370,
+                        "headRefOid": "84b7cfd0570137d5dfec1dd989c520c412a89f9b",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg03w8Q",
+                "updatedAt": "2026-08-02T22:32:56Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLBL6Gg",
+                  "number": 1297,
+                  "title": "fix(plugin): dev-build fingerprint permanently disables plugin skill auto-refresh",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T22:32:55Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-02T22:32:50Z",
+                        "number": 1361,
+                        "headRefOid": "b596dcb12cd80c105716a0abdff7aedf93f28753",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-02T22:32:50Z",
+                        "number": 1367,
+                        "headRefOid": "d56d8dc28841b49d19b5ff2e2f994929f462d4a0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uGA",
+                "updatedAt": "2026-08-08T14:19:49Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgVOA",
+                  "number": 1340,
+                  "title": "Fix nonexistent tool names in defaultAllowedTools (TodoWrite, Task)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:47Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uGY",
+                "updatedAt": "2026-08-08T14:19:50Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgVaQ",
+                  "number": 1341,
+                  "title": "Add a tools: config axis for --tools schema declaration, separate from allowed_tools",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:48Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uGw",
+                "updatedAt": "2026-08-08T14:19:51Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgViw",
+                  "number": 1342,
+                  "title": "Isolate stage invocations from operator-local Claude config (--setting-sources project)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:49Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0-uHM",
+                "updatedAt": "2026-08-08T14:19:52Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLJgVuQ",
+                  "number": 1343,
+                  "title": "Decide and implement the pm plugin's distribution model; close its label gap",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:50Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0SxMg",
+                "updatedAt": "2026-08-08T14:19:47Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZl1bw",
+                  "number": 1209,
+                  "title": "IsSourceCheckout authorises a build+re-exec on a substring match against the git remote",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:46Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1AJAY",
+                "updatedAt": "2026-08-08T18:40:52Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLLD8hw",
+                  "number": 1364,
+                  "title": "fix(validate-skill): make the mandated Pre-Completion rebase conditional \u2014 it livelocks CI and ejects queued PRs",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T18:40:51Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T18:40:45Z",
+                        "number": 1424,
+                        "headRefOid": "2aa29fccf7889b912e3684ce98349b15fe5a7074",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T18:40:42Z",
+                        "number": 1431,
+                        "headRefOid": "8005caec0890b9a73e2a6128cbed3db52e20e43f",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg04ZwU",
+                "updatedAt": "2026-08-03T03:12:09Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLCEdiw",
+                  "number": 1314,
+                  "title": "perf(engine): CIWaitTimeout backstop duplicates checkCIGate's FetchLabelAppliedAt call",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:08Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-03T03:12:01Z",
+                        "number": 1369,
+                        "headRefOid": "9f5caeaca5caf5280c4c36907cf023b1a3566828",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-03T03:11:57Z",
+                        "number": 1370,
+                        "headRefOid": "84b7cfd0570137d5dfec1dd989c520c412a89f9b",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0STyc",
+                "updatedAt": "2026-08-02T22:19:05Z",
+                "fieldValueByName": {
+                  "name": "Review"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABKZD4_w",
+                  "number": 1197,
+                  "title": "feat(pruefer): ship as a released artifact and wire auto-upgrade (defer \u2014 needs bake time)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-02T22:19:04Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "fabrik:paused"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:awaiting-input"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T17:55:45Z",
+                        "number": 1362,
+                        "headRefOid": "27ec48898bac0e1d1f31e1ea8af465786dbe8cf5",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_iGk",
+                "updatedAt": "2026-08-03T16:30:58Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKaQIA",
+                  "number": 1346,
+                  "title": "Scrub the Anthropic auth env namespace; gate API billing behind FABRIK_ANTHROPIC_API_KEY; hard-fail on apiKeyHelper",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T16:30:57Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-03T16:30:53Z",
+                        "number": 1374,
+                        "headRefOid": "f0a91b7cfd4f13e3f4e4b507beae3a1f23620d62",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_iio",
+                "updatedAt": "2026-08-03T03:12:09Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKal2Q",
+                  "number": 1347,
+                  "title": "Board-derived repo management attempts label writes on upstream repos the operator does not administer",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:12:07Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-03T03:11:59Z",
+                        "number": 1356,
+                        "headRefOid": "781c115a3051e92223e11227463ec6f082cc9b90",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-03T03:11:57Z",
+                        "number": 1370,
+                        "headRefOid": "84b7cfd0570137d5dfec1dd989c520c412a89f9b",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_ii8",
+                "updatedAt": "2026-08-02T22:04:41Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKal_w",
+                  "number": 1348,
+                  "title": "allow_auto_merge warnings are never cleared when the repo leaves the board (durable-state leak)",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T22:04:40Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-02T22:04:34Z",
+                        "number": 1357,
+                        "headRefOid": "c9e3613635423fdd5ec5990842ad5413a6d72111",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-02T22:04:29Z",
+                        "number": 1360,
+                        "headRefOid": "c76884eefcf4bfc44e9e5160ee4e0e87cec8c4b0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_ijY",
+                "updatedAt": "2026-08-02T21:37:13Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKamIw",
+                  "number": 1349,
+                  "title": "TUI warnings panel: header count exceeds rendered rows; entries past the 3rd are unreachable and actionable while invisible",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T21:37:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-02T21:37:03Z",
+                        "number": 1353,
+                        "headRefOid": "267df045d01ab1f972db14892ca4ed1317845a78",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-02T21:36:57Z",
+                        "number": 1358,
+                        "headRefOid": "649bc1b9ebb679c7f7f0dd5e18331104d6726606",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_nw0",
+                "updatedAt": "2026-08-02T21:46:52Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKfhEA",
+                  "number": 1350,
+                  "title": "Make the CLAUDE_CONFIG_DIR passthrough observable, pinned by a test, and documented",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-02T21:46:50Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-02T21:46:43Z",
+                        "number": 1352,
+                        "headRefOid": "0b0e6a00f52d40d2449ee5552dddcf6f06d824f5",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg0_5pY",
+                "updatedAt": "2026-08-03T03:36:31Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLKyshA",
+                  "number": 1355,
+                  "title": "e2e: delete the vacuous scenario, verify NoWorkNeeded, record per-test timings",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T03:36:29Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-03T03:36:28Z",
+                        "number": 1363,
+                        "headRefOid": "d004512e4ece240400355ba56f9c5916192d691f",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-03T03:36:27Z",
+                        "number": 1371,
+                        "headRefOid": "ac1af77583684c772bf3e160aead2368a134a416",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ADwI",
+                "updatedAt": "2026-08-08T14:19:53Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLK9yGA",
+                  "number": 1359,
+                  "title": "fabrik init claims readiness without telling the user the board columns it requires",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:52Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1AJBA",
+                "updatedAt": "2026-08-08T15:57:36Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLLEEqA",
+                  "number": 1365,
+                  "title": "fix(engine): suppress cross-turn resumption tools (ScheduleWakeup, Workflow) \u2014 --allowedTools cannot withhold them",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T15:57:34Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T15:57:27Z",
+                        "number": 1423,
+                        "headRefOid": "248941d9666cc907f3d49edc42708d9b3ef2bcbd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1AJBU",
+                "updatedAt": "2026-08-08T19:26:18Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLLELFw",
+                  "number": 1366,
+                  "title": "fix(skills): state the never-wait-on-CI rule as an imperative and propagate it to the 10 skills lacking it",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T19:26:17Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T19:26:16Z",
+                        "number": 1437,
+                        "headRefOid": "48c0b1907c0516a4e51ec4a3df44b9f6a5127ab2",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T19:26:15Z",
+                        "number": 1443,
+                        "headRefOid": "c11d055ef66bcf35a43eaf0589fa358f1b6c8a09",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1GpLM",
+                "updatedAt": "2026-08-08T14:19:55Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLRVuDw",
+                  "number": 1378,
+                  "title": "Cache freshness is coupled to the polling path: webhook deltas refresh data but cannot mark records fresh",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:54Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1HMrE",
+                "updatedAt": "2026-08-08T14:19:57Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLR8uyQ",
+                  "number": 1380,
+                  "title": "feat(engine): spawned sub-issues do not inherit the parent's fabrik:yolo / fabrik:cruise automation mode",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:55Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Bd_U",
+                "updatedAt": "2026-08-08T14:19:55Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLMRWIA",
+                  "number": 1372,
+                  "title": "Stage tool restrictions and the worktree boundary are not enforced under --permission-mode dontAsk",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:53Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Fik0",
+                "updatedAt": "2026-08-04T02:55:47Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLQOr8w",
+                  "number": 1375,
+                  "title": "review_authority: authoritative blocks Fabrik from addressing CHANGES_REQUESTED; bot ladder preempts human escalation",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T02:55:46Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-04T02:55:43Z",
+                        "number": 1376,
+                        "headRefOid": "1036839c085d67d4d4ab6138f3e3f4ea82543ba0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Gnpw",
+                "updatedAt": "2026-08-03T15:15:45Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLRUfKg",
+                  "number": 1377,
+                  "title": "Cache freshness is coupled to the polling path: webhook deltas refresh data but cannot mark records fresh",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-03T15:15:44Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Done:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1HHEw",
+                "updatedAt": "2026-08-04T11:18:46Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLR2KMg",
+                  "number": 1379,
+                  "title": "fabrik:paused should suppress deep-fetch admission, not just the catch-up gates",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T11:18:44Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-04T11:20:51Z",
+                        "number": 1381,
+                        "headRefOid": "7d5b81b060f43666b13d4d48766effd6436a04ad",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1JqFA",
+                "updatedAt": "2026-08-04T11:00:03Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLUzLMg",
+                  "number": 1387,
+                  "title": "Closed items must never be dispatched: make the Validate settle-owner board-sourced instead of widening dispatch admission",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T11:00:02Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-04T10:59:57Z",
+                        "number": 1388,
+                        "headRefOid": "e689506d4c48bfabc949d8d730eee674cf147b49",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1NjPA",
+                "updatedAt": "2026-08-08T18:40:46Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLYvgng",
+                  "number": 1391,
+                  "title": "feat(ghes): support GitHub Enterprise Server \u2014 dual endpoints, host-aware git layer, GH_HOST propagation",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T18:40:45Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T18:40:44Z",
+                        "number": 1392,
+                        "headRefOid": "6d51099fa59edd2687d52bdb9ef2e9400bdf7cfd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T18:40:42Z",
+                        "number": 1431,
+                        "headRefOid": "8005caec0890b9a73e2a6128cbed3db52e20e43f",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1OXcA",
+                "updatedAt": "2026-08-09T06:37:54Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLZsISg",
+                  "number": 1393,
+                  "title": "feat(engine): clean-stop shutdown \u2014 pause in-flight issues durably and bound the worker drain",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T06:37:52Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T06:37:49Z",
+                        "number": 1493,
+                        "headRefOid": "bd7809c1a6fa0887f94a0038a88a131609a24b7a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T06:37:48Z",
+                        "number": 1495,
+                        "headRefOid": "f1a551ac30fa8ca8d0282aa1de43be9144bd9e0b",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Pk1Y",
+                "updatedAt": "2026-08-04T16:21:00Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbCeWQ",
+                  "number": 1394,
+                  "title": "test(e2e): parallel scenarios share README.md and conflict on merge \u2014 give each a unique marker path",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T16:20:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-04T16:20:57Z",
+                        "number": 1403,
+                        "headRefOid": "998060e5b97223689d6e1d48d92d71175d25ffc3",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-04T16:20:55Z",
+                        "number": 1404,
+                        "headRefOid": "ee22c87b03797bef2f0ec682411a819727818ee6",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Pk2Y",
+                "updatedAt": "2026-08-04T16:00:17Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbCfFw",
+                  "number": 1395,
+                  "title": "test(e2e): runaway-guard scenario poisons fabrik-test-beta repo-wide, failing concurrent TestCrossRepoSpawn",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T16:00:16Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-04T16:00:04Z",
+                        "number": 1400,
+                        "headRefOid": "508c97277748d4ba3d77fdcb5758f85ef4acef6d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-04T16:00:04Z",
+                        "number": 1402,
+                        "headRefOid": "766a7fdb84477ba628a03c8b8cdfa36bf7acfc97",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Pk3o",
+                "updatedAt": "2026-08-09T03:21:29Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbCgBg",
+                  "number": 1396,
+                  "title": "test(e2e): bed declares a reviewer that cannot review it; a dropped review costs a 45-min opaque failure",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:21:28Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T03:21:23Z",
+                        "number": 1476,
+                        "headRefOid": "b99f77d6e89cb7841f67f911c6543f9971ab3281",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T03:19:31Z",
+                        "number": 1484,
+                        "headRefOid": "e9436f17e55d7ce075e1205b4b80aba94b9c9220",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1PoEo",
+                "updatedAt": "2026-08-04T15:53:51Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLbGJcA",
+                  "number": 1398,
+                  "title": "Update docs for v0.0.77",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-04T15:53:49Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "documentation"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-04T15:53:48Z",
+                        "number": 1399,
+                        "headRefOid": "3899ac08db152404e6692110cb8ed72b46e94061",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-04T15:53:45Z",
+                        "number": 1401,
+                        "headRefOid": "5233eb95cb91857c40301f1db4355ab192e70957",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1SykY",
+                "updatedAt": "2026-08-06T13:36:33Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLeVinw",
+                  "number": 1405,
+                  "title": "Both shipped plugins declare name \"fabrik\" and contend for one skill namespace",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:31Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1SylI",
+                "updatedAt": "2026-08-06T13:36:37Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLeV2KA",
+                  "number": 1406,
+                  "title": "feat(stages): fully-qualified skill references \u2014 stop relying on the model to infer the plugin namespace, and let users point stages at their own plugins",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:35Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "enhancement"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1Syl8",
+                "updatedAt": "2026-08-06T13:36:38Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLeWKRw",
+                  "number": 1407,
+                  "title": "An unresolved stage skill silently downgrades the stage to an instruction-less prompt and still reports success",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:59Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1TuPk",
+                "updatedAt": "2026-08-08T22:29:30Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLfY2ng",
+                  "number": 1408,
+                  "title": "CI wait timeout is unrecoverable: clearing fabrik:paused leaves the item with no owner",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T22:29:28Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T22:32:22Z",
+                        "number": 1445,
+                        "headRefOid": "5d2956d29447dcbd159ccf00043eaed941e80b7a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T22:29:20Z",
+                        "number": 1459,
+                        "headRefOid": "6f459d8508920f182954c12c18f070b5b95a5568",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1UfJM",
+                "updatedAt": "2026-08-09T02:51:22Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLgJuKQ",
+                  "number": 1410,
+                  "title": "CI gate should bound liveness, not elapsed time \u2014 CIWaitTimeout pauses healthy CI",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:51:20Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T02:51:16Z",
+                        "number": 1468,
+                        "headRefOid": "0349a4a8f6f991453e06fe8a53726efd495d1ddb",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T02:51:15Z",
+                        "number": 1479,
+                        "headRefOid": "a96dece73dd098efc892a4979459475c3e06eaa5",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnQU",
+                "updatedAt": "2026-08-08T14:19:58Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLTeg",
+                  "number": 1411,
+                  "title": "history.json records neither token counts nor the effective model",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:56Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Specify:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnRg",
+                "updatedAt": "2026-08-08T14:19:59Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLULw",
+                  "number": 1412,
+                  "title": "Cost reporting is Anthropic-priced regardless of the model actually served",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T14:19:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnTc",
+                "updatedAt": "2026-08-08T15:57:38Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLU1w",
+                  "number": 1413,
+                  "title": "Comment-path setup failures bypass the #1089 circuit breaker and re-invoke unbounded",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T15:57:36Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T15:57:31Z",
+                        "number": 1425,
+                        "headRefOid": "cda263d1d24bdc09bfbedc352252c166159f730d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ZnUE",
+                "updatedAt": "2026-08-09T04:14:35Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLlLVkA",
+                  "number": 1414,
+                  "title": "A failing --resume session is retried indefinitely with no reset path",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T04:14:33Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T04:14:32Z",
+                        "number": 1487,
+                        "headRefOid": "9a7c12330c33b075d0f21f44f3fa813c3c73fa64",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T04:14:31Z",
+                        "number": 1488,
+                        "headRefOid": "23f7be21047e85bba3760fb758d02e973da65005",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ci-Y",
+                "updatedAt": "2026-08-05T22:03:41Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLVpo9Q",
+                  "number": 1389,
+                  "title": "Docs bug: skill says `fabrik:yolo` wins over `fabrik:cruise` \u2014 it's the reverse (cruise wins)",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-05T22:03:40Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-05T22:03:37Z",
+                        "number": 1415,
+                        "headRefOid": "8ca4fe233979cd0134d642d2094ac9a31956da82",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-05T22:03:35Z",
+                        "number": 1416,
+                        "headRefOid": "b78bd304dc8a4a7239395ee2798e6eba686adfe6",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1iOFQ",
+                "updatedAt": "2026-08-06T13:36:35Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLuFK7w",
+                  "number": 1417,
+                  "title": "Engine loads exactly one plugin dir, and configuring one replaces Fabrik's own",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-06T13:36:33Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzOA",
+                "updatedAt": "2026-08-08T18:40:47Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL9udBA",
+                  "number": 1420,
+                  "title": "merge-train: ejection comments discard the combined Validate output \u2014 the only run in which the failure exists",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T18:40:46Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T18:40:43Z",
+                        "number": 1426,
+                        "headRefOid": "45711d410bc184786b9ec6107e81457538db12f4",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T18:40:42Z",
+                        "number": 1431,
+                        "headRefOid": "8005caec0890b9a73e2a6128cbed3db52e20e43f",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzOY",
+                "updatedAt": "2026-08-08T23:48:04Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL9udHA",
+                  "number": 1421,
+                  "title": "Startup exempts the holding-stage column from validation while the terminal advance still targets it",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T23:48:02Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T23:47:42Z",
+                        "number": 1444,
+                        "headRefOid": "4ae7689b717db01d66bdc2f23054b5f65672189a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T23:45:29Z",
+                        "number": 1461,
+                        "headRefOid": "08145b44f281ce1c2a1acb183169b911bd3e0804",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzOs",
+                "updatedAt": "2026-08-09T03:16:46Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL9udOQ",
+                  "number": 1422,
+                  "title": "A terminal advance that cannot resolve its Status option strands the issue with no owner and no signal",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:16:45Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T03:16:44Z",
+                        "number": 1469,
+                        "headRefOid": "f073e1346b05e9e3e988b1b44ff342c9898ba546",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T03:16:43Z",
+                        "number": 1483,
+                        "headRefOid": "bc55fc3899dc36271179bb44d88fbaca7e642ea2",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzkE",
+                "updatedAt": "2026-08-09T01:12:42Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABK9EPnw",
+                  "number": 1275,
+                  "title": "merge-train: retry the best-effort 'landed via' comment post on member PR",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T01:12:41Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T01:12:36Z",
+                        "number": 1463,
+                        "headRefOid": "5eae1afff70fa022dd1bfe3492eb73801bcfb7cc",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T01:12:26Z",
+                        "number": 1471,
+                        "headRefOid": "a234c443b452c306977b50ff6585c2a0f0d7473d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1xzks",
+                "updatedAt": "2026-08-09T05:13:04Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLzAUWw",
+                  "number": 1419,
+                  "title": "Cross-repo sub-issues are stranded: registered on the parent's board, and unassigned",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T05:13:03Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T05:16:24Z",
+                        "number": 1490,
+                        "headRefOid": "50c4badebdaf8572e64739f69f4e424b4bee5ec0",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T05:13:00Z",
+                        "number": 1492,
+                        "headRefOid": "c40f45f1e0fa434b5d7182850b90f758b263bac8",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1x5Fc",
+                "updatedAt": "2026-08-09T02:54:13Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABJwrMwg",
+                  "number": 1045,
+                  "title": "bug(review): bot review feedback delivered as a plain PR body comment is neither gated on nor auto-addressed (gap in #357)",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:54:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T02:54:07Z",
+                        "number": 1473,
+                        "headRefOid": "1abaf53e76bca5a426b5709b2ed5fcb6216314fd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T02:54:06Z",
+                        "number": 1480,
+                        "headRefOid": "01b894d8fde34d60f6c593c0287e087ec30cae59",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ykUs",
+                "updatedAt": "2026-08-08T19:20:14Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-haRg",
+                  "number": 1427,
+                  "title": "pruefer: a 406 too_large diff fetch retries forever instead of degrading or skipping",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T19:20:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T18:57:25Z",
+                        "number": 1430,
+                        "headRefOid": "6487f1dd13ae52de6aabff36b93f34fd6b42ef14",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T18:57:24Z",
+                        "number": 1436,
+                        "headRefOid": "f3254fa8c5717e52936182ce1deee7cb3fb74bd2",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1ykU8",
+                "updatedAt": "2026-08-08T19:23:30Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-hcww",
+                  "number": 1428,
+                  "title": "pruefer: daemon logs go only to a terminal \u2014 wire the Logf hook to a log file",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-08T19:23:30Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-08T19:23:29Z",
+                        "number": 1429,
+                        "headRefOid": "89637cb038e3289049f9a8f99c5a79de011e7e12",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-08T19:23:28Z",
+                        "number": 1442,
+                        "headRefOid": "b99907ab8550593d14fa98dd8e4d9308c7f9367b",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1y9EA",
+                "updatedAt": "2026-08-08T19:17:43Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-y3hg",
+                  "number": 1439,
+                  "title": "refactor: move pruefer-only code out of fabrik's github package",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-08T19:05:36Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1y9Es",
+                "updatedAt": "2026-08-09T01:12:43Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-1tbg",
+                  "number": 1440,
+                  "title": "merge-train: a red singleton batch is bisected and ejected instead of reported as its own validation failure",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T01:12:42Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T01:12:37Z",
+                        "number": 1465,
+                        "headRefOid": "2baa6ea888ec07d02134b8823a1af018517a63ca",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T01:12:26Z",
+                        "number": 1471,
+                        "headRefOid": "a234c443b452c306977b50ff6585c2a0f0d7473d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zObc",
+                "updatedAt": "2026-08-09T13:47:55Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E1mA",
+                  "number": 1448,
+                  "title": "test: simulated GitHub state model (tests/sim/simgh) backed by real git",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T13:47:54Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "model:opus"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T13:47:50Z",
+                        "number": 1477,
+                        "headRefOid": "0f719b232693edbf20180f2813821ec90795cdc4",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T13:47:48Z",
+                        "number": 1499,
+                        "headRefOid": "869209cf34201606e04bf7e3a687e563ad019816",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1y9FM",
+                "updatedAt": "2026-08-09T04:54:31Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL-1ttA",
+                  "number": 1441,
+                  "title": "CI gate: mergeable_state=unstable clears wait_for_ci, so non-required checks never gate an advance",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T04:54:30Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T04:55:14Z",
+                        "number": 1489,
+                        "headRefOid": "2a4ad3150110f4b00e2a35bb41d51f7e35b557e4",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T04:54:29Z",
+                        "number": 1491,
+                        "headRefOid": "195239ae548fae241ebfe095f55d5942f337cbc6",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zBiQ",
+                "updatedAt": "2026-08-09T03:23:51Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABLB4Nqw",
+                  "number": 1307,
+                  "title": "test(e2e): TestExpectedReviewersPrecedenceGuard passes vacuously \u2014 cannot distinguish declared-empty from undeclared",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:23:49Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      },
+                      {
+                        "name": "stage:Queued:complete"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zKk0",
+                "updatedAt": "2026-08-08T20:15:35Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_C1ug",
+                  "number": 1446,
+                  "title": "feat(pruefer): make the review workflow configurable via a repo-resident skill",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T14:00:18Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOcI",
+                "updatedAt": "2026-08-09T13:46:59Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E2Ow",
+                  "number": 1449,
+                  "title": "test: sim bed harness \u2014 scripted Claude invoker, deterministic clock, smoke pipeline",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T13:46:58Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOcs",
+                "updatedAt": "2026-08-09T17:51:20Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E2lw",
+                  "number": 1450,
+                  "title": "test: port live e2e state-machine scenarios to the simulated bed",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:51:19Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOdY",
+                "updatedAt": "2026-08-09T17:51:21Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E3EA",
+                  "number": 1451,
+                  "title": "test: sim scenarios for settle escalation, cycle limits, restart recovery, and rate limits",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:51:20Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOeQ",
+                "updatedAt": "2026-08-09T17:51:22Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E4Hw",
+                  "number": 1452,
+                  "title": "test: merge-train scenarios in the simulated bed (real git assembly, per-SHA bisection)",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:51:21Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOfA",
+                "updatedAt": "2026-08-09T18:46:16Z",
+                "fieldValueByName": {
+                  "name": "Implement"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E4lg",
+                  "number": 1453,
+                  "title": "test: wire-contract tests for github/ \u2014 GraphQL schema validation and recorded fixtures",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T18:46:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:in_progress"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:cruise"
+                      },
+                      {
+                        "name": "fabrik:locked:arbeithand"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zOfc",
+                "updatedAt": "2026-08-09T17:54:15Z",
+                "fieldValueByName": {
+                  "name": "Specify"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_E5Dg",
+                  "number": 1454,
+                  "title": "test: wire the simulated bed into the release gate and shrink live e2e on evidence",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T17:54:12Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "fabrik:blocked"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zUVg",
+                "updatedAt": "2026-08-08T20:41:17Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_Ij_A",
+                  "number": 1456,
+                  "title": "pruefer: review summary captures model preamble \u2014 needs an explicit summary delimiter",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T14:00:18Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1zrV4",
+                "updatedAt": "2026-08-09T01:12:41Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_f4Sg",
+                  "number": 1458,
+                  "title": "A transient api_error exit is charged against max_retries and pauses the issue, though the stage never ran",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:55:44Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T01:12:34Z",
+                        "number": 1466,
+                        "headRefOid": "bc834641c4cffe9f1e111bc608b13643b85c0f65",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T01:12:26Z",
+                        "number": 1471,
+                        "headRefOid": "a234c443b452c306977b50ff6585c2a0f0d7473d",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1z3SI",
+                "updatedAt": "2026-08-09T02:57:17Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_r9tA",
+                  "number": 1460,
+                  "title": "Non-failure engine pauses are one-way doors: removing fabrik:paused never resets the counter that caused them",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:57:16Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T02:57:12Z",
+                        "number": 1470,
+                        "headRefOid": "5750a46132b17c894fee6dffe4104ad8f852e4bd",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T02:57:01Z",
+                        "number": 1481,
+                        "headRefOid": "c3bef489d2aeb9617b992bf565e4035260061b99",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1z-e8",
+                "updatedAt": "2026-08-09T00:00:59Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_0aUQ",
+                  "number": 1462,
+                  "title": "pruefer: exclude paths before measuring diff size, and filter per file instead of all-or-nothing",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T00:00:57Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg1z-uA",
+                "updatedAt": "2026-08-09T02:57:16Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABL_0qsg",
+                  "number": 1464,
+                  "title": "A busy source-checkout daemon runs arbitrarily stale code with no signal \u2014 detection is gated behind the same idle check as upgrading",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T02:57:15Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T02:57:10Z",
+                        "number": 1475,
+                        "headRefOid": "741308a1003b52b3c7b1ed5df87fed5a778d2d20",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T02:57:01Z",
+                        "number": 1481,
+                        "headRefOid": "c3bef489d2aeb9617b992bf565e4035260061b99",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg10c10",
+                "updatedAt": "2026-08-09T03:42:25Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMATooQ",
+                  "number": 1482,
+                  "title": "Rate-limit banner always says \"GraphQL\" and clears bucket-blind \u2014 REST exhaustion is reported as the wrong resource",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T03:42:24Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T03:42:22Z",
+                        "number": 1485,
+                        "headRefOid": "132639ba2878d3496ce7864560e3279d4d5fc769",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T03:42:21Z",
+                        "number": 1486,
+                        "headRefOid": "e0a72106a37958ce16e6ed08a3c66261fadfd8e1",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12Okw",
+                "updatedAt": "2026-08-09T14:56:19Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMCPl9A",
+                  "number": 1496,
+                  "title": "fix(pruefer): re-review loop at unchanged head \u2014 COMMENTED reviews never supersede in FetchPRReviews",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T14:56:18Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T14:56:12Z",
+                        "number": 1502,
+                        "headRefOid": "d608e5ea48e0d55ce30411b7ca466813181ce8bf",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T14:56:11Z",
+                        "number": 1504,
+                        "headRefOid": "1b3e011872f83790a9da501c468946d7981804b9",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12OlE",
+                "updatedAt": "2026-08-09T17:51:55Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMCPmSQ",
+                  "number": 1497,
+                  "title": "fix(pruefer): give the review prompt prior-thread context so findings stop repeating",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T17:51:53Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T17:51:52Z",
+                        "number": 1505,
+                        "headRefOid": "498cb6489d52d89ec4e189e6cf00e9be24fb496a",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T17:51:51Z",
+                        "number": 1506,
+                        "headRefOid": "eba9887c61e4280a2c49c7b70195cdb0fccfebaf",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12Z-I",
+                "updatedAt": "2026-08-09T13:47:04Z",
+                "fieldValueByName": {
+                  "name": "Backlog"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMCQMfw",
+                  "number": 1498,
+                  "title": "test(simgh): close the deferred fidelity and robustness gaps from #1448",
+                  "state": "OPEN",
+                  "updatedAt": "2026-08-09T13:47:03Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": []
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": []
+                  }
+                }
+              },
+              {
+                "id": "PVTI_lADOENB0Ac4BW0n_zg12baQ",
+                "updatedAt": "2026-08-09T14:52:11Z",
+                "fieldValueByName": {
+                  "name": "Done"
+                },
+                "content": {
+                  "__typename": "Issue",
+                  "id": "I_kwDOR2bN_c8AAAABMAHNsg",
+                  "number": 1472,
+                  "title": "extend-turns pre-grant in merge_train.go derives its turn budget from the wrong base (latent; inert on configs with a bare holding stage)",
+                  "state": "CLOSED",
+                  "updatedAt": "2026-08-09T14:52:10Z",
+                  "repository": {
+                    "nameWithOwner": "handarbeit/fabrik"
+                  },
+                  "labels": {
+                    "nodes": [
+                      {
+                        "name": "bug"
+                      },
+                      {
+                        "name": "stage:Research:complete"
+                      },
+                      {
+                        "name": "stage:Plan:complete"
+                      },
+                      {
+                        "name": "stage:Implement:complete"
+                      },
+                      {
+                        "name": "stage:Review:complete"
+                      },
+                      {
+                        "name": "stage:Validate:complete"
+                      },
+                      {
+                        "name": "stage:Done:complete"
+                      },
+                      {
+                        "name": "stage:Specify:complete"
+                      },
+                      {
+                        "name": "fabrik:yolo"
+                      }
+                    ]
+                  },
+                  "closedByPullRequestsReferences": {
+                    "nodes": [
+                      {
+                        "updatedAt": "2026-08-09T14:52:03Z",
+                        "number": 1501,
+                        "headRefOid": "50ab10218e1ef18eed5c9d4dbb2a26cdb8651497",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      },
+                      {
+                        "updatedAt": "2026-08-09T14:52:02Z",
+                        "number": 1503,
+                        "headRefOid": "fb72ed3db690fa6531aa7ffafdc4921f848155d7",
+                        "isMergeQueueEnabled": false,
+                        "isInMergeQueue": false,
+                        "mergeQueueEntry": null
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

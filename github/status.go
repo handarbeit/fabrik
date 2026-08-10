@@ -9,9 +9,8 @@ type StatusField struct {
 	OrderedOptionNames []string          // option names in API-returned order (first = leftmost column)
 }
 
-// UpdateProjectItemStatus moves an item to a different status column on the project board.
-func (c *Client) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error {
-	query := `
+// updateProjectItemStatusMutation is the GraphQL mutation used by UpdateProjectItemStatus.
+const updateProjectItemStatusMutation = `
 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
   updateProjectV2ItemFieldValue(input: {
     projectId: $projectId,
@@ -24,6 +23,10 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
     }
   }
 }`
+
+// UpdateProjectItemStatus moves an item to a different status column on the project board.
+func (c *Client) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error {
+	query := updateProjectItemStatusMutation
 	vars := map[string]interface{}{
 		"projectId": projectID,
 		"itemId":    itemID,
@@ -38,15 +41,18 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 	return nil
 }
 
-// ArchiveProjectItem archives a project item so it no longer appears in paginated board results.
-// Archiving is idempotent — calling it on an already-archived item is a no-op.
-func (c *Client) ArchiveProjectItem(projectID, itemID string) error {
-	query := `
+// archiveProjectItemMutation is the GraphQL mutation used by ArchiveProjectItem.
+const archiveProjectItemMutation = `
 mutation($projectId: ID!, $itemId: ID!) {
   archiveProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) {
     item { id }
   }
 }`
+
+// ArchiveProjectItem archives a project item so it no longer appears in paginated board results.
+// Archiving is idempotent — calling it on an already-archived item is a no-op.
+func (c *Client) ArchiveProjectItem(projectID, itemID string) error {
+	query := archiveProjectItemMutation
 	vars := map[string]interface{}{
 		"projectId": projectID,
 		"itemId":    itemID,
@@ -59,9 +65,8 @@ mutation($projectId: ID!, $itemId: ID!) {
 	return nil
 }
 
-// FetchStatusField retrieves the Status field ID and its option IDs for a project.
-func (c *Client) FetchStatusField(projectID string) (*StatusField, error) {
-	query := `
+// fetchStatusFieldQuery is the GraphQL query used by FetchStatusField.
+const fetchStatusFieldQuery = `
 query($projectId: ID!) {
   node(id: $projectId) {
     ... on ProjectV2 {
@@ -77,6 +82,10 @@ query($projectId: ID!) {
     }
   }
 }`
+
+// FetchStatusField retrieves the Status field ID and its option IDs for a project.
+func (c *Client) FetchStatusField(projectID string) (*StatusField, error) {
+	query := fetchStatusFieldQuery
 	vars := map[string]interface{}{
 		"projectId": projectID,
 	}
