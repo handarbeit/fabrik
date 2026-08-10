@@ -812,6 +812,29 @@ merging leaves a stale record on the branch its successor reuses, and
 board projection (`findPRByHeadLocked`) applies the same rule, so the two reads
 can never report different linked PRs for one issue.
 
+### Linkage and review data are base-branch-independent; production's aren't — **Simplified, surfaced by #1450's base:\<branch\> port**
+
+`FindPRForIssue`/`FetchLinkedPR` (above) match on the head branch, and
+`FetchPRReviews`/`FetchPRReviewRequests` key directly off the PR number —
+neither path treats a PR's *base* branch specially. Production's real
+GraphQL query populates `closingIssuesReferences`/
+`closedByPullRequestsReferences` (and the review data nested inside them)
+**only for PRs targeting the repo's default branch**; a PR opened against
+any other base gets those fields back empty. This asymmetry is exactly the
+defect class handarbeit/fabrik#1046 was filed against, and #1047/#1050
+shipped the fixes (issue<->PR linkage verification via
+`verifyAndHealLinkageByBody`, and a base-independent review-gate data feed).
+
+Because the model resolves both linkage and review data the same way
+regardless of base branch, that GraphQL asymmetry cannot be reproduced here:
+every base branch behaves identically to every other. `tests/sim`'s port of
+`TestBaseBranchPipeline` (`tests/sim/basebranch_test.go`) can therefore prove
+the *mechanism* — a `base:<branch>` PR is correctly targeted, the pipeline
+does not falsely pause at Implement, and the review gate clears off a real
+review — but it is not regression coverage for the #1046/#1047/#1050 defect
+itself. `tests/e2e/basebranch_test.go` remains the only coverage of that,
+and per ADR-1449/R3 stays live for exactly this reason.
+
 ### Issue and PR numbers share one sequence — **Modelled**
 
 GitHub allocates issue and pull-request numbers from a single per-repo counter,
