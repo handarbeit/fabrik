@@ -495,6 +495,19 @@ will find the PR still open; it must call `MergePR` to make the merge happen.
 **Risk:** medium. Any engine behaviour that depends on GitHub completing an
 auto-merge asynchronously cannot be tested here.
 
+**Concrete finding from #1450's port** (`tests/sim/auto_merge_test.go`'s
+`TestYoloAutoMergeLabel`): this gap is exactly as advertised, no worse. The
+port proves FR-004 (the engine enables native auto-merge and applies
+`fabrik:auto-merge-enabled` at Validate-complete) genuinely, then simulates
+GitHub's async completion via a direct `MergePR` call before proving FR-005
+(`checkAutoMergeConvergence` detects the merge and clears the label). What it
+cannot prove — and does not claim to — is that GitHub would have completed
+the merge on its own once enabled; only the live `tests/e2e/auto_merge_test.go`
+covers that. No fix is proposed: teaching the sim to autonomously "watch
+checks and merge when green" would mean modelling GitHub's own scheduling
+policy, a much larger undertaking than this gap's medium risk currently
+justifies.
+
 ### Merge queue — **Simplified (bookkeeping only)**
 
 `EnqueuePullRequest` / `DequeuePullRequest` record queue membership and assign a
