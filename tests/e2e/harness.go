@@ -990,6 +990,38 @@ func tryLogLineContaining(env *Env, substring string, startOffset int64) (string
 	}
 }
 
+// allLogLinesContaining does a single, non-fatal scan of the test bed's
+// fabrik.log starting at startOffset for every line containing substring —
+// unlike tryLogLineContaining, which returns only the first match, this
+// returns all of them. Used where a caller must distinguish which of several
+// matching lines actually matters (e.g. AC7's per-review-ID check), rather
+// than merely detecting presence or absence.
+func allLogLinesContaining(env *Env, substring string, startOffset int64) ([]string, error) {
+	f, err := os.Open(env.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		return nil, err
+	}
+	var matches []string
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadString('\n')
+		if strings.Contains(line, substring) {
+			matches = append(matches, line)
+		}
+		if err != nil {
+			return matches, nil
+		}
+	}
+}
+
 // ── small internals ────────────────────────────────────────────────────────
 
 func getenvOr(key, fallback string) string {
