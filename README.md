@@ -102,6 +102,8 @@ GitHub Project Board (source of truth)
 > **Cold-start optimization (v0.0.58):** On startup, closed Done items are seeded from probe data as terminal without a deep-fetch, reducing cold-start GraphQL cost by ~80–90%. Combined with probe-driven polling, this makes running two Fabrik instances on a single token budget practical.
 >
 > **Anthropic auth namespace scrub (v0.0.77):** Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default (`ANTHROPIC_*` wildcard, plus an enumerated `CLAUDE_CODE_*` auth-selector list) — an ambient `ANTHROPIC_API_KEY` in the engine's environment can no longer silently redirect a stage from subscription billing to metered API billing. `FABRIK_ANTHROPIC_API_KEY` is the only supported opt-in for API billing; `apiKeyHelper` is refused outright, both at startup and per-invocation. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](docs/USER_GUIDE.md#anthropic-auth-namespace-scrub--apikeyhelper-refusal) in the User Guide.
+>
+> **GitHub Enterprise Server support (v0.0.78):** Fabrik can run against a GHES instance instead of github.com — pure endpoint/host configuration, no adapter layer. Set `--ghes-host` / `FABRIK_GHES_HOST` (or `ghes_host` in `.fabrik/config.yaml`) and Fabrik independently derives the REST (`/api/v3/...`) and GraphQL (`/api/graphql`) endpoints, points bare-clone URLs and commit noreply emails at your host, and propagates `GH_HOST` to every stage worker's `gh` CLI calls so they target the same instance. Absent any GHES configuration, behavior is unchanged. See [GitHub Enterprise Server Support](docs/USER_GUIDE.md#github-enterprise-server-support) in the User Guide.
 
 ### Webhook Mode (Optional)
 
@@ -161,14 +163,18 @@ requires auto-advance to be active):
    Gemini that self-trigger via webhook without appearing in the formal
    reviewer list). If the condition isn't met and the per-cycle timeout
    expires, the issue pauses with `fabrik:awaiting-input`.
-3. **Re-invocation:** When the gate clears and there are unresolved PR
-   review thread comments, Fabrik re-invokes the stage agent to address that
-   inline feedback and push a new commit, then waits for the next review
-   round. Reviews with no inline thread comments—including reviews with only
-   top-level review text (for example, bot approvals or summary-only
-   comments)—do not trigger re-invocation, and the issue advances normally.
-   After each re-invocation cycle, Fabrik posts a PR summary comment with a
-   per-thread footer listing how each inline review thread was addressed.
+3. **Re-invocation:** When the gate clears, Fabrik re-invokes the stage
+   agent to address unresolved inline PR review thread comments **and** the
+   top-level body of any review whose state is not `DISMISSED`/`PENDING`
+   (`CHANGES_REQUESTED`, `COMMENTED`, and `APPROVED` bodies are all treated
+   as potentially actionable — this is what lets a bot reviewer like Pruefer,
+   which submits its entire finding set as a `COMMENTED` review, get picked
+   up and addressed instead of silently dropped), then waits for the next
+   review round. Only a truly empty-bodied `APPROVED` review with no inline
+   comments has nothing to route, so re-invocation is skipped and the issue
+   advances normally. After each re-invocation cycle, Fabrik posts a PR
+   summary comment with a per-thread footer listing how each inline review
+   thread was addressed.
 
 > **Configuration:** `--max-review-cycles` / `FABRIK_MAX_REVIEW_CYCLES` (default `5`)
 > caps the number of re-invocation cycles per session. `--review-wait-timeout` /
@@ -217,6 +223,22 @@ appears on next TUI startup instead, so operator customizations are never silent
 overwritten. See
 [USER_GUIDE.md §Recovering from Wedged State](docs/USER_GUIDE.md#recovering-from-wedged-state)
 for the full escape-hatch procedure.
+
+### Clean-Stop Shutdown
+
+Sending `SIGINT` or `SIGTERM` (Ctrl-C on the bare CLI, or quitting the TUI)
+triggers a clean stop, not a kill: Fabrik stops admitting new work, pauses
+every in-flight issue durably (`fabrik:paused` + `fabrik:awaiting-input`,
+plus an audit comment naming the interrupted stage), and commits and pushes
+any uncommitted worktree progress before winding down. The entire drain —
+Claude worker kill-grace escalation plus the pause-write phase — is bounded
+by `--drain-deadline` (default 30 seconds), so Fabrik exits rather than
+hanging if something gets stuck. Force-quit remains available as an escape
+hatch: press Ctrl-C (or send SIGINT/SIGTERM) a second time while the clean
+stop is in progress to exit immediately with no further label writes or
+worktree commits. See
+[USER_GUIDE.md §Graceful Shutdown](docs/USER_GUIDE.md#graceful-shutdown)
+for the full sequence.
 
 ## Default Pipeline
 
