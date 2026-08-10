@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -37,6 +38,22 @@ type reinvokeOpts struct {
 	// worktree dir and the processComments error. Used for CI's no-op-SHA
 	// recording and rebase's auto-merge re-enablement.
 	after func(workDir string, err error)
+}
+
+// commentIDsForLog joins the IDs of a dispatched comment batch for inclusion
+// in dispatchReinvoke's log line, so a log scraper (e.g. the e2e suite) can
+// distinguish which review/comment a given reinvoke was dispatched for,
+// rather than relying on a count- or timing-based proxy. "|" is used as the
+// separator: GraphQL node IDs are base64url (comma-safe already, but "|"
+// avoids any ambiguity), and review-body synthetic IDs (reviewBodyCommentID,
+// "review-body:<DatabaseID>") never contain it either. Returns "" for an
+// empty batch.
+func commentIDsForLog(comments []gh.Comment) string {
+	ids := make([]string, len(comments))
+	for i, c := range comments {
+		ids[i] = c.ID
+	}
+	return strings.Join(ids, "|")
 }
 
 // dispatchReinvoke is the shared goroutine scaffold for all three reinvoke
@@ -112,7 +129,7 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
 		}
 
-		e.logf(item.Number, opts.tag, "re-invoking stage %q via comment processing\n", stage.Name)
+		e.logf(item.Number, opts.tag, "re-invoking stage %q via comment processing (comments: %s)\n", stage.Name, commentIDsForLog(comments))
 		err := e.processComments(ctx, board, item, reinvokeStage, comments, onPIDReady)
 
 		if opts.after != nil {
