@@ -3,6 +3,8 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"syscall"
@@ -404,4 +406,112 @@ func lockHeld(t *testing.T, path string) bool {
 	}
 	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return false
+}
+
+// releaseCheckCounter starts a test server standing in for GitHub's release
+// API, counting hits and always reporting "up to date" (same tag as the
+// running version) so no download/exec is ever attempted.
+func releaseCheckCounter(t *testing.T) (srv *httptest.Server, hits func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	count := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		count++
+		mu.Unlock()
+		fmt.Fprint(w, `{"tag_name": "v0.0.1", "assets": []}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return count
+	}
+}
+
+// TestDaemonRun_UpgradeCheckFiresAfterPollWhenEnabled verifies that Run
+// invokes the upgrade check at the poll boundary when Config.AutoUpgrade is
+// set, and that the 30-minute throttle suppresses repeat checks across
+// several fast poll cycles within the same Run call.
+func TestDaemonRun_UpgradeCheckFiresAfterPollWhenEnabled(t *testing.T) {
+	srv, hits := releaseCheckCounter(t)
+
+	origBase := releaseAPIBaseURL
+	releaseAPIBaseURL = srv.URL
+	t.Cleanup(func() { releaseAPIBaseURL = origBase })
+	setVersion(t, "v0.0.1")
+
+	d := &Daemon{
+		Config:    Config{PollInterval: 15 * time.Millisecond, AutoUpgrade: true},
+		FabrikDir: t.TempDir(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := hits(); got != 1 {
+		t.Errorf("release-check hits = %d, want exactly 1 (throttle should suppress repeats across fast poll cycles)", got)
+	}
+}
+
+// TestDaemonRun_UpgradeCheckSkippedWhenDisabled verifies that Run never
+// invokes the upgrade check when Config.AutoUpgrade is false (the default) —
+// an operator must opt in.
+func TestDaemonRun_UpgradeCheckSkippedWhenDisabled(t *testing.T) {
+	srv, hits := releaseCheckCounter(t)
+
+	origBase := releaseAPIBaseURL
+	releaseAPIBaseURL = srv.URL
+	t.Cleanup(func() { releaseAPIBaseURL = origBase })
+	setVersion(t, "v0.0.1")
+
+	d := &Daemon{
+		Config:    Config{PollInterval: 15 * time.Millisecond, AutoUpgrade: false},
+		FabrikDir: t.TempDir(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := hits(); got != 0 {
+		t.Errorf("release-check hits = %d, want 0 (AutoUpgrade is false)", got)
+	}
+}
+
+// TestDaemonRun_UpgradeCheckSkippedWhenContextAlreadyCancelled guards the
+// ctx.Err() == nil guard in Run's loop: neither selfupgrade helper takes a
+// context and a successful upgrade ends in syscall.Exec, so once started
+// nothing can abort it. This reproduces the shutdown race the guard exists
+// for — a cancellation that has already landed by the time poll() returns —
+// and asserts the upgrade check is suppressed rather than firing and
+// silently discarding the pending shutdown.
+func TestDaemonRun_UpgradeCheckSkippedWhenContextAlreadyCancelled(t *testing.T) {
+	srv, hits := releaseCheckCounter(t)
+
+	origBase := releaseAPIBaseURL
+	releaseAPIBaseURL = srv.URL
+	t.Cleanup(func() { releaseAPIBaseURL = origBase })
+	setVersion(t, "v0.0.1")
+
+	d := &Daemon{
+		Config:    Config{PollInterval: 15 * time.Millisecond, AutoUpgrade: true},
+		FabrikDir: t.TempDir(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before Run's first poll() even starts
+
+	if err := d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := hits(); got != 0 {
+		t.Errorf("release-check hits = %d, want 0 (ctx was already cancelled before the poll boundary)", got)
+	}
 }
