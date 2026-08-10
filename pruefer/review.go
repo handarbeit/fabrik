@@ -172,7 +172,8 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		return ReviewOutcome{Err: fmt.Errorf("claude review invocation: %w", err)}
 	}
 
-	summary, findings := parseReviewFindings(result.Text)
+	summary, findings, parseInfo := parseReviewFindings(result.Text)
+	logSummaryParseInfo(pr.Number, parseInfo)
 	findings = dedupeFindings(findings)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
@@ -190,6 +191,23 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
 	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD}
+}
+
+// logSummaryParseInfo implements R4: logs when parseReviewFindings' summary
+// extraction fell back to positional parsing (markers missing or malformed),
+// or when a well-formed marker pair was found but non-empty preamble text
+// was discarded ahead of PRUEFER_SUMMARY_BEGIN — both are compliance-drift
+// signals distinct from the happy path (markers found, zero-byte preamble),
+// which logs nothing (AC5). parseReviewFindings itself stays pure; this is
+// the one call site with pr.Number in scope to log against.
+func logSummaryParseInfo(prNumber int, info SummaryParseInfo) {
+	if !info.MarkersFound {
+		logf(prNumber, "warn", "review summary had no PRUEFER_SUMMARY_BEGIN/END markers (or a malformed pair) — used positional fallback\n")
+		return
+	}
+	if info.DiscardedBytes > 0 {
+		logf(prNumber, "warn", "discarded %d byte(s) of preamble before PRUEFER_SUMMARY_BEGIN\n", info.DiscardedBytes)
+	}
 }
 
 // decideEvent computes the review event to submit, deterministically, from
