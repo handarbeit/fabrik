@@ -514,3 +514,16 @@ func TestBuildReviewPrompt_ContainsR5RevisedNitpickInstruction(t *testing.T) {
 		t.Errorf("expected the R5 raised-bar instruction in the prompt, got:\n%s", prompt)
 	}
 }
+
+// TestBuildReviewPrompt_ContainsSummaryDelimiterMarkers pins #1456's R1: the
+// output contract must instruct Claude to wrap its prose summary in the
+// literal PRUEFER_SUMMARY_BEGIN/END marker strings, so a future edit to the
+// prompt can't silently drop the contract findings.go's parser depends on.
+func TestBuildReviewPrompt_ContainsSummaryDelimiterMarkers(t *testing.T) {
+	prompt := buildReviewPrompt(ReviewRequest{})
+	for _, want := range []string{"PRUEFER_SUMMARY_BEGIN", "PRUEFER_SUMMARY_END"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected marker %q in prompt, got:\n%s", want, prompt)
+		}
+	}
+}
