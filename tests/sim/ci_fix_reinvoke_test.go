@@ -1,19 +1,108 @@
 package sim
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tests/sim/simclaude"
 )
 
 // ciFixSentinel is the required-context name standing in for the live
 // suite's "ci-fix-sentinel" check.
 const ciFixSentinel = "ci-fix-sentinel"
+
+// ciFixReinvokeSeq gives every ciFixCommentScript call a unique commit —
+// mirrors simclaude's own commitStageMarker (invocationSeq in
+// tests/sim/simclaude/git.go), which this package cannot call directly
+// (unexported, different package).
+var ciFixReinvokeSeq atomic.Uint64
+
+// ciFixCommentScript returns a simclaude.CommentScript for the CI-fix
+// reinvoke's InvokeForComments call (dispatchCIFixReinvoke re-invokes via
+// *comment* processing, not a normal stage Invoke — see engine/ci.go's doc
+// comment on dispatchCIFixReinvoke).
+//
+// R5 fidelity note: production's processComments (engine/comments.go) never
+// pushes the worktree itself — a live comment-review Claude session pushes
+// as part of its own tool use, per the -comment skills' "commit and push"
+// instructions. tests/sim/simclaude's DefaultCommentScript faithfully
+// mirrors that: it commits locally but never pushes (see git.go), which is
+// correct for scenarios that only need the *stage to complete* (e.g.
+// TestFailureShape_CommentReviewInvocation) but is silently wrong for one
+// that also needs the new commit to be *observable* — as this scenario does,
+// since the CI-fix loop's whole premise is a new PR head SHA existing check
+// runs can be seeded against. This is exactly the kind of gap AC10's
+// non-vacuity bar exists to catch: without an explicit push here, every
+// reinvoke would silently keep re-reporting the same (still-failing) SHA
+// forever, which is what this port's first draft actually did before this
+// fix — recorded as a fidelity finding in FIDELITY.md.
+func ciFixCommentScript() simclaude.CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		if err := commitAndPushCIFixAttempt(workDir, issue.Number); err != nil {
+			return "", false, engine.TokenUsage{}, err
+		}
+		usage := engine.TokenUsage{InputTokens: 500, OutputTokens: 100, CostUSD: 0.02, TurnsUsed: 2, MaxTurns: 50}
+		return "FABRIK_STAGE_COMPLETE\n", true, usage, nil
+	}
+}
+
+// commitAndPushCIFixAttempt appends a uniquely-numbered line to a scratch
+// file, commits it, and pushes to the issue's fabrik/issue-<N> branch —
+// mirroring #1323's live fixture design (an unconditional, mechanically
+// verifiable action every reinvoke takes, independent of any judgment about
+// fixability) and, unlike simclaude's own DefaultCommentScript, actually
+// pushing so the new commit is observable via FetchLinkedPR.
+func commitAndPushCIFixAttempt(workDir string, issueNumber int) error {
+	seq := ciFixReinvokeSeq.Add(1)
+	relPath := filepath.Join(".simclaude", "ci-fix-attempts.log")
+	full := filepath.Join(workDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return fmt.Errorf("commitAndPushCIFixAttempt: mkdir: %w", err)
+	}
+	f, err := os.OpenFile(full, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("commitAndPushCIFixAttempt: open: %w", err)
+	}
+	if _, err := fmt.Fprintf(f, "attempt-%d\n", seq); err != nil {
+		f.Close()
+		return fmt.Errorf("commitAndPushCIFixAttempt: write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("commitAndPushCIFixAttempt: close: %w", err)
+	}
+
+	run := func(args ...string) error {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), out, err)
+		}
+		return nil
+	}
+	if err := run("add", relPath); err != nil {
+		return err
+	}
+	if err := run(
+		"-c", "user.name=simclaude",
+		"-c", "user.email=simclaude@fabrik.test",
+		"commit", "-m", fmt.Sprintf("chore(simclaude): ci-fix attempt %d for issue #%d", seq, issueNumber),
+	); err != nil {
+		return err
+	}
+	branch := fmt.Sprintf("fabrik/issue-%d", issueNumber)
+	return run("push", "origin", "HEAD:refs/heads/"+branch)
+}
 
 // ciFixStages is a minimal 3-stage pipeline (Implement -> Validate -> Done):
 // nothing about the CI-fix reinvoke loop depends on Specify/Research/Plan/
@@ -84,6 +173,21 @@ func TestCIFixReinvoke(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{
 		Stages: ciFixStages(),
+		// StartTime near real time.Now(), NOT the package default
+		// (2026-01-01) — checkCIGate's mergeable_state-derived timeout
+		// branches (classifyCIFromMergeableState, engine/ci.go) compare
+		// time.Since(appliedAt) against real wall-clock time, where appliedAt
+		// comes from FetchLabelAppliedAt (GitHub-anchored, driven by this
+		// Env's injected Clock). With the far-past default StartTime, the
+		// very first poll where a check run hasn't been seeded yet for the
+		// current SHA (a real gap in this scenario: the SHA is only known,
+		// and its check run only seeded, reactively after Validate dispatches)
+		// would already read as many months stale relative to real "now" —
+		// instantly exceeding ciWaitTimeout (30m default) and pausing before
+		// the CI-fix reinvoke ever gets a chance to fire. Scenarios that WANT
+		// an instant timeout (timeout_test.go) deliberately exploit this same
+		// mismatch; this scenario needs the opposite.
+		StartTime: time.Now(),
 		// engine.Config has no built-in zero-value default for
 		// MaxCiFixCycles the way cmd/root.go's flag resolution does
 		// (defaulting to 5 there) — NewWithDeps takes the struct literal
@@ -93,10 +197,21 @@ func TestCIFixReinvoke(t *testing.T) {
 		// explicitly (mirroring production's own default).
 		ConfigureCfg: func(cfg *engine.Config) { cfg.MaxCiFixCycles = 5 },
 	})
+	// dispatchCIFixReinvoke re-invokes via InvokeForComments, not Invoke — see
+	// ciFixCommentScript's doc comment for why the default comment script
+	// (commits but never pushes) isn't sufficient for this scenario.
+	env.Claude.ForStageComments("Validate", ciFixCommentScript())
 	// Direct-merge fallback (matches smoke_test.go): deterministic Done
 	// advancement once the gate clears, without simulating an async native
 	// auto-merge convergence (auto_merge_test.go's concern, not this one's).
 	env.Sim.Sim().SeedRepoAccess(env.OwnerRepo, gh.RepoAccess{AllowAutoMerge: false, CanPush: true})
+	// SeedRequiredContexts is load-bearing, not cosmetic: without it,
+	// deriveMergeableState (tests/sim/simgh/prs.go) has nothing to check
+	// before this scenario reactively seeds its first check run, and an
+	// empty required-contexts set vacuously derives "clean" — racing the CI
+	// gate closed before fabrik:awaiting-ci is ever observably present.
+	// Registering the context up front makes the pre-seed state genuinely
+	// "blocked" instead, closing that window.
 	env.Sim.Sim().SeedRequiredContexts(env.OwnerRepo, "main", []string{ciFixSentinel})
 	if err := env.Sim.Sim().Err(); err != nil {
 		t.Fatalf("seeding: %v", err)
@@ -131,14 +246,15 @@ func TestCIFixReinvoke(t *testing.T) {
 		t.Fatalf("SeedCheckRun: %v", err)
 	}
 
-	// The CI-fix reinvoke re-dispatches Validate — StageCallCount reaching 2
-	// is the sim-observable proxy for "the reinvoke fired" (the live test's
+	// The CI-fix reinvoke dispatches via InvokeForComments, not Invoke
+	// (dispatchCIFixReinvoke, engine/ci.go) — CommentCallCount reaching 1 is
+	// the sim-observable proxy for "the reinvoke fired" (the live test's
 	// WaitForPRCommentContaining a second "stage: Validate" comment has no
 	// sim equivalent since sim posts no comments at all; this is a stronger
 	// signal in the sense AC10 asks for — it's the dispatch itself, not
 	// prose that mentions it).
 	AdvanceUntil(t, env, func(env *Env) bool {
-		return env.Claude.StageCallCount("Validate") >= 2
+		return env.Claude.CommentCallCount("Validate") >= 1
 	}, 80)
 
 	pr2, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
@@ -162,8 +278,12 @@ func TestCIFixReinvoke(t *testing.T) {
 	WaitForProjectStatus(t, env, num, "Done", 80)
 
 	// No-rebase-storm guard (baselined post-initial-dispatch — see doc
-	// comment): exactly one CI-fix commit beyond baselineSHA.
-	finalCommits := gitCommitCount(t, simBareDir, baselineSHA, "main")
+	// comment): exactly one CI-fix commit beyond baselineSHA, measured on the
+	// PR's own head (sha2) — mirroring what the live test's PRCommitCount
+	// actually counts (commits on the PR branch), not commits reachable on
+	// the base branch after merge (which would also include the merge commit
+	// itself and is not what "no rebase storm" is about).
+	finalCommits := gitCommitCount(t, simBareDir, baselineSHA, sha2)
 	if finalCommits != 1 {
 		t.Fatalf("expected exactly 1 CI-fix commit beyond the post-initial-dispatch baseline, got %d — possible rebase storm", finalCommits)
 	}
@@ -188,10 +308,17 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	const maxCycles = 2
 	env := NewEnv(t, EnvOptions{
 		Stages: ciFixStages(),
+		// See TestCIFixReinvoke's StartTime comment — same reasoning applies
+		// here: this test wants the genuine cycle-limit path to fire, not an
+		// incidental real-wall-clock timeout from the far-past default.
+		StartTime: time.Now(),
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.MaxCiFixCycles = maxCycles
 		},
 	})
+	env.Claude.ForStageComments("Validate", ciFixCommentScript())
+	// See TestCIFixReinvoke's SeedRequiredContexts comment — same
+	// vacuous-clean race applies here before the first check run is seeded.
 	env.Sim.Sim().SeedRequiredContexts(env.OwnerRepo, "main", []string{ciFixSentinel})
 	if err := env.Sim.Sim().Err(); err != nil {
 		t.Fatalf("seeding: %v", err)
@@ -222,17 +349,21 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 	}
 	seedFailure(baselineSHA)
 
+	// dispatchCIFixReinvoke dispatches via InvokeForComments — CommentCallCount
+	// reaching N is "the Nth reinvoke fired" (see ciFixCommentScript's doc
+	// comment). maxCycles reinvokes must happen before the cycle limit pauses
+	// the issue on the (maxCycles+1)th ciFailure classification.
 	seenSHAs := map[string]bool{baselineSHA: true}
-	for call := 2; call <= maxCycles+1; call++ {
+	for reinvokeNum := 1; reinvokeNum <= maxCycles; reinvokeNum++ {
 		AdvanceUntil(t, env, func(env *Env) bool {
-			return env.Claude.StageCallCount("Validate") >= call
+			return env.Claude.CommentCallCount("Validate") >= reinvokeNum
 		}, 80)
 		curPR, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
 		if err != nil {
-			t.Fatalf("FetchLinkedPR (call %d): %v", call, err)
+			t.Fatalf("FetchLinkedPR (reinvoke %d): %v", reinvokeNum, err)
 		}
 		if seenSHAs[curPR.HeadSHA] {
-			t.Fatalf("Validate dispatch #%d landed a SHA already seen (%s) — no new commit was pushed", call, curPR.HeadSHA)
+			t.Fatalf("CI-fix reinvoke #%d landed a SHA already seen (%s) — no new commit was pushed", reinvokeNum, curPR.HeadSHA)
 		}
 		seenSHAs[curPR.HeadSHA] = true
 		seedFailure(curPR.HeadSHA)
