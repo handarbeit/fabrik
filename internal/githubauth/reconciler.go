@@ -18,10 +18,30 @@ import (
 // first identity check — see the justBootstrapped branch in Reconcile.
 var identityValidationRetryDelays = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
 
-// identityValidationSleep is identityValidationRetryDelays' delay function —
-// a package var so tests can replace it with a no-op instead of sleeping for
-// real.
-var identityValidationSleep = time.Sleep
+// identityValidationSleepFunc is identityValidationRetryDelays' delay
+// function signature — a package var so tests can replace it with a
+// near-instant stand-in instead of sleeping for real. It still takes ctx
+// (and returns ctx.Err() on cancellation) so a test substitute can exercise
+// the cancellation path too, not just skip the delay.
+type identityValidationSleepFunc func(ctx context.Context, d time.Duration) error
+
+// identityValidationSleep is identityValidationRetryDelays' delay function.
+// The default selects on ctx.Done() vs. a timer so a canceled context (e.g.
+// shutdown) aborts the wait immediately instead of always sleeping out the
+// full delay — this only shortens the *pause between* retry attempts; the
+// gh.FetchAppSlug call each attempt makes is not itself ctx-aware yet (a
+// separate, larger gap — see the Reconcile-wide ctx-threading note in
+// Reconcile's doc comment).
+var identityValidationSleep identityValidationSleepFunc = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // retryIdentityCheckAfterCreation re-attempts an identity check that just
 // failed immediately after this exact Reconcile call created or recreated
@@ -30,7 +50,7 @@ var identityValidationSleep = time.Sleep
 // Shared so the two call sites can't drift out of sync on the backoff
 // policy; each keeps its own error message, since "just created" and "just
 // recreated" warrant different wording.
-func retryIdentityCheckAfterCreation(baseURL string, jwt string) (slug string, err error) {
+func retryIdentityCheckAfterCreation(ctx context.Context, baseURL string, jwt string) (slug string, err error) {
 	// Seeded non-nil so an empty identityValidationRetryDelays (impossible
 	// today — the package-level slice always has two entries — but not
 	// guaranteed by the type system, and one accidental edit or test
@@ -42,7 +62,9 @@ func retryIdentityCheckAfterCreation(baseURL string, jwt string) (slug string, e
 	// surfaced failure this is supposed to guarantee.
 	err = errors.New("no retry attempts configured (identityValidationRetryDelays is empty)")
 	for _, delay := range identityValidationRetryDelays {
-		identityValidationSleep(delay)
+		if sleepErr := identityValidationSleep(ctx, delay); sleepErr != nil {
+			return "", fmt.Errorf("waiting to retry identity check: %w", sleepErr)
+		}
 		if slug, err = gh.FetchAppSlug(baseURL, jwt); err == nil {
 			return slug, nil
 		}
@@ -262,7 +284,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		// only self-heal (re-enter the manifest flow) below when the App
 		// was NOT just created in this call.
 		if justBootstrapped {
-			slug, err = retryIdentityCheckAfterCreation(opts.BaseURL, jwt)
+			slug, err = retryIdentityCheckAfterCreation(ctx, opts.BaseURL, jwt)
 			if err != nil {
 				if opts.AppInstallationID != 0 {
 					return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d is a leftover pin from before this run — it cannot be an installation of this brand-new App, and will need to be updated (or cleared to let discovery run) once the App's identity resolves; retry Reconcile", appID, len(identityValidationRetryDelays), err, opts.AppInstallationID)
@@ -331,7 +353,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			// adding persisted-timestamp state for it.
 			slug, err = gh.FetchAppSlug(opts.BaseURL, jwt)
 			if err != nil {
-				slug, err = retryIdentityCheckAfterCreation(opts.BaseURL, jwt)
+				slug, err = retryIdentityCheckAfterCreation(ctx, opts.BaseURL, jwt)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("re-created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as a second deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)

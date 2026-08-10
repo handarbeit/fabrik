@@ -1,11 +1,13 @@
 package githubauth
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildManifest_NoActiveWebhook(t *testing.T) {
@@ -78,7 +80,7 @@ func TestExchangeManifestCode_Success(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	mc, err := exchangeManifestCode(srv.URL, "the-code")
+	mc, err := exchangeManifestCode(context.Background(), srv.URL, "the-code")
 	if err != nil {
 		t.Fatalf("exchangeManifestCode: %v", err)
 	}
@@ -102,7 +104,7 @@ func TestExchangeManifestCode_ErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	if _, err := exchangeManifestCode(srv.URL, "expired-code"); err == nil {
+	if _, err := exchangeManifestCode(context.Background(), srv.URL, "expired-code"); err == nil {
 		t.Fatal("expected an error for a 404 response (e.g. expired/already-used code)")
 	}
 }
@@ -127,7 +129,7 @@ func TestExchangeManifestCode_EscapesSpecialCharacters(t *testing.T) {
 	defer srv.Close()
 
 	maliciousCode := "abc?evil=1#frag/xyz"
-	if _, err := exchangeManifestCode(srv.URL, maliciousCode); err != nil {
+	if _, err := exchangeManifestCode(context.Background(), srv.URL, maliciousCode); err != nil {
 		t.Fatalf("exchangeManifestCode: %v", err)
 	}
 	if gotRawQuery != "" {
@@ -149,7 +151,42 @@ func TestExchangeManifestCode_MissingIDOrPEM(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	if _, err := exchangeManifestCode(srv.URL, "the-code"); err == nil {
+	if _, err := exchangeManifestCode(context.Background(), srv.URL, "the-code"); err == nil {
 		t.Fatal("expected an error when the response is missing id/pem")
+	}
+}
+
+// TestExchangeManifestCode_HonorsContextCancellation is the regression test
+// for a review finding: exchangeManifestCode previously built its request
+// with http.NewRequest (no context), so a caller-driven cancellation (e.g.
+// shutdown mid-exchange) couldn't abort it — the call would ride out
+// manifestHTTPClient's full 30s timeout regardless. A canceled context must
+// now fail the request immediately.
+func TestExchangeManifestCode_HonorsContextCancellation(t *testing.T) {
+	blockUntilCanceled := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app-manifests/", func(w http.ResponseWriter, r *http.Request) {
+		<-blockUntilCanceled // never responds — only ctx cancellation can end the request
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	defer close(blockUntilCanceled)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled — the request must fail without ever completing
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := exchangeManifestCode(ctx, srv.URL, "the-code")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a canceled context")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("exchangeManifestCode did not honor context cancellation within 5s")
 	}
 }

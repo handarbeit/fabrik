@@ -63,7 +63,7 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 		return Credentials{}, fmt.Errorf("waiting for GitHub App manifest callback: %w", err)
 	}
 
-	mc, err := exchangeManifestCode(opts.BaseURL, code)
+	mc, err := exchangeManifestCode(ctx, opts.BaseURL, code)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("exchanging manifest code: %w", err)
 	}

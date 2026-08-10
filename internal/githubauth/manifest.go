@@ -1,6 +1,7 @@
 package githubauth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,8 +93,11 @@ type ManifestCredentials struct {
 // POST /app-manifests/{code}/conversions to retrieve the newly created
 // App's credentials. baseURL selects GitHub's API host ("" = production, an
 // httptest URL in tests). The code expires after GitHub's fixed window (1
-// hour) and can only be exchanged once.
-func exchangeManifestCode(baseURL, code string) (ManifestCredentials, error) {
+// hour) and can only be exchanged once. ctx is honored via
+// http.NewRequestWithContext so a caller-driven cancellation (e.g. shutdown
+// mid-exchange) aborts the request promptly instead of riding out
+// manifestHTTPClient's full 30s timeout.
+func exchangeManifestCode(ctx context.Context, baseURL, code string) (ManifestCredentials, error) {
 	if baseURL == "" {
 		baseURL = defaultGitHubBaseURL
 	}
@@ -102,7 +106,7 @@ func exchangeManifestCode(baseURL, code string) (ManifestCredentials, error) {
 	// that it's well-formed) — path-escape it so a value containing "/",
 	// "?", or "#" can't redirect this request to a different path/query.
 	reqURL := fmt.Sprintf("%s/app-manifests/%s/conversions", baseURL, url.PathEscape(code))
-	req, err := http.NewRequest(http.MethodPost, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, nil)
 	if err != nil {
 		return ManifestCredentials{}, fmt.Errorf("creating manifest exchange request: %w", err)
 	}

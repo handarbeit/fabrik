@@ -1182,7 +1182,7 @@ func TestReconcile_SelfHealRecreatedApp_TransientIdentityFailure_RetriesInsteadO
 	}
 
 	oldSleep := identityValidationSleep
-	identityValidationSleep = func(time.Duration) {}
+	identityValidationSleep = func(context.Context, time.Duration) error { return nil }
 	defer func() { identityValidationSleep = oldSleep }()
 
 	var appCalls int
@@ -1258,7 +1258,7 @@ func TestReconcile_SelfHealRecreatedApp_PersistentIdentityFailure_ReturnsErrorNe
 	}
 
 	oldSleep := identityValidationSleep
-	identityValidationSleep = func(time.Duration) {}
+	identityValidationSleep = func(context.Context, time.Duration) error { return nil }
 	defer func() { identityValidationSleep = oldSleep }()
 
 	mux := http.NewServeMux()
@@ -1490,7 +1490,7 @@ func TestReconcile_JustBootstrapped_TransientIdentityFailure_RetriesInsteadOfSel
 	statePath := filepath.Join(dir, "app-state.json")
 
 	oldSleep := identityValidationSleep
-	identityValidationSleep = func(time.Duration) {}
+	identityValidationSleep = func(context.Context, time.Duration) error { return nil }
 	defer func() { identityValidationSleep = oldSleep }()
 
 	var appCalls int
@@ -1554,7 +1554,7 @@ func TestReconcile_JustBootstrapped_PersistentIdentityFailure_ReturnsErrorNeverD
 	statePath := filepath.Join(dir, "app-state.json")
 
 	oldSleep := identityValidationSleep
-	identityValidationSleep = func(time.Duration) {}
+	identityValidationSleep = func(context.Context, time.Duration) error { return nil }
 	defer func() { identityValidationSleep = oldSleep }()
 
 	mux := http.NewServeMux()
@@ -1612,7 +1612,7 @@ func TestReconcile_JustBootstrapped_PersistentIdentityFailure_WithPinnedInstalla
 	statePath := filepath.Join(dir, "app-state.json")
 
 	oldSleep := identityValidationSleep
-	identityValidationSleep = func(time.Duration) {}
+	identityValidationSleep = func(context.Context, time.Duration) error { return nil }
 	defer func() { identityValidationSleep = oldSleep }()
 
 	mux := http.NewServeMux()
@@ -1732,5 +1732,60 @@ func TestReconcile_MalformedWatchedRepoEntry_LogsAndSkips(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a log line naming the malformed watched-repo entry, got: %v", lines())
+	}
+}
+
+// TestIdentityValidationSleep_HonorsContextCancellation is the regression
+// test for a review finding: retryIdentityCheckAfterCreation's backoff
+// previously slept unconditionally (time.Sleep(delay)) between attempts, so
+// a canceled context (e.g. shutdown mid-retry) couldn't shorten the wait —
+// bounded at ~1s total across identityValidationRetryDelays, but still
+// inconsistent with the cancellation discipline used everywhere else in
+// this package. The default identityValidationSleep must now return
+// promptly, with ctx.Err(), when ctx is canceled before its timer fires.
+func TestIdentityValidationSleep_HonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- identityValidationSleep(ctx, time.Hour) // would hang for an hour if cancellation weren't honored
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a canceled context")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("identityValidationSleep did not honor context cancellation within 5s")
+	}
+}
+
+// TestRetryIdentityCheckAfterCreation_ContextCanceledDuringBackoff_ReturnsPromptly
+// confirms retryIdentityCheckAfterCreation itself propagates a canceled
+// context out of its backoff loop rather than always sleeping out every
+// configured delay first.
+func TestRetryIdentityCheckAfterCreation_ContextCanceledDuringBackoff_ReturnsPromptly(t *testing.T) {
+	oldDelays := identityValidationRetryDelays
+	identityValidationRetryDelays = []time.Duration{time.Hour, time.Hour} // would hang if cancellation weren't honored
+	defer func() { identityValidationRetryDelays = oldDelays }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := retryIdentityCheckAfterCreation(ctx, "", "fake-jwt")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a canceled context")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("retryIdentityCheckAfterCreation did not honor context cancellation within 5s")
 	}
 }
