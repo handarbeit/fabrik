@@ -35,6 +35,29 @@ func (s *Sim) FetchRepoAccess(owner, repo string) (gh.RepoAccess, error) {
 	return r.access, nil
 }
 
+// RepoBareDir returns the on-disk path of ownerRepo's ("owner/repo") backing
+// bare git repository, or an error if it has not been seeded.
+//
+// This exists for tests/sim's harness wiring, not for anything Sim needs
+// internally: the harness reproduces production's own git topology (a real
+// bare-clone-of-a-bare-clone acting as the engine's "origin", exactly as
+// ensureBareClone bare-clones the real GitHub remote) by running
+// `git clone --bare` against this path. Exported rather than duplicating
+// repoDir's path formula in the harness package, so the two can never drift
+// apart.
+func (s *Sim) RepoBareDir(ownerRepo string) (string, error) {
+	owner, repo, err := splitOwnerRepo(ownerRepo)
+	if err != nil {
+		return "", fmt.Errorf("simgh: RepoBareDir: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.lookupRepo(owner, repo); err != nil {
+		return "", err
+	}
+	return s.repoDir(owner, repo), nil
+}
+
 // RateLimitStats returns the REST and GraphQL budgets.
 //
 // Modelled as static: the budgets never deplete as calls are made, and no

@@ -181,6 +181,11 @@ type Engine struct {
 	// Nil in non-TUI mode. Set via SetCleanupHook; wrapped in sync.Once so
 	// concurrent force-quit goroutines can't call it simultaneously.
 	cleanupHook func()
+	// clock is the source e.now() reads from. Nil in production (New never
+	// sets it) — now() falls back to time.Now(), byte-identical to the
+	// pre-seam behavior. Tests substitute it via SetClock to control
+	// itemstate.CooldownAt timing deterministically (ADR-1449).
+	clock Clock
 }
 
 func New(cfg Config) (*Engine, error) {

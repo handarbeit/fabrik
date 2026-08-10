@@ -1134,7 +1134,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 					Number: item.Number,
 					Reason: "periodic-re-eval",
-					Until:  time.Now().Add(cooldown),
+					Until:  e.now().Add(cooldown),
 				})
 			}
 		}
@@ -1708,7 +1708,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				if admitErr == nil {
-					now := time.Now()
+					now := e.now()
 					hasExpiredCooldown = admitSnap.HasExpiredCooldown(now)
 					if admitSnap.HasActiveCooldown(now) && !hasExpiredCooldown {
 						continue // within cooldown window: no change + no expired window
