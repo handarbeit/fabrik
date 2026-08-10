@@ -780,6 +780,61 @@ func TestReconcile_RepoVerifyFailure_PreservesPriorCacheEntry(t *testing.T) {
 	}
 }
 
+// TestReconcile_RepoVerifyDefiniteZeroAccess_OverwritesStaleCacheEntry is
+// the regression test for a review finding: unlike the transient-failure
+// case above, a *successful* verifyRepoAccess call that definitively finds
+// zero authorized repos (e.g. a repo was removed from a selected-mode
+// installation) is not a "we didn't check this round" outcome and must
+// overwrite — not preserve — a stale prior "authorized" cache entry. Before
+// the fix, repoCache only gained a key when at least one repo came back
+// authorized, so a definitive zero-access answer was indistinguishable from
+// the repoVerifyFailed case and silently left the old entry in place.
+func TestReconcile_RepoVerifyDefiniteZeroAccess_OverwritesStaleCacheEntry(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	statePath := filepath.Join(dir, "app-state.json")
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "someorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{111: {"someorg/repo-one"}}
+	defer srv.Close()
+
+	opts := Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: []string{"someorg/repo-one"}, BaseURL: srv.URL,
+	}
+
+	if _, err := Reconcile(context.Background(), opts); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after first Reconcile: %v", err)
+	}
+	if len(saved.InstallationRepoCache["someorg"]) != 1 || saved.InstallationRepoCache["someorg"][0] != "someorg/repo-one" {
+		t.Fatalf("InstallationRepoCache[someorg] after first Reconcile = %v, want [someorg/repo-one]", saved.InstallationRepoCache["someorg"])
+	}
+
+	// The repo is removed from the installation's selected-repos grant —
+	// a definitive, successful check that now finds zero access.
+	fake.selectedRepos = map[int64][]string{111: {}}
+	if _, err := Reconcile(context.Background(), opts); err != nil {
+		t.Fatalf("second Reconcile (definitive zero access): %v", err)
+	}
+
+	saved, err = loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials after second Reconcile: %v", err)
+	}
+	if entries, ok := saved.InstallationRepoCache["someorg"]; !ok || len(entries) != 0 {
+		t.Errorf("InstallationRepoCache[someorg] after a definitive zero-access verify = %v (present=%v), want an empty entry overwriting the stale [someorg/repo-one]", entries, ok)
+	}
+}
+
 // TestReconcile_AppIDChange_ClearsStaleSecretsAndCache is the regression
 // test for a review finding: if AppStatePath is reused across a switch to a
 // different App (e.g. an operator repoints github_app_id at a new App,

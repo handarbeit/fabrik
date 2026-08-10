@@ -136,13 +136,33 @@ func (r *Reconciler) ClientForRepo(ctx context.Context, owner, repo string) (*gh
 // installation this Reconciler minted — see Auth.RunRefreshLoop. logf is
 // called once per Auth, synchronously, to build that installation's own log
 // function before its goroutine is spawned.
-func (r *Reconciler) RunRefreshLoops(ctx context.Context, logf func(installationID int64) func(format string, args ...any)) {
+//
+// Returns a wait function the caller MUST call, and block on, before tearing
+// down anything the per-installation logf closures depend on (e.g.
+// pruefer's package-level Logf hook and the log file it writes to) — these
+// goroutines are unmanaged by any daemon/poll-loop lifecycle, so nothing
+// else guarantees they've stopped calling logf by the time ctx is
+// cancelled. Each goroutine exits promptly once ctx.Done() fires (they
+// select on it both while waiting for the next refresh and after a failed
+// refresh's retry delay), but "promptly" is not "synchronously with ctx
+// cancellation" — a goroutine can still be mid-refresh or mid-logf-call
+// when the caller's shutdown path proceeds, racing an unsynchronized write
+// to that same logf infrastructure. wait() blocks until every goroutine has
+// actually returned, closing that window.
+func (r *Reconciler) RunRefreshLoops(ctx context.Context, logf func(installationID int64) func(format string, args ...any)) (wait func()) {
 	r.mu.Lock()
 	auths := append([]*Auth(nil), r.auths...)
 	r.mu.Unlock()
+	var wg sync.WaitGroup
 	for _, a := range auths {
-		go a.RunRefreshLoop(ctx, logf(a.InstallationID))
+		installLogf := logf(a.InstallationID)
+		wg.Add(1)
+		go func(a *Auth) {
+			defer wg.Done()
+			a.RunRefreshLoop(ctx, installLogf)
+		}(a)
 	}
+	return wg.Wait
 }
 
 // InstallationCount returns the number of distinct installations minted —
@@ -461,6 +481,17 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			if err != nil {
 				logf("! verifying repo access for owner %q failed: %v", owner, err)
 				repoVerifyFailed = true
+			} else {
+				// A definitive answer for this owner this round — set the
+				// map key now (possibly to an empty, non-nil slice) so
+				// saveInstallationRepoCache's per-owner merge overwrites
+				// whatever stale entry it holds, even when zero repos come
+				// back authorized. Leaving the key unset here would be
+				// indistinguishable from the repoVerifyFailed ("we didn't
+				// check this round") case above, silently perpetuating a
+				// stale "authorized" cache entry that a live, successful
+				// check just definitively contradicted.
+				repoCache[strings.ToLower(owner)] = []string{}
 			}
 			for _, st := range statuses {
 				if st.Authorized {
@@ -508,7 +539,11 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 // Merging by owner, rather than replacing the whole map, means that
 // owner's last known entry survives the transient hiccup instead of being
 // wiped to empty — a purely transient failure shouldn't regress a "last
-// known good" diagnostic.
+// known good" diagnostic. A *definitive* zero-repos-authorized answer is
+// not a transient failure, though, and does contribute an entry (an empty,
+// non-nil slice) precisely so it overwrites — rather than is
+// indistinguishable from omitting — a stale "authorized" entry left over
+// from before access was revoked.
 //
 // If the AppID being reconciled differs from whatever AppID this state
 // file was last saved under, the existing entry belongs to a *different*

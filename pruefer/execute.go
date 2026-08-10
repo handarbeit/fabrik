@@ -92,7 +92,7 @@ func Execute() error {
 	}
 	logf(0, "auth", "authenticated as %s (%d installation(s))\n", auth.BotLogin(), auth.InstallationCount())
 
-	auth.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
+	waitRefreshLoops := auth.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
 		prefix := fmt.Sprintf("installation %d: ", installationID)
 		return func(format string, args ...any) {
 			logf(0, "auth", prefix+format, args...)
@@ -113,7 +113,16 @@ func Execute() error {
 	}
 
 	daemon, closeLog := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, auth.BotLogin())
-	defer closeLog()
+	// waitRefreshLoops must run before closeLog: the refresh-loop goroutines
+	// spawned above are unmanaged by Daemon.Run's own lifecycle (unlike its
+	// internal poll/review goroutines, which Run joins before returning), so
+	// nothing else guarantees they've stopped calling logf — and therefore
+	// stopped touching the package-level Logf hook closeLog tears down —
+	// before this deferred close runs. See RunRefreshLoops' doc comment.
+	defer func() {
+		waitRefreshLoops()
+		closeLog()
+	}()
 	daemon.preAcquiredLock = lockFile
 
 	if useTUI(cfg) {

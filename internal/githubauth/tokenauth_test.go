@@ -256,3 +256,75 @@ func TestAuth_RunRefreshLoop_IndependentPerInstallation(t *testing.T) {
 		t.Error("expected at least one logged refresh failure for the always-failing installation")
 	}
 }
+
+// TestReconciler_RunRefreshLoops_WaitBlocksUntilGoroutinesExit is the
+// regression test for a review finding: RunRefreshLoops used to fire its
+// per-installation goroutines and return immediately, giving the caller no
+// way to know they'd actually stopped. execute.go tears down the
+// package-level pruefer.Logf hook (and closes its backing log file)
+// shortly after ctx is cancelled, racing any refresh-loop goroutine still
+// mid-refresh or mid-log-call at that moment — an unsynchronized access to
+// shared logging state, and a potential nil-function-call panic if the
+// hook is cleared between logf's own nil-check and invocation. wait() must
+// block until every spawned goroutine has actually returned, not merely
+// until ctx is cancelled.
+func TestReconciler_RunRefreshLoops_WaitBlocksUntilGoroutinesExit(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	privateKey, err := loadPrivateKey(keyPath)
+	if err != nil {
+		t.Fatalf("loadPrivateKey: %v", err)
+	}
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "verveguy"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	a111, err := mintAuth(42, 111, "pruefer-bot[bot]", privateKey, srv.URL)
+	if err != nil {
+		t.Fatalf("mintAuth(111): %v", err)
+	}
+	a222, err := mintAuth(42, 222, "pruefer-bot[bot]", privateKey, srv.URL)
+	if err != nil {
+		t.Fatalf("mintAuth(222): %v", err)
+	}
+
+	r := &Reconciler{auths: []*Auth{a111, a222}}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var exited int32
+	logf := func(installationID int64) func(format string, args ...any) {
+		return func(format string, args ...any) {}
+	}
+	wait := r.RunRefreshLoops(ctx, logf)
+
+	// Wrap wait() to observe when it actually returns, from a separate
+	// goroutine, so the test can assert it hasn't returned prematurely.
+	waitDone := make(chan struct{})
+	go func() {
+		wait()
+		atomic.StoreInt32(&exited, 1)
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("wait() returned before ctx was even cancelled — refresh-loop goroutines can't have exited yet")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: both loops are still parked on their (long, since the
+		// token just minted with an hour's validity) refresh-wait timer.
+	}
+	if atomic.LoadInt32(&exited) != 0 {
+		t.Fatal("wait() reported done before cancel()")
+	}
+
+	cancel()
+
+	select {
+	case <-waitDone:
+		// Both goroutines observed ctx.Done() and returned; wait() unblocked.
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait() did not return within 2s of ctx cancellation")
+	}
+}
