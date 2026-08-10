@@ -254,10 +254,10 @@ func renderOmittedPaths(b *strings.Builder, baseBranch string, excluded, trimmed
 	}
 	fmt.Fprintf(b, "```\ngit diff %s -- .", ref)
 	for _, p := range excluded {
-		fmt.Fprintf(b, " ':!%s'", p)
+		fmt.Fprintf(b, " %s", shellQuotePathspec(":!"+p))
 	}
 	for _, p := range trimmed {
-		fmt.Fprintf(b, " ':!%s'", p)
+		fmt.Fprintf(b, " %s", shellQuotePathspec(":!"+p))
 	}
 	b.WriteString("\n```\n\n")
 	for _, p := range excluded {
@@ -267,6 +267,18 @@ func renderOmittedPaths(b *strings.Builder, baseBranch string, excluded, trimmed
 		fmt.Fprintf(b, "- %s (dropped to fit within max_diff_bytes)\n", p)
 	}
 	b.WriteString("\n")
+}
+
+// shellQuotePathspec wraps a git pathspec (e.g. ":!some/path") in single
+// quotes suitable for verbatim copy-paste into a POSIX shell, escaping any
+// single quote the path itself contains. A naive `'%s'` wrap (the prior
+// behavior) breaks the moment an omitted path contains a literal quote
+// character — the generated example closes its quote early and produces a
+// syntactically broken command. The standard POSIX technique instead closes
+// the quoted string, emits a backslash-escaped literal quote, then reopens
+// the quoted string, so the shell sees one unbroken token either way.
+func shellQuotePathspec(pathspec string) string {
+	return "'" + strings.ReplaceAll(pathspec, "'", `'\''`) + "'"
 }
 
 // buildReviewPrompt constructs the prompt sent to claude via stdin.

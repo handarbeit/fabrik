@@ -587,3 +587,39 @@ func TestBuildReviewPrompt_OmittedPaths_NoBaseBranch_FallsBackToHEAD(t *testing.
 		t.Errorf("expected the pathspec example to fall back to plain HEAD, got:\n%s", prompt)
 	}
 }
+
+// TestBuildReviewPrompt_OmittedPath_WithSingleQuote_EscapedForShell pins the
+// bot-review fix: an omitted path containing a literal single quote must not
+// produce a pathspec example that closes its shell quote early. A naive
+// `':!%s'` wrap would emit `':!it's/broken.go'`, a syntactically invalid
+// command Claude could not copy-paste and run verbatim — the entire point of
+// giving it an actionable example. shellQuotePathspec's backslash-escaping
+// keeps the emitted command valid regardless of what the path contains.
+func TestBuildReviewPrompt_OmittedPath_WithSingleQuote_EscapedForShell(t *testing.T) {
+	req := ReviewRequest{OmittedExcludedPaths: []string{"it's/broken.go"}}
+	prompt := buildReviewPrompt(req)
+
+	if !strings.Contains(prompt, `':!it'\''s/broken.go'`) {
+		t.Errorf("expected the single quote in the path to be escaped as '\\'' , got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, `':!it's/broken.go'`) {
+		t.Error("pathspec example must not contain the unescaped, shell-breaking form")
+	}
+}
+
+// TestShellQuotePathspec verifies the escaping helper directly against a
+// handful of shapes: no special characters, one quote, and multiple quotes.
+func TestShellQuotePathspec(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{":!plain/path.go", "':!plain/path.go'"},
+		{":!it's.go", `':!it'\''s.go'`},
+		{":!a'b'c", `':!a'\''b'\''c'`},
+	}
+	for _, c := range cases {
+		if got := shellQuotePathspec(c.in); got != c.want {
+			t.Errorf("shellQuotePathspec(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

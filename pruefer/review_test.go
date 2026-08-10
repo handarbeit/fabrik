@@ -1061,6 +1061,59 @@ func TestReviewPR_AllPathsExcluded_MultiFile_StillSkips(t *testing.T) {
 	}
 }
 
+// ambiguousPathSingleFileDiff builds a single-file diff whose path itself
+// contains the literal substring " b/" (a directory named "weird b"
+// containing "file.go") — the shape that makes the "diff --git a/X b/Y"
+// header's greedy capture ambiguous. Used to pin the bot-review fix that
+// unified the terminal all-excluded check's path resolution with the
+// per-file filter's, so the two can no longer disagree about which file an
+// exclusion glob matches.
+func ambiguousPathSingleFileDiff(path string) string {
+	return "diff --git a/" + path + " b/" + path + "\n" +
+		"--- a/" + path + "\n" +
+		"+++ b/" + path + "\n" +
+		"@@ -1,1 +1,1 @@\n" +
+		"-old\n" +
+		"+new\n"
+}
+
+// TestReviewPR_AmbiguousPath_TerminalCheckAgreesWithPerFileFilter pins the
+// bot-review finding: ParseChangedPaths (previously used for the terminal
+// all-excluded check) always takes the "diff --git a/X b/Y" header's
+// greedy, ambiguous b/-side capture, while resolveFilePath (used by the
+// per-file filter) prefers the unambiguous "+++ b/<path>" content line. For
+// an ordinary file whose path contains the literal substring " b/", the two
+// resolvers used to disagree: ParseChangedPaths would extract only the
+// truncated suffix after the last " b/" (here, "file.go"), which does not
+// match an exclusion glob written against the real path ("weird b/*"), so
+// the terminal check would wrongly let the PR proceed — only for the
+// per-file filter (using the correct "weird b/file.go" resolution) to then
+// exclude the diff's only file anyway, leaving nothing to review. That is
+// exactly the "review that presents as complete but reviewed nothing"
+// failure mode R4 warns against, reached via a different door than R4's own
+// trim-to-fit exhaustion path. After the fix (both checks resolve paths
+// from the same splitDiffFiles/resolveFilePath pass), the terminal check
+// catches this case directly and returns SkipExcludedPath before ever
+// cloning or invoking claude — the correct, cheap disposition.
+func TestReviewPR_AmbiguousPath_TerminalCheckAgreesWithPerFileFilter(t *testing.T) {
+	const path = "weird b/file.go"
+	client := newFakeReviewer()
+	client.diff = ambiguousPathSingleFileDiff(path)
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{ExcludedPaths: []string{"weird b/*"}}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
+		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath — the terminal check must resolve %q the same way the per-file filter does", outcome, path)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+		t.Error("an all-excluded diff (correctly resolved) must skip before cloning or invoking claude — not fall through to a claude call over an empty diff")
+	}
+}
+
 // TestReviewPR_SizeOnlyTrim_NoExcludedPaths_ReviewsSurvivors proves
 // trim-to-fit engages on size alone: no excluded_paths configured, one huge
 // file forces the diff over max_diff_bytes, and trimming it away lets the

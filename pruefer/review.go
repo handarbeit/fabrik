@@ -155,7 +155,24 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 			return ReviewOutcome{Skipped: true, Reason: SkipExcludedPath}
 		}
 	} else {
-		changedPaths = ParseChangedPaths(diff)
+		// Both the terminal all-excluded check below and the per-file
+		// filter (R2) must resolve each block's path identically — splitting
+		// once here and deriving changedPaths from the same blocks (rather
+		// than a second, independent ParseChangedPaths(diff) call) is what
+		// guarantees that. ParseChangedPaths and resolveFilePath used to
+		// disagree on an ordinary file whose path contains the literal
+		// substring " b/": ParseChangedPaths always takes the "diff --git
+		// a/X b/Y" header's greedy, ambiguous b/-side capture, while
+		// resolveFilePath prefers the unambiguous "+++ b/<path>" content
+		// line and only falls back to that same ambiguous header capture
+		// when no such line exists. Two independent resolvers reaching
+		// different verdicts for the same file would let the terminal
+		// all-excluded gate and the per-file filter disagree about whether
+		// that file was excluded at all — resolving once, here, closes that
+		// divergence structurally rather than requiring the two call sites
+		// to be kept in sync by hand.
+		blocks, preamble := splitDiffFiles(diff)
+		changedPaths = pathsOf(blocks)
 
 		// R1/R3: path exclusion is checked before the size gate. The
 		// terminal "every changed path is excluded" disposition is
@@ -173,7 +190,6 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		// widens the all-or-nothing terminal check above into a partial
 		// filter: a diff with some (but not all) excluded files proceeds on
 		// the survivors instead of being skipped whole.
-		blocks, preamble := splitDiffFiles(diff)
 		kept, excludedBlocks := filterExcludedPaths(blocks, cfg.ExcludedPaths)
 		measuredBytes := blocksLen(preamble, kept)
 
