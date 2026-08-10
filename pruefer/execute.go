@@ -119,6 +119,18 @@ func Execute() error {
 	// nothing else guarantees they've stopped calling logf — and therefore
 	// stopped touching the package-level Logf hook closeLog tears down —
 	// before this deferred close runs. See RunRefreshLoops' doc comment.
+	//
+	// waitRefreshLoops() cannot hang here only because both return paths
+	// below (Daemon.Run and runTUI) are structurally guaranteed to return
+	// solely once ctx is already cancelled — Run via the real OS signal,
+	// runTUI via its own self-SIGTERM on quit — which is exactly the ctx
+	// the refresh-loop goroutines select on to exit. This is an implicit
+	// invariant of those two functions' current return conditions, not
+	// something enforced here: a future change that lets either one return
+	// early for some other reason (without ctx having been cancelled) would
+	// silently turn this into a shutdown hang. If that invariant ever needs
+	// to change, wire an explicit deadline into waitRefreshLoops() (or the
+	// underlying ctx) instead of assuming it away.
 	defer func() {
 		waitRefreshLoops()
 		closeLog()
