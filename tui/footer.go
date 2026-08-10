@@ -11,6 +11,23 @@ import (
 	"github.com/muesli/termenv"
 )
 
+// graphqlProjectionYellowMargin is the fraction of Remaining at which the
+// GraphQL budget indicator turns yellow: projected consumption to reset
+// exceeding this fraction of Remaining is "approaching" exhaustion.
+// Deliberately a separate constant from engine/backoff.go's ADR-028
+// rateLimitBackoffThreshold/rateLimitHealthyThreshold — those gate
+// poll-interval backoff (a behavioral concern); this gates only the
+// footer's display color, and the two must stay independently tunable.
+// See issue #1510.
+const graphqlProjectionYellowMargin = 0.75
+
+// graphqlSample is a single (time, Remaining) observation of the GraphQL
+// rate-limit budget, taken from a PollCompletedEvent.
+type graphqlSample struct {
+	at        time.Time
+	remaining int
+}
+
 // FooterComponent renders the bottom status bar: project info, rate limit stats,
 // and (when webhook mode is active) the webhook health indicator.
 type FooterComponent struct {
@@ -19,6 +36,16 @@ type FooterComponent struct {
 	now           time.Time
 	webhookState  string         // "", "starting_up", "healthy", "unhealthy"
 	webhookCounts map[string]int // per-type event counts
+
+	// GraphQL burn-rate estimation state (#1510). haveSample/lastSample track
+	// the most recent PollCompletedEvent observation; haveBurnRate/burnRatePerMin
+	// hold the estimate derived from the two most recent samples. Kept entirely
+	// in-component (rather than widening RateLimitStats) — see ADR discussion
+	// in issue #1510's Plan stage.
+	haveSample     bool
+	lastSample     graphqlSample
+	haveBurnRate   bool
+	burnRatePerMin float64
 }
 
 func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -27,7 +54,7 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		f.now = ev.At
 	case PollCompletedEvent:
 		if ev.GraphQLStats.Limit > 0 {
-			f.graphqlStats = ev.GraphQLStats
+			f = f.observeGraphQLSample(ev.GraphQLStats)
 		}
 	case ProjectMetaEvent:
 		f.projectInfo.BoardTitle = ev.BoardTitle
@@ -39,6 +66,102 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		}
 	}
 	return f, nil
+}
+
+// observeGraphQLSample records a new GraphQL rate-limit observation and updates
+// the burn-rate estimate from it. The estimate is a simple two-point delta
+// against the immediately-prior sample (Δpoints/Δwall-clock-minutes) — no
+// rolling window or smoothing, per issue #1510's Plan.
+//
+// A Remaining increase between consecutive samples is treated as a window
+// reset: the stale sample is discarded and the estimator restarts (a
+// cold-start-like gap of one cycle) rather than compute a negative rate.
+// Sample timestamps use f.now (updated once per second via TickEvent) rather
+// than time.Now(), keeping the estimator deterministic and testable via
+// direct field assignment.
+func (f FooterComponent) observeGraphQLSample(stats RateLimitStats) FooterComponent {
+	f.graphqlStats = stats
+
+	if f.now.IsZero() {
+		// No TickEvent has landed yet; treat this as a fresh baseline rather
+		// than compute a bogus rate against a zero timestamp. Harmless: cold
+		// start already renders green.
+		f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+		f.haveSample = true
+		f.haveBurnRate = false
+		return f
+	}
+
+	if !f.haveSample {
+		f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+		f.haveSample = true
+		f.haveBurnRate = false
+		return f
+	}
+
+	prev := f.lastSample
+	if stats.Remaining > prev.remaining {
+		// Window reset: Remaining jumped back up. Discard the stale sample
+		// and restart the estimator rather than emit a negative burn rate.
+		f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+		f.haveBurnRate = false
+		return f
+	}
+
+	if prev.at.IsZero() {
+		// prev was recorded by the f.now.IsZero() branch above (the first
+		// sample landed before any TickEvent had set f.now — the engine's
+		// synchronous startup poll typically beats the TUI's first 1s tick).
+		// That timestamp isn't a real baseline, so treat this sample as a
+		// fresh baseline too rather than computing elapsed against a
+		// zero-value time.Time, which would grossly overstate the elapsed
+		// duration (the zero value is year 1) and silently bias
+		// burnRatePerMin toward zero (a false "safe" reading) regardless of
+		// actual consumption. See issue #1510 review discussion.
+		f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+		f.haveBurnRate = false
+		return f
+	}
+
+	elapsed := f.now.Sub(prev.at)
+	if elapsed <= 0 {
+		// Non-advancing or out-of-order timestamp; keep the prior estimate
+		// rather than divide by a non-positive duration, but still advance
+		// the baseline so the next sample compares against this one.
+		f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+		return f
+	}
+
+	pointsConsumed := prev.remaining - stats.Remaining // >= 0, reset case handled above
+	f.burnRatePerMin = float64(pointsConsumed) / elapsed.Minutes()
+	f.haveBurnRate = true
+	f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+	return f
+}
+
+// graphqlStyle selects the display style for the GraphQL budget indicator by
+// projecting the estimated burn rate forward to the window reset and
+// comparing it against Remaining, rather than coloring on raw percentage
+// remaining alone (issue #1510).
+//
+// Cold start (no burn-rate estimate yet) and an idle/zero burn rate both
+// render green by construction — never a fallback to percentage-based
+// coloring, which would reintroduce the false alarm this issue exists to fix.
+func (f FooterComponent) graphqlStyle() lipgloss.Style {
+	minutesToReset := f.graphqlStats.Reset.Sub(f.now).Minutes()
+	if !f.haveBurnRate || f.burnRatePerMin <= 0 || minutesToReset <= 0 {
+		return successStyle
+	}
+	projected := f.burnRatePerMin * minutesToReset
+	remaining := float64(f.graphqlStats.Remaining)
+	switch {
+	case projected > remaining:
+		return failStyle
+	case projected > graphqlProjectionYellowMargin*remaining:
+		return activeStyle
+	default:
+		return successStyle
+	}
 }
 
 // webhookIndicator returns the rendered webhook health indicator string, or "" when
@@ -124,17 +247,7 @@ func (f FooterComponent) View(width int) string {
 	if f.graphqlStats.Limit > 0 {
 		countdown := fmtRateLimitCountdown(f.graphqlStats.Reset, f.now)
 		plain := fmt.Sprintf("%d/%d  %s", f.graphqlStats.Remaining, f.graphqlStats.Limit, countdown)
-		pct := float64(f.graphqlStats.Remaining) / float64(f.graphqlStats.Limit)
-		var style lipgloss.Style
-		switch {
-		case pct > 0.5:
-			style = successStyle
-		case pct > 0.2:
-			style = activeStyle
-		default:
-			style = failStyle
-		}
-		rightParts = append(rightParts, style.Render(plain))
+		rightParts = append(rightParts, f.graphqlStyle().Render(plain))
 	}
 	var rightStr string
 	if len(rightParts) > 0 {
