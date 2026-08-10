@@ -173,9 +173,19 @@ func (r *repoState) withWorktree(ref string, fn func(wt string) error) (err erro
 	// git worktree add insists on creating the directory itself.
 	wt := filepath.Join(tmp, "wt")
 
-	if _, err := runGit(r.bareDir, "worktree", "add", "--detach", wt, ref); err != nil {
-		os.RemoveAll(tmp)
-		return err
+	if _, addErr := runGit(r.bareDir, "worktree", "add", "--detach", wt, ref); addErr != nil {
+		// `worktree add` can register its administrative entry under
+		// <bare>/worktrees/<name> and *then* fail (disk pressure, a stale
+		// lock from a killed prior run). The deferred cleanup below prunes
+		// unconditionally for exactly this reason — a stale entry here would
+		// otherwise be free to trip a later worktree operation on this same
+		// bare repo, and this path must not be the one exception to that.
+		rmErr := os.RemoveAll(tmp)
+		_, _, _ = runGitAllowFail(r.bareDir, "worktree", "prune")
+		if rmErr != nil {
+			return fmt.Errorf("simgh: worktree add: %w; also failed removing its temp dir %s: %w", addErr, tmp, rmErr)
+		}
+		return addErr
 	}
 	defer func() {
 		// Prune unconditionally: the worktree removal can legitimately fail if

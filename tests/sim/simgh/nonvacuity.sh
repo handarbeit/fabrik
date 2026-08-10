@@ -727,6 +727,10 @@ mutate "the probe counter is not reset after the housekeeping gc" \
   'TestMergeableProbeBoundsUnreferencedObjects' \
   'git.go::s{\t\t\tr\.probesSinceGC = 0\n}{}'
 
+mutate "a failed worktree add does not prune the stale administrative entry" \
+  'TestWithWorktreePrunesAfterFailedAdd' \
+  'git.go::s{(rmErr := os\.RemoveAll\(tmp\)\n)\t\t_, _, _ = runGitAllowFail\(r\.bareDir, "worktree", "prune"\)\n}{$1}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

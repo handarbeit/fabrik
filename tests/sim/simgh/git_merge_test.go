@@ -689,3 +689,56 @@ func TestMergeableProbeBoundsUnreferencedObjects(t *testing.T) {
 		t.Fatalf("main is unreadable after the housekeeping gc: %v", mainErr)
 	}
 }
+
+// TestWithWorktreePrunesAfterFailedAdd pins item 1's fix: `git worktree add`
+// can register its administrative entry under <bare>/worktrees/<name> and
+// *then* fail — disk pressure or a stale lock from a killed prior run in
+// production, but reproduced here deterministically with a `post-checkout`
+// hook that exits non-zero after the checkout itself has already succeeded
+// and the entry is fully registered. Without the fix, the error path removed
+// only the physical temp dir and never ran `worktree prune`, leaving a stale
+// administrative entry behind to trip a later worktree operation on the same
+// bare repo — exactly the cross-test contamination #1451's deliberate fault
+// injection would hit hardest. See FIDELITY.md and #1498.
+func TestWithWorktreePrunesAfterFailedAdd(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+
+	hookPath := filepath.Join(r.bareDir, "hooks", "post-checkout")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("creating hooks dir: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("seeding failing post-checkout hook: %v", err)
+	}
+
+	var called bool
+	r.gitMu.Lock()
+	wtErr := r.withWorktree("refs/heads/main", func(wt string) error {
+		called = true
+		return nil
+	})
+	r.gitMu.Unlock()
+	if wtErr == nil {
+		t.Fatal("withWorktree reported success despite the post-checkout hook failing the underlying worktree add")
+	}
+	if called {
+		t.Fatal("fn ran despite worktree add having failed")
+	}
+
+	// No stale administrative entry may survive: `git worktree list` must
+	// report only the bare repo itself.
+	r.gitMu.Lock()
+	out, listErr := runGit(r.bareDir, "worktree", "list")
+	r.gitMu.Unlock()
+	if listErr != nil {
+		t.Fatalf("worktree list: %v", listErr)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("worktree list =\n%s\nwant only the bare repo entry — a failed worktree add left a stale administrative entry unpruned", out)
+	}
+}

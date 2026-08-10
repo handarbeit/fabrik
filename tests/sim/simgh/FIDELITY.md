@@ -1103,6 +1103,30 @@ attacker-controlled input, so this is a sandbox-hygiene guarantee — everything
 this package creates stays inside the `baseDir` you gave it — rather than a
 security boundary. Do not treat `simgh` as safe against hostile input.
 
+### `withWorktree` prunes on every exit path, including a failed `add` — **Modelled**
+
+`git worktree add --detach` can register its administrative entry under
+`<bare>/worktrees/<name>` and *then* fail — disk pressure, a stale lock from a
+killed prior run. Every ordinary exit path already ran an unconditional
+`worktree prune` in the deferred cleanup for exactly this reason (the worktree
+*removal* can legitimately fail if `fn` left the tree conflicted, and a stale
+administrative entry left behind would trip a later operation on the same bare
+repo); the failed-`add` path was the one exception, removing only the physical
+temp dir and returning early before that defer was even registered. A stale
+entry surviving there is plausible cross-test contamination, and hardest to
+diagnose in exactly the fault-injection scenarios #1451 exists to run.
+
+**Decision:** close it, not merely document it — this is now the same
+unconditional prune every other exit path already gets, plus a genuine
+`os.RemoveAll` error is now wrapped into the returned error instead of
+discarded. `TestWithWorktreePrunesAfterFailedAdd` pins it, reproducing
+"registered, then failed" deterministically with a `post-checkout` hook that
+exits non-zero after the checkout itself has already succeeded (rather than
+relying on genuine disk pressure, which non-vacuity mutation testing cannot
+provoke on demand).
+
+**Risk:** low. Fixed in #1498.
+
 ### `ownerType` — **Simplified**
 
 `FetchProjectBoard` accepts `ownerType` and echoes it back but does not use it.
