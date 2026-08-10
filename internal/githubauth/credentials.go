@@ -133,7 +133,8 @@ func savePrivateKey(path string, pemBytes []byte) error {
 // os.WriteFile, which writes in place and can leave a torn file behind if
 // the process is killed mid-write.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
@@ -142,6 +143,18 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("writing temp file: %w", err)
+	}
+	// Sync the file's data to disk before closing/renaming — without this,
+	// the write can sit in the OS page cache indefinitely, so a power loss
+	// (as opposed to an ordinary process kill/OOM, where the kernel still
+	// flushes dirty pages on its own schedule) could lose the new content
+	// entirely even though the rename below is atomic. This closes the gap
+	// between "never leaves a torn/invalid file behind" (true even without
+	// Sync, since rename is atomic) and "the just-written content actually
+	// survives a power loss" (not true without it).
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("syncing temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp file: %w", err)
@@ -157,6 +170,18 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("renaming temp file into place: %w", err)
+	}
+	// Best-effort: fsync the containing directory so the rename itself (a
+	// directory-entry update, distinct from the file's own data synced
+	// above) is durable across a power loss too. Never treated as fatal —
+	// the write has already succeeded and is readable regardless; this
+	// only affects how quickly the rename is committed to durable storage.
+	// Some platforms (notably Windows) don't support fsyncing a directory,
+	// so a failure to even open/sync it is silently ignored rather than
+	// erroring the whole write.
+	if dirFile, dirErr := os.Open(dir); dirErr == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 	return nil
 }

@@ -27,5 +27,14 @@ func defaultOpenBrowser(url string) error {
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Reap the launcher process once it exits so it never lingers as a
+	// zombie. Started, not awaited, on purpose: the launcher (open/xdg-open/
+	// rundll32) hands off to the desktop environment and returns quickly —
+	// this function must not block on the browser's own lifetime — so the
+	// Wait runs in the background rather than inline.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
