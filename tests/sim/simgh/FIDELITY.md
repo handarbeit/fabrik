@@ -1033,13 +1033,22 @@ refused via the sticky error rather than silently recorded — GitHub could
 never have produced that PR as merged either. This mirrors the existing
 "Seeded PRs and issues must be shapes GitHub can produce" precedent below.
 
+A refused merge leaves no trace at all, including in the shared issue/PR
+number sequence: `reserveNumber` runs only once the merge has actually
+succeeded, not before the attempt. Reserving an explicit number earlier and
+then refusing the merge would have burned that number from `nextNumber`'s
+free-above invariant for a PR that was never created — unlike every other
+validation failure in `SeedPR`, which fails before the sequence moves at all,
+and unlike real GitHub, where a failed create never consumes a number either.
+
 **Risk:** low. `TestSeedPRMergedTruePerformsRealMerge` pins the merge commit
 and the auto-close together; `TestSeedPRMergedTrueRefusesConflict` pins the
-refusal. Fixed in #1498 — this was previously the one seeding shape whose
-*consequences* went unmodelled (medium risk), which made a merge-train
-scenario's "this member already landed" seed assert against unmerged git
-history and open issues that `assembleTrialBranch` (pure real git) would then
-faithfully build on top of, passing for the wrong reason.
+refusal; `TestSeedPRRefusedMergeDoesNotBurnTheNumber` pins that a refused
+merge leaves `nextNumber` untouched. Fixed in #1498 — this was previously the
+one seeding shape whose *consequences* went unmodelled (medium risk), which
+made a merge-train scenario's "this member already landed" seed assert against
+unmerged git history and open issues that `assembleTrialBranch` (pure real
+git) would then faithfully build on top of, passing for the wrong reason.
 
 ### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
 

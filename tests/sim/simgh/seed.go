@@ -414,14 +414,19 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	if state == "" {
 		state = "open"
 	}
-	r.reserveNumber(num)
 	s.mu.Unlock()
 
 	// The git-side merge, when requested, runs with mu released — mirroring
 	// MergePR's own mu -> release -> gitMu -> release sequencing, since the
 	// two locks must never be held at once (see the package doc comment in
 	// git.go). A failed merge means the PR record below is never inserted —
-	// there is no partial state to unwind.
+	// there is no partial state to unwind. reserveNumber is deliberately
+	// deferred past this point (below, right before the record is built)
+	// rather than called here: reserving num now and then refusing the merge
+	// would burn the number from the shared sequence — nextNumber advancing
+	// past it — for a PR that was never actually created, unlike every other
+	// validation failure in this function, which fails before nextNumber
+	// moves at all.
 	if seed.Merged {
 		msg := fmt.Sprintf("Merge pull request #%d from %s\n\n%s", num, seed.Head, seed.Title)
 		r.gitMu.Lock()
@@ -450,6 +455,7 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	r.reserveNumber(num)
 	now := s.now()
 	pr := &prRecord{
 		number:                  num,

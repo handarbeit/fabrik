@@ -577,6 +577,40 @@ func TestSeedPRMergedTrueRefusesConflict(t *testing.T) {
 	}
 }
 
+// TestSeedPRRefusedMergeDoesNotBurnTheNumber pins a review finding on #1498:
+// reserveNumber must not run before a Merged: true seed's git-side merge is
+// attempted. Before the fix, an explicit PR number survived a refused merge
+// (conflict, or nothing to merge) as permanently reserved in the shared
+// issue/PR sequence even though no PR record was ever created — a leak real
+// GitHub has no equivalent of, since a failed create never consumes a number
+// there either, and unlike every other validation failure in SeedPR, which
+// fails before the sequence moves at all.
+func TestSeedPRRefusedMergeDoesNotBurnTheNumber(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedConflict(t, s)
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	s.mu.Lock()
+	before := r.nextNumber
+	s.mu.Unlock()
+
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "conflicting", Merged: true})
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedPR(Merged: true) accepted branches that genuinely conflict")
+	}
+
+	s.mu.Lock()
+	after := r.nextNumber
+	s.mu.Unlock()
+	if after != before {
+		t.Fatalf("nextNumber = %d after a refused Merged: true seed, want unchanged %d — "+
+			"explicit number 42 was burned despite no PR record being created", after, before)
+	}
+}
+
 // countLooseObjects parses `git count-objects -v`'s "count:" line — the
 // number of loose objects sitting outside any pack, which is exactly where an
 // orphaned probe merge commit lives before it is packed or pruned. Caller

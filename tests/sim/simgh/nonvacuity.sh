@@ -743,6 +743,10 @@ mutate "SeedReviewThreadReply accepts an unknown thread ID" \
   'TestSeedReviewThreadReplyRefusesUnknownThread' \
   'seed.go::s{if !found \{}{if !found \&\& false \{}'
 
+mutate "a refused SeedPR(Merged: true) still reserves the number" \
+  'TestSeedPRRefusedMergeDoesNotBurnTheNumber' \
+  'seed.go::s{(if state == "" \{\n\t\tstate = "open"\n\t\}\n)\ts\.mu\.Unlock\(\)\n}{$1\tr.reserveNumber(num)\n\ts.mu.Unlock()\n}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
