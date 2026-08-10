@@ -2,6 +2,7 @@ package sim
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -116,6 +117,24 @@ func waitForIssueClosedInRepo(t *testing.T, env *Env, ownerRepo string, issueNum
 	}, maxPolls)
 }
 
+// gitShowFile returns path's content at ref in the bare git repo at dir, or
+// an error if either doesn't resolve. The sim-side substitute for the live
+// harness's FetchRepoFileContent (a REST content-fetch call): simgh exposes
+// no such API of its own (there is nothing to fetch — the engine itself
+// never needs one), but the commits are real, so reading straight from the
+// backing git repo is the faithful equivalent — the same rationale
+// ci_fix_reinvoke_test.go's gitCommitCount already uses for commit counts.
+func gitShowFile(t *testing.T, dir, ref, path string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", "show", ref+":"+path)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git show %s:%s (dir=%q): %w", ref, path, dir, err)
+	}
+	return string(out), nil
+}
+
 // TestCrossRepoSpawn ports the live test of the same name: a parent in
 // env.OwnerRepo spawns a child in env.OwnerRepoBeta, the parent blocks until
 // the child closes, the child runs its own full pipeline, and the parent
@@ -160,6 +179,36 @@ func TestCrossRepoSpawn(t *testing.T) {
 	// same mechanics as smoke_test.go, just in the second repo.
 	waitForIssueClosedInRepo(t, env, env.OwnerRepoBeta, child, 300)
 	t.Logf("child %s#%d closed — parent should resume", env.OwnerRepoBeta, child)
+
+	// fabrik:children-spawned only proves Plan emitted a spawn block, and the
+	// blockedBy/close checks above only prove the child's own pipeline
+	// reached Done — neither proves the child's actual work landed in the
+	// correct (beta) repo rather than, say, the parent's. The live test's own
+	// final and strongest assertion reads the merged content back
+	// (FetchRepoFileContent + a per-run sentinel); this port's
+	// DefaultScript-committed content has no equivalent sentinel to search
+	// for, but every stage's marker file is written under
+	// .simclaude/<Stage>.md with the issue number baked into its own text
+	// (commitStageMarker, tests/sim/simclaude/git.go) — reading Implement's
+	// marker back from env.OwnerRepoBeta's own bare repo and confirming it
+	// names the *child's* issue number is the direct sim-side equivalent:
+	// it fails if RegisterWorktreeManagerForTest ever routed a repo's
+	// worktree operations to the wrong backing git repo, exactly the class
+	// of regression this port's new multi-repo seam could introduce.
+	betaBareDir, err := env.Sim.Sim().RepoBareDir(env.OwnerRepoBeta)
+	if err != nil {
+		t.Fatalf("RepoBareDir(%s): %v", env.OwnerRepoBeta, err)
+	}
+	implementMarker, err := gitShowFile(t, betaBareDir, "main", ".simclaude/Implement.md")
+	if err != nil {
+		t.Fatalf("reading child's Implement marker from %s's own bare repo: %v", env.OwnerRepoBeta, err)
+	}
+	wantMarker := fmt.Sprintf("issue #%d", child)
+	if !strings.Contains(implementMarker, wantMarker) {
+		t.Fatalf("child's Implement marker in %s does not mention %q — the beta-side work may have landed in the wrong repo:\n%s",
+			env.OwnerRepoBeta, wantMarker, implementMarker)
+	}
+	t.Logf("child %s#%d's Implement marker confirmed on %s's own default branch — beta-side work genuinely landed there", env.OwnerRepoBeta, child, env.OwnerRepoBeta)
 
 	// Parent unblocks and completes its own remaining stages (Implement,
 	// Review, Validate — Specify/Research/Plan were pre-seeded complete).
