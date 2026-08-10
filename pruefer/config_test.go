@@ -253,6 +253,18 @@ hookdeck:
 	}
 }
 
+func TestLoadConfig_HookdeckEnvFlagsEmptyRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, ``)
+
+	if _, err := LoadConfig([]string{"-config", path, "-hookdeck-api-key-env="}); err == nil {
+		t.Fatal("expected an error for an empty -hookdeck-api-key-env value")
+	}
+	if _, err := LoadConfig([]string{"-config", path, "-hookdeck-webhook-secret-env="}); err == nil {
+		t.Fatal("expected an error for an empty -hookdeck-webhook-secret-env value")
+	}
+}
+
 func TestLoadConfig_ReconciliationYAML(t *testing.T) {
 	dir := t.TempDir()
 	path := writeYAMLConfig(t, dir, `

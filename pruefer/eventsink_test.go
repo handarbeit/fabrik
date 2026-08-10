@@ -28,7 +28,7 @@ func newTestDaemonForEvents(client *fakeLister) *Daemon {
 }
 
 func TestDaemonEventSink_PullRequestTriggerActions_DispatchReview(t *testing.T) {
-	for _, action := range []string{"opened", "synchronize", "ready_for_review"} {
+	for _, action := range []string{"opened", "reopened", "synchronize", "ready_for_review"} {
 		t.Run(action, func(t *testing.T) {
 			client := newFakeLister()
 			client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}

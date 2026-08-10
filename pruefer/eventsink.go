@@ -96,9 +96,15 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 
 // reviewTriggerActions are the pull_request webhook actions that should
 // trigger a review, per the issue's "Triggers, not source of truth"
-// requirement.
+// requirement. reopened is included alongside opened/synchronize/
+// ready_for_review: a closed-then-reopened PR needs a fresh review just as
+// much as a newly opened one, and without it here the PR would silently
+// wait out the reconciliation-fallback interval (or a full poll sweep)
+// before pruefer notices — the same "review it now" transition, just
+// missed.
 var reviewTriggerActions = map[string]bool{
 	"opened":           true,
+	"reopened":         true,
 	"synchronize":      true,
 	"ready_for_review": true,
 }

@@ -109,7 +109,7 @@ On macOS arm64, a release-mode upgrade re-signs the replacement binary ad-hoc af
 
 ## Event-driven mode (Hookdeck)
 
-By default (`event_source: poll`, unset), Pruefer's behavior is exactly what's described above — poll every `poll_interval_seconds`, list open PRs, review the eligible ones. `event_source: hookdeck` is an opt-in alternative: GitHub webhooks are forwarded through [Hookdeck](https://hookdeck.com) into Pruefer, which reviews a PR within moments of `opened`/`synchronize`/`ready_for_review` instead of waiting up to a full poll interval. Polling is never removed in this mode — it's demoted to a low-frequency reconciliation safety net (`reconciliation.fallback_interval`, default `2m`), covering startup, a Hookdeck outage, and the moment right after reconnecting, so a missed or dropped event is never fatal.
+By default (`event_source: poll`, unset), Pruefer's behavior is exactly what's described above — poll every `poll_interval_seconds`, list open PRs, review the eligible ones. `event_source: hookdeck` is an opt-in alternative: GitHub webhooks are forwarded through [Hookdeck](https://hookdeck.com) into Pruefer, which reviews a PR within moments of `opened`/`reopened`/`synchronize`/`ready_for_review` instead of waiting up to a full poll interval. Polling is never removed in this mode — it's demoted to a low-frequency reconciliation safety net (`reconciliation.fallback_interval`, default `2m`), covering startup, a Hookdeck outage, and the moment right after reconnecting, so a missed or dropped event is never fatal.
 
 Pruefer is the deliberate test bed for this pattern before it's ported to Fabrik's own webhook infrastructure — see [adrs/1254-event-driven-hookdeck-ingestion.md](../../adrs/1254-event-driven-hookdeck-ingestion.md).
 

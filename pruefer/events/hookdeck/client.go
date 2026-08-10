@@ -17,6 +17,10 @@ const DefaultAPIBaseURL = "https://api.hookdeck.com/2025-07-01"
 // sessions.
 const DefaultWSBaseURL = "wss://ws.hookdeck.com"
 
+// maxSessionResponseBytes bounds the cli-session creation response body —
+// see the io.LimitReader call site in createSession's success path.
+const maxSessionResponseBytes = 1 << 20 // 1MiB
+
 // createSession creates a new Hookdeck CLI session scoped to apiKey via
 // HTTP Basic auth (username=apiKey, empty password), returning the session
 // ID used as the Websocket-Id dial header.
@@ -49,8 +53,11 @@ func createSession(ctx context.Context, httpClient *http.Client, baseURL, apiKey
 		return "", fmt.Errorf("creating cli-session: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
+	// Bounded like the error path above: an HTTP 200 from a misbehaving or
+	// compromised endpoint carrying an oversized body would otherwise force
+	// unbounded allocation in Decode before it ever returns.
 	var out createSessionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxSessionResponseBytes)).Decode(&out); err != nil {
 		return "", fmt.Errorf("decoding cli-session response: %w", err)
 	}
 	if out.ID == "" {

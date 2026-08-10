@@ -50,6 +50,12 @@ const (
 	// again, silently defeating the pongWait/aliveGracePeriod liveness
 	// checks (a hung write never surfaces as a read timeout).
 	defaultWriteWait = 10 * time.Second
+
+	// maxFrameBytes bounds every WebSocket read via conn.SetReadLimit,
+	// matching GitHub's own documented webhook payload ceiling — see the
+	// SetReadLimit call site in runOnce for why an unbounded read is a
+	// real risk here.
+	maxFrameBytes = 25 * 1024 * 1024
 )
 
 // Config configures a Source.
@@ -73,6 +79,15 @@ type Config struct {
 	// daemon uses a transition into HealthConnected following a prior
 	// disconnect to trigger a reconciliation poll, since events may have
 	// been missed while disconnected.
+	//
+	// Callers must tolerate events arriving out of order across a
+	// reconnect boundary: runOnce's liveness goroutine is signaled to stop
+	// but not joined, so a HealthConnected emitted right as one connection
+	// attempt is dying can still land after the next attempt's own
+	// HealthReconnecting/HealthConnected sequence begins (see the
+	// markConnected race noted in runOnce). The daemon's own consumer only
+	// tracks a boolean transition and already tolerates this; any future
+	// consumer must do the same rather than assuming strict ordering.
 	OnHealth func(events.HealthEvent)
 
 	// HTTPClient overrides the HTTP client used for session creation; nil
@@ -129,6 +144,11 @@ type Source struct {
 	// lastNormWarnAt rate-limits the normalization-failure warn log below,
 	// same single-threaded guarantee as lastSigWarnAt.
 	lastNormWarnAt time.Time
+	// lastFrameWarnAt rate-limits the malformed-envelope warn log in
+	// handleFrame, kept distinct from lastNormWarnAt so a sustained run of
+	// one failure class can't suppress the other's log — same
+	// single-threaded guarantee as lastSigWarnAt.
+	lastFrameWarnAt time.Time
 }
 
 // NewSource returns a Source ready to Run, applying defaults for any unset
@@ -252,6 +272,16 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 	}
 	defer conn.Close()
 
+	// gorilla/websocket's default read limit is 0 (unlimited): without this,
+	// a misbehaving endpoint — or a redirected WSBaseURL / mis-issued cert
+	// pointing somewhere unexpected — could push a single oversized frame
+	// and force unbounded allocation in ReadMessage before it ever returns.
+	// maxFrameBytes matches GitHub's own documented webhook payload ceiling
+	// (25MB), generous enough for any real delivery while still bounding
+	// the worst case; createSession's error path applies the same
+	// discipline via io.LimitReader.
+	conn.SetReadLimit(maxFrameBytes)
+
 	// A silently-dead connection (NAT timeout, a firewall dropping packets
 	// without a FIN/RST) would otherwise leave ReadMessage blocked forever
 	// with no error — Run's reconnect/backoff loop would never re-trigger,
@@ -292,6 +322,21 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 	// reconnect even though nothing was actually wrong. aliveGracePeriod
 	// resolves both: an instant reject can't survive it, but idle-and-
 	// healthy does.
+	//
+	// markConnectedOnce means only the first caller of markConnected
+	// actually emits — but the read loop below and the grace-timer branch
+	// in the goroutine started just after this can both call it, and
+	// nothing orders them against each other or against the read loop's
+	// own error return. If the connection dies right around the
+	// aliveGracePeriod boundary, the grace timer can fire and emit
+	// HealthConnected after (or racing) the read loop has already failed —
+	// an accepted, cosmetic race: the only observable effect is Run's
+	// backoff-reset decision and an extra HealthConnected->
+	// HealthReconnecting flip, which triggers at most one harmless,
+	// already-coalesced reconciliation poll. Not resolved with a
+	// WaitGroup/join because doing so would block runOnce's return on the
+	// goroutine's own select, and the only failure mode is this cosmetic
+	// double emission.
 	var proven atomic.Bool
 	var markConnectedOnce sync.Once
 	markConnected := func() {
@@ -350,6 +395,15 @@ func (s *Source) runOnce(ctx context.Context, sink events.EventSink) (connected 
 func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *websocket.Conn, msg []byte) {
 	var frame wsFrame
 	if err := json.Unmarshal(msg, &frame); err != nil {
+		// Rate-limited like the sibling warns below: a sustained stream of
+		// malformed outer envelopes (protocol drift, an intermediary
+		// corrupting frames) would otherwise silently stop event ingestion
+		// while transport health still reports connected, with no
+		// operator-visible signal.
+		if time.Since(s.lastFrameWarnAt) >= sigFailureLogInterval {
+			s.lastFrameWarnAt = time.Now()
+			logf("dropping malformed hookdeck frame envelope: %v\n", err)
+		}
 		return
 	}
 	if frame.Event != wsEventAttempt {
@@ -365,11 +419,12 @@ func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *w
 	s.ack(conn, attempt)
 }
 
-// sigFailureLogInterval rate-limits the invalid-signature and
-// normalization-failure warn logs in processAttempt — either can fail every
-// single delivery (a misconfigured secret; a persistent payload-shape
-// mismatch), and both need to stay visible without flooding the log on a
-// sustained run of failures.
+// sigFailureLogInterval rate-limits the malformed-envelope warn log in
+// handleFrame and the invalid-signature/normalization-failure warn logs in
+// processAttempt — any of these can fail every single delivery (a
+// misconfigured secret; a persistent payload-shape mismatch; protocol
+// drift in the outer envelope), and all three need to stay visible without
+// flooding the log on a sustained run of failures.
 const sigFailureLogInterval = 30 * time.Second
 
 // processAttempt verifies the GitHub signature, normalizes the payload,
@@ -438,6 +493,15 @@ func lookupHeader(headers map[string]string, key string) string {
 // expects for every attempt. A failure to send is not retried — the
 // attempt has already been processed; a lost ack only costs a Hookdeck-side
 // timeout/retry of the same delivery, which dedupe absorbs on arrival.
+//
+// Status is always StatusOK, even when processAttempt rejected or dropped
+// the event (bad signature, malformed payload, dedupe hit) — the ack
+// completes the CLI-session round trip and is not a statement about GitHub
+// signature validity. Trade-off: a persistent misconfiguration (e.g. the
+// wrong webhook secret) is therefore invisible from Hookdeck's own
+// dashboard/delivery logs; the only signal is the rate-limited warn logs
+// in processAttempt/handleFrame above, which require access to pruefer's
+// own logs to notice.
 func (s *Source) ack(conn *websocket.Conn, attempt attemptBody) {
 	body, err := json.Marshal(attemptResponseBody{
 		AttemptID: attempt.AttemptID,

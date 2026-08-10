@@ -417,9 +417,15 @@ func LoadConfig(args []string) (Config, error) {
 		cfg.EventSource = fv.eventSource
 	}
 	if explicit["hookdeck-api-key-env"] {
+		if fv.hookdeckAPIKeyEnv == "" {
+			return Config{}, fmt.Errorf("-hookdeck-api-key-env cannot be empty")
+		}
 		cfg.HookdeckAPIKeyEnv = fv.hookdeckAPIKeyEnv
 	}
 	if explicit["hookdeck-webhook-secret-env"] {
+		if fv.hookdeckWebhookSecretEnv == "" {
+			return Config{}, fmt.Errorf("-hookdeck-webhook-secret-env cannot be empty")
+		}
 		cfg.HookdeckWebhookSecretEnv = fv.hookdeckWebhookSecretEnv
 	}
 	if explicit["reconciliation-startup"] {
