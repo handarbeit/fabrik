@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"testing"
 	"time"
@@ -82,6 +83,14 @@ import (
 // pre-#1375 behavior; see adrs/1375-review-authority-reinvoke-not-pause.md
 // for why that behavior was wrong and what replaces it.
 
+// reviewBodyIDPattern extracts a review-body synthetic comment ID
+// ("review-body:<database ID>", produced by engine/reviews.go's
+// reviewBodyCommentID) from a dispatchReinvoke log line enriched by
+// commentIDsForLog (engine/reinvoke.go, #1519). Used by AC7 below to key its
+// "same review not reprocessed" check off the review's own identity, not off
+// reinvoke count or timing.
+var reviewBodyIDPattern = regexp.MustCompile(`review-body:\d+`)
+
 // TestReviewAuthorityReinvokesOnChangesRequested covers AC1 and AC6 (R1/R3,
 // #1375, ADR-1375). This supersedes the retired
 // TestReviewAuthorityBlocksAndPausesOnChangesRequested and its expectation
@@ -100,8 +109,26 @@ import (
 // REQUEST_CHANGES, no inline thread comments) — and confirms it alone
 // triggers the reinvoke. AC7 requires the same review is not re-processed on
 // a later poll: after the reinvoke completes, this test waits through a
-// further poll window and asserts no second review-reinvoke dispatch occurs
-// for the same review.
+// further poll window and asserts no reinvoke dispatch carries the same
+// review's ID among its comments.
+//
+// AC7's premise (#1519, correcting the original design under #1375): a
+// *second* review-reinvoke dispatch in the settle window is not by itself a
+// violation. #1045 widened buildReviewBodyCommentsFromReviews's
+// actionable-feedback filter so any non-DISMISSED, non-PENDING review body is
+// actionable, not just CHANGES_REQUESTED — so a distinct, previously
+// unprocessed review body (e.g. the bed's self-submitting bot reviewer
+// posting a generic COMMENTED summary, which every real bed observes within
+// seconds of the test's own review) correctly triggers its own reinvoke, and
+// AC7 must tolerate it. What AC7 actually guards is narrower: the dedup on
+// the *original* review (keyed on reviewBodyCommentID, "review-body:<review
+// database ID>") must hold — that review's ID must never reappear in a later
+// reinvoke's comment batch. dispatchReinvoke's log line is enriched (#1519,
+// engine/reinvoke.go's commentIDsForLog) to carry the dispatched comment IDs
+// specifically so this test can key the check off the original review's ID,
+// not off dispatch count or timing — a widened match that merely tolerated
+// *any* second reinvoke would satisfy R3 while reintroducing a vacuous test
+// (R2), since it could no longer detect a genuine dedup regression.
 //
 // Requires #1261 (engine support for the review-authority:authoritative
 // label) and #1375 (this issue) to be merged.
@@ -157,8 +184,23 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 	// verdict has not cleared) — before Finding 1's fix this reinvoke was
 	// unreachable, and the gate would instead sit on fabrik:awaiting-review
 	// until FABRIK_REVIEW_WAIT_TIMEOUT elapsed.
-	WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), logOffset, 10*time.Minute)
+	firstReinvokeLine := WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), logOffset, 10*time.Minute)
 	t.Logf("review-reinvoke dispatched for %s#%d — authoritative CHANGES_REQUESTED body alone triggered a reinvoke", env.RepoAlpha, num)
+
+	// Extract the original review's synthetic comment ID so AC7 below can key
+	// its check off the review's own identity. AC6's premise guarantees this
+	// scenario is a body-only REQUEST_CHANGES review (no inline comments), which
+	// always produces exactly one review-body: ID — if extraction ever comes up
+	// empty, something upstream broke (the log enrichment, or AC6's shape
+	// assumption), and failing loudly here is preferable to AC7 silently
+	// no-op'ing.
+	originalReviewIDs := reviewBodyIDPattern.FindAllString(firstReinvokeLine, -1)
+	if len(originalReviewIDs) == 0 {
+		t.Fatalf("could not extract a review-body: ID from the first review-reinvoke log line %q — "+
+			"expected commentIDsForLog (engine/reinvoke.go) to have enriched it with the dispatched review's synthetic ID", firstReinvokeLine)
+	}
+	originalReviewID := originalReviewIDs[0]
+	t.Logf("original review's synthetic comment ID: %s", originalReviewID)
 
 	// The reinvoke, not a pause, is the primary response — fabrik:paused must
 	// not have fired from this alone.
@@ -173,20 +215,36 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 	WaitForLogLine(t, env, fmt.Sprintf("[#%d done] comment processing complete", num), logOffset, 20*time.Minute)
 	t.Logf("review-reinvoke completed for %s#%d", env.RepoAlpha, num)
 
-	// AC7: the same review must not be re-processed on a later poll. No new
-	// review has been submitted and no new thread comments exist, so
-	// buildReviewFeedbackComments must now return empty — confirm no second
-	// review-reinvoke dispatch occurs within a bounded settle window.
+	// AC7: the same review must not be re-processed on a later poll. The
+	// dedup in buildReviewBodyCommentsFromReviews (engine/reviews.go) is keyed
+	// per review-body ID (snap.CommentProcessed(reviewBodyCommentID(r))), so
+	// once the original review is processed, its own ID must never reappear
+	// in a later reinvoke's dispatched comment batch. A *different* review's
+	// ID reappearing is not a violation — since #1045, any distinct,
+	// previously unprocessed non-DISMISSED review body is actionable, and the
+	// bed's self-submitting bot reviewer routinely posts a generic COMMENTED
+	// summary within seconds of the test's own review, correctly triggering
+	// its own reinvoke. This scans every review-reinvoke line in the settle
+	// window (not just the first) and fails only if the original review's ID
+	// is among them.
 	settleOffset := LogOffset(t, env)
 	settleDeadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(settleDeadline) {
 		pollSleep(pollBase())
 	}
-	if line, err := tryLogLineContaining(env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), settleOffset); err == nil && line != "" {
-		t.Fatalf("AC7 violated: a second review-reinvoke dispatched for %s#%d after the same review was already processed: %q",
-			env.RepoAlpha, num, line)
+	lines, err := allLogLinesContaining(env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), settleOffset)
+	if err != nil {
+		t.Fatalf("scanning settle window for review-reinvoke lines: %v", err)
 	}
-	t.Logf("AC7 verified: %s#%d did not re-dispatch a reinvoke for the same, already-processed review", env.RepoAlpha, num)
+	for _, line := range lines {
+		if slices.Contains(reviewBodyIDPattern.FindAllString(line, -1), originalReviewID) {
+			t.Fatalf("AC7 violated: a review-reinvoke dispatched for %s#%d reprocessed the already-processed review %s: %q",
+				env.RepoAlpha, num, originalReviewID, line)
+		}
+		t.Logf("tolerated: a review-reinvoke dispatched for %s#%d for a different review (not %s), the bed's real steady-state behavior since #1045: %q",
+			env.RepoAlpha, num, originalReviewID, line)
+	}
+	t.Logf("AC7 verified: %s#%d did not re-dispatch a reinvoke for the same, already-processed review %s", env.RepoAlpha, num, originalReviewID)
 }
 
 // TestReviewAuthorityCycleLimitPauses covers AC4: a reviewer requesting
