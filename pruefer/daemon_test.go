@@ -444,14 +444,16 @@ func TestDaemonRun_PreAcquiredLockNotReacquiredOrReleased(t *testing.T) {
 		preAcquiredLock: lockFile,
 	}
 
+	// Cancelled up front rather than after a sleep: Run's own loop calls
+	// poll() once synchronously before ever reaching its ctx.Done() select,
+	// so if Run wrongly tried to reacquire the lock we already hold, it
+	// would fail immediately inside that first call — no warm-up delay is
+	// needed to observe that failure, and this avoids depending on an
+	// arbitrary sleep duration being "long enough."
 	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.Run(ctx) }()
-
-	// Give Run a moment to reach its first poll (proving it didn't fail
-	// trying to reacquire the lock we already hold) before cancelling.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
 
 	select {
 	case err := <-errCh:
