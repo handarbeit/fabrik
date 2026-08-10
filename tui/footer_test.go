@@ -236,6 +236,57 @@ func TestGraphQLStyle_ProjectionBoundary(t *testing.T) {
 	}
 }
 
+// TestGraphQLStyle_FirstSampleBeforeFirstTick verifies that when the first
+// PollCompletedEvent lands before any TickEvent has set f.now (f.now is the
+// zero time.Time — the engine's synchronous startup poll typically beats the
+// TUI's first 1s tick), the *next* sample does not compute an elapsed
+// duration against that bogus zero-value baseline (which would grossly
+// overstate elapsed and silently drive burnRatePerMin toward zero regardless
+// of actual consumption — a false "safe" reading). Instead it re-baselines,
+// exactly like a genuine cold start; only the sample after that produces a
+// real estimate, and that estimate must reflect the true burn rate.
+func TestGraphQLStyle_FirstSampleBeforeFirstTick(t *testing.T) {
+	f := FooterComponent{}
+	// f.now is still zero: no TickEvent has landed yet.
+	comp, _ := f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 2000, Reset: time.Now().Add(11 * time.Minute)}})
+	f = comp.(FooterComponent)
+	if f.haveBurnRate {
+		t.Fatal("no burn rate expected from the very first sample")
+	}
+
+	// A TickEvent finally lands, then a second sample arrives with a large
+	// drop in Remaining. Without the fix, this would be computed against the
+	// zero-value baseline and silently understate the true burn rate.
+	now := time.Now()
+	comp, _ = f.Update(TickEvent{At: now})
+	f = comp.(FooterComponent)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 500, Reset: now.Add(10 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	if f.haveBurnRate {
+		t.Error("sample immediately following a zero-f.now baseline must re-baseline, not compute a rate")
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("re-baselining sample: got %v, want successStyle (cold-start-like green)", got)
+	}
+
+	// The *third* sample, now measured against a real prior timestamp,
+	// produces a genuine estimate that reflects the actual high burn rate.
+	f.now = now.Add(1 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 100, Reset: now.Add(9 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	if !f.haveBurnRate {
+		t.Fatal("expected a real burn-rate estimate on the third sample")
+	}
+	if f.burnRatePerMin != 400 {
+		t.Errorf("expected burn rate of 400 pts/min (500-100 over 1 minute), got %v", f.burnRatePerMin)
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != failStyle.GetForeground() {
+		t.Errorf("high real burn rate must be reflected as red, got %v", got)
+	}
+}
+
 // TestGraphQLStyle_WindowReset verifies that a Remaining increase between
 // consecutive samples is treated as a window reset: the estimator discards
 // the stale sample (rendering green, cold-start-like) rather than computing

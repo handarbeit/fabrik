@@ -108,6 +108,21 @@ func (f FooterComponent) observeGraphQLSample(stats RateLimitStats) FooterCompon
 		return f
 	}
 
+	if prev.at.IsZero() {
+		// prev was recorded by the f.now.IsZero() branch above (the first
+		// sample landed before any TickEvent had set f.now — the engine's
+		// synchronous startup poll typically beats the TUI's first 1s tick).
+		// That timestamp isn't a real baseline, so treat this sample as a
+		// fresh baseline too rather than computing elapsed against a
+		// zero-value time.Time, which would grossly overstate the elapsed
+		// duration (the zero value is year 1) and silently bias
+		// burnRatePerMin toward zero (a false "safe" reading) regardless of
+		// actual consumption. See issue #1510 review discussion.
+		f.lastSample = graphqlSample{at: f.now, remaining: stats.Remaining}
+		f.haveBurnRate = false
+		return f
+	}
+
 	elapsed := f.now.Sub(prev.at)
 	if elapsed <= 0 {
 		// Non-advancing or out-of-order timestamp; keep the prior estimate
