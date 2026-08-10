@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "operation": "update_project_item_status",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-08-09T18:45:00Z",
+    "source_repo": "handarbeit (project #2 \"Fabrik Test\", disposable sandbox item)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "updateProjectV2ItemFieldValue": {
+        "projectV2Item": {
+          "id": "PVTI_lADOENB0Ac4BYrazzg13dl8"
+        }
+      }
+    }
+  }
+}

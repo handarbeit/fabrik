@@ -1,0 +1,14 @@
+{
+  "provenance": {
+    "operation": "merge_pr",
+    "endpoint": "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge",
+    "recorded_at": "2026-08-09T18:55:00Z",
+    "source_repo": "handarbeit/fabrik-test-alpha#4382 (disposable sandbox PR)",
+    "scrubbed": true
+  },
+  "response": {
+    "sha": "7da7f42e01d9bbab8f6ffecad03ecbd9b8c513d3",
+    "merged": true,
+    "message": "Pull Request successfully merged"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "operation": "add_blocked_by",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-08-09T18:45:00Z",
+    "source_repo": "handarbeit/fabrik-test-alpha#4380,#4381 (disposable sandbox issues)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "addBlockedBy": {
+        "issue": {
+          "id": "I_kwDOSmuv9s8AAAABMDpPmw"
+        }
+      }
+    }
+  }
+}

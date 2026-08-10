@@ -150,6 +150,16 @@ func canEstablishOrSupersedeReview(state string) bool {
 	return state == "COMMENTED" || isFormalReviewVerdict(state)
 }
 
+// fetchPRReviewDecisionQuery is the GraphQL query used by FetchPRReviewDecision.
+const fetchPRReviewDecisionQuery = `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewDecision
+    }
+  }
+}`
+
 // FetchPRReviewDecision returns GitHub's computed review-decision verdict for a
 // pull request via GraphQL, keyed on PR number — mirroring prNodeID's
 // single-field-by-number query shape rather than closedByPullRequestsReferences,
@@ -166,14 +176,7 @@ func canEstablishOrSupersedeReview(state string) bool {
 // not be folded into the same "" the no-branch-protection fallback treats as
 // meaningful data.
 func (c *Client) FetchPRReviewDecision(owner, repo string, prNumber int) (string, error) {
-	query := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewDecision
-    }
-  }
-}`
+	query := fetchPRReviewDecisionQuery
 	vars := map[string]interface{}{
 		"owner":  owner,
 		"repo":   repo,
@@ -196,6 +199,34 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	}
 	return result.Data.Repository.PullRequest.ReviewDecision, nil
 }
+
+// fetchPRReviewThreadsQuery is the GraphQL query used by FetchPRReviewThreads.
+const fetchPRReviewThreadsQuery = `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50) {
+        totalCount
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 20) {
+            totalCount
+            nodes {
+              author { login }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}`
 
 // FetchPRReviewThreads returns every review thread on a pull request —
 // resolved and unresolved alike — via GraphQL, keyed on PR number (same
@@ -234,32 +265,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 // Returns an error (not an empty slice) when the query resolves with no
 // pullRequest node, matching FetchPRReviewDecision's convention.
 func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRReviewThread, bool, error) {
-	query := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 50) {
-        totalCount
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          originalLine
-          comments(first: 20) {
-            totalCount
-            nodes {
-              author { login }
-              body
-              createdAt
-            }
-          }
-        }
-      }
-    }
-  }
-}`
+	query := fetchPRReviewThreadsQuery
 	vars := map[string]interface{}{
 		"owner":  owner,
 		"repo":   repo,
@@ -940,12 +946,8 @@ func (c *Client) SubmitPRReview(owner, repo string, prNumber int, commitSHA, bod
 	return result.ID, nil
 }
 
-// prNodeID fetches the GraphQL node ID of a pull request by its REST number.
-// The node ID is required by every GraphQL mutation that operates on a PR
-// (markPullRequestReadyForReview, enablePullRequestAutoMerge, enqueuePullRequest,
-// dequeuePullRequest) since none of them accept a plain PR number.
-func (c *Client) prNodeID(owner, repo string, prNumber int) (string, error) {
-	fetchQuery := `
+// prNodeIDQuery is the GraphQL query used by prNodeID.
+const prNodeIDQuery = `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
@@ -953,6 +955,13 @@ query($owner: String!, $repo: String!, $number: Int!) {
     }
   }
 }`
+
+// prNodeID fetches the GraphQL node ID of a pull request by its REST number.
+// The node ID is required by every GraphQL mutation that operates on a PR
+// (markPullRequestReadyForReview, enablePullRequestAutoMerge, enqueuePullRequest,
+// dequeuePullRequest) since none of them accept a plain PR number.
+func (c *Client) prNodeID(owner, repo string, prNumber int) (string, error) {
+	fetchQuery := prNodeIDQuery
 	fetchVars := map[string]interface{}{
 		"owner":  owner,
 		"repo":   repo,
@@ -977,6 +986,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	return nodeID, nil
 }
 
+// markPRReadyMutation is the GraphQL mutation used by MarkPRReady.
+const markPRReadyMutation = `
+mutation($prId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+
 // MarkPRReady transitions a draft PR to ready-for-review.
 // Uses the GraphQL markPullRequestReadyForReview mutation, which is the supported
 // path — REST PATCH does not reliably support draft→ready transitions.
@@ -986,14 +1005,7 @@ func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!) {
-  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
-    pullRequest {
-      id
-    }
-  }
-}`
+	mutation := markPRReadyMutation
 	mutVars := map[string]interface{}{
 		"prId": nodeID,
 	}
@@ -1085,14 +1097,8 @@ var ErrAutoMergeAlreadyClean = errors.New("PR is already in clean status — mer
 // strategy must be one of "MERGE", "SQUASH", or "REBASE". GitHub merges the PR
 // atomically when all branch-protection requirements are satisfied.
 //
-// Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
-func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
-	nodeID, err := c.prNodeID(owner, repo, prNumber)
-	if err != nil {
-		return err
-	}
-
-	mutation := `
+// enablePullRequestAutoMergeMutation is the GraphQL mutation used by EnablePullRequestAutoMerge.
+const enablePullRequestAutoMergeMutation = `
 mutation($prId: ID!, $method: PullRequestMergeMethod!) {
   enablePullRequestAutoMerge(input: { pullRequestId: $prId, mergeMethod: $method }) {
     pullRequest {
@@ -1100,6 +1106,15 @@ mutation($prId: ID!, $method: PullRequestMergeMethod!) {
     }
   }
 }`
+
+// Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
+func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
+	}
+
+	mutation := enablePullRequestAutoMergeMutation
 	mutVars := map[string]interface{}{
 		"prId":   nodeID,
 		"method": strategy,
@@ -1147,6 +1162,16 @@ func isAutoMergeAlreadyCleanError(err error) bool {
 // when an unresolved review thread appears on the current head during the
 // convergence window (#1207).
 //
+// disablePullRequestAutoMergeMutation is the GraphQL mutation used by DisablePullRequestAutoMerge.
+const disablePullRequestAutoMergeMutation = `
+mutation($prId: ID!) {
+  disablePullRequestAutoMerge(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+
 // Uses the same two-step pattern as EnablePullRequestAutoMerge: fetch the PR
 // node ID via GraphQL, then call the disablePullRequestAutoMerge mutation.
 func (c *Client) DisablePullRequestAutoMerge(owner, repo string, prNumber int) error {
@@ -1155,14 +1180,7 @@ func (c *Client) DisablePullRequestAutoMerge(owner, repo string, prNumber int) e
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!) {
-  disablePullRequestAutoMerge(input: { pullRequestId: $prId }) {
-    pullRequest {
-      id
-    }
-  }
-}`
+	mutation := disablePullRequestAutoMergeMutation
 	mutVars := map[string]interface{}{
 		"prId": nodeID,
 	}
@@ -1178,6 +1196,16 @@ mutation($prId: ID!) {
 // force-pushed since the caller read the SHA, the mutation fails safely
 // (optimistic concurrency).
 //
+// enqueuePullRequestMutation is the GraphQL mutation used by EnqueuePullRequest.
+const enqueuePullRequestMutation = `
+mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
+  enqueuePullRequest(input: { pullRequestId: $prId, expectedHeadOid: $expectedHeadOid }) {
+    mergeQueueEntry {
+      id
+    }
+  }
+}`
+
 // Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
 // GraphQL, then call the enqueuePullRequest mutation.
 func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error {
@@ -1189,14 +1217,7 @@ func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHe
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
-  enqueuePullRequest(input: { pullRequestId: $prId, expectedHeadOid: $expectedHeadOid }) {
-    mergeQueueEntry {
-      id
-    }
-  }
-}`
+	mutation := enqueuePullRequestMutation
 	mutVars := map[string]interface{}{
 		"prId":            nodeID,
 		"expectedHeadOid": expectedHeadOID,
@@ -1210,6 +1231,16 @@ mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
 
 // DequeuePullRequest removes a pull request from the repository's merge queue.
 //
+// dequeuePullRequestMutation is the GraphQL mutation used by DequeuePullRequest.
+const dequeuePullRequestMutation = `
+mutation($prId: ID!) {
+  dequeuePullRequest(input: { id: $prId }) {
+    mergeQueueEntry {
+      id
+    }
+  }
+}`
+
 // Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
 // GraphQL, then call the dequeuePullRequest mutation.
 func (c *Client) DequeuePullRequest(owner, repo string, prNumber int) error {
@@ -1218,14 +1249,7 @@ func (c *Client) DequeuePullRequest(owner, repo string, prNumber int) error {
 		return err
 	}
 
-	mutation := `
-mutation($prId: ID!) {
-  dequeuePullRequest(input: { id: $prId }) {
-    mergeQueueEntry {
-      id
-    }
-  }
-}`
+	mutation := dequeuePullRequestMutation
 	mutVars := map[string]interface{}{
 		"prId": nodeID,
 	}

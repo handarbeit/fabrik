@@ -186,7 +186,22 @@ func TestRemoveLabelFromIssue_NotFound_ReturnsErrNotFound(t *testing.T) {
 
 // ── prs.go ───────────────────────────────────────────────────────────────────
 
+// TestCreateDraftPR_Success serves github/testdata/recordings/create_draft_pr.json
+// — a real response recorded from creating and closing a disposable draft PR
+// on handarbeit/fabrik-test-alpha (#1453 R2/R5/R3a) — instead of a
+// hand-authored literal. The recording needed live redaction: GitHub's real
+// response included real committer email addresses that internal/wirescrub
+// caught and replaced before this fixture was committed (see
+// github/testdata/README.md).
 func TestCreateDraftPR_Success(t *testing.T) {
+	raw := loadRecording(t, "create_draft_pr")
+	var recorded struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatalf("parsing recorded response: %v", err)
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
@@ -203,7 +218,7 @@ func TestCreateDraftPR_Success(t *testing.T) {
 			t.Errorf("body missing Closes #42: %v", body["body"])
 		}
 		w.WriteHeader(201)
-		json.NewEncoder(w).Encode(map[string]interface{}{"number": 99})
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
@@ -212,8 +227,8 @@ func TestCreateDraftPR_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraftPR: %v", err)
 	}
-	if prNum != 99 {
-		t.Errorf("prNum = %d, want 99", prNum)
+	if prNum != recorded.Number {
+		t.Errorf("prNum = %d, want %d (recorded)", prNum, recorded.Number)
 	}
 }
 

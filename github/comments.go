@@ -53,16 +53,19 @@ func (c *Client) AddPRReviewCommentReaction(owner, repo string, commentDatabaseI
 	return nil
 }
 
-// ResolveReviewThread marks a PR review thread as resolved ("Resolve
-// conversation" in the GitHub UI). threadID is the GraphQL node ID of the
-// thread (available via ProjectItem.LinkedPRReviewThreadComments[*].ReviewThreadID).
-func (c *Client) ResolveReviewThread(threadID string) error {
-	const query = `
+// resolveReviewThreadMutation is the GraphQL mutation used by ResolveReviewThread.
+const resolveReviewThreadMutation = `
 mutation($threadId: ID!) {
   resolveReviewThread(input: { threadId: $threadId }) {
     thread { id isResolved }
   }
 }`
+
+// ResolveReviewThread marks a PR review thread as resolved ("Resolve
+// conversation" in the GitHub UI). threadID is the GraphQL node ID of the
+// thread (available via ProjectItem.LinkedPRReviewThreadComments[*].ReviewThreadID).
+func (c *Client) ResolveReviewThread(threadID string) error {
+	query := resolveReviewThreadMutation
 	vars := map[string]interface{}{"threadId": threadID}
 	var result struct {
 		Data struct {

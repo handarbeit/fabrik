@@ -61,48 +61,57 @@ func probeResponse(ownerType, projectID string, nodes []interface{}, totalCount 
 	}
 }
 
+// TestProbeProjectBoard_Success serves github/testdata/recordings/probe_project_board.json
+// — a real response recorded from the live handarbeit/fabrik board using the
+// exact probeProjectBoardQueryTemplate field selection (#1453 R2/R5) —
+// instead of the synthetic probeItemResponse/probeResponse helpers below
+// (which remain in use by the other tests in this file, covering edge
+// cases — closed items, PRs, pagination — that a single real snapshot
+// can't exercise).
 func TestProbeProjectBoard_Success(t *testing.T) {
-	t1 := "2024-01-01T10:00:00Z"
-	t2 := "2024-01-01T11:00:00Z" // later than t1
+	raw := loadRecording(t, "probe_project_board")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		node := probeItemResponse("PVTI_1", "I_abc", 42, "Issue", "OPEN", t1, t2, "owner/repo", 0, "")
-		resp := probeResponse("user", "PVT_123", []interface{}{node}, 1, false, "")
-		json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	items, projectID, err := c.ProbeProjectBoard("owner", "repo", 1, "user")
+	items, projectID, err := c.ProbeProjectBoard("handarbeit", "fabrik", 1, "organization")
 	if err != nil {
 		t.Fatalf("ProbeProjectBoard: %v", err)
 	}
-	if projectID != "PVT_123" {
-		t.Errorf("projectID = %q, want PVT_123", projectID)
+	if projectID != "PVT_kwDOENB0Ac4BW0n_" {
+		t.Errorf("projectID = %q, want PVT_kwDOENB0Ac4BW0n_", projectID)
 	}
-	if len(items) != 1 {
-		t.Fatalf("len(items) = %d, want 1", len(items))
+	if len(items) == 0 {
+		t.Fatal("expected at least one item from the recording")
 	}
+	// Spot-check the first recorded item: real content from the live board.
 	item := items[0]
-	if item.ItemID != "PVTI_1" {
-		t.Errorf("ItemID = %q, want PVTI_1", item.ItemID)
+	if item.ItemID != "PVTI_lADOENB0Ac4BW0n_zg1zXpw" {
+		t.Errorf("ItemID = %q", item.ItemID)
 	}
-	if item.ContentID != "I_abc" {
-		t.Errorf("ContentID = %q, want I_abc", item.ContentID)
+	if item.ContentID != "I_kwDOR2bN_c8AAAABL_NaWQ" {
+		t.Errorf("ContentID = %q", item.ContentID)
 	}
-	if item.Number != 42 {
-		t.Errorf("Number = %d, want 42", item.Number)
+	if item.Number != 1457 {
+		t.Errorf("Number = %d, want 1457", item.Number)
 	}
 	if item.IsPR {
 		t.Error("IsPR should be false for Issue")
 	}
 	if item.IsClosed {
-		t.Error("IsClosed should be false for open issue")
+		t.Error("IsClosed should be false for an OPEN issue")
 	}
-	if item.Repo != "owner/repo" {
-		t.Errorf("Repo = %q, want owner/repo", item.Repo)
+	if item.Repo != "handarbeit/fabrik" {
+		t.Errorf("Repo = %q, want handarbeit/fabrik", item.Repo)
 	}
-	// effectiveUpdatedAt = max(contentUpdatedAt, itemUpdatedAt) = t2 (later)
-	want, _ := time.Parse(time.RFC3339, t2)
+	// effectiveUpdatedAt = max(contentUpdatedAt, itemUpdatedAt); the item's
+	// own updatedAt (18:29:26Z) is later than content's (18:29:24Z) in the
+	// recorded fixture.
+	want, _ := time.Parse(time.RFC3339, "2026-08-09T18:29:26Z")
 	if !item.EffectiveUpdatedAt.Equal(want) {
 		t.Errorf("EffectiveUpdatedAt = %v, want %v", item.EffectiveUpdatedAt, want)
 	}

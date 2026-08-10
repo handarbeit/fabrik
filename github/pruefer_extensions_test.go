@@ -484,11 +484,27 @@ func TestListPRs_PopulatesAuthorAndLabels(t *testing.T) {
 	}
 }
 
+// TestFetchPRReviews_PopulatesCommitID serves
+// github/testdata/recordings/fetch_pr_reviews.json — a real reviews
+// response recorded from handarbeit/fabrik#1505 (#1453 R2/R5, read-only) —
+// instead of a hand-authored literal. The recording holds 7 COMMENTED
+// reviews from the same bot author (a real re-review sequence); FetchPRReviews
+// collapses same-author reviews to the latest submission, so the recording
+// still exercises the exact "populates CommitID" behavior this test is
+// named for, using the real final commit_id rather than an invented one.
 func TestFetchPRReviews_PopulatesCommitID(t *testing.T) {
+	raw := loadRecording(t, "fetch_pr_reviews")
+	var recorded []struct {
+		CommitID string `json:"commit_id"`
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatalf("parsing recorded response: %v", err)
+	}
+	wantCommitID := recorded[len(recorded)-1].CommitID
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]map[string]interface{}{
-			{"id": 1, "user": map[string]string{"login": "pruefer-bot[bot]"}, "state": "COMMENTED", "commit_id": "deadbeef"},
-		})
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(raw)
 	}))
 	defer srv.Close()
 
@@ -498,10 +514,10 @@ func TestFetchPRReviews_PopulatesCommitID(t *testing.T) {
 		t.Fatalf("FetchPRReviews: %v", err)
 	}
 	if len(reviews) != 1 {
-		t.Fatalf("expected 1 review, got %d", len(reviews))
+		t.Fatalf("expected 1 collapsed review (single author), got %d", len(reviews))
 	}
-	if reviews[0].CommitID != "deadbeef" {
-		t.Errorf("CommitID = %q, want deadbeef", reviews[0].CommitID)
+	if reviews[0].CommitID != wantCommitID {
+		t.Errorf("CommitID = %q, want %q (recorded, last submission)", reviews[0].CommitID, wantCommitID)
 	}
 }
 
