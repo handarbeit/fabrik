@@ -1789,3 +1789,60 @@ func TestRetryIdentityCheckAfterCreation_ContextCanceledDuringBackoff_ReturnsPro
 		t.Fatal("retryIdentityCheckAfterCreation did not honor context cancellation within 5s")
 	}
 }
+
+// TestReconcile_JustBootstrapped_ContextCanceledDuringRetryBackoff_DoesNotClaimRetriesExhausted
+// is the regression test for a review finding: the justBootstrapped
+// identity-failure error unconditionally said "its identity still doesn't
+// resolve on GitHub after N retries" — misleading when the actual cause of
+// retryIdentityCheckAfterCreation giving up was a canceled context (e.g.
+// shutdown mid-wait), not GitHub genuinely rejecting the identity check N
+// times over. The message must describe cancellation distinctly.
+func TestReconcile_JustBootstrapped_ContextCanceledDuringRetryBackoff_DoesNotClaimRetriesExhausted(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app-private-key.pem")
+	statePath := filepath.Join(dir, "app-state.json")
+
+	oldSleep := identityValidationSleep
+	identityValidationSleep = func(ctx context.Context, d time.Duration) error {
+		return context.Canceled // simulates a cancellation interrupting the backoff wait
+	}
+	defer func() { identityValidationSleep = oldSleep }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"app not found"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	oldFlow := runManifestFlow
+	runManifestFlow = func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey in stub: %v", err)
+		}
+		creds := Credentials{AppID: 999, Slug: "brand-new-app"}
+		if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+			t.Fatalf("saveCredentials in stub: %v", err)
+		}
+		return creds, nil
+	}
+	defer func() { runManifestFlow = oldFlow }()
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: keyPath, AppStatePath: statePath,
+		WatchedRepos: nil, BaseURL: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the retry backoff is canceled")
+	}
+	if strings.Contains(err.Error(), "still doesn't resolve on GitHub after") {
+		t.Errorf("error = %v, want it to NOT claim retries were exhausted against GitHub — the wait was canceled, not GitHub-rejected", err)
+	}
+	if !strings.Contains(err.Error(), "canceled") {
+		t.Errorf("error = %v, want it to describe the cancellation", err)
+	}
+	if !strings.Contains(err.Error(), "just created") {
+		t.Errorf("error = %v, want it to still explain the App was just created in this run", err)
+	}
+}

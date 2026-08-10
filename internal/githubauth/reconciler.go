@@ -72,6 +72,22 @@ func retryIdentityCheckAfterCreation(ctx context.Context, baseURL string, jwt st
 	return "", err
 }
 
+// identityRetryFailureClause describes why retryIdentityCheckAfterCreation
+// gave up, for interpolation into the three "just created/recreated App"
+// error messages below. A canceled context (identityValidationSleep bailing
+// out of its backoff wait, possibly before a single retry attempt even ran)
+// is a materially different situation from GitHub's identity check itself
+// failing on every configured retry — "still doesn't resolve on GitHub
+// after N retries" is misleading if what actually happened is Reconcile's
+// caller cancelling the wait, not GitHub repeatedly rejecting the identity
+// check.
+func identityRetryFailureClause(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "identity validation was interrupted (context canceled) before it could be confirmed"
+	}
+	return fmt.Sprintf("its identity still doesn't resolve on GitHub after %d retries", len(identityValidationRetryDelays))
+}
+
 // Options configures Reconcile. It mirrors the subset of the caller's own
 // config the reconciler needs — this package must never import pruefer (see
 // doc.go), so callers pass these fields explicitly rather than a
@@ -286,10 +302,11 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		if justBootstrapped {
 			slug, err = retryIdentityCheckAfterCreation(ctx, opts.BaseURL, jwt)
 			if err != nil {
+				clause := identityRetryFailureClause(err)
 				if opts.AppInstallationID != 0 {
-					return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d is a leftover pin from before this run — it cannot be an installation of this brand-new App, and will need to be updated (or cleared to let discovery run) once the App's identity resolves; retry Reconcile", appID, len(identityValidationRetryDelays), err, opts.AppInstallationID)
+					return nil, fmt.Errorf("just created App ID %d but %s (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d is a leftover pin from before this run — it cannot be an installation of this brand-new App, and will need to be updated (or cleared to let discovery run) once the App's identity resolves; retry Reconcile", appID, clause, err, opts.AppInstallationID)
 				}
-				return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
+				return nil, fmt.Errorf("just created App ID %d but %s (%w) — not treated as deletion since the App was only just created in this run; retry Reconcile", appID, clause, err)
 			}
 		} else if opts.AppInstallationID != 0 {
 			// AppID itself came from the state file (not pinned), but
@@ -356,7 +373,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 				slug, err = retryIdentityCheckAfterCreation(ctx, opts.BaseURL, jwt)
 			}
 			if err != nil {
-				return nil, fmt.Errorf("re-created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as a second deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
+				return nil, fmt.Errorf("re-created App ID %d but %s (%w) — not treated as a second deletion since the App was only just created in this run; retry Reconcile", appID, identityRetryFailureClause(err), err)
 			}
 		}
 	}
