@@ -324,7 +324,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
 			Number: pctx.item.Number,
 			Reason: "review-blocked",
-			Until:  time.Now().Add(cooldown),
+			Until:  e.now().Add(cooldown),
 		})
 		return true
 	}

@@ -313,7 +313,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	if hasLabel(item.Labels, "fabrik:blocked") {
 		repo := itemOwnerRepoString(item, e.defaultRepo())
 		if snap, err := e.store.Get(repo, item.Number); err == nil {
-			if cooldown := snap.CooldownAt("dep-blocked"); !cooldown.IsZero() && time.Now().Before(cooldown) {
+			if cooldown := snap.CooldownAt("dep-blocked"); !cooldown.IsZero() && e.now().Before(cooldown) {
 				return false // cooldown active — #576 short-circuit still holds
 			}
 			// Cooldown expired: fall through to admit for one re-check.
@@ -549,7 +549,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			Repo:   repoStr,
 			Number: item.Number,
 			Reason: "dep-blocked",
-			Until:  time.Now().Add(cooldown),
+			Until:  e.now().Add(cooldown),
 		})
 		return nil
 	}
@@ -903,7 +903,7 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 		Repo:   repoStr,
 		Number: item.Number,
 		Reason: "periodic-re-eval",
-		Until:  time.Now().Add(cooldown),
+		Until:  e.now().Add(cooldown),
 	})
 	e.store.Apply(itemstate.InvocationRecorded{
 		Repo:      itemOwnerRepoString(item, e.defaultRepo()),

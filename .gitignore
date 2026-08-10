@@ -47,6 +47,7 @@
 tmp/
 *.out
 engine/.fabrik/
+tests/sim/.fabrik/
 .fabrik/debug-footer.bin
 
 # Old release-notes input file — superseded by release-notes/<version>.md

@@ -409,7 +409,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 	e.logf(item.Number, "spawn", "pre-Implement: inconsistent state — stage:Plan:complete present but no Plan comment in item snapshot; attempting recovery\n")
 
 	if snap, err := e.store.Get(item.Repo, item.Number); err == nil {
-		if cooldown := snap.CooldownAt(cooldownReason); !cooldown.IsZero() && time.Now().Before(cooldown) {
+		if cooldown := snap.CooldownAt(cooldownReason); !cooldown.IsZero() && e.now().Before(cooldown) {
 			e.logf(item.Number, "spawn", "pre-Implement: spawn-recovery cooldown active — deferring without a live re-read\n")
 			return false, errPreImplementDeferred
 		}
@@ -422,7 +422,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 			Repo:   item.Repo,
 			Number: item.Number,
 			Reason: cooldownReason,
-			Until:  time.Now().Add(time.Duration(e.cfg.PollSeconds*10) * time.Second),
+			Until:  e.now().Add(time.Duration(e.cfg.PollSeconds*10) * time.Second),
 		})
 		return false, errPreImplementDeferred
 	}
