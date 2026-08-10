@@ -9,12 +9,22 @@ import "time"
 // FetchLabelAppliedAt) and engine-local timing (itemstate.CooldownAt) in
 // lockstep under a single Advance(d) call.
 //
-// This seam covers exactly the R3 "engine-local" timing group identified in
-// #1449's research: the itemstate.CooldownAt stamping/reading call sites.
-// Every other named timing gate (the review-wait timeout, the CI settle
-// scan, the Done-archive scan) is anchored on a GitHubClient-read timestamp
-// via FetchLabelAppliedAt and is already fully controllable from a
-// GitHubClient substitute with no engine-side seam — see ADR-1449.
+// This seam covers the R3 "engine-local" timing group identified in #1449's
+// research: the itemstate.CooldownAt stamping/reading call sites, plus one
+// call site research did not anticipate — recordLabelAppliedAtNow's
+// in-memory write-through cache (engine/mutate.go, #1314). Every named
+// timing gate (the review-wait timeout, the CI settle scan, the Done-archive
+// scan) is conceptually anchored on a GitHubClient-read timestamp via
+// FetchLabelAppliedAt, but #1314 added a same-process cache that
+// labelAppliedAt prefers over a live fetch whenever present — so a scenario
+// backdating FetchLabelAppliedAt's response has no effect until the cache
+// entry (recorded by the engine itself, at the moment it first applies the
+// label) also honors the injected clock instead of real time.Now(). Found
+// empirically while building #1449's review-wait-timeout scenario: the
+// mutation-log evidence showed the timeout evaluating "not yet elapsed"
+// indefinitely despite a simgh timestamp backdated by 24 hours, because the
+// cache had already recorded a fresh real time.Now() first. See
+// ADR-1449.
 type Clock interface {
 	Now() time.Time
 }

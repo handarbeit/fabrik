@@ -107,3 +107,27 @@ func TestPoll_PeriodicReEvalCooldown_UsesInjectedClock(t *testing.T) {
 		t.Errorf("CooldownAt[periodic-re-eval] = %v, want %v (poll.go's refresh site is not reading e.now())", got, want)
 	}
 }
+
+// TestRecordLabelAppliedAtNow_UsesInjectedClock is a regression guard for
+// the mutate.go recordLabelAppliedAtNow write site (discovered while
+// building #1449's sim-harness review-wait-timeout scenario: this
+// in-memory cache — #1314 — is consulted ahead of a live
+// FetchLabelAppliedAt call, so a scenario backdating the GitHubClient
+// response alone cannot control ReviewWaitTimeout unless this site also
+// respects the injected Clock).
+func TestRecordLabelAppliedAtNow_UsesInjectedClock(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	fixedNow := time.Date(2020, 3, 4, 5, 6, 7, 0, time.UTC)
+	eng.SetClock(stubClock{t: fixedNow})
+
+	item := gh.ProjectItem{Number: 55, Repo: "owner/repo", Labels: []string{"fabrik:awaiting-review"}}
+	eng.recordLabelAppliedAtNow(item, "fabrik:awaiting-review")
+
+	snap, err := eng.store.Get("owner/repo", 55)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.LabelAppliedAt("fabrik:awaiting-review"); !got.Equal(fixedNow) {
+		t.Errorf("LabelAppliedAt = %v, want %v (recordLabelAppliedAtNow is not reading e.now())", got, fixedNow)
+	}
+}

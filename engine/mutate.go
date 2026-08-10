@@ -74,8 +74,9 @@ func (e *Engine) applyLabelAdd(item gh.ProjectItem, label string, echo bool) {
 }
 
 // recordLabelAppliedAtNow records that the engine just applied label to item,
-// at the current time, into the in-memory record-at-write cache (#1314) —
-// but only when the cache doesn't already hold a value for this label.
+// at the current time (e.now() — the #1449 Clock seam; see clock.go), into
+// the in-memory record-at-write cache (#1314) — but only when the cache
+// doesn't already hold a value for this label.
 //
 // This guard exists because the write sites that call this (applyLabelAdd's
 // success path, plus the handful of direct AddLabelToIssue call sites in
@@ -104,7 +105,7 @@ func (e *Engine) recordLabelAppliedAtNow(item gh.ProjectItem, label string) {
 			return
 		}
 	}
-	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: repoStr, Number: item.Number, Label: label, At: time.Now()})
+	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: repoStr, Number: item.Number, Label: label, At: e.now()})
 }
 
 // clearLabelAppliedAtNow clears the in-memory record-at-write cache entry for
