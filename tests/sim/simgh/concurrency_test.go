@@ -446,3 +446,88 @@ func TestConcurrentSeedRepoDoesNotClobber(t *testing.T) {
 		t.Fatal("the surviving repoState does not have its default branch; seeding raced")
 	}
 }
+
+// TestConcurrentSeedPRDoesNotClobber drives the window SeedPR{Merged: true}'s
+// git-side merge opens. numberTaken is checked under mu, mu is then released
+// for the merge (mu and gitMu must never be held at once — see git.go), and
+// mu is retaken to reserve the number and publish — so, without seedPRMu,
+// concurrent callers for one explicit number could all clear the check before
+// any of them publishes.
+//
+// Without seedPRMu, the last writer to reach the final locked section
+// replaces r.prs[num] outright, discarding an earlier caller's PR with no
+// error from either call — silent corruption, not a race the tool would even
+// flag, since both writes are individually mu-guarded. A start barrier makes
+// all the callers reach the check together, so the window is entered rather
+// than hoped for.
+func TestConcurrentSeedPRDoesNotClobber(t *testing.T) {
+	s, _ := newSim(t)
+
+	const (
+		repo    = "acme/widgets"
+		callers = 4
+		prNum   = 42
+	)
+	s.SeedRepo(repo).SeedCommit(repo, "main", map[string]string{"base.txt": "base\n"}, "base")
+	heads := make([]string, callers)
+	for i := 0; i < callers; i++ {
+		heads[i] = fmt.Sprintf("feature-%d", i)
+		s.SeedCommit(repo, heads[i], map[string]string{fmt.Sprintf("f%d.txt", i): "feature\n"}, "feature")
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	var start, done sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < callers; i++ {
+		done.Add(1)
+		go func(head string) {
+			defer done.Done()
+			start.Wait()
+			s.SeedPR(repo, PRSeed{Number: prNum, Head: head, Base: "main", Merged: true, Title: "concurrent"})
+		}(heads[i])
+	}
+	start.Done()
+	done.Wait()
+
+	// Exactly one caller can win the explicit number; every other must be
+	// turned away by the numberTaken refusal, not a git failure (a git error
+	// would mean two callers both cleared the check and raced inside
+	// tryMerge instead of being serialised) and not silence (a clobber
+	// leaves s.Err() nil, since neither call fails).
+	err := s.Err()
+	if err == nil {
+		t.Fatalf("%d concurrent SeedPR calls for one explicit number all succeeded; want every one after the first to be refused", callers)
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("concurrent SeedPR failed with %v; want the \"already exists\" refusal — anything else means the callers raced instead of being serialised", err)
+	}
+
+	// The surviving record must be exactly one whole PR — a real merge commit
+	// on main, contributed by exactly one of the candidate heads — not a
+	// half-published clobber of two callers' work.
+	r, rerr := s.repoByKey(repo)
+	if rerr != nil {
+		t.Fatalf("repoByKey: %v", rerr)
+	}
+	s.mu.Lock()
+	pr, ok := r.prs[prNum]
+	s.mu.Unlock()
+	if !ok {
+		t.Fatalf("PR %d does not exist after seeding; want exactly one surviving record", prNum)
+	}
+	found := false
+	for _, h := range heads {
+		if pr.head == h {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("surviving PR %d has head %q, not one of the seeded candidates %v", prNum, pr.head, heads)
+	}
+	if !pr.merged {
+		t.Fatalf("surviving PR %d is not marked merged", prNum)
+	}
+}

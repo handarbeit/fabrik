@@ -331,6 +331,14 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 // merge, is refused rather than silently recorded — GitHub could never have
 // produced that PR as merged either.
 func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
+	// Serialise SeedPR end to end. See seedPRMu's doc comment (sim.go): the
+	// Merged: true path below releases mu around the git-side merge, opening a
+	// check-then-publish window for an explicitly-seeded number that this lock
+	// closes — mirroring seedRepoMu's role for SeedRepo. Cheap, since seeding
+	// is setup, not a hot path.
+	s.seedPRMu.Lock()
+	defer s.seedPRMu.Unlock()
+
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
 		return s
@@ -419,12 +427,16 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	// The git-side merge, when requested, runs with mu released — mirroring
 	// MergePR's own mu -> release -> gitMu -> release sequencing, since the
 	// two locks must never be held at once (see the package doc comment in
-	// git.go). A failed merge means the PR record below is never inserted —
-	// there is no partial state to unwind. reserveNumber is deliberately
-	// deferred past this point (below, right before the record is built)
-	// rather than called here: reserving num now and then refusing the merge
-	// would burn the number from the shared sequence — nextNumber advancing
-	// past it — for a PR that was never actually created, unlike every other
+	// git.go). seedPRMu (held for the whole function, see above) is what
+	// keeps this release safe for an explicitly-seeded number: without it, a
+	// concurrent SeedPR call could pass its own numberTaken check and insert
+	// its record while mu is released here. A failed merge means the PR
+	// record below is never inserted — there is no partial state to unwind.
+	// reserveNumber is deliberately deferred past this point (below, right
+	// before the record is built) rather than called here: reserving num now
+	// and then refusing the merge would burn the number from the shared
+	// sequence — nextNumber advancing past it — for a PR that was never
+	// actually created, unlike every other
 	// validation failure in this function, which fails before nextNumber
 	// moves at all.
 	if seed.Merged {

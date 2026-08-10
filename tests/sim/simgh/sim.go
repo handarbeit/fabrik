@@ -163,6 +163,18 @@ type Sim struct {
 	// holding mu or gitMu.
 	seedRepoMu sync.Mutex
 
+	// seedPRMu serialises SeedPR end to end, mirroring seedRepoMu's reasoning.
+	// SeedPR{Merged: true} releases mu around the git-side merge (mu and gitMu
+	// must never be held at once — see git.go's locking invariant), so an
+	// explicitly-numbered PR is only checked against numberTaken before that
+	// release and not actually reserved until after the merge completes and mu
+	// is re-acquired. Without this lock, a concurrent SeedPR call for the same
+	// explicit number could pass its own numberTaken check and insert its
+	// record during that window, and this call's later unconditional
+	// r.prs[num] = pr would silently clobber it. Taken at the outermost level
+	// only; never acquired while holding mu or gitMu.
+	seedPRMu sync.Mutex
+
 	// mu guards every field below it. See the package doc's locking invariant.
 	mu sync.Mutex
 

@@ -516,6 +516,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"baseDir":               fieldRebuilt,
 		"clock":                 fieldSkipped,
 		"seedRepoMu":            fieldSkipped,
+		"seedPRMu":              fieldSkipped,
 		"mu":                    fieldSkipped,
 		"repos":                 fieldCopied,
 		"projects":              fieldCopied,
