@@ -45,12 +45,18 @@ type Env struct {
 	Clock  *Clock
 	Claude *simclaude.Invoker
 
-	// Owner/Repo/OwnerRepo identify the single repo this Env manages —
-	// mirrors tests/e2e's Env.RepoAlpha in spirit, singular here because a
-	// smoke-scale scenario needs exactly one.
+	// Owner/Repo/OwnerRepo identify the primary repo this Env manages —
+	// mirrors tests/e2e's Env.RepoAlpha in spirit, singular by default
+	// because a smoke-scale scenario needs exactly one.
 	Owner     string
 	Repo      string
 	OwnerRepo string
+
+	// OwnerRepoBeta is a second, opt-in repo (mirrors tests/e2e's
+	// Env.RepoBeta) — empty unless EnvOptions.SecondRepo was set. Only
+	// TestCrossRepoSpawn's port uses it; every other scenario leaves this
+	// zero-valued and unused.
+	OwnerRepoBeta string
 
 	// ProjectNum identifies the project board, always under Owner — unlike
 	// tests/e2e's Env, there is no independent ProjectOwner: engine.Config
@@ -122,6 +128,23 @@ type EnvOptions struct {
 	// (e.g. ReviewWaitTimeout, CIWaitTimeout) without growing this struct
 	// for every engine.Config field a future scenario might need.
 	ConfigureCfg func(*engine.Config)
+
+	// SecondRepo, when non-nil, seeds a second repo in simgh (Env.OwnerRepoBeta)
+	// and forces cfg.Repo = "" so the one Env-managed engine legitimately
+	// serves both repos — mirroring production's actual multi-repo-instance
+	// topology (spawnTargetServedByThisInstance's cfg.Repo == "" branch),
+	// not a repo:-scoped instance guessing at a second board. Additive and
+	// opt-in: nil (the default) changes nothing about any existing
+	// single-repo scenario. Only TestCrossRepoSpawn sets this.
+	SecondRepo *SecondRepoOptions
+}
+
+// SecondRepoOptions names the second repo EnvOptions.SecondRepo seeds.
+type SecondRepoOptions struct {
+	// Owner/Repo identify the second repo. Default "acme"/"gadgets" (paired
+	// with the primary Env's default "acme"/"widgets").
+	Owner string
+	Repo  string
 }
 
 // stageColumns returns one column name per non-holding, non-unmanaged stage
@@ -188,6 +211,23 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	if err := simModel.Err(); err != nil {
 		t.Fatalf("sim.NewEnv: seeding: %v", err)
 	}
+	var ownerRepoBeta string
+	if opts.SecondRepo != nil {
+		betaOwner := opts.SecondRepo.Owner
+		if betaOwner == "" {
+			betaOwner = owner
+		}
+		betaRepo := opts.SecondRepo.Repo
+		if betaRepo == "" {
+			betaRepo = "gadgets"
+		}
+		ownerRepoBeta = betaOwner + "/" + betaRepo
+		simModel.SeedRepo(ownerRepoBeta)
+		if err := simModel.Err(); err != nil {
+			t.Fatalf("sim.NewEnv: seeding second repo: %v", err)
+		}
+	}
+
 	inst := simgh.Instrument(simModel)
 
 	wm := buildWorktreeManager(t, simModel, ownerRepo)
@@ -206,9 +246,14 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		yolo = *opts.Yolo
 	}
 
+	cfgRepo := repo
+	if opts.SecondRepo != nil {
+		// Multi-repo instance topology — see SecondRepoOptions' doc comment.
+		cfgRepo = ""
+	}
 	cfg := engine.Config{
 		Owner:         owner,
-		Repo:          repo,
+		Repo:          cfgRepo,
 		ProjectNum:    projectNum,
 		OwnerType:     "User",
 		User:          "fabrik-sim-bot",
@@ -227,16 +272,17 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	eng.SetClock(clk)
 
 	return &Env{
-		T:            t,
-		Engine:       eng,
-		Sim:          inst,
-		Clock:        clk,
-		Claude:       claude,
-		Owner:        owner,
-		Repo:         repo,
-		OwnerRepo:    ownerRepo,
-		ProjectNum:   projectNum,
-		PollInterval: time.Duration(cfg.PollSeconds) * time.Second,
+		T:             t,
+		Engine:        eng,
+		Sim:           inst,
+		Clock:         clk,
+		Claude:        claude,
+		Owner:         owner,
+		Repo:          repo,
+		OwnerRepo:     ownerRepo,
+		OwnerRepoBeta: ownerRepoBeta,
+		ProjectNum:    projectNum,
+		PollInterval:  time.Duration(cfg.PollSeconds) * time.Second,
 	}
 }
 
