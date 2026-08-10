@@ -174,8 +174,8 @@ review_authority: authoritative # Optional: advisory (default) | authoritative. 
                                 # commit reverses the cycle-counter increment (ReviewCycleDecremented)), bounded by
                                 # MaxReviewCycles, with pauseForReviewCycleLimit as the terminal fallback
                                 # only if the loop never converges — never as the first response to a
-                                # change request. yolo/cruise
-                                # never bypass an authoritative gate's MERGE decision — they still control
+                                # change request. yolo/cruise never bypass an authoritative gate's MERGE
+                                # decision — they still control
                                 # auto-advance/auto-merge timing, only once the gate itself is satisfied.
                                 # See ADR-1250, ADR-1375.
 expected_reviewers:             # Optional: declares unrequested reviewers (self-submitting review bots
