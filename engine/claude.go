@@ -19,6 +19,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -35,50 +36,18 @@ var noWorkNeededRE = regexp.MustCompile(`(?m)^FABRIK_NO_WORK_NEEDED\r?$`)
 // classifyUsageLimitExit and #1183.
 const usageLimitTerminalReason = "blocking_limit"
 
-// claudeUsageLimitError signals that a Claude invocation exited because the
-// account's usage limit (session or weekly) was exhausted, not because the
-// stage genuinely failed. The stage never ran to completion, so this
-// condition must be excluded from max_retries — see handleUsageLimitExit
-// in item.go, which is the sole consumer (via errors.As).
-type claudeUsageLimitError struct {
-	// Message describes the structural field that triggered detection (see
-	// classifyUsageLimitExit), for logging.
-	Message string
-	// ResetTime is always "" — the structural detector never parses a reset
-	// time from prose. Kept so computeUsageLimitResetDeadline's existing
-	// fallback-when-empty path (claudeUsageLimitFallbackBackoff) is exercised
-	// unconditionally; do not populate this from matched text (#1183).
-	ResetTime string
-}
-
-func (e *claudeUsageLimitError) Error() string {
-	if e.ResetTime != "" {
-		return fmt.Sprintf("claude usage limit hit: %s (resets %s)", e.Message, e.ResetTime)
-	}
-	return fmt.Sprintf("claude usage limit hit: %s", e.Message)
-}
-
-// claudeTurnLimitError signals that a Claude invocation exited because it
-// exhausted its configured turn budget (CLI-reported subtype
-// "error_max_turns"), not because the stage genuinely failed. Unlike
-// claudeUsageLimitError, this does NOT short-circuit finalizeStageOutcome /
-// processComments with an early return: the existing retry/escalation
-// machinery (StageAttempted, commitWIP, StageRetryIncremented, MaxRetries)
-// must still run exactly as it does today for a turn-cap exit — that
-// behavior is pre-existing and deliberate (see #1081/#448), and out of scope
-// for #1178. This sentinel only changes what feeds the InvocationRecorded
-// write, so history/TUI can render the run as incomplete-but-resumable
-// rather than as a genuine fault.
-type claudeTurnLimitError struct {
-	// TerminalReason is the CLI's own terminal_reason field, if present, for logging.
-	TerminalReason string
-	// NumTurns is the CLI-reported turn count at exit, for logging.
-	NumTurns int
-}
-
-func (e *claudeTurnLimitError) Error() string {
-	return fmt.Sprintf("claude exited: turn limit reached (num_turns=%d)", e.NumTurns)
-}
+// claudeUsageLimitError, claudeTurnLimitError, claudeAPIErrorExit, and
+// claudeResumeFailureError are unexported aliases of the exported types in
+// internal/claudeerr, where the definitions (and their doc comments) live.
+// They are aliases, not new types (`type X = claudeerr.X`), so every existing
+// construction site and errors.As assertion in this package (and its test
+// files) keeps compiling and behaving unchanged — this extraction moved the
+// types' location, not their name, identity, or behavior. See
+// internal/claudeerr's package doc and ADR-1449.
+type claudeUsageLimitError = claudeerr.UsageLimitError
+type claudeTurnLimitError = claudeerr.TurnLimitError
+type claudeAPIErrorExit = claudeerr.APIErrorExit
+type claudeResumeFailureError = claudeerr.ResumeFailureError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for a
 // transient Anthropic-side API error — observed live on 2026-08-08 (#1458) as
@@ -87,73 +56,6 @@ func (e *claudeTurnLimitError) Error() string {
 // says nothing about the account as a whole, so it must never trigger
 // activateClaudeSuspension (see claudeAPIErrorExit's doc comment and #1458 R3).
 const apiErrorTerminalReason = "api_error"
-
-// claudeAPIErrorExit signals that a Claude invocation exited because of a
-// transient Anthropic-side API error, not because the stage genuinely
-// failed. The stage never ran, so this condition must be excluded from
-// max_retries — see handleAPIErrorExit in item.go, which is the sole
-// consumer (via errors.As).
-//
-// Deliberately a distinct type from claudeUsageLimitError, not a second
-// value recognized by classifyUsageLimitExit itself: claudeUsageLimitError
-// is also the trigger, by Go type, for two behaviors that must NOT apply
-// here — activateClaudeSuspension (item.go/comments.go, forbidden by R3,
-// since an api_error is per-invocation, not account-wide) and the
-// comment-processing circuit breaker bypass (comments.go, forbidden by R6's
-// spirit, since exempting api_error from the breaker would leave the
-// comment-triggered dispatch path with no bound at all). Being a distinct
-// type means neither errors.As(&claudeUsageLimitError{}) check ever matches
-// a *claudeAPIErrorExit, so both call sites need no changes. See ADR-1458.
-type claudeAPIErrorExit struct {
-	// TerminalReason is the CLI's own terminal_reason field, for logging.
-	TerminalReason string
-	// NumTurns is the CLI-reported turn count at exit, for logging.
-	NumTurns int
-	// CostUSD is the CLI-reported cost at exit, for logging.
-	CostUSD float64
-}
-
-func (e *claudeAPIErrorExit) Error() string {
-	return fmt.Sprintf("claude exited: transient api_error (terminal_reason=%q, num_turns=%d, cost=$%.4f)", e.TerminalReason, e.NumTurns, e.CostUSD)
-}
-
-// claudeResumeFailureError signals that a Claude invocation which resumed an
-// existing session (--resume) failed for a reason none of the more specific
-// classifiers above caught. Unlike claudeUsageLimitError/claudeAPIErrorExit,
-// this does NOT imply the stage never ran — a resumed session can fail after
-// real work happened — so it must NOT short-circuit finalizeStageOutcome the
-// way the did-not-run family does; it follows claudeTurnLimitError's
-// non-short-circuiting shape instead (commitWIP, push, InvocationRecorded all
-// still run). It is exempted from StageRetryIncremented (mirroring the
-// did-not-run family's max_retries exemption) precisely so the mechanism this
-// type exists to enable — a guaranteed cold-start attempt once
-// ConsecutiveFailures reaches Threshold — cannot itself be starved by the
-// failures it is counting. See #1414, ADR-1414.
-type claudeResumeFailureError struct {
-	// Cause is the underlying error the CLI exited with.
-	Cause error
-	// SessionID is the --resume session ID this invocation attempted to
-	// resume, for logging.
-	SessionID string
-	// ConsecutiveFailures is the count of consecutive resume failures for
-	// this (issue, stage) session, including this one.
-	ConsecutiveFailures int
-	// Threshold is the configured MaxResumeFailures value in effect for this
-	// invocation, for logging.
-	Threshold int
-	// Abandoned reports whether this invocation's failure pushed the
-	// consecutive count to (or past) Threshold, causing the session pointer
-	// to be discarded so the next invocation cold-starts.
-	Abandoned bool
-}
-
-func (e *claudeResumeFailureError) Error() string {
-	return fmt.Sprintf("claude exited with error while resuming session %s (consecutive failures=%d/%d, abandoned=%t): %v", e.SessionID, e.ConsecutiveFailures, e.Threshold, e.Abandoned, e.Cause)
-}
-
-func (e *claudeResumeFailureError) Unwrap() error {
-	return e.Cause
-}
 
 // classifyAPIErrorExit determines whether a Claude invocation exited on a
 // transient Anthropic-side API error, using only the CLI's own structured

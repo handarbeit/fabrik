@@ -960,6 +960,30 @@ type pollResult struct {
 	SeenRepos  map[string]bool // all repos observed on the board in this poll
 }
 
+// PollOnce runs exactly one poll cycle and reports only whether it errored —
+// pollResult stays internal, so this seam cannot be used to reach into engine
+// internals beyond triggering a cycle. It is a thin, deliberately bare
+// delegation to the unexported poll, added as a test seam (ADR-1449) so an
+// external package (tests/sim) can drive the engine deterministically —
+// looping Engine.Run() against a tiny PollSeconds and cancelling after a
+// while would reintroduce exactly the wall-clock nondeterminism a
+// poll-advancement-driven test harness exists to eliminate.
+//
+// PollOnce deliberately does NOT replicate any part of Run()'s preamble
+// (the exclusive .fabrik/fabrik.lock flock, opening .fabrik/fabrik.log and
+// assigning the package-level pollLogFile global, or the startup stage-drift
+// warnings). poll() itself depends on none of that setup, and reproducing it
+// here would be actively wrong for a test harness: the flock is cross-process
+// mutual exclusion that would make concurrently-run scenarios contend with or
+// deadlock each other; pollLogFile is a package-level global that is unsafe
+// to assign from parallel scenarios; the drift warnings are one-time startup
+// diagnostics with no bearing on a single poll cycle. Do not "restore" any of
+// this later as a fix for some unrelated symptom — it was omitted on purpose.
+func (e *Engine) PollOnce(ctx context.Context) error {
+	_, err := e.poll(ctx)
+	return err
+}
+
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
