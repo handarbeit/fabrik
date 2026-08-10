@@ -856,6 +856,43 @@ func TestReconcile_MissingPrivateKey_RepairErrorNeverBootstraps(t *testing.T) {
 	}
 }
 
+// TestReconcile_MissingPrivateKey_AppIDFromStateFile_DoesNotClaimConfigured
+// covers the case where AppID is resolved from AppStatePath (a prior
+// manifest-flow run), not pinned via opts.AppID/github_app_id — the repair
+// error must not claim "github_app_id N is configured" (found by bot
+// review), since a fresh manifest bootstrap never sets that config value at
+// all; an operator following that message would search for a config entry
+// that was never there.
+func TestReconcile_MissingPrivateKey_AppIDFromStateFile_DoesNotClaimConfigured(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "app-state.json")
+	if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "old-app"}); err != nil {
+		t.Fatalf("saveCredentials: %v", err)
+	}
+
+	_, err := Reconcile(context.Background(), Options{
+		AppPrivateKeyPath: filepath.Join(dir, "nonexistent.pem"),
+		AppStatePath:      statePath,
+		WatchedRepos:      []string{"handarbeit/fabrik"},
+	})
+	if err == nil {
+		t.Fatal("expected a repair error when AppID (from state) is known but the private key is missing")
+	}
+	if strings.Contains(err.Error(), "github_app_id 42 is configured") {
+		t.Errorf("error = %v, falsely claims github_app_id is configured when AppID was resolved from the state file", err)
+	}
+	if !strings.Contains(err.Error(), "resolved from") {
+		t.Errorf("error = %v, want it to name the state file as the source of App ID 42", err)
+	}
+	if !strings.Contains(err.Error(), "42") {
+		t.Errorf("error = %v, want it to mention App ID 42", err)
+	}
+}
+
 func TestReconcile_CorruptAppStateFile_ReturnsErrorNeverBootstraps(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
@@ -1562,6 +1599,17 @@ func TestReconcile_JustBootstrapped_PersistentIdentityFailure_WithPinnedInstalla
 	}
 	if !strings.Contains(err.Error(), "555") {
 		t.Errorf("error = %v, want it to mention the pinned github_app_installation_id (555) that also needs updating", err)
+	}
+	// A pinned installation ID necessarily predates the App this call just
+	// created — it cannot be an installation of a brand-new App, so the
+	// message must not claim otherwise (found by bot review: the original
+	// wording said it "still refers to this new App's installation," which
+	// is structurally impossible).
+	if strings.Contains(err.Error(), "still refers to this new App") {
+		t.Errorf("error = %v, claims the stale pinned installation ID refers to the new App, which is impossible", err)
+	}
+	if !strings.Contains(err.Error(), "leftover pin") {
+		t.Errorf("error = %v, want it to describe the pinned installation ID as a leftover from before this run", err)
 	}
 }
 

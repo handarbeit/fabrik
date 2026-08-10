@@ -245,7 +245,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			slug, err = retryIdentityCheckAfterCreation(opts.BaseURL, jwt)
 			if err != nil {
 				if opts.AppInstallationID != 0 {
-					return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d also still refers to this new App's installation and will need updating if this persists; retry Reconcile", appID, len(identityValidationRetryDelays), err, opts.AppInstallationID)
+					return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; note github_app_installation_id %d is a leftover pin from before this run — it cannot be an installation of this brand-new App, and will need to be updated (or cleared to let discovery run) once the App's identity resolves; retry Reconcile", appID, len(identityValidationRetryDelays), err, opts.AppInstallationID)
 				}
 				return nil, fmt.Errorf("just created App ID %d but its identity still doesn't resolve on GitHub after %d retries (%w) — not treated as deletion since the App was only just created in this run; retry Reconcile", appID, len(identityValidationRetryDelays), err)
 			}
@@ -589,6 +589,13 @@ func saveInstallationRepoCache(statePath string, appID int64, slug string, repoC
 // first identity check for a sign of external deletion (see the retry loop
 // around FetchAppSlug in Reconcile).
 func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(string, ...any)) (int64, *rsa.PrivateKey, bool, error) {
+	// appIDPinned distinguishes appID coming from an explicit
+	// github_app_id config value from appID resolved out of the
+	// reconciler-owned state file below — the two error-message sets
+	// further down name the source accurately rather than always
+	// claiming "github_app_id is configured," which is false in the
+	// latter case (a fresh manifest-flow bootstrap never sets it).
+	appIDPinned := opts.AppID != 0
 	appID := opts.AppID
 	var expectedFingerprint string
 	if appID == 0 {
@@ -614,16 +621,32 @@ func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(str
 		justBootstrapped = true
 	}
 
+	// appIDSource names where appID actually came from, for the three
+	// error messages below — appIDPinned means an explicit github_app_id
+	// config value; justBootstrapped means it was minted by the manifest
+	// flow a few lines above in this same call; anything else means it
+	// was resolved from the reconciler-owned AppStatePath. Saying
+	// "github_app_id N is configured" when no such config value exists
+	// (the state-file and just-bootstrapped cases) sends an operator
+	// looking for a config entry that was never there.
+	appIDSource := fmt.Sprintf("App ID %d (resolved from %s)", appID, opts.AppStatePath)
+	switch {
+	case appIDPinned:
+		appIDSource = fmt.Sprintf("github_app_id %d is configured", appID)
+	case justBootstrapped:
+		appIDSource = fmt.Sprintf("App ID %d (just created by first-run setup)", appID)
+	}
+
 	if _, err := os.Stat(opts.AppPrivateKeyPath); os.IsNotExist(err) {
-		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is missing — restore it from the App's settings page (repair required, not auto-regenerated)", appID, opts.AppPrivateKeyPath)
+		return 0, nil, false, fmt.Errorf("%s but its private key %s is missing — restore it from the App's settings page (repair required, not auto-regenerated)", appIDSource, opts.AppPrivateKeyPath)
 	}
 	pemBytes, err := os.ReadFile(opts.AppPrivateKeyPath)
 	if err != nil {
-		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appID, opts.AppPrivateKeyPath, err)
+		return 0, nil, false, fmt.Errorf("%s but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appIDSource, opts.AppPrivateKeyPath, err)
 	}
 	privateKey, err := gh.ParseAppPrivateKey(pemBytes)
 	if err != nil {
-		return 0, nil, false, fmt.Errorf("github_app_id %d is configured but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appID, opts.AppPrivateKeyPath, err)
+		return 0, nil, false, fmt.Errorf("%s but its private key %s is unreadable/corrupt — restore it from the App's settings page (repair required, not auto-regenerated): %w", appIDSource, opts.AppPrivateKeyPath, err)
 	}
 
 	// justBootstrapped means we just wrote both files ourselves a few
