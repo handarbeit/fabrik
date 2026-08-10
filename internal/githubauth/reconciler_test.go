@@ -1845,4 +1845,12 @@ func TestReconcile_JustBootstrapped_ContextCanceledDuringRetryBackoff_DoesNotCla
 	if !strings.Contains(err.Error(), "just created") {
 		t.Errorf("error = %v, want it to still explain the App was just created in this run", err)
 	}
+	// Regression check for a review finding: identityRetryFailureClause's
+	// canceled-context branch previously restated "(context canceled)"
+	// itself, on top of the wrapped err's own "%w" already surfacing that
+	// same text — a mildly redundant "canceled ... canceled" in one
+	// sentence. The word must now appear exactly once.
+	if n := strings.Count(err.Error(), "canceled"); n != 1 {
+		t.Errorf("error = %v, contains %q %d times, want exactly once (not redundantly restated)", err, "canceled", n)
+	}
 }

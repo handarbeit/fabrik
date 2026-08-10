@@ -83,7 +83,12 @@ func retryIdentityCheckAfterCreation(ctx context.Context, baseURL string, jwt st
 // check.
 func identityRetryFailureClause(err error) string {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "identity validation was interrupted (context canceled) before it could be confirmed"
+		// Deliberately doesn't restate "context canceled"/"deadline
+		// exceeded" here — every call site interpolates this clause
+		// immediately followed by "(%w)", which already surfaces that
+		// detail from err itself; repeating it here would just say the
+		// same thing twice in one sentence.
+		return "identity validation was interrupted before it could be confirmed"
 	}
 	return fmt.Sprintf("its identity still doesn't resolve on GitHub after %d retries", len(identityValidationRetryDelays))
 }
