@@ -503,8 +503,11 @@ const (
 	// fieldRebuilt is recomputed from the restore target rather than carried —
 	// the absolute on-disk paths, which must not survive verbatim.
 	fieldRebuilt fieldDisposition = "rebuilt at restore"
-	// fieldSkipped is deliberately not carried: mutexes, and the Clock, which
-	// is re-supplied as an Option.
+	// fieldSkipped is deliberately not carried: mutexes, the Clock (which is
+	// re-supplied as an Option), and pure housekeeping counters with no
+	// real-GitHub correlate — restoring one to zero is always safe, since it
+	// only ever widens the window before the next scheduled housekeeping
+	// pass rather than changing an answer.
 	fieldSkipped fieldDisposition = "deliberately not carried"
 )
 
@@ -544,6 +547,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"latestRelease":     fieldCopied,
 		"mergeQueueEnabled": fieldCopied,
 		"nextNumber":        fieldCopied,
+		"probesSinceGC":     fieldSkipped,
 	},
 	"issueRecord": {
 		"number":         fieldCopied,

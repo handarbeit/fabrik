@@ -715,6 +715,18 @@ mutate "SeedPR{Merged: true} does not auto-close the linked issue" \
   'TestSeedPRMergedTruePerformsRealMerge' \
   'seed.go::s{if seed\.Merged && base == r\.defaultBranch \{}{if false \{}'
 
+mutate "the probe path does not run its housekeeping gc" \
+  'TestMergeableProbeBoundsUnreferencedObjects' \
+  'git.go::s{_, _, _ = runGitAllowFail\(r\.bareDir, "gc", "--quiet", "--prune=now"\)\n}{}'
+
+mutate "the probe counter never advances toward the gc threshold" \
+  'TestMergeableProbeBoundsUnreferencedObjects' \
+  'git.go::s{\t\tr\.probesSinceGC\+\+\n}{}'
+
+mutate "the probe counter is not reset after the housekeeping gc" \
+  'TestMergeableProbeBoundsUnreferencedObjects' \
+  'git.go::s{\t\t\tr\.probesSinceGC = 0\n}{}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

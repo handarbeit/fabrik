@@ -122,18 +122,44 @@ scenario that mutates a repo concurrently with its own `MergePR` call. A
 scenario that wants to exercise "a required check went red mid-merge" cannot do
 it here; that needs the server-side re-check the sim does not model.
 
-### Trial merges leave unreachable objects — **Simplified**
+### Trial merges leave unreachable objects, bounded by a periodic gc — **Modelled, bounded**
 
 A read-only mergeability probe runs a real `git merge --no-ff` and then discards
 the result by not moving any ref, so the merge commit it wrote stays in the
-object store with nothing pointing at it. Nothing here runs `git gc`, and
-mergeability is recomputed on every read, so a long multi-poll scenario
-accumulates orphaned objects for the life of the test process.
+object store with nothing pointing at it. Mergeability is recomputed on every
+read, so a long multi-poll scenario would otherwise accumulate orphaned
+objects for the life of the test process — worst exactly where merge-train
+bisection lives (#1452), which re-probes mergeability across a bisection
+sequence on top of a per-trial-SHA `FetchCheckRuns` poll.
 
-**Risk:** low, and it is disk and inode cost rather than a wrong answer — the
-objects are unreachable, so no read can observe them. The backing repos live
-under `t.TempDir()` and vanish with the test. Worth revisiting only if a
-scenario in #1449 grows long enough for it to matter; tracked in #1498.
+**Decision:** bound it with a periodic housekeeping `git gc`, not by
+restructuring the probe to avoid writing a commit object in the first place
+(e.g. `git merge-tree`). The latter would be more faithful in the sense of
+"no garbage at all," but requires git ≥ 2.38 (no version floor exists in this
+codebase today) and has no precedent here — and, more importantly, it would
+touch `tryMerge`'s single shared implementation, which is deliberately used by
+both the probe and `MergePR` so the two can never disagree about whether a PR
+merges cleanly. Periodic `git gc` is pure post-hoc housekeeping on
+already-unreferenced objects instead: it runs on every 25th probe
+(`probeGCThreshold`), under the same `gitMu` already held, and is invisible to
+every read — it cannot change an answer, only reclaim disk and inodes. The
+threshold has no real-GitHub correlate to model against; it is a bookkeeping
+judgement call, tuned low enough that `TestMergeableProbeBoundsUnreferencedObjects`
+runs in seconds.
+
+It runs `git gc --quiet --prune=now` rather than plain `git gc`, which by
+default only expires unreachable objects older than a 2-week grace period —
+protection against pruning something a concurrent writer elsewhere in the repo
+might still need. That race cannot happen here: `gitMu` serialises every git
+subprocess call against one bare repo, so nothing else can be mid-write when
+the gc runs, and every object it reclaims was orphaned the instant its own
+probe returned, never "possibly still wanted."
+
+**Risk:** low. Bounded rather than unbounded, and it is disk and inode cost
+rather than a wrong answer either way — the objects are unreachable, so no
+read can observe them regardless of when (or whether) the gc runs. Fixed in
+#1498; `TestMergeableProbeBoundsUnreferencedObjects` pins that the loose-object
+count is reclaimed after crossing the threshold and that the counter resets.
 
 ### A PR whose head branch is gone errors — **Simplified**
 

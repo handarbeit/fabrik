@@ -31,6 +31,13 @@ type repoState struct {
 	// sufficient. Never acquire Sim.mu while holding this.
 	gitMu sync.Mutex
 
+	// probesSinceGC counts read-only mergeability probes (tryMerge with
+	// commit=false) since the last housekeeping `git gc`, so the unreferenced
+	// merge-commit objects each one leaves behind do not accumulate without
+	// bound across a long-running scenario. Guarded by gitMu, like every
+	// other piece of state tryMerge touches.
+	probesSinceGC int
+
 	issues map[int]*issueRecord
 	prs    map[int]*prRecord
 
