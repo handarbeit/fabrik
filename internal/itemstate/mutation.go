@@ -433,6 +433,24 @@ type ReviewCycleIncremented struct {
 func (ReviewCycleIncremented) isMutation()       {}
 func (m ReviewCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// ReviewBlockedCycleIncremented increments the never-refunded non-convergence
+// counter for a stage's review gate (ADR-1518). Applied alongside
+// ReviewCycleIncremented, but only when the reinvoke it accompanies is
+// dispatched while the gate is still blocked/timed-out — a reinvoke
+// dispatched with the gate already clear (the #1045 junk-overview shape)
+// never increments this counter. Unlike ReviewCycleIncremented, this counter
+// has no decrement counterpart by design: a reinvoke that turns out to be a
+// no-op on HEAD while the gate was blocking is still genuine evidence the
+// loop failed to converge, not an attempt that "didn't count."
+type ReviewBlockedCycleIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (ReviewBlockedCycleIncremented) isMutation()       {}
+func (m ReviewBlockedCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ReviewCycleDecremented compensates a prior ReviewCycleIncremented when a
 // review reinvoke lands no new commit (#1045) — a cycle that changed nothing
 // was not an attempt, so it must not count against MaxReviewCycles. Applied
@@ -764,9 +782,10 @@ type EngineUnpaused struct {
 func (EngineUnpaused) isMutation()       {}
 func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// EngineCyclesCleared zeroes ReviewCycles, CIFixCycles, RebaseCycles, and
-// EnqueueCycles for a stage. Called by clearFailedStage on unpause/success to
-// prevent stale counters from triggering premature max-cycle pauses on the next run.
+// EngineCyclesCleared zeroes ReviewCycles, ReviewBlockedCycles, CIFixCycles,
+// RebaseCycles, and EnqueueCycles for a stage. Called by clearFailedStage on
+// unpause/success to prevent stale counters from triggering premature
+// max-cycle pauses on the next run.
 type EngineCyclesCleared struct {
 	Repo      string
 	Number    int

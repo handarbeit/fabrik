@@ -470,6 +470,52 @@ func TestApplyReviewCycleDecremented_FlooredAtZero(t *testing.T) {
 	}
 }
 
+// ---- ReviewBlockedCycleIncremented (ADR-1518) ----
+
+func TestApplyReviewBlockedCycleIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewBlockedCycles["Review"]; got != 1 {
+		t.Errorf("ReviewBlockedCycles = %d, want 1", got)
+	}
+	applyExpect(t, s, ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewBlockedCycles["Review"]; got != 2 {
+		t.Errorf("ReviewBlockedCycles = %d, want 2", got)
+	}
+	// Independent of ReviewCycles — the two counters track different things
+	// (attempts vs. attempts-that-happened-while-genuinely-blocked) and
+	// ReviewBlockedCycleIncremented must never touch the other map.
+	if got := getItem(t, s, testRepo, 1).StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (must not be touched by ReviewBlockedCycleIncremented)", got)
+	}
+}
+
+// TestReviewBlockedCyclesNeverRefunded documents, at the store level, the
+// defining property of ReviewBlockedCycles (ADR-1518, R3): unlike
+// ReviewCycles, it has no decrement mutation at all — nothing in this package
+// can lower it once incremented, short of EngineCyclesCleared's full reset.
+// This is what lets it survive #1045's ReviewCycleDecremented refund
+// indefinitely forgiving ReviewCycles for the same sequence of no-op
+// reinvokes.
+func TestReviewBlockedCyclesNeverRefunded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	for i := 0; i < 5; i++ {
+		s.Apply(ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"})
+		// Every increment is paired with the exact refund #1045 applies to
+		// ReviewCycles for a no-op reinvoke — ReviewBlockedCycles must be
+		// unaffected by it.
+		s.Apply(ReviewCycleIncremented{Repo: testRepo, Number: 1, StageName: "Review"})
+		s.Apply(ReviewCycleDecremented{Repo: testRepo, Number: 1, StageName: "Review"})
+	}
+	st := getItem(t, s, testRepo, 1)
+	if got := st.StageState.ReviewBlockedCycles["Review"]; got != 5 {
+		t.Errorf("ReviewBlockedCycles = %d, want 5 (never refunded)", got)
+	}
+	if got := st.StageState.ReviewCycles["Review"]; got != 0 {
+		t.Errorf("ReviewCycles = %d, want 0 (refunded every time, #1045)", got)
+	}
+}
+
 // ---- CIFixCycleIncremented ----
 
 func TestApplyCIFixCycleIncremented(t *testing.T) {
@@ -669,6 +715,7 @@ func TestEngineCyclesClearedClearsEnqueueCycles(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	s.Apply(EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
 	s.Apply(RebaseCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	s.Apply(ReviewBlockedCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
 	if getItem(t, s, testRepo, 1).StageState.EnqueueCycles["Validate"] != 1 {
 		t.Fatal("precondition: EnqueueCycles not set")
 	}
@@ -679,6 +726,13 @@ func TestEngineCyclesClearedClearsEnqueueCycles(t *testing.T) {
 	}
 	if got := st.StageState.RebaseCycles["Validate"]; got != 0 {
 		t.Errorf("RebaseCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
+	}
+	// ADR-1518: a resumed item must not immediately re-trip the new
+	// non-convergence terminal check on its very next pass — the same
+	// "unpause -> re-pause in one poll" bug #1460 already fixed for the other
+	// counters.
+	if got := st.StageState.ReviewBlockedCycles["Validate"]; got != 0 {
+		t.Errorf("ReviewBlockedCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
 	}
 }
 

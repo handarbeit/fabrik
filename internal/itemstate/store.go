@@ -419,6 +419,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.ReviewCycles[v.StageName]++
 		return StageStateChanged
 
+	case ReviewBlockedCycleIncremented:
+		ensureStageStateMaps(item)
+		item.StageState.ReviewBlockedCycles[v.StageName]++
+		return StageStateChanged
+
 	case ReviewCycleDecremented:
 		// Check before ensureStageStateMaps, not after: a nil map reads as
 		// the zero value safely, but ensureStageStateMaps's nil->empty-map
@@ -466,6 +471,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case EngineCyclesCleared:
 		ensureStageStateMaps(item)
 		delete(item.StageState.ReviewCycles, v.StageName)
+		delete(item.StageState.ReviewBlockedCycles, v.StageName)
 		delete(item.StageState.CIFixCycles, v.StageName)
 		delete(item.StageState.RebaseCycles, v.StageName)
 		delete(item.StageState.EnqueueCycles, v.StageName)
@@ -1174,6 +1180,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.ReviewCycles == nil {
 		ss.ReviewCycles = make(map[string]int)
+	}
+	if ss.ReviewBlockedCycles == nil {
+		ss.ReviewBlockedCycles = make(map[string]int)
 	}
 	if ss.CIFixCycles == nil {
 		ss.CIFixCycles = make(map[string]int)

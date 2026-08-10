@@ -33,6 +33,7 @@ type Snapshot struct {
 //   - ItemState.StageState.PausedByEngine
 //   - ItemState.StageState.PRCreationFailed
 //   - ItemState.StageState.ReviewCycles
+//   - ItemState.StageState.ReviewBlockedCycles
 //   - ItemState.StageState.CIFixCycles
 //   - ItemState.StageState.RebaseCycles
 //   - ItemState.StageState.EnqueueCycles
@@ -209,6 +210,12 @@ func (s Snapshot) ReviewCycles(stageName string) int {
 	return s.state.StageState.ReviewCycles[stageName]
 }
 
+// ReviewBlockedCycles returns the never-refunded non-convergence cycle count
+// for a given stage's review gate (ADR-1518) — see StageState.ReviewBlockedCycles.
+func (s Snapshot) ReviewBlockedCycles(stageName string) int {
+	return s.state.StageState.ReviewBlockedCycles[stageName]
+}
+
 // CIFixCycles returns the CI-fix re-invocation cycle count for a given stage.
 func (s Snapshot) CIFixCycles(stageName string) int {
 	return s.state.StageState.CIFixCycles[stageName]
@@ -383,6 +390,7 @@ func copyStageState(s StageState) StageState {
 		PausedByEngine:       copyMap(s.PausedByEngine),
 		PRCreationFailed:     copyMap(s.PRCreationFailed),
 		ReviewCycles:         copyMap(s.ReviewCycles),
+		ReviewBlockedCycles:  copyMap(s.ReviewBlockedCycles),
 		CIFixCycles:          copyMap(s.CIFixCycles),
 		RebaseCycles:         copyMap(s.RebaseCycles),
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
