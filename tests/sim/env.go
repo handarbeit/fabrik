@@ -55,6 +55,16 @@ type Env struct {
 	ProjectOwner string
 	ProjectNum   int
 
+	// PollInterval is how far RunPoll advances Clock before each poll cycle
+	// — the engine-local mirror of R3's GitHub-anchored gates: dispatch
+	// cooldowns (itemstate.CooldownAt) are stamped as e.now()+duration, so a
+	// Clock that never advances would leave any such cooldown permanently
+	// active (deterministic, but stuck) rather than eventually expiring the
+	// way a real poll loop's wall-clock cadence would. Defaults to
+	// cfg.PollSeconds converted to a Duration, matching production's own
+	// notion of how far apart two poll cycles are.
+	PollInterval time.Duration
+
 	// issueSeqMu/issueSeqNext back FileIssue's explicit issue-number
 	// assignment (assertions.go) — deterministic rather than relying on
 	// simgh's auto-assign, so a scenario always knows the number it just
@@ -224,6 +234,7 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		OwnerRepo:    ownerRepo,
 		ProjectOwner: projectOwner,
 		ProjectNum:   projectNum,
+		PollInterval: time.Duration(cfg.PollSeconds) * time.Second,
 	}
 }
 

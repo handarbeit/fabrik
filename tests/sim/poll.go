@@ -5,15 +5,54 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
-// RunPoll drives exactly one engine poll cycle via the Engine.PollOnce test
-// seam (ADR-1449) and fails the test on error.
+// workerYield is a small, fixed real-wall-clock pause after each poll cycle,
+// giving the goroutines PollOnce just dispatched a chance to actually run.
+//
+// This is a deliberate, narrow exception to R4's "a scenario must never
+// depend on real sleeping" — that requirement targets the live-bed anti-
+// pattern of sleeping past a GitHub-side async event (a review arriving, CI
+// finishing) that the scenario cannot otherwise observe. It says nothing
+// about the engine's own dispatch concurrency: poll() hands each item's work
+// to a background goroutine and returns immediately, and part of that
+// goroutine's real, production behavior is genuinely real-time-bound —
+// acquireLockAndVerify's multi-instance lock-verify step
+// (engine/item.go's lockVerifyDelay, 2s) sleeps on the real clock, not the
+// injected one, because it exists to let a *different Fabrik process*
+// observe a competing lock, which the Clock seam has no way to represent.
+// Without some real pause here, a tight PollOnce loop can out-run that
+// goroutine's progress indefinitely, exactly as the very first version of
+// this harness did in testing (30 polls all executing before the dispatched
+// worker's 2-second lock-verify sleep even elapsed).
+//
+// This is bounded and documented rather than open-ended: total added real
+// time for any AdvanceUntil call is at most maxPolls*workerYield, and it is
+// the honest cost R8 asks this package to measure and record, not a silent
+// flakiness source.
+const workerYield = 100 * time.Millisecond
+
+// RunPoll advances Clock by env.PollInterval, drives exactly one engine poll
+// cycle via the Engine.PollOnce test seam (ADR-1449), fails the test on
+// error, and then pauses for workerYield (see its doc comment).
+//
+// Advancing the clock here — not just before the poll loop starts — is what
+// keeps itemstate.CooldownAt-based dispatch suppression (R3's engine-local
+// group) from becoming permanently stuck: a cooldown is stamped as
+// e.now()+duration, so without this a scenario's Clock would sit frozen at
+// its start time forever and no cooldown would ever expire, deadlocking
+// dispatch exactly as it would if a real poll loop's wall-clock cadence
+// simply stopped.
 func RunPoll(t *testing.T, env *Env) {
 	t.Helper()
+	if env.PollInterval > 0 {
+		env.Clock.Advance(env.PollInterval)
+	}
 	if err := env.Engine.PollOnce(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
+	time.Sleep(workerYield)
 }
 
 // RunPolls drives n poll cycles in sequence.
