@@ -191,13 +191,13 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 	// its check off the review's own identity. AC6's premise guarantees this
 	// scenario is a body-only REQUEST_CHANGES review (no inline comments), which
 	// always produces exactly one review-body: ID — if extraction ever comes up
-	// empty, something upstream broke (the log enrichment, or AC6's shape
-	// assumption), and failing loudly here is preferable to AC7 silently
-	// no-op'ing.
+	// empty or with more than one ID, something upstream broke (the log
+	// enrichment, or AC6's shape assumption), and failing loudly here is
+	// preferable to AC7 silently no-op'ing or picking an arbitrary ID.
 	originalReviewIDs := reviewBodyIDPattern.FindAllString(firstReinvokeLine, -1)
-	if len(originalReviewIDs) == 0 {
-		t.Fatalf("could not extract a review-body: ID from the first review-reinvoke log line %q — "+
-			"expected commentIDsForLog (engine/reinvoke.go) to have enriched it with the dispatched review's synthetic ID", firstReinvokeLine)
+	if len(originalReviewIDs) != 1 {
+		t.Fatalf("expected exactly one review-body: ID in the first review-reinvoke log line %q, got %d (%v) — "+
+			"expected commentIDsForLog (engine/reinvoke.go) to have enriched it with exactly the dispatched review's synthetic ID", firstReinvokeLine, len(originalReviewIDs), originalReviewIDs)
 	}
 	originalReviewID := originalReviewIDs[0]
 	t.Logf("original review's synthetic comment ID: %s", originalReviewID)
