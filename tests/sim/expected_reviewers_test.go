@@ -23,12 +23,16 @@ import (
 //
 // Divergence from the live suite (R2, recorded once here, same rationale as
 // review_authority_test.go's file doc comment): the live tests use
-// seedReviewGateItemDraft for four of five scenarios specifically to dodge
-// #1312 (the bed's real reviewer, Pruefer, landing an incidental review
-// before the assertion runs). simgh never synthesizes an incidental bot
-// review, so this port uses the plain (non-draft) seedReviewGateItem
-// throughout — the draft variant exists in review_gate_helpers.go for
-// structural parity but carries no sim-side determinism concern.
+// seedReviewGateItemDraft specifically to dodge #1312 (the bed's real
+// reviewer, Pruefer, landing an incidental review before the assertion
+// runs). simgh never synthesizes an incidental bot review, so that
+// determinism concern doesn't exist here — draft vs. non-draft is inert in
+// sim either way. This port mirrors the live suite's own per-scenario
+// draft/plain choice anyway (four of five below call
+// seedReviewGateItemDraft, matching the live suite's own four; only
+// TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation uses the plain
+// seedReviewGateItem, again matching its live counterpart), for structural
+// parity rather than because sim needs the draft variant for its own sake.
 //
 // Scope limitation (unchanged from the live suite, ADR-1298 following
 // ADR-1258): these scenarios only exercise the advance gate
@@ -37,19 +41,22 @@ import (
 // reviewAuthorityStages (review_authority_test.go) has no Validate stage,
 // reused here directly — same pipeline shape, same "Review" gate stage.
 //
-// Comment-content observability gap (recorded once here, applies to
-// TestExpectedReviewersDeclaredWaitsAndReprompts and
-// TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation below): the live
-// suite asserts the Phase 1 re-prompt comment's exact text (an @mention of
-// the declared synthetic name) and its absence. simgh's Sim/Instrumented
-// never exposes issue/PR comment bodies back to a scenario — comments are
-// write-only from the scenario's side (see ci_fix_reinvoke_test.go's #1320
-// discriminator note for the identical gap). This port substitutes the
-// strongest available GitHub-observable signals instead: the
-// fabrik:bot-reprompted / fabrik:paused label sequence for the re-prompt
-// ladder's presence, and fabrik:bot-reprompted's absence plus
-// env.Claude.CommentCallCount("Review") for the ladder's correct
-// non-engagement. Recorded as a coverage-matrix partial-port reason (R4).
+// Comment-content observability (corrected during this port's own review,
+// #1450): an earlier revision of this file claimed simgh's Sim/Instrumented
+// "never exposes issue/PR comment bodies back to a scenario — comments are
+// write-only from the scenario's side." That claim was wrong.
+// projectItem's Comments field (buildProjectItem, tests/sim/simgh/board.go)
+// merges both the issue's own comments and its linked PR's comments — the
+// exact same field no_work_needed_test.go's hasNoWorkNeededSkipComment
+// already reads. TestExpectedReviewersDeclaredWaitsAndReprompts below
+// carries forward the live suite's exact-@mention-text assertion using this
+// field, rather than settling for the label sequence alone.
+//
+// reviewRepromptCommentPrefix is the literal prefix of the Phase 1
+// re-prompt comment (checkAwaitingReviewTimeout, engine/reviews.go) —
+// copied here the same way ciFixCycleLimitCommentPrefix is copied in
+// ci_fix_reinvoke_test.go, since the engine's own const is unexported.
+const reviewRepromptCommentPrefix = "🏭 **Fabrik — review re-prompt**"
 
 // newExpectedReviewersTimeoutEnv backdates StartTime 24 real hours into the
 // past — the same technique timeout_test.go's
@@ -117,6 +124,20 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 	// engine re-prompts the declared identity and applies fabrik:bot-reprompted.
 	WaitForIssueLabel(t, env, num, "fabrik:bot-reprompted", 80)
 	t.Logf("fabrik:bot-reprompted appeared on #%d — Phase 1 re-prompt fired", num)
+
+	// The live suite asserts the Phase 1 re-prompt comment's exact @mention
+	// text — carried forward here rather than settled for the label alone
+	// (found auditing this port, #1450): projectItem's Comments field
+	// already merges both issue and linked-PR comments (buildProjectItem,
+	// tests/sim/simgh/board.go), the same mechanism no_work_needed_test.go
+	// and ci_fix_reinvoke_test.go's #1320 check rely on — comment content is
+	// NOT write-only from a scenario's side, contrary to what an earlier
+	// revision of this file's doc comment claimed.
+	if !hasCommentWithPrefix(projectItem(t, env, num).Comments, reviewRepromptCommentPrefix) {
+		t.Fatalf("no engine-authored review re-prompt comment (prefix %q) found on #%d after fabrik:bot-reprompted appeared",
+			reviewRepromptCommentPrefix, num)
+	}
+	t.Logf("Phase 1's actual re-prompt comment confirmed on #%d, not just the label", num)
 
 	// Phase 2: the synthetic name never actually reviews, so after a second
 	// full timeout window the engine gives up and pauses for a human,
@@ -238,9 +259,23 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	// it: if reviewGateAllBots incorrectly read allBots=true for the
 	// still-outstanding declared bot once the human's verdict dropped
 	// outstanding to empty, fabrik:bot-reprompted would appear here.
-	RunPolls(t, env, 20)
-	if hasLabel(IssueLabels(t, env, num), "fabrik:bot-reprompted") {
-		t.Fatal("fabrik:bot-reprompted applied — the declared bot's re-prompt ladder fired instead of deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)")
+	//
+	// Checked after EVERY poll in the window, not just once at the end: with
+	// the backdated clock, both Phase 1 (re-prompt, applies the label) and
+	// Phase 2 (timeout, removes it again) have their own timeout windows
+	// already overdue from poll 1 — a regression that incorrectly fires
+	// Phase 1 would have it removed again by Phase 2 within the same settle
+	// window, so a single post-loop check can miss the label's entire
+	// lifetime. This was caught empirically: an earlier revision of this
+	// fix used RunPolls(20) + one check afterward, which still passed
+	// against a reverted Finding-2 fix, because by the time the check ran,
+	// Phase 2 had already cleared the transient fabrik:bot-reprompted state
+	// Phase 1 had (incorrectly) applied moments before.
+	for i := 0; i < 20; i++ {
+		RunPoll(t, env)
+		if hasLabel(IssueLabels(t, env, num), "fabrik:bot-reprompted") {
+			t.Fatalf("fabrik:bot-reprompted applied on poll %d — the declared bot's re-prompt ladder fired instead of deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)", i+1)
+		}
 	}
-	t.Logf("AC2 verified: #%d — declared bot never re-prompted despite an already-overdue timeout window; human's authoritative CHANGES_REQUESTED escalation won", num)
+	t.Logf("AC2 verified: #%d — declared bot never re-prompted at any point despite an already-overdue timeout window; human's authoritative CHANGES_REQUESTED escalation won", num)
 }

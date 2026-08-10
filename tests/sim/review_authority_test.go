@@ -43,6 +43,17 @@ import (
 // landing gate (reviewGateBlocksLanding), which is reachable only through a
 // stage literally named "Validate". reviewAuthorityStages below has no
 // Validate stage.
+//
+// reviewCycleLimitCommentPrefix is the literal prefix of
+// pauseForReviewCycleLimit's own comment (engine/reviews.go) — copied here
+// the same way ciFixCycleLimitCommentPrefix is copied in
+// ci_fix_reinvoke_test.go, since the engine's own const is unexported.
+// TestReviewAuthorityCycleLimitPauses uses it to confirm the pause is
+// provably pauseForReviewCycleLimit's own, not merely a label combination
+// another gate could in principle also produce (comment content is
+// observable via projectItem's Comments field — see
+// expected_reviewers_test.go's corrected file doc comment).
+const reviewCycleLimitCommentPrefix = "🏭 **Fabrik — review cycle limit reached**"
 
 // reviewDatabaseIDSeq allocates unique PRReview.DatabaseID values —
 // buildReviewBodyCommentsFromReviews (engine/reviews.go) skips any review
@@ -185,13 +196,22 @@ func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 	WaitForIssueLabel(t, env, num, "fabrik:paused", 80)
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 20)
 
-	if item := projectItem(t, env, num); item.IsClosed {
+	item := projectItem(t, env, num)
+	if item.IsClosed {
 		t.Fatal("issue closed after cycle limit — expected OPEN")
 	}
 	// Non-vacuity: exactly maxCycles reinvoke dispatches happened — the
 	// (maxCycles+1)th review triggered a pause, not a further dispatch.
 	if got := env.Claude.CommentCallCount("Review"); got != maxCycles {
 		t.Fatalf("expected exactly %d review-reinvoke dispatches before the cycle-limit pause, got %d", maxCycles, got)
+	}
+	// Pause provenance: the live suite confirms this pause specifically came
+	// from pauseForReviewCycleLimit (WaitForPRCommentContainingAny) rather
+	// than trusting the label pair alone — carried forward here the same way
+	// ci_fix_reinvoke_test.go's cycle-limit test does for its own comment.
+	if !hasCommentWithPrefix(item.Comments, reviewCycleLimitCommentPrefix) {
+		t.Fatalf("no engine-authored review cycle-limit comment (prefix %q) found on #%d — the issue paused, but not provably via pauseForReviewCycleLimit",
+			reviewCycleLimitCommentPrefix, num)
 	}
 	t.Logf("AC4 verified: #%d paused via the review cycle limit after %d genuine reinvoke cycle(s), not an unbounded loop", num, maxCycles)
 }
