@@ -89,9 +89,9 @@ var catchUpPhase1Handlers = []catchUpHandler{
 // removed. That is precisely "a human unpaused a cycle-limit-paused item" —
 // clearFailedStage is safe to reuse as-is: it removes stage:<name>:failed (a
 // harmless no-op, since these four sites never apply it), clears
-// PausedByEngine, resets LastAttemptAt, zeroes ReviewCycles/CIFixCycles/
-// RebaseCycles/EnqueueCycles via EngineCyclesCleared, and resets the comment
-// circuit breaker — the identical reset already used by
+// PausedByEngine, resets LastAttemptAt, zeroes ReviewCycles/ReviewBlockedCycles/
+// CIFixCycles/RebaseCycles/EnqueueCycles via EngineCyclesCleared, and resets
+// the comment circuit breaker — the identical reset already used by
 // escalateFailedStage/escalatePRCreationFailure/handleBoundaryViolation via
 // processItem's gate, and by pauseForSliceLimit via that same gate (a
 // different call path — slice-limit pauses mid-stage, before completion, so

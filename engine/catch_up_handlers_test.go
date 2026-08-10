@@ -1704,9 +1704,9 @@ func runPhase1Chain(eng *Engine, pctx *phase1Ctx) (claimed bool) {
 // the stage (the item reached this handler chain — meaning fabrik:paused is
 // currently absent per poll.go's/ci_settle.go's admission filters — while
 // still marked paused-by-engine from before), handleEngineUnpause fires
-// clearFailedStage (zeroing ReviewCycles/CIFixCycles/RebaseCycles/
-// EnqueueCycles and clearing PausedByEngine) and always returns false so the
-// rest of the chain still runs this same pass.
+// clearFailedStage (zeroing ReviewCycles/ReviewBlockedCycles/CIFixCycles/
+// RebaseCycles/EnqueueCycles and clearing PausedByEngine) and always returns
+// false so the rest of the chain still runs this same pass.
 func TestHandleEngineUnpause_PausedByEngine_ResetsAndReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{}
 	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}}
