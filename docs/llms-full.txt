@@ -3000,6 +3000,24 @@ The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
 Typical cost is ~5–30 points per poll depending on active items, well within the
 5,000 points/hour limit.
 
+#### Footer GraphQL Indicator Color
+
+The TUI footer's GraphQL indicator (`remaining/limit  countdown`) colors itself from a
+**projected-exhaustion estimate**, not raw percentage remaining. Fabrik estimates the
+burn rate (points consumed per minute) from consecutive polls, projects that rate
+forward to the window reset, and compares the projection against `Remaining`:
+
+- **Green** — projected consumption stays comfortably below `Remaining`.
+- **Yellow** — projected consumption is within 25% of `Remaining`.
+- **Red** — projected consumption would exceed `Remaining` before the window resets.
+
+This means a low percentage remaining with little time left in the window can still be
+green: if the window is about to reset, the budget resets with it. Conversely, a
+seemingly-healthy percentage with a high burn rate and a long time left before reset can
+turn yellow or red. On startup, before enough polls have landed to estimate a rate, and
+whenever the engine is idle, the indicator is green — it never flashes red before there
+is a burn rate to project from.
+
 #### Cold-Start Cache Population
 
 On first startup, Fabrik bootstraps the board cache from the same lightweight probe
