@@ -223,6 +223,32 @@ func TestParseReviewFindings_MarkersFound_NoFence(t *testing.T) {
 	}
 }
 
+// TestParseReviewFindings_FenceNestedInsideMarkers_ExcludedFromSummary is the
+// Pruefer bot-review regression from PR #1511: buildReviewPrompt asks for the
+// findings fence to come after PRUEFER_SUMMARY_END, but that's unenforced —
+// if Claude nests the fence between BEGIN and END instead, the raw JSON
+// array must not leak into the human-facing summary. Findings still parse
+// correctly (the fence search in parseReviewFindings is independent of the
+// marker span), but the returned summary must stop at the fence's start,
+// exactly as the no-markers positional fallback would.
+func TestParseReviewFindings_FenceNestedInsideMarkers_ExcludedFromSummary(t *testing.T) {
+	text := "PRUEFER_SUMMARY_BEGIN\nSummary text\n\n```json\n[{\"path\":\"a.go\",\"line\":1,\"body\":\"bug\",\"severity\":\"high\"}]\n```\nPRUEFER_SUMMARY_END\n"
+
+	summary, findings, info := parseReviewFindings(text)
+	if strings.Contains(summary, "```") || strings.Contains(summary, "\"severity\"") {
+		t.Errorf("summary leaked raw findings JSON: %q", summary)
+	}
+	if summary != "Summary text" {
+		t.Errorf("summary = %q, want %q", summary, "Summary text")
+	}
+	if len(findings) != 1 || findings[0].Severity != SeverityHigh {
+		t.Errorf("findings = %+v, want one high-severity finding", findings)
+	}
+	if !info.MarkersFound {
+		t.Errorf("info.MarkersFound = false, want true")
+	}
+}
+
 // TestDecideEvent_UnaffectedBySummaryMarkers pins AC4: the same findings
 // JSON, with and without summary markers present around it, produces an
 // identical findings slice and decideEvent verdict — the summary-parsing

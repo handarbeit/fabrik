@@ -70,6 +70,17 @@ type SummaryParseInfo struct {
 // — a malformed pair is treated identically to "markers absent" (R3): the
 // fallback logic stays binary (found-and-well-formed vs. not) rather than
 // inventing a harder-to-test partial-extraction state.
+//
+// buildReviewPrompt instructs Claude to place the findings JSON fence after
+// PRUEFER_SUMMARY_END, never between the markers, but that's an unenforced
+// request — the same shape of problem this whole feature exists to close.
+// If Claude nests the fence inside the marker pair anyway, the fence's
+// content is never prose summary — it's already extracted separately as
+// structured findings — so it is truncated out of the delimited text here,
+// mirroring parseReviewFindings' own positional text[:loc[0]] behavior
+// exactly. This is not the R5 "heuristic trimming" the doc comment there
+// warns against: R5 protects legitimate summary prose from being guessed
+// away, and a raw findings array was never summary prose to begin with.
 func splitSummaryMarkers(text string) (summary string, info SummaryParseInfo) {
 	beginLoc := summaryMarkerBeginRE.FindStringIndex(text)
 	if beginLoc == nil {
@@ -81,7 +92,11 @@ func splitSummaryMarkers(text string) (summary string, info SummaryParseInfo) {
 	}
 
 	preamble := strings.TrimSpace(text[:beginLoc[0]])
-	summary = strings.TrimSpace(text[beginLoc[1] : beginLoc[1]+endLoc[0]])
+	delimited := text[beginLoc[1] : beginLoc[1]+endLoc[0]]
+	if fenceLoc := findingsFenceRE.FindStringIndex(delimited); fenceLoc != nil {
+		delimited = delimited[:fenceLoc[0]]
+	}
+	summary = strings.TrimSpace(delimited)
 	return summary, SummaryParseInfo{MarkersFound: true, DiscardedBytes: len(preamble)}
 }
 
