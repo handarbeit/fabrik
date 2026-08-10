@@ -164,9 +164,15 @@ review_authority: authoritative # Optional: advisory (default) | authoritative. 
                                 # computation otherwise. Governs MERGING, never WORKING: an unresolved
                                 # CHANGES_REQUESTED does not make Fabrik sit idle — it reinvokes the stage
                                 # to address the reviewer's feedback (both inline thread comments and the
-                                # body of any CHANGES_REQUESTED review, which GitHub requires non-empty;
-                                # COMMENTED review bodies are deliberately excluded, since automated
-                                # reviewers routinely submit a generic summary as one), bounded by
+                                # body of any review whose state is not DISMISSED or PENDING — as of #1045,
+                                # CHANGES_REQUESTED, COMMENTED, and APPROVED bodies are all treated as
+                                # potentially actionable, since a bot reviewer that submits its entire
+                                # finding set as COMMENTED (e.g. Pruefer) would otherwise be silently
+                                # dropped; the accepted trade-off is that a generic bot summary (e.g.
+                                # Copilot/Gemini's COMMENTED overview) can also trigger a reinvoke, whose
+                                # cost is capped by the no-op cycle exemption — a reinvoke landing no
+                                # commit reverses the cycle-counter increment (ReviewCycleDecremented)),
+                                # bounded by
                                 # MaxReviewCycles, with pauseForReviewCycleLimit as the terminal fallback
                                 # only if the loop never converges — never as the first response to a
                                 # change request. yolo/cruise
