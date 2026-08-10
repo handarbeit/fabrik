@@ -478,6 +478,35 @@ stages must declare `expected_reviewers` (ADR-1283).
 Bot classification reuses production's own `github.IsBotLogin`, rather than
 reimplementing the heuristic.
 
+### A submitted review used to leave its author's review request outstanding — **Fixed (#1450)**
+
+Real GitHub removes a reviewer from a PR's outstanding review-request list
+the instant that reviewer's review lands — a server-side side effect
+`reviewGateOutstanding` (`engine/reviews.go`) trusts implicitly: it reads
+`reviewRequests` as-is and assumes a login present there genuinely hasn't
+responded yet. Before this fix, `SeedReview`/`SeedReviewsAt` appended the
+review but left `pr.reviewRequests` untouched, so a scenario that both
+formally requested a reviewer (`SeedReviewRequest`) and then seeded that
+same login's review would see the login incorrectly remain "outstanding"
+forever — `reviewGateOutstanding`'s `len(outstanding) == 0` clearing
+condition could never be satisfied for that PR.
+
+No existing scenario had exercised this combination before #1450's
+review-authority/expected-reviewers port: `timeout_test.go`'s
+`SeedReviewRequest` caller leaves the request permanently unanswered by
+design, and no other caller seeded a request and a matching review for the
+exact same login. `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation`
+(`tests/sim/expected_reviewers_test.go`) needed exactly this shape —
+"outstanding empty because a human reviewed, no formal request ever
+made" — and was written to route around the bug rather than trigger it
+(it never calls `SeedReviewRequest` at all), which is what surfaced the gap
+under audit rather than as a test failure.
+
+**Fixed**, not just recorded: `SeedReview` and `SeedReviewsAt` now remove any
+`reviewRequests` entry matching the review's author, mirroring GitHub's own
+behavior. Verified against the full existing `tests/sim/simgh` suite with no
+regressions (no prior scenario relied on the stale-list behavior).
+
 ---
 
 ## Auto-merge and merge queue
