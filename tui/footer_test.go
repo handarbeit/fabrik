@@ -210,11 +210,11 @@ func TestGraphQLStyle_ProjectionBoundary(t *testing.T) {
 		minutes float64 // minutes to reset
 		want    lipgloss.Style
 	}{
-		{"just under yellow margin -> green", 7.49, successStyle},          // projected 749 < 750
+		{"just under yellow margin -> green", 7.49, successStyle},                       // projected 749 < 750
 		{"exactly at yellow margin -> green (not strictly greater)", 7.5, successStyle}, // projected 750 == 750
-		{"just over yellow margin -> yellow", 7.51, activeStyle},           // projected 751 > 750
+		{"just over yellow margin -> yellow", 7.51, activeStyle},                        // projected 751 > 750
 		{"exactly at remaining -> yellow (not strictly greater)", 10.0, activeStyle},    // projected 1000 == 1000
-		{"just over remaining -> red", 10.01, failStyle},                   // projected 1001 > 1000
+		{"just over remaining -> red", 10.01, failStyle},                                // projected 1001 > 1000
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
