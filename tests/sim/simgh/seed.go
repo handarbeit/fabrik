@@ -731,6 +731,18 @@ func (s *Sim) SeedMergeableRecomputePending(ownerRepo string, prNumber, reads in
 }
 
 // SeedReview records a submitted review on a PR.
+//
+// Mirrors real GitHub's own side effect (found auditing this port, #1450):
+// a reviewer who submits a review is removed from the PR's outstanding
+// review-request list — GitHub does this server-side the instant a
+// requested reviewer's review lands, and reviewGateOutstanding
+// (engine/reviews.go) trusts reviewRequests to already reflect that. Before
+// this fix, a scenario that both requested a reviewer (SeedReviewRequest)
+// and then seeded that same login's review would see them incorrectly
+// remain "outstanding" — a fidelity gap no existing scenario had exercised
+// (every prior SeedReviewRequest caller either left the request permanently
+// unanswered, as in timeout_test.go, or never seeded a matching review for
+// that exact login). See FIDELITY.md.
 func (s *Sim) SeedReview(ownerRepo string, prNumber int, review gh.PRReview) *Sim {
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
@@ -747,7 +759,24 @@ func (s *Sim) SeedReview(ownerRepo string, prNumber int, review gh.PRReview) *Si
 		review.SubmittedAt = s.now()
 	}
 	pr.reviews = append(pr.reviews, review)
+	removeReviewRequestFor(pr, review.Author)
 	return s
+}
+
+// removeReviewRequestFor withdraws review.Author from pr's outstanding
+// review-request list, if present — see SeedReview's doc comment for why.
+// Caller must hold s.mu.
+func removeReviewRequestFor(pr *prRecord, author string) {
+	if author == "" {
+		return
+	}
+	kept := pr.reviewRequests[:0:0]
+	for _, existing := range pr.reviewRequests {
+		if existing.Login != author {
+			kept = append(kept, existing)
+		}
+	}
+	pr.reviewRequests = kept
 }
 
 // SeedReviewRequest records an outstanding reviewer request on a PR. IsBot is
@@ -1106,6 +1135,9 @@ func (s *Sim) SeedReviewsAt(ownerRepo string, prNumber int, at time.Time, review
 	}
 	pr.reviewSchedule.add(at, func(p *prRecord) {
 		p.reviews = append(p.reviews, pending...)
+		for _, rev := range pending {
+			removeReviewRequestFor(p, rev.Author)
+		}
 		p.updatedAt = laterOf(p.updatedAt, at)
 	})
 	return s
