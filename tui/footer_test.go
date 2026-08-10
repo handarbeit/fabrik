@@ -108,10 +108,13 @@ func TestViewFooter_RateLimitShown(t *testing.T) {
 	}
 }
 
-// TestViewFooter_RateLimitColors verifies the color thresholds applied to the
-// rate limit section. Colors are forced via lipgloss.SetColorProfile so that
-// ANSI escape sequences are emitted even in a non-TTY test environment.
-func TestViewFooter_RateLimitColors(t *testing.T) {
+// TestViewFooter_RateLimitColors_ColdStartAlwaysGreen verifies that setting
+// graphqlStats directly (bypassing Update, so no PollCompletedEvent sample
+// has ever been observed) always renders green regardless of percentage
+// remaining — the cold-start behavior required by issue #1510's Requirement
+// 4 ("must not flash red on startup"). This supersedes the pre-#1510 version
+// of this test, which pinned the removed percentage-only coloring.
+func TestViewFooter_RateLimitColors_ColdStartAlwaysGreen(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
 
@@ -121,11 +124,10 @@ func TestViewFooter_RateLimitColors(t *testing.T) {
 		name      string
 		remaining int
 		limit     int
-		wantColor string // lipgloss color code present in ANSI escape
 	}{
-		{"green >50%", 2600, 5000, "42"},
-		{"yellow 20-50%", 1500, 5000, "214"},
-		{"red <20%", 900, 5000, "196"},
+		{"formerly green >50%", 2600, 5000},
+		{"formerly yellow 20-50%", 1500, 5000},
+		{"formerly red <20%", 900, 5000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,12 +140,209 @@ func TestViewFooter_RateLimitColors(t *testing.T) {
 				Reset:     reset,
 			}
 			footer := m.footer.View(m.width)
-			// The ANSI escape for the color code should be present in the raw string.
-			if !strings.Contains(footer, tc.wantColor) {
-				t.Errorf("expected color %q for %d/%d; footer=%q", tc.wantColor, tc.remaining, tc.limit, footer)
+			if !strings.Contains(footer, "42") {
+				t.Errorf("expected cold-start green (42) for %d/%d; footer=%q", tc.remaining, tc.limit, footer)
+			}
+			if strings.Contains(footer, "214") || strings.Contains(footer, "196") {
+				t.Errorf("cold start must never render yellow/red; footer=%q", footer)
 			}
 		})
 	}
+}
+
+// TestGraphQLStyle_ReportedCase pins the false positive reported in issue
+// #1510: 1980/5000 remaining, 4 minutes to reset, with poll-loop spend far
+// below what's needed to exhaust the budget in that window. Must render
+// green, not the old percentage logic's yellow.
+func TestGraphQLStyle_ReportedCase(t *testing.T) {
+	f := FooterComponent{}
+	now := time.Now()
+
+	// Warm up the estimator with a low, healthy burn rate: 5 points consumed
+	// over 5 minutes (1 point/min) is orders of magnitude below what would be
+	// needed to exhaust 1980 remaining in the 4 minutes left.
+	f.now = now
+	comp, _ := f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 1985, Reset: now.Add(9 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	f.now = now.Add(5 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 1980, Reset: now.Add(4 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	if !f.haveBurnRate {
+		t.Fatal("expected a burn-rate estimate after two samples")
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("reported case: got style %v, want successStyle (green)", got)
+	}
+}
+
+// TestGraphQLStyle_ProjectedExhaustionRed pins a genuine exhaustion
+// projection: a high burn rate that will consume Remaining well before
+// Reset.
+func TestGraphQLStyle_ProjectedExhaustionRed(t *testing.T) {
+	f := FooterComponent{}
+	now := time.Now()
+
+	f.now = now
+	comp, _ := f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 2000, Reset: now.Add(11 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	// 1000 points consumed in 1 minute -> burn rate 1000/min. Projected over
+	// the remaining 10 minutes (10000) vastly exceeds Remaining (1000).
+	f.now = now.Add(1 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 1000, Reset: now.Add(10 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	if got := f.graphqlStyle(); got.GetForeground() != failStyle.GetForeground() {
+		t.Errorf("exhaustion case: got style %v, want failStyle (red)", got)
+	}
+}
+
+// TestGraphQLStyle_ProjectionBoundary pins the exact comparison operators at
+// both thresholds: strictly-greater-than in both cases, so a projection
+// exactly equal to a threshold stays in the lower (safer) band.
+func TestGraphQLStyle_ProjectionBoundary(t *testing.T) {
+	// remaining=1000, burnRate=100 pts/min => projected = 100 * minutes.
+	// graphqlProjectionYellowMargin (0.75) puts the yellow threshold at 750.
+	cases := []struct {
+		name    string
+		minutes float64 // minutes to reset
+		want    lipgloss.Style
+	}{
+		{"just under yellow margin -> green", 7.49, successStyle},          // projected 749 < 750
+		{"exactly at yellow margin -> green (not strictly greater)", 7.5, successStyle}, // projected 750 == 750
+		{"just over yellow margin -> yellow", 7.51, activeStyle},           // projected 751 > 750
+		{"exactly at remaining -> yellow (not strictly greater)", 10.0, activeStyle},    // projected 1000 == 1000
+		{"just over remaining -> red", 10.01, failStyle},                   // projected 1001 > 1000
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			f := FooterComponent{
+				now:            now,
+				haveBurnRate:   true,
+				burnRatePerMin: 100,
+				graphqlStats: RateLimitStats{
+					Limit:     5000,
+					Remaining: 1000,
+					Reset:     now.Add(time.Duration(tc.minutes * float64(time.Minute))),
+				},
+			}
+			if got := f.graphqlStyle(); got.GetForeground() != tc.want.GetForeground() {
+				t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGraphQLStyle_WindowReset verifies that a Remaining increase between
+// consecutive samples is treated as a window reset: the estimator discards
+// the stale sample (rendering green, cold-start-like) rather than computing
+// a negative burn rate, and a subsequent post-reset sample produces a fresh,
+// correct estimate.
+func TestGraphQLStyle_WindowReset(t *testing.T) {
+	f := FooterComponent{}
+	now := time.Now()
+
+	// Establish a high burn rate pre-reset.
+	f.now = now
+	comp, _ := f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 2000, Reset: now.Add(11 * time.Minute)}})
+	f = comp.(FooterComponent)
+	f.now = now.Add(1 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 500, Reset: now.Add(10 * time.Minute)}})
+	f = comp.(FooterComponent)
+	if got := f.graphqlStyle(); got.GetForeground() != failStyle.GetForeground() {
+		t.Fatalf("pre-reset sanity check: got %v, want failStyle", got)
+	}
+
+	// Window resets: Remaining jumps back up to Limit.
+	f.now = now.Add(2 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 5000, Reset: now.Add(70 * time.Minute)}})
+	f = comp.(FooterComponent)
+	if f.haveBurnRate {
+		t.Error("window reset should discard the burn-rate estimate")
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("immediately after window reset: got %v, want successStyle (green)", got)
+	}
+
+	// A subsequent post-reset sample computes a fresh rate correctly (not
+	// poisoned by the pre-reset delta).
+	f.now = now.Add(3 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 4990, Reset: now.Add(69 * time.Minute)}})
+	f = comp.(FooterComponent)
+	if !f.haveBurnRate {
+		t.Fatal("expected a fresh burn-rate estimate after the post-reset sample")
+	}
+	if f.burnRatePerMin != 10 {
+		t.Errorf("expected fresh burn rate of 10 pts/min, got %v", f.burnRatePerMin)
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("healthy post-reset burn rate: got %v, want successStyle (green)", got)
+	}
+}
+
+// TestGraphQLStyle_IdleZeroBurn verifies an idle engine (Remaining unchanged
+// across samples) renders green no matter how low Remaining has fallen.
+func TestGraphQLStyle_IdleZeroBurn(t *testing.T) {
+	f := FooterComponent{}
+	now := time.Now()
+
+	f.now = now
+	comp, _ := f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 50, Reset: now.Add(11 * time.Minute)}})
+	f = comp.(FooterComponent)
+	f.now = now.Add(5 * time.Minute)
+	comp, _ = f.Update(PollCompletedEvent{GraphQLStats: RateLimitStats{Limit: 5000, Remaining: 50, Reset: now.Add(6 * time.Minute)}})
+	f = comp.(FooterComponent)
+
+	if f.burnRatePerMin != 0 {
+		t.Fatalf("expected zero burn rate for an idle engine, got %v", f.burnRatePerMin)
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("idle engine at low Remaining: got %v, want successStyle (green)", got)
+	}
+}
+
+// TestGraphQLStyle_ResetAtOrBehindNow verifies no panic/division issue and a
+// green result when Reset is at or behind now, even with an established
+// non-zero burn rate.
+func TestGraphQLStyle_ResetAtOrBehindNow(t *testing.T) {
+	now := time.Now()
+	f := FooterComponent{
+		now:            now,
+		haveBurnRate:   true,
+		burnRatePerMin: 100,
+		graphqlStats: RateLimitStats{
+			Limit:     5000,
+			Remaining: 10,
+			Reset:     now.Add(-1 * time.Minute), // behind now
+		},
+	}
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("Reset behind now: got %v, want successStyle (green)", got)
+	}
+
+	f.graphqlStats.Reset = now // exactly at now
+	if got := f.graphqlStyle(); got.GetForeground() != successStyle.GetForeground() {
+		t.Errorf("Reset at now: got %v, want successStyle (green)", got)
+	}
+}
+
+// TestGraphQLStyle_LimitZero verifies no division-by-zero panic when Limit
+// is zero (the pre-existing Limit > 0 gate in Update/View covers this, but
+// graphqlStyle itself must also not divide by Limit anywhere).
+func TestGraphQLStyle_LimitZero(t *testing.T) {
+	f := FooterComponent{
+		now: time.Now(),
+		graphqlStats: RateLimitStats{
+			Limit:     0,
+			Remaining: 0,
+			Reset:     time.Time{},
+		},
+	}
+	// Must not panic.
+	_ = f.graphqlStyle()
 }
 
 // TestViewFooter_TruncationWithRateLimit verifies that at narrow widths the
