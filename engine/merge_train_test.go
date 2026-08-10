@@ -4883,6 +4883,83 @@ func TestRunawayGuard_NormalBisectionNotTripped(t *testing.T) {
 	}
 }
 
+// TestRunawayGuard_BisectionExceedsThresholdWithoutTripping is the A3 regression test for
+// #1528: it reproduces the reported bed's exact trial shape (a 3-member batch with a single
+// poisoner, #3) against a threshold the *raw* trial count provably exceeds but the *counted*
+// (non-green) trial count does not.
+//
+// Trial-by-trial trace (member 3 is the sole poisoner):
+//  1. {1,2,3} red   (counted: initial batch validation)
+//  2. {1}     green (not counted — bisection sub-trial proving half A clean)
+//  3. {2,3}   red   (counted — half B still contains the poisoner)
+//  4. {2}     green (not counted — bisection sub-trial proving half A of {2,3} clean)
+//  5. {3}     red   (counted — isolates the poisoner)
+//  6. {1,2}   green (not counted — the survivor-validation trial that lands #1 and #2)
+//
+// Raw trial count is 6; the guard-counted (non-green) count is 3. With
+// MaxTrainTrialsPerWindow=5, 6 > 5 (satisfying A3's "trial count exceeds
+// MaxTrainTrialsPerWindow" requirement) while 3 < 5, so the guard must never fire and the
+// survivors must land — exactly the scenario the reported bed hit with the default N=6.
+func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Red iff #3 is present; #3 is the sole poisoner.
+	eng, client, rv := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] })
+	eng.cfg.MaxTrainTrialsPerWindow = 5
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	batch := makeSeamBatch(3)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	// Non-vacuity: the raw trial count must actually exceed the threshold — this is what
+	// makes the test meaningful (fixed code completes all 6 raw trials since bisection is
+	// never preempted; the pre-fix code trips the guard early and never reaches trial 6 at
+	// all, which is itself a symptom of the bug this test guards against — see #1528 PR body
+	// for the recorded red run). Non-fatal so the rest of the assertions still run and
+	// surface the fuller picture on regression.
+	if got := rv.count(); got <= eng.cfg.MaxTrainTrialsPerWindow {
+		t.Errorf("raw trial count %d does not exceed MaxTrainTrialsPerWindow %d", got, eng.cfg.MaxTrainTrialsPerWindow)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	// No member — poisoner or survivor — may receive a runaway guard alert or pause.
+	for _, issueNum := range []int{1, 2, 3} {
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				t.Errorf("member #%d got a runaway guard alert — a successful bisection must never trip the guard", issueNum)
+			}
+		}
+		for _, c := range client.addLabelCalls {
+			if c.issueNumber == issueNum && c.labelName == "fabrik:paused" {
+				t.Errorf("member #%d got fabrik:paused — a successful bisection must never trip the runaway guard", issueNum)
+			}
+		}
+	}
+
+	// #3 must still be ejected as the isolated poisoner (bisection itself must keep working).
+	ejected := false
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 && strings.Contains(c.body, "isolated by halving bisection") {
+			ejected = true
+		}
+	}
+	if !ejected {
+		t.Error("expected #3 to be ejected as the isolated poisoner")
+	}
+
+	// #1 and #2 must land (exactly one integration-PR merge).
+	if merges := len(client.mergePRCalls); merges != 1 {
+		t.Errorf("expected survivors #1 and #2 to land (1 merge), got %d merges", merges)
+	}
+}
+
 // TestMergeTrainRunawayGuard is the e2e runaway guard test: a persistently-red batch
 // where every trial fails and no member ever lands trips the guard within N trials,
 // pausing all Queued members. Follows the pattern of TestMergeTrainBisect_CostCapFallbackLogs.
