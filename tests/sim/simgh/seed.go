@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -320,6 +321,15 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 // SeedPR creates a pull request. Its head and base branches must already exist
 // in the backing repository — every git-derived answer about the PR is
 // computed from them rather than declared here.
+//
+// Merged: true performs the same git-side merge MergePR would — a real merge
+// commit on the base branch, plus the closing-keyword auto-close loop when
+// base is the repo's default branch — so a seeded "already landed" PR is not
+// a different world from one merged at runtime. See FIDELITY.md,
+// "SeedPR{Merged: true}". Seeding is authoritative about *state*, not about
+// git history it cannot represent: a genuine conflict, or nothing left to
+// merge, is refused rather than silently recorded — GitHub could never have
+// produced that PR as merged either.
 func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
@@ -338,13 +348,14 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	r.gitMu.Unlock()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !headOK {
 		s.fail("simgh: PR head branch %q does not exist in %s (seed it first)", seed.Head, ownerRepo)
+		s.mu.Unlock()
 		return s
 	}
 	if !baseOK {
 		s.fail("simgh: PR base branch %q does not exist in %s", base, ownerRepo)
+		s.mu.Unlock()
 		return s
 	}
 	// GitHub refuses a PR whose head is its base ("No commits between ..."), and
@@ -352,6 +363,7 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	// nothing-to-merge path.
 	if seed.Head == base {
 		s.fail("simgh: PR head and base are both %q; GitHub refuses a PR with no commits between them", base)
+		s.mu.Unlock()
 		return s
 	}
 
@@ -361,10 +373,12 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 		num = r.allocNumber()
 	case num < 0:
 		s.fail("simgh: PR number %d is not valid; use 0 to auto-assign", num)
+		s.mu.Unlock()
 		return s
 	case r.numberTaken(num):
 		// Shared number space: #N may already be an issue, not just a PR.
 		s.fail("simgh: PR %s#%d already exists", ownerRepo, num)
+		s.mu.Unlock()
 		return s
 	}
 
@@ -380,15 +394,18 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	case "", "open", "closed":
 	default:
 		s.fail("simgh: PR state %q is not valid; use \"open\" or \"closed\"", state)
+		s.mu.Unlock()
 		return s
 	}
 	if seed.Merged {
 		if seed.Draft {
 			s.fail("simgh: PR %s#%d cannot be both merged and draft", ownerRepo, num)
+			s.mu.Unlock()
 			return s
 		}
 		if state == "open" {
 			s.fail("simgh: PR %s#%d cannot be merged and open; a merged PR is closed", ownerRepo, num)
+			s.mu.Unlock()
 			return s
 		}
 		// Unspecified means "whatever merging implies", which is closed.
@@ -398,8 +415,43 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 		state = "open"
 	}
 	r.reserveNumber(num)
+	s.mu.Unlock()
+
+	// The git-side merge, when requested, runs with mu released — mirroring
+	// MergePR's own mu -> release -> gitMu -> release sequencing, since the
+	// two locks must never be held at once (see the package doc comment in
+	// git.go). A failed merge means the PR record below is never inserted —
+	// there is no partial state to unwind.
+	if seed.Merged {
+		msg := fmt.Sprintf("Merge pull request #%d from %s\n\n%s", num, seed.Head, seed.Title)
+		r.gitMu.Lock()
+		_, conflict, err := r.tryMerge(base, seed.Head, true, msg)
+		r.gitMu.Unlock()
+		switch {
+		case errors.Is(err, errNothingToMerge):
+			s.mu.Lock()
+			s.fail("simgh: SeedPR %s#%d: Merged: true, but %s is already contained in %s; "+
+				"there is no merge commit to write", ownerRepo, num, seed.Head, base)
+			s.mu.Unlock()
+			return s
+		case err != nil:
+			s.mu.Lock()
+			s.fail("%v", err)
+			s.mu.Unlock()
+			return s
+		case conflict:
+			s.mu.Lock()
+			s.fail("simgh: SeedPR %s#%d: Merged: true, but %s does not merge cleanly into %s; "+
+				"GitHub could never have produced this PR as merged", ownerRepo, num, seed.Head, base)
+			s.mu.Unlock()
+			return s
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := s.now()
-	r.prs[num] = &prRecord{
+	pr := &prRecord{
 		number:                  num,
 		title:                   seed.Title,
 		body:                    seed.Body,
@@ -413,6 +465,19 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 		mergeableRecomputeReads: seed.MergeableRecomputeReads,
 		createdAt:               now,
 		updatedAt:               now,
+	}
+	r.prs[num] = pr
+
+	// Mirrors MergePR's own auto-close, including its default-branch
+	// restriction — why Fabrik has to close issues itself on a non-default
+	// base (ADR-1096).
+	if seed.Merged && base == r.defaultBranch {
+		for _, n := range closingIssueNumbers(pr) {
+			if iss, ok := r.issues[n]; ok && iss.state != "CLOSED" {
+				iss.state = "CLOSED"
+				iss.updatedAt = now
+			}
+		}
 	}
 	return s
 }

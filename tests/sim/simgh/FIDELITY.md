@@ -948,20 +948,28 @@ be classified off the *failed* run with nothing to indicate why.
 **Simplified:** IDs are assigned from a single counter per `Sim` rather than
 globally across a GitHub instance, and nothing ties them to creation time.
 
-### `SeedPR{Merged: true}` sets the flag without merging — **Simplified**
+### `SeedPR{Merged: true}` performs the real merge — **Modelled**
 
-A directly-seeded merged PR sets the `merged` bookkeeping flag only. It does
-**not** write a merge commit onto the base branch, and it does **not** run the
-closing-keyword auto-close loop `MergePR` performs, so linked issues stay open
-and the base branch's git history shows no merge.
+**Decision:** model it, not merely flag it. A directly-seeded merged PR now
+writes the same real merge commit onto the base branch `MergePR` would (via
+the same `tryMerge` helper), and runs the same closing-keyword auto-close loop
+— including its default-branch restriction (ADR-1096) — so a seeded "already
+landed" PR is not a different world from one merged at runtime.
 
-That is a different world from one reached by calling `MergePR`, and the
-divergence is silent: a scenario that seeds a pre-merged PR and then asserts on
-git history or a linked issue's closed state gets a confidently wrong answer.
-**Risk:** medium — it is the one seeding shape whose *consequences* are not
-modelled rather than merely coarse. Seed the pre-merge state and call `MergePR`
-when a scenario depends on either consequence; use `Merged: true` only as an
-inert "this PR is already done" marker. Tracked in #1498.
+Seeding stays authoritative about *state*, not about git history it cannot
+represent: `Merged: true` against branches that genuinely conflict, or where
+the head is already fully contained in the base (nothing left to merge), is
+refused via the sticky error rather than silently recorded — GitHub could
+never have produced that PR as merged either. This mirrors the existing
+"Seeded PRs and issues must be shapes GitHub can produce" precedent below.
+
+**Risk:** low. `TestSeedPRMergedTruePerformsRealMerge` pins the merge commit
+and the auto-close together; `TestSeedPRMergedTrueRefusesConflict` pins the
+refusal. Fixed in #1498 — this was previously the one seeding shape whose
+*consequences* went unmodelled (medium risk), which made a merge-train
+scenario's "this member already landed" seed assert against unmerged git
+history and open issues that `assembleTrialBranch` (pure real git) would then
+faithfully build on top of, passing for the wrong reason.
 
 ### Seeded PRs and issues must be shapes GitHub can produce — **Modelled**
 

@@ -707,6 +707,14 @@ mutate "the mutation log is not carried across a restore" \
   'TestInstrumentedSnapshotCarriesFaultsAndLog' \
   'snapshot.go::s{\tin\.log\.restoreEntries\(snap\.logEntries\)\n}{}'
 
+mutate "SeedPR{Merged: true} does not perform a real git-side merge" \
+  'TestSeedPRMergedTruePerformsRealMerge|TestSeedPRMergedTrueRefusesConflict' \
+  'seed.go::s{if seed\.Merged \{\n\t\tmsg := fmt\.Sprintf}{if false \{\n\t\tmsg := fmt.Sprintf}'
+
+mutate "SeedPR{Merged: true} does not auto-close the linked issue" \
+  'TestSeedPRMergedTruePerformsRealMerge' \
+  'seed.go::s{if seed\.Merged && base == r\.defaultBranch \{}{if false \{}'
+
 echo
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then

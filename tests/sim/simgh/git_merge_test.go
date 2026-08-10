@@ -483,3 +483,95 @@ func TestSeedBranchRefusesExistingBranch(t *testing.T) {
 		t.Fatalf("refused SeedBranch still moved %s from %s to %s", headBranch, before, after)
 	}
 }
+
+// TestSeedPRMergedTruePerformsRealMerge pins item 4's fix: SeedPR{Merged: true}
+// must not merely flip a bookkeeping flag. It has to write the same merge
+// commit MergePR would, and run the same closing-keyword auto-close, or a
+// merge-train scenario asserting "this member already landed" would be
+// asserting against git history and issue state that never actually
+// happened. See FIDELITY.md, "SeedPR{Merged: true}", and #1498.
+func TestSeedPRMergedTruePerformsRealMerge(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+
+	baseBefore := mustHeadSHA(t, s, repoName, "main")
+	headSHA := mustHeadSHA(t, s, repoName, headBranch)
+
+	// Linked via IssueNumber, the same as CreateDraftPR would link it — issue
+	// #7 is the one seedBasicBoard already seeds.
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "already landed", IssueNumber: 7, Merged: true})
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedPR(Merged: true): %v", err)
+	}
+
+	baseAfter := mustHeadSHA(t, s, repoName, "main")
+	if baseAfter == baseBefore {
+		t.Fatal("SeedPR(Merged: true) did not move the base branch — no merge commit was written")
+	}
+
+	r, err := s.repoByKey(repoName)
+	if err != nil {
+		t.Fatalf("repoByKey: %v", err)
+	}
+	r.gitMu.Lock()
+	parents, gitErr := runGit(r.bareDir, "rev-list", "--parents", "-n", "1", "refs/heads/main")
+	r.gitMu.Unlock()
+	if gitErr != nil {
+		t.Fatalf("rev-list --parents: %v", gitErr)
+	}
+	fields := strings.Fields(parents)
+	if len(fields) != 3 {
+		t.Fatalf("main tip has %d parents (%q), want a two-parent merge commit", len(fields)-1, parents)
+	}
+	if fields[1] != baseBefore || fields[2] != headSHA {
+		t.Fatalf("merge commit parents = %v, want [%s %s]", fields[1:], baseBefore, headSHA)
+	}
+
+	merged, err := s.FetchPRMerged("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRMerged: %v", err)
+	}
+	if !merged {
+		t.Fatal("PR reports merged = false after SeedPR(Merged: true)")
+	}
+
+	// The linked issue must be auto-closed, exactly as MergePR's own
+	// closing-keyword loop would do it.
+	iss, err := s.FetchIssue("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchIssue: %v", err)
+	}
+	if iss.State != "closed" {
+		t.Fatalf("linked issue #7 state = %q, want %q after SeedPR(Merged: true) on the default branch", iss.State, "closed")
+	}
+}
+
+// TestSeedPRMergedTrueRefusesConflict pins the other half of item 4: seeding
+// is authoritative about *state*, not about git history it cannot represent.
+// Merged: true against branches that genuinely conflict is refused rather
+// than silently recorded — GitHub could never have produced that PR as
+// merged either.
+func TestSeedPRMergedTrueRefusesConflict(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedConflict(t, s)
+
+	baseBefore := mustHeadSHA(t, s, repoName, "main")
+
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "conflicting", Merged: true})
+
+	err := s.Err()
+	if err == nil {
+		t.Fatal("SeedPR(Merged: true) accepted branches that genuinely conflict")
+	}
+	if !strings.Contains(err.Error(), "does not merge cleanly") {
+		t.Fatalf("error = %v, want it to name the conflict", err)
+	}
+
+	// The refusal must leave no trace: no moved ref, and no PR record at all.
+	if after := mustHeadSHA(t, s, repoName, "main"); after != baseBefore {
+		t.Fatalf("a refused SeedPR(Merged: true) still moved main from %s to %s", baseBefore, after)
+	}
+	if _, ferr := s.FetchPRMerged("acme", "widgets", 42); ferr == nil {
+		t.Fatal("a refused SeedPR(Merged: true) still recorded a PR")
+	}
+}
