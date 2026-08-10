@@ -31,31 +31,100 @@ type ReviewFinding struct {
 // the summary prose (e.g. Claude illustrating a fix with a ```go block).
 var findingsFenceRE = regexp.MustCompile("(?s)```json\\s*(.*?)```")
 
+// summaryMarkerBeginRE and summaryMarkerEndRE match the PRUEFER_SUMMARY_BEGIN
+// / PRUEFER_SUMMARY_END delimiter lines buildReviewPrompt instructs Claude to
+// wrap its prose summary in (R1/R2). Line-anchored (multiline `^...$`, `\r?`
+// tolerant), mirroring engine/claude.go's stageCompleteRE convention for
+// control tokens — a marker must occupy its own line, so a phrase that
+// merely mentions "PRUEFER_SUMMARY_BEGIN" mid-sentence in narration can't be
+// mistaken for the real delimiter.
+var (
+	summaryMarkerBeginRE = regexp.MustCompile(`(?m)^PRUEFER_SUMMARY_BEGIN\r?$`)
+	summaryMarkerEndRE   = regexp.MustCompile(`(?m)^PRUEFER_SUMMARY_END\r?$`)
+)
+
+// SummaryParseInfo reports how parseReviewFindings extracted the summary,
+// for the caller (review.go) to log per R4 — parseReviewFindings itself
+// stays a pure function with no logf call, matching the rest of this file.
+type SummaryParseInfo struct {
+	// MarkersFound is true iff a well-formed PRUEFER_SUMMARY_BEGIN/END pair
+	// was found (BEGIN present, END present after it) and the delimited text
+	// was used as the summary. False means the positional fallback
+	// (everything before the findings fence, or the whole text) was used
+	// instead — either because Claude omitted the markers, or emitted a
+	// malformed pair (missing END, or END before BEGIN).
+	MarkersFound bool
+	// DiscardedBytes is the trimmed length of the preamble text found before
+	// PRUEFER_SUMMARY_BEGIN, when MarkersFound is true. Whitespace-trimmed,
+	// not a raw byte count, so a stray trailing newline before the marker
+	// doesn't count as discarded content. Always 0 when MarkersFound is
+	// false — the fallback path discards nothing; it uses the full
+	// positional text as the summary, exactly as before this change.
+	DiscardedBytes int
+}
+
+// splitSummaryMarkers looks for a well-formed PRUEFER_SUMMARY_BEGIN/END pair
+// in text and, if found, returns the trimmed text between them plus
+// SummaryParseInfo{MarkersFound: true, ...}. If BEGIN is missing, END is
+// missing, or END is found before BEGIN, it returns ("", SummaryParseInfo{})
+// — a malformed pair is treated identically to "markers absent" (R3): the
+// fallback logic stays binary (found-and-well-formed vs. not) rather than
+// inventing a harder-to-test partial-extraction state.
+func splitSummaryMarkers(text string) (summary string, info SummaryParseInfo) {
+	beginLoc := summaryMarkerBeginRE.FindStringIndex(text)
+	if beginLoc == nil {
+		return "", SummaryParseInfo{}
+	}
+	endLoc := summaryMarkerEndRE.FindStringIndex(text[beginLoc[1]:])
+	if endLoc == nil {
+		return "", SummaryParseInfo{}
+	}
+
+	preamble := strings.TrimSpace(text[:beginLoc[0]])
+	summary = strings.TrimSpace(text[beginLoc[1] : beginLoc[1]+endLoc[0]])
+	return summary, SummaryParseInfo{MarkersFound: true, DiscardedBytes: len(preamble)}
+}
+
 // parseReviewFindings splits Claude's review output into its two-part
 // contract: free-form summary prose, followed by a single fenced ```json
-// array of {"path","line","body"} findings. Everything before the fence is
-// the summary; the fence's content is unmarshaled into findings.
+// array of {"path","line","body"} findings. The summary is extracted from
+// between PRUEFER_SUMMARY_BEGIN/END markers when a well-formed pair is
+// present (R1/R2); otherwise it falls back to everything before the fence,
+// exactly as before those markers existed (R3). The fence's content is
+// unmarshaled into findings independently of which summary path was taken.
 //
 // This is a graceful-degrade parser, not a strict one: when no fenced JSON
 // block is present, or its content doesn't unmarshal as a findings array,
-// the entire input is returned as the summary with zero findings. That
-// covers both today's plain-prose reviews and Claude failing to follow the
-// new contract — in neither case should the review fail to submit; it just
-// posts without inline comments, exactly as it does today.
-func parseReviewFindings(text string) (summary string, findings []ReviewFinding) {
+// the entire input (or the delimited summary, if markers were found) is
+// returned as the summary with zero findings. That covers both today's
+// plain-prose reviews and Claude failing to follow the new contract — in
+// neither case should the review fail to submit; it just posts without
+// inline comments, exactly as it does today.
+func parseReviewFindings(text string) (summary string, findings []ReviewFinding, info SummaryParseInfo) {
+	delimited, delimitedInfo := splitSummaryMarkers(text)
+
 	loc := findingsFenceRE.FindStringSubmatchIndex(text)
 	if loc == nil {
-		return strings.TrimSpace(text), nil
+		if delimitedInfo.MarkersFound {
+			return delimited, nil, delimitedInfo
+		}
+		return strings.TrimSpace(text), nil, SummaryParseInfo{}
 	}
 
 	fenceContent := text[loc[2]:loc[3]]
 	var parsed []ReviewFinding
 	if err := json.Unmarshal([]byte(fenceContent), &parsed); err != nil {
-		return strings.TrimSpace(text), nil
+		if delimitedInfo.MarkersFound {
+			return delimited, nil, delimitedInfo
+		}
+		return strings.TrimSpace(text), nil, SummaryParseInfo{}
 	}
 
+	if delimitedInfo.MarkersFound {
+		return delimited, parsed, delimitedInfo
+	}
 	summary = strings.TrimSpace(text[:loc[0]])
-	return summary, parsed
+	return summary, parsed, SummaryParseInfo{}
 }
 
 // dedupeFindings collapses findings that share the same (Path, Line) into a
