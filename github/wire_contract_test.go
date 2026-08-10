@@ -142,15 +142,25 @@ func TestWireContract_SchemaNotStale(t *testing.T) {
 // This cannot say *which* query is missing, but it turns a silent gap into
 // a failing go test.
 func TestWireContract_RegistryIsComplete(t *testing.T) {
-	callSitePattern := regexp.MustCompile(`\bc\.graphqlRequest\(`)
-	sourceFiles := []string{"project.go", "prs.go", "status.go", "comments.go", "client.go"}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("globbing *.go: %v", err)
+	}
 
+	callSitePattern := regexp.MustCompile(`\bc\.graphqlRequest\(`)
+	var sourceFiles []string
+	var source []byte
 	total := 0
-	for _, f := range sourceFiles {
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
 		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("reading %s: %v", f, err)
 		}
+		sourceFiles = append(sourceFiles, f)
+		source = append(source, data...)
 		total += len(callSitePattern.FindAllIndex(data, -1))
 	}
 
@@ -158,6 +168,19 @@ func TestWireContract_RegistryIsComplete(t *testing.T) {
 		t.Fatalf("found %d c.graphqlRequest( call sites across %v but wireContractRegistry has %d entries — "+
 			"a query was added or removed without updating the registry in wire_contract_test.go",
 			total, sourceFiles, len(wireContractRegistry))
+	}
+
+	var missing []string
+	for _, op := range wireContractRegistry {
+		namePattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(op.name) + `\b`)
+		if !namePattern.Match(source) {
+			missing = append(missing, op.name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("registry entries %v reference an identifier no longer found in source %v — "+
+			"the call site was likely removed or renamed without updating wire_contract_test.go",
+			missing, sourceFiles)
 	}
 }
 
