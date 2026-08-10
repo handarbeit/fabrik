@@ -283,6 +283,7 @@ immediately reads will see a resolved answer here and might not on GitHub.
 
 ## Check runs and commit statuses
 
+### The recompute window double-drains across `FetchPRMergeable` and `FetchPRMergeableState` — **Simplified, deliberately not shared**
 
 **Each read drains one unit, including the two single-field accessors.**
 `FetchPRMergeable` and `FetchPRMergeableState` are independent calls into
@@ -291,12 +292,29 @@ thing to want, and what `FetchPRDetails` sanctions for itself — burns two unit
 rather than one, and can see the flag and the state resolve at different points.
 Real GitHub reports both from a single response, so they resolve together.
 
+**Decision: document, do not model.** Sharing a drain between the two
+accessors would require them to know they are part of one logical read — a
+concept the `engine.GitHubClient` interface does not express, and inventing
+one here would be sim-only semantics with no real-GitHub analogue. It would
+also not buy back much fidelity: production's own `FetchPRMergeable` and
+`FetchPRMergeableState` (`github/prs.go:466-514`) *each independently hit*
+`/pulls/{number}` too — calling both is two separate REST round-trips in real
+GitHub as well, not one shared read. Only `FetchPRMergeableFields` is the
+genuinely single-call path, and no current engine or `boardcache` call site
+calls the two single-field accessors back-to-back for one PR — only
+`FetchPRMergeableFields` is used when a caller wants both. The same reasoning
+applies here as to `MergePR`'s retarget compare-and-swap under
+[Merge commits](#merge-commits) above: modelling a guarantee neither the sim's
+interface nor production's own call pattern actually provides would make the
+sim *less* faithful, not more.
+
 **Risk:** low but real for a scenario that seeds a *short* window (1–2 reads) and
-then reads both fields; the window drains faster than the scenario intends. The
-sim does not share a drain between them because doing so would require the two
-accessors to know they are part of one logical read, which the interface does not
-express. Prefer `FetchPRMergeableFields` when a scenario needs both, exactly as
-production's single-PR endpoint does. See #1498.
+then reads both fields; the window drains faster than the scenario intends. Prefer
+`FetchPRMergeableFields` when a scenario needs both, exactly as production's
+single-PR endpoint does — this is a stated recommendation, not merely a
+suggestion: no current engine code path is exposed to this gap because it
+already follows it. See #1498.
+
 ### Two separate collections — **Modelled**
 
 Check runs (`FetchCheckRuns`) and classic commit statuses (`FetchCombinedStatus`)
