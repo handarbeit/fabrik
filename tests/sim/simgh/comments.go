@@ -101,26 +101,48 @@ func (s *Sim) addReaction(owner, repo string, commentDatabaseID int, content str
 	return nil
 }
 
-// ResolveReviewThread marks a review thread resolved and bumps the PR's
-// resolved-thread count, which the engine's progress detection reads during
-// turn extension.
+// ResolveReviewThread marks every comment sharing threadID resolved and
+// bumps the PR's resolved-thread count once, which the engine's progress
+// detection reads during turn extension.
+//
+// A thread is every comment sharing threadID, not just the first one found —
+// board projections surface an unresolved thread comment individually
+// (buildProjectItem appends every review-thread comment with
+// !c.threadResolved), so leaving a sibling comment unmarked would make a
+// resolved multi-comment thread read as still partially outstanding.
 func (s *Sim) ResolveReviewThread(threadID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range s.repos {
 		for _, pr := range r.prs {
+			found := false
+			allResolved := true
 			for _, c := range pr.reviewThreadComment {
 				if c.reviewThreadID != threadID {
 					continue
 				}
-				if c.threadResolved {
-					return nil
+				found = true
+				if !c.threadResolved {
+					allResolved = false
 				}
-				c.threadResolved = true
-				pr.resolvedThreads++
-				pr.updatedAt = s.now()
+			}
+			if !found {
+				continue
+			}
+			if allResolved {
+				// Idempotent: every comment sharing this thread ID is
+				// already resolved, so a repeat call is a no-op rather than
+				// a second increment of resolvedThreads.
 				return nil
 			}
+			for _, c := range pr.reviewThreadComment {
+				if c.reviewThreadID == threadID {
+					c.threadResolved = true
+				}
+			}
+			pr.resolvedThreads++
+			pr.updatedAt = s.now()
+			return nil
 		}
 	}
 	return fmt.Errorf("simgh: review thread %q not found", threadID)

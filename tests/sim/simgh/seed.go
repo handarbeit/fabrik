@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -260,6 +261,16 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 		return s
 	}
 
+	// See repoState.numberMu's doc comment (model.go): this call's own
+	// critical section never releases Sim.mu, but SeedPR{Merged: true}'s
+	// does, and its auto-assigned candidate is only a peek at nextNumber
+	// until the merge succeeds — invisible to allocNumber's bookkeeping in
+	// the meantime. Without this lock, this call's own allocNumber() below
+	// could claim that exact peeked number while a concurrent SeedPR is
+	// mid-merge on this repo.
+	r.numberMu.Lock()
+	defer r.numberMu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -320,11 +331,30 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 // SeedPR creates a pull request. Its head and base branches must already exist
 // in the backing repository — every git-derived answer about the PR is
 // computed from them rather than declared here.
+//
+// Merged: true performs the same git-side merge MergePR would — a real merge
+// commit on the base branch, plus the closing-keyword auto-close loop when
+// base is the repo's default branch — so a seeded "already landed" PR is not
+// a different world from one merged at runtime. See FIDELITY.md,
+// "SeedPR{Merged: true}". Seeding is authoritative about *state*, not about
+// git history it cannot represent: a genuine conflict, or nothing left to
+// merge, is refused rather than silently recorded — GitHub could never have
+// produced that PR as merged either.
 func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	r, ok := s.repoForSeed(ownerRepo)
 	if !ok {
 		return s
 	}
+
+	// Serialise the whole numbering decision. See repoState.numberMu's doc
+	// comment (model.go): the Merged: true path below releases Sim.mu around
+	// the git-side merge, opening a check-then-publish window — for an
+	// explicitly-seeded number against a concurrent SeedPR call, and for an
+	// auto-assigned one against any numbering path at all on this repo
+	// (CreateIssue, CreatePR, SeedIssue, or another SeedPR) — that this lock
+	// closes. Cheap, since seeding is setup, not a hot path.
+	r.numberMu.Lock()
+	defer r.numberMu.Unlock()
 
 	base := seed.Base
 	if base == "" {
@@ -338,13 +368,14 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	r.gitMu.Unlock()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !headOK {
 		s.fail("simgh: PR head branch %q does not exist in %s (seed it first)", seed.Head, ownerRepo)
+		s.mu.Unlock()
 		return s
 	}
 	if !baseOK {
 		s.fail("simgh: PR base branch %q does not exist in %s", base, ownerRepo)
+		s.mu.Unlock()
 		return s
 	}
 	// GitHub refuses a PR whose head is its base ("No commits between ..."), and
@@ -352,19 +383,32 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	// nothing-to-merge path.
 	if seed.Head == base {
 		s.fail("simgh: PR head and base are both %q; GitHub refuses a PR with no commits between them", base)
+		s.mu.Unlock()
 		return s
 	}
 
 	num := seed.Number
 	switch {
 	case num == 0:
-		num = r.allocNumber()
+		// Peek the candidate rather than calling allocNumber: allocNumber
+		// commits the number immediately by advancing nextNumber, which is
+		// exactly the leak a review finding on #1498 caught — a state/Draft
+		// validation failure below, or a refused merge further down, would
+		// still burn an auto-assigned number for a PR that was never
+		// created, even though the equivalent case for an explicit number
+		// is already deferred (see reserveNumber below). r.nextNumber is
+		// only actually advanced once reserveNumber(num) runs, at the same
+		// point an explicit number is reserved — after the whole seed has
+		// succeeded.
+		num = r.nextNumber
 	case num < 0:
 		s.fail("simgh: PR number %d is not valid; use 0 to auto-assign", num)
+		s.mu.Unlock()
 		return s
 	case r.numberTaken(num):
 		// Shared number space: #N may already be an issue, not just a PR.
 		s.fail("simgh: PR %s#%d already exists", ownerRepo, num)
+		s.mu.Unlock()
 		return s
 	}
 
@@ -380,15 +424,18 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	case "", "open", "closed":
 	default:
 		s.fail("simgh: PR state %q is not valid; use \"open\" or \"closed\"", state)
+		s.mu.Unlock()
 		return s
 	}
 	if seed.Merged {
 		if seed.Draft {
 			s.fail("simgh: PR %s#%d cannot be both merged and draft", ownerRepo, num)
+			s.mu.Unlock()
 			return s
 		}
 		if state == "open" {
 			s.fail("simgh: PR %s#%d cannot be merged and open; a merged PR is closed", ownerRepo, num)
+			s.mu.Unlock()
 			return s
 		}
 		// Unspecified means "whatever merging implies", which is closed.
@@ -397,9 +444,58 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 	if state == "" {
 		state = "open"
 	}
+	s.mu.Unlock()
+
+	// The git-side merge, when requested, runs with mu released — mirroring
+	// MergePR's own mu -> release -> gitMu -> release sequencing, since the
+	// two locks must never be held at once (see the package doc comment in
+	// git.go). numberMu (held for the whole function, see above) is what
+	// keeps this release safe: without it, a concurrent SeedPR call could
+	// pass its own numberTaken check and insert its record for the same
+	// explicit number while mu is released here, or any numbering path
+	// (CreateIssue, CreatePR, SeedIssue, another SeedPR) could claim the
+	// auto-assigned number peeked above before this call reserves it. A
+	// failed merge means the PR record below is never inserted — there is no
+	// partial state to unwind.
+	// reserveNumber is deliberately deferred past this point (below, right
+	// before the record is built) rather than called here: reserving num now
+	// and then refusing the merge would burn the number from the shared
+	// sequence — nextNumber advancing past it — for a PR that was never
+	// actually created, unlike every other validation failure in this
+	// function, which fails before nextNumber moves at all. That invariant
+	// now holds for an auto-assigned number too (num == 0 above peeks
+	// nextNumber instead of allocating it), not just an explicit one.
+	if seed.Merged {
+		msg := fmt.Sprintf("Merge pull request #%d from %s\n\n%s", num, seed.Head, seed.Title)
+		r.gitMu.Lock()
+		_, conflict, err := r.tryMerge(base, seed.Head, true, msg)
+		r.gitMu.Unlock()
+		switch {
+		case errors.Is(err, errNothingToMerge):
+			s.mu.Lock()
+			s.fail("simgh: SeedPR %s#%d: Merged: true, but %s is already contained in %s; "+
+				"there is no merge commit to write", ownerRepo, num, seed.Head, base)
+			s.mu.Unlock()
+			return s
+		case err != nil:
+			s.mu.Lock()
+			s.fail("%v", err)
+			s.mu.Unlock()
+			return s
+		case conflict:
+			s.mu.Lock()
+			s.fail("simgh: SeedPR %s#%d: Merged: true, but %s does not merge cleanly into %s; "+
+				"GitHub could never have produced this PR as merged", ownerRepo, num, seed.Head, base)
+			s.mu.Unlock()
+			return s
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	r.reserveNumber(num)
 	now := s.now()
-	r.prs[num] = &prRecord{
+	pr := &prRecord{
 		number:                  num,
 		title:                   seed.Title,
 		body:                    seed.Body,
@@ -413,6 +509,19 @@ func (s *Sim) SeedPR(ownerRepo string, seed PRSeed) *Sim {
 		mergeableRecomputeReads: seed.MergeableRecomputeReads,
 		createdAt:               now,
 		updatedAt:               now,
+	}
+	r.prs[num] = pr
+
+	// Mirrors MergePR's own auto-close, including its default-branch
+	// restriction — why Fabrik has to close issues itself on a non-default
+	// base (ADR-1096).
+	if seed.Merged && base == r.defaultBranch {
+		for _, n := range closingIssueNumbers(pr) {
+			if iss, ok := r.issues[n]; ok && iss.state != "CLOSED" {
+				iss.state = "CLOSED"
+				iss.updatedAt = now
+			}
+		}
 	}
 	return s
 }
@@ -686,6 +795,57 @@ func (s *Sim) SeedReviewThreadComment(ownerRepo string, prNumber int, author, bo
 		reactions:      make(map[string]int),
 		fromPR:         prNumber,
 		reviewThreadID: fmt.Sprintf("thread:%s#%d:%d", ownerRepo, prNumber, id),
+		path:           path,
+		line:           line,
+	})
+	return s
+}
+
+// SeedReviewThreadReply attaches a further comment to an existing review
+// thread, sharing threadID with the comment(s) already on it — the shape of
+// more than one comment landing in one conversation, which
+// SeedReviewThreadComment alone cannot construct: a thread ID is derived from
+// its first comment's own database ID, so there is no way to declare "these
+// comments share a thread" before that first comment exists.
+//
+// threadID must already exist on the PR — read it back the same way
+// SeedComment's doc comment directs for a plain comment's database ID, via
+// FetchProjectItem or FetchLinkedPR's review-thread comments. A typo'd or
+// not-yet-seeded thread ID fails loudly rather than silently building a
+// thread of one.
+func (s *Sim) SeedReviewThreadReply(ownerRepo string, prNumber int, threadID, author, body, path string, line int) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		s.fail("simgh: PR %s#%d not found", ownerRepo, prNumber)
+		return s
+	}
+	found := false
+	for _, c := range pr.reviewThreadComment {
+		if c.reviewThreadID == threadID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.fail("simgh: SeedReviewThreadReply: thread %q not found on %s#%d; seed its first comment with SeedReviewThreadComment", threadID, ownerRepo, prNumber)
+		return s
+	}
+	id := s.nextCommentDatabaseID
+	s.nextCommentDatabaseID++
+	pr.reviewThreadComment = append(pr.reviewThreadComment, &commentRecord{
+		databaseID:     id,
+		author:         author,
+		body:           body,
+		createdAt:      s.now(),
+		reactions:      make(map[string]int),
+		fromPR:         prNumber,
+		reviewThreadID: threadID,
 		path:           path,
 		line:           line,
 	})

@@ -399,6 +399,102 @@ func TestReviewThreadResolutionIsObservable(t *testing.T) {
 	}
 }
 
+// TestReviewThreadResolutionMarksEveryCommentOnTheThread pins item 6's fix: a
+// thread is every comment sharing a thread ID, not just the first one
+// ResolveReviewThread happens to find. Before the fix, a second comment
+// replying into an already-resolved thread stayed marked unresolved, so board
+// projections kept surfacing it individually — a resolved multi-comment
+// thread reading as still partially outstanding. See FIDELITY.md and #1498.
+func TestReviewThreadResolutionMarksEveryCommentOnTheThread(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	const repo = "acme/widgets"
+
+	s.SeedCommit(repo, "fabrik/issue-7", map[string]string{"a.go": "package a\n"}, "work").
+		SeedPR(repo, PRSeed{Number: 42, Head: "fabrik/issue-7", Title: "Add a thing"}).
+		SeedReviewThreadComment(repo, 42, "reviewer", "please fix", "a.go", 1)
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding first comment: %v", err)
+	}
+
+	item, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if len(item.LinkedPRReviewThreadComments) != 1 {
+		t.Fatalf("thread comments = %d, want 1", len(item.LinkedPRReviewThreadComments))
+	}
+	threadID := item.LinkedPRReviewThreadComments[0].ReviewThreadID
+
+	s.SeedReviewThreadReply(repo, 42, threadID, "author", "on it", "a.go", 1)
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding reply: %v", err)
+	}
+
+	item, err = s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem after reply: %v", err)
+	}
+	if len(item.LinkedPRReviewThreadComments) != 2 {
+		t.Fatalf("thread comments = %d, want 2 before resolving", len(item.LinkedPRReviewThreadComments))
+	}
+
+	if err := s.ResolveReviewThread(threadID); err != nil {
+		t.Fatalf("ResolveReviewThread: %v", err)
+	}
+
+	item, err = s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem after resolve: %v", err)
+	}
+	if len(item.LinkedPRReviewThreadComments) != 0 {
+		t.Fatalf("resolved thread still surfaces %d comment(s) as unresolved: %+v",
+			len(item.LinkedPRReviewThreadComments), item.LinkedPRReviewThreadComments)
+	}
+	// resolvedThreads counts *threads*, not comments: two comments on one
+	// resolved thread must bump the count by exactly 1, matching the
+	// single-comment case above.
+	if item.LinkedPRResolvedThreadCount != 1 {
+		t.Fatalf("resolved count = %d, want 1 (one thread resolved, not one per comment)", item.LinkedPRResolvedThreadCount)
+	}
+
+	// Idempotent: resolving an already-fully-resolved thread again must not
+	// double-count.
+	if err := s.ResolveReviewThread(threadID); err != nil {
+		t.Fatalf("second ResolveReviewThread: %v", err)
+	}
+	item, err = s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem after second resolve: %v", err)
+	}
+	if item.LinkedPRResolvedThreadCount != 1 {
+		t.Fatalf("resolved count after a repeat resolve = %d, want 1", item.LinkedPRResolvedThreadCount)
+	}
+}
+
+// TestSeedReviewThreadReplyRefusesUnknownThread pins that a typo'd or
+// not-yet-seeded thread ID fails loudly rather than silently building a
+// thread of one — the same "loud failure over silent no-op" convention every
+// other Seed* method in this file follows.
+func TestSeedReviewThreadReplyRefusesUnknownThread(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	const repo = "acme/widgets"
+
+	s.SeedCommit(repo, "fabrik/issue-7", map[string]string{"a.go": "package a\n"}, "work").
+		SeedPR(repo, PRSeed{Number: 42, Head: "fabrik/issue-7", Title: "Add a thing"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	s.SeedReviewThreadReply(repo, 42, "thread:acme/widgets#42:does-not-exist", "author", "on it", "a.go", 1)
+	err := s.Err()
+	if err == nil {
+		t.Fatal("SeedReviewThreadReply accepted an unknown thread ID")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want it to name the missing thread", err)
+	}
+}
+
 // TestReviewDecisionEmptyWithoutBranchProtection covers the case the engine's
 // authoritative review gate falls back on: GraphQL's reviewDecision is null
 // unless branch protection actually requires reviews.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -444,5 +445,377 @@ func TestConcurrentSeedRepoDoesNotClobber(t *testing.T) {
 	r.gitMu.Unlock()
 	if !ok {
 		t.Fatal("the surviving repoState does not have its default branch; seeding raced")
+	}
+}
+
+// TestConcurrentSeedPRDoesNotClobber drives the window SeedPR{Merged: true}'s
+// git-side merge opens. numberTaken is checked under mu, mu is then released
+// for the merge (mu and gitMu must never be held at once — see git.go), and
+// mu is retaken to reserve the number and publish — so, without numberMu,
+// concurrent callers for one explicit number could all clear the check before
+// any of them publishes.
+//
+// Without numberMu, the last writer to reach the final locked section
+// replaces r.prs[num] outright, discarding an earlier caller's PR with no
+// error from either call — silent corruption, not a race the tool would even
+// flag, since both writes are individually mu-guarded. A start barrier makes
+// all the callers reach the check together, so the window is entered rather
+// than hoped for.
+//
+// A single batch of callers is not reliable on its own: whether the window
+// is actually entered depends on real scheduling (how far the goroutines get
+// through their two short gitMu sections before the first one's git
+// subprocess call finishes and publishes), and empirically that lands
+// somewhere around a 70% catch rate per batch — a mutation sweep run that
+// happens to land in the unlucky 30% would report a real regression as
+// vacuous. Running several independent rounds, each against its own fresh
+// Sim (so one round's expected "already exists" refusal never sticks around
+// as the sim's terminal error and masks the next round's seeding), drives
+// the miss probability down geometrically (0.3^rounds) without changing what
+// any single round asserts — a genuine numberMu removal must eventually be
+// caught, while correct code (which serialises deterministically every
+// round, not just probabilistically) never fails regardless of round count.
+func TestConcurrentSeedPRDoesNotClobber(t *testing.T) {
+	const (
+		repo    = "acme/widgets"
+		callers = 4
+		prNum   = 42
+		rounds  = 10
+	)
+
+	for round := 0; round < rounds; round++ {
+		s, _ := newSim(t)
+		s.SeedRepo(repo).SeedCommit(repo, "main", map[string]string{"base.txt": "base\n"}, "base")
+		heads := make([]string, callers)
+		for i := 0; i < callers; i++ {
+			heads[i] = fmt.Sprintf("feature-%d", i)
+			s.SeedCommit(repo, heads[i], map[string]string{fmt.Sprintf("f%d.txt", i): "feature\n"}, "feature")
+		}
+		if err := s.Err(); err != nil {
+			t.Fatalf("round %d: seeding: %v", round, err)
+		}
+
+		var start, done sync.WaitGroup
+		start.Add(1)
+		for i := 0; i < callers; i++ {
+			done.Add(1)
+			go func(head string) {
+				defer done.Done()
+				start.Wait()
+				s.SeedPR(repo, PRSeed{Number: prNum, Head: head, Base: "main", Merged: true, Title: "concurrent"})
+			}(heads[i])
+		}
+		start.Done()
+		done.Wait()
+
+		// Exactly one caller can win the explicit number; every other must be
+		// turned away by the numberTaken refusal, not a git failure (a git
+		// error would mean two callers both cleared the check and raced
+		// inside tryMerge instead of being serialised) and not silence (a
+		// clobber leaves s.Err() nil, since neither call fails).
+		err := s.Err()
+		if err == nil {
+			t.Fatalf("round %d: %d concurrent SeedPR calls for one explicit number all succeeded; want every one after the first to be refused", round, callers)
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("round %d: concurrent SeedPR failed with %v; want the \"already exists\" refusal — anything else means the callers raced instead of being serialised", round, err)
+		}
+
+		// The surviving record must be exactly one whole PR — a real merge
+		// commit on main, contributed by exactly one of the candidate heads —
+		// not a half-published clobber of two callers' work.
+		r, rerr := s.repoByKey(repo)
+		if rerr != nil {
+			t.Fatalf("round %d: repoByKey: %v", round, rerr)
+		}
+		s.mu.Lock()
+		pr, ok := r.prs[prNum]
+		s.mu.Unlock()
+		if !ok {
+			t.Fatalf("round %d: PR %d does not exist after seeding; want exactly one surviving record", round, prNum)
+		}
+		found := false
+		for _, h := range heads {
+			if pr.head == h {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("round %d: surviving PR %d has head %q, not one of the seeded candidates %v", round, prNum, pr.head, heads)
+		}
+		if !pr.merged {
+			t.Fatalf("round %d: surviving PR %d is not marked merged", round, prNum)
+		}
+	}
+}
+
+// TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers drives numberMu against
+// two different numbering APIs racing on one repo, not two calls to the same
+// one. SeedPR{Merged: true} releases mu for its git-side merge while holding
+// only a peeked, not-yet-reserved, auto-assigned candidate — a window
+// SeedIssue's own allocNumber (atomic under mu alone, with no release in the
+// middle) could otherwise slip through, claiming the exact number SeedPR
+// peeked and silently violating the shared issue-and-PR number space this
+// package is built around (numberTaken, node IDs, AddComment's shared REST
+// endpoint).
+//
+// SeedIssue's own critical section is memory-only and finishes in
+// nanoseconds, while SeedPR's peek is only reachable after a real git
+// subprocess call (the branch-existence check) that takes orders of
+// magnitude longer — so a single SeedIssue call racing a single SeedPR call
+// almost always finishes (and claims its number) before SeedPR ever reaches
+// its peek at all, never entering the vulnerable window by sheer timing
+// rather than by being correctly excluded from it. Proving numberMu is what
+// keeps the window shut therefore needs *repeated* SeedIssue attempts spread
+// across the *entire* duration several real merges are in flight, so at
+// least one attempt is very likely to land inside a release window rather
+// than merely before or after every one of them.
+//
+// Unlike TestConcurrentSeedPRDoesNotClobber, every call here is expected to
+// succeed — an auto-assigned number is never asked for explicitly, so two
+// auto-assigning calls have no reason to be refused against each other. The
+// failure mode under test is silent (the same number handed to an issue and
+// a PR), not loud, so the assertion is on the resulting state rather than on
+// s.Err().
+func TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers(t *testing.T) {
+	s, _ := newSim(t)
+
+	const (
+		repo      = "acme/widgets"
+		prCallers = 5 // concurrent SeedPR{Merged: true} calls, each a real merge
+		hammers   = 4 // goroutines that repeatedly auto-assign a SeedIssue
+	)
+	s.SeedRepo(repo).SeedCommit(repo, "main", map[string]string{"base.txt": "base\n"}, "base")
+	heads := make([]string, prCallers)
+	for i := 0; i < prCallers; i++ {
+		heads[i] = fmt.Sprintf("feature-%d", i)
+		s.SeedCommit(repo, heads[i], map[string]string{fmt.Sprintf("f%d.txt", i): "feature\n"}, "feature")
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var start, prDone, hammerDone sync.WaitGroup
+	start.Add(1)
+
+	for i := 0; i < prCallers; i++ {
+		prDone.Add(1)
+		go func(head string) {
+			defer prDone.Done()
+			start.Wait()
+			s.SeedPR(repo, PRSeed{Head: head, Base: "main", Merged: true, Title: "concurrent pr"})
+		}(heads[i])
+	}
+	// Each hammer keeps auto-assigning issues for as long as any SeedPR call
+	// above is still in flight, so the attempts span every merge's release
+	// window rather than racing it just once.
+	for i := 0; i < hammers; i++ {
+		hammerDone.Add(1)
+		go func() {
+			defer hammerDone.Done()
+			start.Wait()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					s.SeedIssue(repo, IssueSeed{Title: "concurrent issue"})
+				}
+			}
+		}()
+	}
+	start.Done()
+	prDone.Wait()
+	close(stop)
+	hammerDone.Wait()
+
+	// Every call should have succeeded: none of them asked for a specific
+	// number, so there is nothing for any of them to be refused against.
+	if err := s.Err(); err != nil {
+		t.Fatalf("concurrent auto-assigning SeedIssue/SeedPR calls: %v", err)
+	}
+
+	r, rerr := s.repoByKey(repo)
+	if rerr != nil {
+		t.Fatalf("repoByKey: %v", rerr)
+	}
+	s.mu.Lock()
+	var overlap []int
+	for num := range r.issues {
+		if _, ok := r.prs[num]; ok {
+			overlap = append(overlap, num)
+		}
+	}
+	issueCount, prCount := len(r.issues), len(r.prs)
+	s.mu.Unlock()
+
+	if len(overlap) != 0 {
+		t.Fatalf("number(s) %v claimed by both an issue and a PR — the shared number space was violated", overlap)
+	}
+	// Every hammer attempt succeeds (auto-assign never refuses), so the issue
+	// count is however many landed before stop fired — only the PR count and
+	// the overlap check above are deterministic.
+	if prCount != prCallers {
+		t.Fatalf("want %d PRs (one per caller, none clobbered by a concurrent SeedIssue), got %d", prCallers, prCount)
+	}
+	if issueCount == 0 {
+		t.Fatal("no hammer SeedIssue call landed at all; the test did not exercise any overlap")
+	}
+}
+
+// TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers closes the same
+// numberMu release window as TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers,
+// but against CreateIssue and CreatePR specifically — the two non-seeding
+// numbering paths, used by the engine's own child-spawn and PR-creation code
+// rather than by test scenarios. All four numbering paths (CreateIssue,
+// CreatePR, SeedIssue, SeedPR) take repoState.numberMu identically, but
+// nonvacuity.sh's mutations previously only isolated the field as a whole or
+// SeedIssue's own acquisition specifically — a regression that dropped just
+// CreateIssue's or CreatePR's r.numberMu.Lock() would have passed every other
+// test in this file undetected. This test exists so that gap is not closed
+// by silence.
+//
+// Same timing rationale as TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers
+// for CreateIssue: its critical section is memory-only and fast enough that a
+// single hammer attempt racing a single SeedPR merge would almost always land
+// outside the merge's release window by sheer timing. Repeated hammer
+// attempts spread across the entire duration several real SeedPR merges are
+// in flight make landing inside a window likely rather than hoped for —
+// empirically 100% reliable (verified over repeated manual runs against a
+// deliberately reverted lock), so nonvacuity.sh pins CreateIssue's specific
+// acquisition here (see the "CreateIssue does not take the numbering lock"
+// mutation).
+//
+// CreatePR does not get the same treatment, deliberately: its own critical
+// section is gated behind a real r.gitMu-guarded branch-existence check, the
+// same per-repo lock a SeedPR merge holds for the exploitable window's
+// entire duration. Structurally, SeedPR requests Sim.mu for its
+// reserve-and-publish step the instant it releases gitMu at the end of its
+// merge, with no intervening work — whereas CreatePR can only request Sim.mu
+// after first running its own gitMu-guarded check, once gitMu frees up. That
+// extra step reliably loses the race to SeedPR's immediate re-lock: manual
+// testing against a deliberately reverted lock, scaled from 4 up to 40
+// hammer goroutines and from 5 up to 30 concurrent merges, produced zero
+// catches. CreatePR's numbering path is still exercised here concurrently
+// (proving it does not corrupt state under load, and that removing its lock
+// entirely — via the whole-field mutation — is still caught by
+// TestConcurrentSeedPRDoesNotClobber's unrelated mechanism), but its
+// specific lock acquisition is not independently pinned by a dedicated
+// nonvacuity.sh mutation: registering one that cannot reliably turn red
+// would only add flakiness to the sweep, not real coverage. Its correctness
+// instead rests on code symmetry with CreateIssue and SeedIssue, which share
+// the identical "look up the repo, then r.numberMu.Lock() before touching
+// nextNumber" shape.
+func TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers(t *testing.T) {
+	s, _ := newSim(t)
+
+	const (
+		owner, repo = "acme", "widgets"
+		ownerRepo   = "acme/widgets"
+		prCallers   = 5 // concurrent SeedPR{Merged: true} calls, each a real merge
+		hammers     = 4 // goroutines that repeatedly auto-assign via CreateIssue/CreatePR
+	)
+	s.SeedRepo(ownerRepo).SeedCommit(ownerRepo, "main", map[string]string{"base.txt": "base\n"}, "base")
+	heads := make([]string, prCallers)
+	for i := 0; i < prCallers; i++ {
+		heads[i] = fmt.Sprintf("feature-%d", i)
+		s.SeedCommit(ownerRepo, heads[i], map[string]string{fmt.Sprintf("f%d.txt", i): "feature\n"}, "feature")
+	}
+	// CreatePR's own hammer needs a head/base pair distinct from every
+	// SeedPR merge candidate, so its numbering attempts aren't gated on git
+	// state a merge might be consuming — only the numbering path is under
+	// test here.
+	s.SeedCommit(ownerRepo, "hammer-head", map[string]string{"hammer.txt": "hammer\n"}, "hammer")
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	var createPRHammerCount, createIssueHammerCount atomic.Int64
+	stop := make(chan struct{})
+	var start, prDone, hammerDone sync.WaitGroup
+	start.Add(1)
+
+	for i := 0; i < prCallers; i++ {
+		prDone.Add(1)
+		go func(head string) {
+			defer prDone.Done()
+			start.Wait()
+			s.SeedPR(ownerRepo, PRSeed{Head: head, Base: "main", Merged: true, Title: "concurrent pr"})
+		}(heads[i])
+	}
+	// Half the hammers auto-assign via CreateIssue, half via CreatePR, so
+	// both non-seeding numbering paths are exercised across the merges'
+	// entire in-flight duration.
+	for i := 0; i < hammers; i++ {
+		hammerDone.Add(1)
+		useCreatePR := i%2 == 0
+		go func() {
+			defer hammerDone.Done()
+			start.Wait()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					if useCreatePR {
+						if _, err := s.CreatePR(owner, repo, "hammer pr", "hammer-head", "main", ""); err != nil {
+							t.Errorf("CreatePR: %v", err)
+							return
+						}
+						createPRHammerCount.Add(1)
+					} else {
+						if _, _, err := s.CreateIssue(owner, repo, "hammer issue", "", nil); err != nil {
+							t.Errorf("CreateIssue: %v", err)
+							return
+						}
+						createIssueHammerCount.Add(1)
+					}
+				}
+			}
+		}()
+	}
+	start.Done()
+	prDone.Wait()
+	close(stop)
+	hammerDone.Wait()
+
+	// Every call should have succeeded: none of them asked for a specific
+	// number, so there is nothing for any of them to be refused against.
+	if err := s.Err(); err != nil {
+		t.Fatalf("concurrent CreateIssue/CreatePR/SeedPR calls: %v", err)
+	}
+
+	r, rerr := s.repoByKey(ownerRepo)
+	if rerr != nil {
+		t.Fatalf("repoByKey: %v", rerr)
+	}
+	s.mu.Lock()
+	var overlap []int
+	for num := range r.issues {
+		if _, ok := r.prs[num]; ok {
+			overlap = append(overlap, num)
+		}
+	}
+	issueCount, prCount := len(r.issues), len(r.prs)
+	s.mu.Unlock()
+
+	if len(overlap) != 0 {
+		t.Fatalf("number(s) %v claimed by both an issue and a PR — the shared number space was violated", overlap)
+	}
+	// Every SeedPR merge succeeds, plus every CreatePR hammer attempt before
+	// stop fired; only the merge count is deterministic.
+	if prCount < prCallers {
+		t.Fatalf("want at least %d PRs (one per SeedPR caller, none clobbered), got %d", prCallers, prCount)
+	}
+	if issueCount == 0 {
+		t.Fatal("no issue record landed at all; the test did not exercise any overlap")
+	}
+	if createPRHammerCount.Load() == 0 {
+		t.Fatal("no hammer CreatePR call landed at all; the test did not exercise CreatePR's numbering path")
+	}
+	if createIssueHammerCount.Load() == 0 {
+		t.Fatal("no hammer CreateIssue call landed at all; the test did not exercise CreateIssue's numbering path")
 	}
 }

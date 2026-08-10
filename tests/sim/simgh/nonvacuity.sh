@@ -127,7 +127,7 @@ mutate "blockedBy state is frozen at seed time" \
 
 mutate "ResolveReviewThread is a no-op" \
   'TestReviewThreadResolutionIsObservable' \
-  'comments.go::s{^\t\t\t\tc\.threadResolved = true$}{\t\t\t\t// neutralised}m'
+  'comments.go::s{^\t\t\t\t\tc\.threadResolved = true$}{\t\t\t\t\t// neutralised}m'
 
 mutate "reviewDecision ignores missing branch protection" \
   'TestReviewDecisionEmptyWithoutBranchProtection' \
@@ -301,6 +301,19 @@ mutate_race "SeedRepo's creation lock is removed (concurrent callers race in git
   'sim.go::s|\tseedRepoMu sync\.Mutex|\tseedRepoMu noopSeedMutex|' \
   'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
 
+mutate_race "the numbering lock is removed entirely (concurrent callers for one explicit PR number race and clobber)" \
+  'TestConcurrentSeedPRDoesNotClobber' \
+  'model.go::s|\tnumberMu sync\.Mutex|\tnumberMu noopSeedMutex|' \
+  'sim.go::s|^type realClock struct\{\}$|type noopSeedMutex struct{}\n\nfunc (noopSeedMutex) Lock()   {}\nfunc (noopSeedMutex) Unlock() {}\n\ntype realClock struct{}|m'
+
+mutate_race "SeedIssue does not take the numbering lock (races a concurrent auto-assigning SeedPR merge and clobbers)" \
+  'TestConcurrentSeedIssueAndSeedPRDoNotClobberNumbers' \
+  'seed.go::s|\tr\.numberMu\.Lock\(\)\n\tdefer r\.numberMu\.Unlock\(\)\n\n\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n\n\tnum := seed\.Number\n\tswitch \{\n\tcase num == 0:\n\t\tnum = r\.allocNumber\(\)\n|\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\n\tnum := seed.Number\n\tswitch {\n\tcase num == 0:\n\t\tnum = r.allocNumber()\n|'
+
+mutate_race "CreateIssue does not take the numbering lock (races a concurrent auto-assigning SeedPR merge and clobbers)" \
+  'TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers' \
+  'issues.go::s|\tr\.numberMu\.Lock\(\)\n\tdefer r\.numberMu\.Unlock\(\)\n\n\ts\.mu\.Lock\(\)\n\tdefer s\.mu\.Unlock\(\)\n\tnum := r\.allocNumber\(\)\n|\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tnum := r.allocNumber()\n|'
+
 # The two halves of the re-add drift are neutralised separately, because each
 # path had been missing a different one and a single mutation could not show
 # that both are now covered.
@@ -456,7 +469,7 @@ mutate "a non-canonical issue state is stored verbatim" \
 
 mutate "a non-canonical PR state is stored verbatim" \
   'TestSeedRefusesNonCanonicalState' \
-  'seed.go::s{s\.fail\("simgh: PR state %q is not valid; use \\"open\\" or \\"closed\\"", state\)\n\t\treturn s}{state = "open"}'
+  'seed.go::s{s\.fail\("simgh: PR state %q is not valid; use \\"open\\" or \\"closed\\"", state\)\n\t\ts\.mu\.Unlock\(\)\n\t\treturn s}{state = "open"}'
 
 mutate "a PR may have head equal to base (runtime)" \
   'TestPRHeadEqualBaseIsRefused' \
@@ -706,6 +719,50 @@ mutate "the fault schedule is not carried across a restore" \
 mutate "the mutation log is not carried across a restore" \
   'TestInstrumentedSnapshotCarriesFaultsAndLog' \
   'snapshot.go::s{\tin\.log\.restoreEntries\(snap\.logEntries\)\n}{}'
+
+mutate "SeedPR{Merged: true} does not perform a real git-side merge" \
+  'TestSeedPRMergedTruePerformsRealMerge|TestSeedPRMergedTrueRefusesConflict' \
+  'seed.go::s{if seed\.Merged \{\n\t\tmsg := fmt\.Sprintf}{if false \{\n\t\tmsg := fmt.Sprintf}'
+
+mutate "SeedPR{Merged: true} does not auto-close the linked issue" \
+  'TestSeedPRMergedTruePerformsRealMerge' \
+  'seed.go::s{if seed\.Merged && base == r\.defaultBranch \{}{if false \{}'
+
+mutate "the probe path does not run its housekeeping gc" \
+  'TestMergeableProbeBoundsUnreferencedObjects' \
+  'git.go::s{_, _, _ = runGitAllowFail\(r\.bareDir, "gc", "--quiet", "--prune=now"\)\n}{}'
+
+mutate "the probe counter never advances toward the gc threshold" \
+  'TestMergeableProbeBoundsUnreferencedObjects' \
+  'git.go::s{\t\tr\.probesSinceGC\+\+\n}{}'
+
+mutate "the probe counter is not reset after the housekeeping gc" \
+  'TestMergeableProbeBoundsUnreferencedObjects' \
+  'git.go::s{\t\t\tr\.probesSinceGC = 0\n}{}'
+
+mutate "a failed worktree add does not prune the stale administrative entry" \
+  'TestWithWorktreePrunesAfterFailedAdd' \
+  'git.go::s{(rmErr := os\.RemoveAll\(tmp\)\n)\t\t_, _, _ = runGitAllowFail\(r\.bareDir, "worktree", "prune"\)\n}{$1}'
+
+mutate "ResolveReviewThread marks only the first comment on a thread" \
+  'TestReviewThreadResolutionMarksEveryCommentOnTheThread|TestReviewThreadResolutionIsObservable' \
+  'comments.go::s{(if c\.reviewThreadID == threadID \{\n\t\t\t\t\tc\.threadResolved = true\n)}{$1\t\t\t\t\tbreak\n}'
+
+mutate "ResolveReviewThread double-counts a repeat resolve" \
+  'TestReviewThreadResolutionMarksEveryCommentOnTheThread' \
+  'comments.go::s{if allResolved \{}{if allResolved \&\& false \{}'
+
+mutate "SeedReviewThreadReply accepts an unknown thread ID" \
+  'TestSeedReviewThreadReplyRefusesUnknownThread' \
+  'seed.go::s{if !found \{}{if !found \&\& false \{}'
+
+mutate "a refused SeedPR(Merged: true) still reserves the number" \
+  'TestSeedPRRefusedMergeDoesNotBurnTheNumber' \
+  'seed.go::s{(if state == "" \{\n\t\tstate = "open"\n\t\}\n)\ts\.mu\.Unlock\(\)\n}{$1\tr.reserveNumber(num)\n\ts.mu.Unlock()\n}'
+
+mutate "a refused auto-assigned SeedPR still burns nextNumber" \
+  'TestSeedPRAutoAssignRefusedShapeDoesNotBurnTheNumber' \
+  'seed.go::s{\t\tnum = r\.nextNumber\n}{\t\tnum = r.allocNumber()\n}'
 
 echo
 status=0
