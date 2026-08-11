@@ -912,6 +912,60 @@ func TestReconcile_AppIDChange_ClearsStaleSecretsAndCache(t *testing.T) {
 	}
 }
 
+// TestSaveInstallationRepoCache_AppIDMismatchAndPEMReadFailure_SkipsSave is
+// the regression test for a review finding on the narrow combination the
+// previous fix (TestReconcile_AppIDChange_ClearsStaleSecretsAndCache) didn't
+// cover: an AppID mismatch discards the prior Credentials record (including
+// its PrivateKeyFingerprint) before the fresh fingerprint is recomputed from
+// disk, so if that recompute's os.ReadFile *also* fails, "leave it as
+// whatever loadCredentials returned above" is no longer a safe fallback —
+// that value was already discarded. The fix skips persisting anything in
+// that case, rather than writing a record with a blank/stale fingerprint
+// that would silently disable loadOrBootstrapCredentials' crash-window
+// consistency check.
+func TestSaveInstallationRepoCache_AppIDMismatchAndPEMReadFailure_SkipsSave(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "app-state.json")
+
+	if err := saveCredentials(statePath, Credentials{
+		AppID: 42, Slug: "old-app", WebhookSecret: "old-hook-secret",
+		InstallationRepoCache: map[string][]string{"someorg": {"someorg/repo-one"}},
+		PrivateKeyFingerprint: "stale-fingerprint-from-a-different-app-entirely",
+	}); err != nil {
+		t.Fatalf("seeding app-state.json: %v", err)
+	}
+
+	missingKeyPath := filepath.Join(dir, "does-not-exist.pem")
+
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	saveInstallationRepoCache(statePath, missingKeyPath, 99, "new-app", map[string][]string{"someorg": {"someorg/repo-one"}}, logf)
+
+	saved, err := loadCredentials(statePath)
+	if err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	// The save must be skipped entirely — the stale App-42 record,
+	// including its own (different App's) fingerprint, survives unchanged
+	// rather than being half-updated to AppID 99 with a blank fingerprint.
+	if saved.AppID != 42 {
+		t.Errorf("saved.AppID = %d, want 42 — save should have been skipped on PEM read failure, not partially applied", saved.AppID)
+	}
+	if saved.PrivateKeyFingerprint != "stale-fingerprint-from-a-different-app-entirely" {
+		t.Errorf("saved.PrivateKeyFingerprint = %q, want the pre-existing value left untouched by a skipped save, not blanked", saved.PrivateKeyFingerprint)
+	}
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "skipping save") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a log line noting the save was skipped, got: %v", logs)
+	}
+}
+
 func TestReconcile_MissingPrivateKey_RepairErrorNeverBootstraps(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

@@ -624,7 +624,12 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 // performs (comparing this field against the PEM at reconciler-restart
 // time) accurate for whichever App is actually active, instead of either
 // wrong or (an earlier version of this function) silently disabled by
-// leaving it blank.
+// leaving it blank. If the PEM can't be read here at all (a rare
+// double-failure — this same PEM just authenticated successfully earlier
+// in the same Reconcile call), there is no trustworthy value to fall back
+// to once a mismatch has already discarded the prior record, so the whole
+// save is skipped for that round rather than persisting a record with a
+// blank or stale fingerprint.
 func saveInstallationRepoCache(statePath, privateKeyPath string, appID int64, slug string, repoCache map[string][]string, logf func(string, ...any)) {
 	existing, err := loadCredentials(statePath)
 	if err != nil {
@@ -649,16 +654,25 @@ func saveInstallationRepoCache(statePath, privateKeyPath string, appID int64, sl
 	existing.AppID = appID
 	existing.Slug = slug
 	existing.InstallationRepoCache = merged
-	if pemBytes, err := os.ReadFile(privateKeyPath); err == nil {
-		existing.PrivateKeyFingerprint = privateKeyFingerprint(pemBytes)
-	} else {
-		// Best-effort, diagnostics-only: Reconcile already successfully
-		// authenticated with this PEM earlier in this same call, so a read
-		// failure here would be surprising (e.g. removed mid-run) — leave
-		// PrivateKeyFingerprint as whatever loadCredentials returned above
-		// rather than failing reconciliation over it.
-		logf("could not recompute private key fingerprint for the installation-repo cache: %v", err)
+	pemBytes, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		// Reconcile already successfully authenticated with this PEM
+		// earlier in this same call, so a read failure here would be
+		// surprising (e.g. removed mid-run). Unlike the AppID-match case,
+		// "leave PrivateKeyFingerprint as whatever loadCredentials
+		// returned above" is not a safe fallback when the AppID-mismatch
+		// branch above just reset existing to a zero-value Credentials{}:
+		// "whatever loadCredentials returned" is already gone, so that
+		// path would silently persist a blank fingerprint — exactly the
+		// crash-window-consistency-check-disabling bug this function's
+		// AppID-mismatch handling exists to fix. Skip the save entirely
+		// rather than persist a record we can't compute a trustworthy
+		// fingerprint for; the InstallationRepoCache update this round is
+		// diagnostics-only and can wait for the next Reconcile.
+		logf("could not recompute private key fingerprint for the installation-repo cache (skipping save): %v", err)
+		return
 	}
+	existing.PrivateKeyFingerprint = privateKeyFingerprint(pemBytes)
 	if err := saveCredentials(statePath, existing); err != nil {
 		logf("could not persist installation-repo cache: %v", err)
 	}
