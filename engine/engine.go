@@ -34,6 +34,7 @@ type Config struct {
 	MaxRetries                int
 	MaxSliceRetries           int                 // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures
 	MaxResumeFailures         int                 // Max consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting (default 2; #1414) — independent of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
+	MaxToolsDeniedRetries     int                 // Max consecutive tool-permission-denial exits per stage before pausing (default 3; #1523) — bounds a non-converging permission misconfiguration independently of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
 	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)

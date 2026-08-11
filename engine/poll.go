@@ -857,6 +857,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:claude-limit",
 	"fabrik:clear-claude-limit",
 	"fabrik:api-key-helper-detected",
+	"fabrik:tools-denied",
 }
 
 // gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels

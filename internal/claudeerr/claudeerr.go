@@ -20,7 +20,10 @@
 // extraction moved the types' location, not their name or behavior.
 package claudeerr
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // UsageLimitError signals that a Claude invocation exited because the
 // account's usage limit (session or weekly) was exhausted, not because the
@@ -132,4 +135,33 @@ func (e *ResumeFailureError) Error() string {
 
 func (e *ResumeFailureError) Unwrap() error {
 	return e.Cause
+}
+
+// ToolsDeniedError signals that a Claude invocation was blocked from making
+// progress because one or more mutating tool calls (Edit, Write, a
+// write-capable Bash, etc.) were denied by the CLI's own permission layer —
+// a local environment/configuration problem (a stray PreToolUse hook, an
+// org/user-level "ask" permission rule with no interactive prompt available,
+// etc.), not a genuine defect in the stage's work. See #1523.
+//
+// Structurally unlike UsageLimitError/APIErrorExit: the CLI exits cleanly
+// (is_error=false, terminal_reason="completed") and real, committable work
+// may have happened before the denial — so this does NOT short-circuit
+// finalizeStageOutcome the way the did-not-run family does. It follows
+// TurnLimitError/ResumeFailureError's non-short-circuiting shape instead:
+// commitWIP, push, and markCommentsSeenByStage all still run, so a
+// late-invocation denial never discards earlier valid edits. It IS exempted
+// from StageRetryIncremented (mirroring the did-not-run family's max_retries
+// exemption) because no retry can fix an environmental permission
+// misconfiguration — see handleToolsDeniedExit in engine/item.go, the sole
+// consumer (via errors.As), and ADR-1523.
+type ToolsDeniedError struct {
+	// ToolNames lists the distinct tool names the CLI reported as denied
+	// (resp.permission_denials[].tool_name), for the R4 explanatory comment
+	// and for logging. Never empty when this error is constructed.
+	ToolNames []string
+}
+
+func (e *ToolsDeniedError) Error() string {
+	return fmt.Sprintf("claude tool call(s) denied by permission configuration: %s", strings.Join(e.ToolNames, ", "))
 }
