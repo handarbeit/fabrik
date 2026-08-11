@@ -225,6 +225,18 @@ and should recognize.
   against `max_retries`, no `fabrik:paused`/`stage:<name>:failed`. Clears
   automatically once `apiKeyHelper` is removed and a later invocation
   reaches Claude successfully — no manual removal needed.
+- **`fabrik:tools-denied`** — Set when a Claude invocation's tool call(s)
+  were denied by the CLI's own permission layer (detected structurally
+  from the CLI's `permission_denials` result field, never from output
+  text) — a blocked worker, not a failed stage. Unlike its two siblings
+  above, the invocation may have made real progress before the denial, so
+  it does not short-circuit: commits and pushes still happen. Does not
+  count against `max_retries` (bounded independently, default 3
+  consecutive detections, before pausing with `fabrik:paused` +
+  `fabrik:awaiting-input` — never `stage:<name>:failed`). Clears
+  automatically once the permission configuration is fixed and a later
+  invocation isn't denied — no manual removal needed. The outcome is
+  identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`.
 
 ## Notes for skill authors
 
