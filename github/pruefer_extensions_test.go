@@ -161,8 +161,13 @@ func TestFetchPRFiles_MultiPage(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seenPages) != 3 {
-		t.Errorf("expected 3 page requests (100, then 1, then empty stop), got %d: %v", len(seenPages), seenPages)
+	// Was 3 before #1539: the loop used to stop only on an *empty* page, so a
+	// short second page still cost a third request to confirm the end. It now
+	// stops on any page shorter than restPageSize — same data, one fewer round
+	// trip, and consistent with paginateREST. The count is asserted rather than
+	// ignored because it is the only way to tell the two termination rules apart.
+	if len(seenPages) != 2 {
+		t.Errorf("expected 2 page requests (100, then a short page ending it), got %d: %v", len(seenPages), seenPages)
 	}
 }
 

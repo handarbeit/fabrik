@@ -107,6 +107,38 @@ func TestFetchPRReviews_SinglePageIssuesOneRequest(t *testing.T) {
 	}
 }
 
+// TestFetchPRReviews_ExactlyOnePageFullStillTerminates pins the boundary the
+// other tests step over: a collection of exactly restPageSize records is
+// indistinguishable from a full page with more behind it, so the loop must
+// fetch one more page, see it empty, and stop — returning the complete set
+// rather than looping or dropping records.
+func TestFetchPRReviews_ExactlyOnePageFullStillTerminates(t *testing.T) {
+	items := make([]map[string]any, 0, restPageSize)
+	for i := 0; i < restPageSize; i++ {
+		items = append(items, map[string]any{
+			"id":           i + 1,
+			"user":         map[string]any{"login": fmt.Sprintf("author-%d", i)},
+			"state":        "COMMENTED",
+			"commit_id":    fmt.Sprintf("sha%03d", i),
+			"submitted_at": "2026-08-11T00:00:00Z",
+		})
+	}
+	reqs := 0
+	_, c := pagedArrayServer(t, "/repos/o/r/pulls/1/reviews", items, &reqs)
+
+	got, err := c.FetchPRReviews("o", "r", 1)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	// Distinct authors, so the collapse keeps one entry each.
+	if len(got) != restPageSize {
+		t.Fatalf("got %d reviews, want %d", len(got), restPageSize)
+	}
+	if reqs != 2 {
+		t.Errorf("served %d requests, want 2 (one full page + one empty page proving the end)", reqs)
+	}
+}
+
 // TestFetchIssueComments_PagesBeyondFirstPage covers the comment-processing
 // consequence: GitHub returns issue comments oldest-first, so truncation drops
 // the newest — the ones Fabrik reacts to.
@@ -164,6 +196,37 @@ func TestListOpenPRs_PagesBeyondFirstPage(t *testing.T) {
 	}
 	if got[len(got)-1].Number != total {
 		t.Errorf("last PR number = %d, want %d", got[len(got)-1].Number, total)
+	}
+}
+
+// TestFetchPRFiles_BoundedAgainstEndlessPages covers the hang vector closed in
+// the #1539 review: FetchPRFiles predates paginateREST and looped
+// `for page := 1; ; page++` with no cap, so a server that never returns a short
+// page spun forever while the result slice grew without bound. Verified to be
+// non-vacuous by removing the bound — without it this test does not fail, it
+// hangs, which is precisely the defect.
+func TestFetchPRFiles_BoundedAgainstEndlessPages(t *testing.T) {
+	full := make([]map[string]any, restPageSize)
+	for i := range full {
+		full[i] = map[string]any{"filename": fmt.Sprintf("file%d.go", i)}
+	}
+	var pages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		json.NewEncoder(w).Encode(full) // always a full page: never terminates on its own
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	files, err := c.FetchPRFiles("o", "r", 1)
+	if err == nil {
+		t.Fatalf("expected an error when the endpoint never returns a short page, got %d files and nil error", len(files))
+	}
+	if files != nil {
+		t.Errorf("expected nil results alongside the error, got %d files", len(files))
+	}
+	if pages != restMaxPages {
+		t.Errorf("served %d pages, want the restMaxPages bound of %d", pages, restMaxPages)
 	}
 }
 

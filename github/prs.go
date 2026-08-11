@@ -609,7 +609,7 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 		HTMLURL    string `json:"html_url"`
 	}
 	var all []rawCheckRun
-	totalCount := -1
+	totalCount := 0
 	for page := 1; page <= restMaxPages; page++ {
 		apiURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d",
 			c.baseURL, owner, repo, sha, restPageSize, page)
@@ -630,7 +630,16 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 				sha, restMaxPages)
 		}
 	}
-	if totalCount >= 0 && len(all) != totalCount {
+	// Only cross-check when the server actually reported a positive total.
+	// Guarding on >= 0 (as this first did) makes an ABSENT total_count — which
+	// decodes to 0 — indistinguishable from a genuine zero, so any deployment
+	// that omits the field would hard-fail every CI gate on every commit. Real
+	// github.com always sends it (see testdata/recordings/fetch_check_runs.json,
+	// a captured response), but v0.0.78 added GHES support and no equivalent
+	// recording exists for it, so this fails open on absence and closed only on
+	// a real, positive disagreement. A server reporting 0 while returning runs
+	// is incoherent and not worth defending against.
+	if totalCount > 0 && len(all) != totalCount {
 		return nil, fmt.Errorf("fetching check runs for %s: collected %d of %d reported check runs — refusing to return an incomplete set",
 			sha, len(all), totalCount)
 	}
@@ -898,9 +907,15 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 // page, stop on an empty page. Returns nil, nil on 404.
 func (c *Client) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
 	var out []string
-	for page := 1; ; page++ {
-		apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
-			c.baseURL, owner, repo, prNumber, page)
+	// Bounded by restMaxPages (#1539 review finding 1). This loop predates
+	// paginateREST and was written as `for page := 1; ; page++` with no cap, so a
+	// server that never returns an empty page — a misconfigured proxy, a GHES
+	// bug, a hostile endpoint — spins forever while `out` grows without bound.
+	// Not converted to paginateREST because the accumulation projects to a field
+	// rather than collecting whole records; the bound is what actually matters.
+	for page := 1; page <= restMaxPages; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d",
+			c.baseURL, owner, repo, prNumber, restPageSize, page)
 		var raw []struct {
 			Filename string `json:"filename"`
 		}
@@ -910,14 +925,15 @@ func (c *Client) FetchPRFiles(owner, repo string, prNumber int) ([]string, error
 			}
 			return nil, fmt.Errorf("fetching files for PR #%d: %w", prNumber, err)
 		}
-		if len(raw) == 0 {
-			break
-		}
 		for _, f := range raw {
 			out = append(out, f.Filename)
 		}
+		if len(raw) < restPageSize {
+			return out, nil
+		}
 	}
-	return out, nil
+	return nil, fmt.Errorf("fetching files for PR #%d: exceeded %d pages without reaching the end — refusing to return a truncated result",
+		prNumber, restMaxPages)
 }
 
 // ReviewEvent selects the wire "event" value SubmitPRReview submits. Its

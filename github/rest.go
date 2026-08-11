@@ -250,10 +250,18 @@ const restMaxPages = 100
 // landing gate, where a stale verdict changes a merge decision.
 //
 // Termination: a page shorter than restPageSize is the last one, so a collection
-// that fits on a single page costs exactly one request (no speculative probe).
+// of fewer than restPageSize records costs exactly one request. A collection of
+// exactly restPageSize (or any exact multiple) is indistinguishable from a full
+// page with more behind it, and costs one additional request that comes back
+// empty — the price of not probing speculatively in the common case.
+//
 // Hitting restMaxPages returns an error rather than the accumulated prefix —
 // silently degrading into a short list is precisely the defect being fixed, so
-// the bound fails loud.
+// the bound fails loud. Known limitation: a genuine collection of exactly
+// restMaxPages*restPageSize records is indistinguishable from a server that
+// never returns a short page, and is reported as the latter. At 10,000 records
+// that is far outside any real review list, comment thread, or open-PR set, and
+// erring toward "refuse" beats erring toward a silent truncation.
 func paginateREST[T any](c *Client, what string, urlFor func(page int) string) ([]T, error) {
 	var all []T
 	for page := 1; page <= restMaxPages; page++ {
