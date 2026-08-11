@@ -5142,6 +5142,179 @@ func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
 	}
 }
 
+// ── #1533 fireRunawayGuard atomicity/idempotency ────────────────────────────
+
+// TestFireRunawayGuard_IdempotentAcrossTwoFirings covers R2/A3: a member appearing in two
+// separate fireRunawayGuard calls' items slices within the same guard episode (the shape
+// Hook 1's two call sites, or a racing Hook 1/Hook 2 pair, can produce) must receive the
+// alert comment exactly once, not once per call.
+func TestFireRunawayGuard_IdempotentAcrossTwoFirings(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	memberA := makeTrainItem(1, "Member One") // present in both firings
+	memberB := makeTrainItem(2, "Member Two") // only in the second firing
+
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA, memberB}, 6)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	alertCount := func(issueNum int) int {
+		n := 0
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				n++
+			}
+		}
+		return n
+	}
+	if got := alertCount(1); got != 1 {
+		t.Errorf("member #1 (in both firings): expected exactly 1 alert comment, got %d", got)
+	}
+	if got := alertCount(2); got != 1 {
+		t.Errorf("member #2 (only in the second firing): expected exactly 1 alert comment, got %d", got)
+	}
+}
+
+// TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable covers R1's residual case: an
+// AddComment failure must not silently strand the (already-paused) member. It should be left
+// with the durable fabrik:awaiting-runaway-alert marker instead, and must NOT be recorded as
+// already-alerted — a later fireRunawayGuard call (or the settle scan) must still retry it.
+func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
+	client := &mockGitHubClient{}
+	client.addCommentFn = func(owner, repo string, issueNumber int, body string) (int, error) {
+		return 0, fmt.Errorf("simulated transient failure")
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(9, "Flaky Member")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+
+	client.mu.Lock()
+	paused, marker, commentAttempts := false, false, 0
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 9 && c.labelName == "fabrik:paused" {
+			paused = true
+		}
+		if c.issueNumber == 9 && c.labelName == runawayAlertMarkerLabel {
+			marker = true
+		}
+	}
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 9 {
+			commentAttempts++
+		}
+	}
+	client.mu.Unlock()
+
+	if !paused {
+		t.Error("expected fabrik:paused applied even though the alert comment failed — pause is not gated on the comment")
+	}
+	if !marker {
+		t.Errorf("expected %s marker applied so the settle scan retries the failed alert", runawayAlertMarkerLabel)
+	}
+	if commentAttempts != 1 {
+		t.Errorf("expected exactly 1 comment attempt, got %d", commentAttempts)
+	}
+
+	// Not marked alerted: a second firing for the same member within the same episode
+	// must retry the comment, not skip it as already-delivered.
+	client.addCommentFn = nil // succeeds this time
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	commentAttempts = 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 9 {
+			commentAttempts++
+		}
+	}
+	if commentAttempts != 2 {
+		t.Errorf("expected the second firing to retry the comment (2 total attempts), got %d", commentAttempts)
+	}
+}
+
+// TestResetTrialCounter_ClearsRunawayAlertedIdempotency verifies that resetTrialCounter (the
+// guard's own "episode ends" signal) clears mergeTrainRunawayAlerted for the repo, so a member
+// alerted in one episode is eligible for a fresh alert in the next.
+func TestResetTrialCounter_ClearsRunawayAlertedIdempotency(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(4, "Repeat Offender")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.resetTrialCounter("owner/repo")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	alerts := 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 4 && strings.Contains(c.body, "runaway guard") {
+			alerts++
+		}
+	}
+	if alerts != 2 {
+		t.Errorf("expected 2 alerts across two separate episodes (separated by resetTrialCounter), got %d", alerts)
+	}
+}
+
+// TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember is the A2 test: it covers Hook 2
+// (routeQueuedGroup's "already tripped — pausing before dispatch" path) specifically, and
+// asserts every member in the passed items slice receives the alert comment. Before #1533,
+// only fireRunawayGuard's Hook 1 call sites had direct unit coverage.
+func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxTrainTrialsPerWindow = 1
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	repoKey := "owner/repo"
+	eng.recordTrial(repoKey) // trips the counter (threshold 1)
+
+	items := []gh.ProjectItem{
+		makeTrainItem(1, "Member One"),
+		makeTrainItem(2, "Member Two"),
+	}
+
+	eng.routeQueuedGroup(context.Background(), repoKey, items, "PVT_test")
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, issueNum := range []int{1, 2} {
+		hasAlert := false
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				hasAlert = true
+			}
+		}
+		if !hasAlert {
+			t.Errorf("member #%d: expected a runaway guard alert comment from Hook 2 (routeQueuedGroup)", issueNum)
+		}
+		paused := false
+		for _, c := range client.addLabelCalls {
+			if c.issueNumber == issueNum && c.labelName == "fabrik:paused" {
+				paused = true
+			}
+		}
+		if !paused {
+			t.Errorf("member #%d: expected fabrik:paused from Hook 2", issueNum)
+		}
+	}
+
+	// routeQueuedGroup must return immediately after firing the guard — no worker dispatched.
+	if _, ok := eng.mergeTrainInFlight.Load(repoKey); ok {
+		t.Error("expected no worker dispatched when the runaway guard is already tripped")
+	}
+}
+
 // TestMergeTrainRunawayGuard is the e2e runaway guard test: a persistently-red batch
 // where every trial fails and no member ever lands trips the guard within N trials,
 // pausing all Queued members. Follows the pattern of TestMergeTrainBisect_CostCapFallbackLogs.

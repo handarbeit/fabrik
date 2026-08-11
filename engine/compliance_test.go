@@ -12,7 +12,7 @@ package engine
 // A body argument is compliant if and only if:
 //   - It is a call to formatOutputComment, formatPRSummaryComment,
 //     formatReviewFeedbackComment, buildAwaitingInputComment, buildBlockedComment,
-//     or noWorkNeededSkipComment, OR
+//     noWorkNeededSkipComment, or runawayGuardAlertMessage, OR
 //   - It is a string literal whose value starts with "🏭 **Fabrik", OR
 //   - It is a local variable where any assignment in the same function scope
 //     is compliant (i.e. a fmt.Sprintf whose format string starts with

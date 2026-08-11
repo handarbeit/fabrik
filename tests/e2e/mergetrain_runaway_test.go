@@ -81,10 +81,17 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 		t.Logf("member #%d has fabrik:paused + fabrik:awaiting-input", issueNum)
 	}
 
-	// Assert the alert comment on at least one member (the first). The guard
-	// posts it on every member unconditionally, so member[0] is sufficient.
-	WaitForIssueComment(t, env, env.RepoBeta, members[0], "runaway guard tripped", 5*time.Minute)
-	t.Logf("alert comment confirmed on member #%d", members[0])
+	// Assert the alert comment on every member, not just member[0] (#1533): the guard's
+	// pause and alert are two independent GitHub calls per member, and before #1533 a
+	// member could end up fabrik:paused with no alert comment at all — a race between
+	// fireRunawayGuard's three call sites (Hook 1 x2, Hook 2) that only strengthening
+	// this assertion to cover all 4 members can catch. A member whose direct alert
+	// failed and fell back to the settleRunawayGuardAlertScan retry still needs to see
+	// the comment land within this window — the retry runs every poll cycle.
+	for _, issueNum := range members {
+		WaitForIssueComment(t, env, env.RepoBeta, issueNum, "runaway guard tripped", 5*time.Minute)
+		t.Logf("alert comment confirmed on member #%d", issueNum)
+	}
 
 	// No member should have reached Done.
 	for _, issueNum := range members {
