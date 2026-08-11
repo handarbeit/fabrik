@@ -302,6 +302,7 @@ Reconstruction reads only durable state (never the map) and never launches a gor
 | `fabrik:claude-limit` | `handleUsageLimitExit` | On a Claude invocation that exits because the account's usage limit was hit (`claudeUsageLimitError`, detected structurally in `interpretClaudeResult`/`classifyUsageLimitExit` from `resp.TerminalReason == "blocking_limit"` — never from output prose), gated on the label's own absence (idempotent — comment posted only on the absent→present transition) | The non-limit path in `finalizeStageOutcome`, unconditionally, immediately after the usage-limit branch — fires for success, blocked-on-input, no-work-needed, genuine failure/retry, and PR-creation failure alike; `settleClaudeLimitLabelSweep` (account-wide, once the suspension lifts); `cleanupClosedIssueTransientLabels` (defensive sweep, via `transientLifecycleLabels`) | On the next invocation that is not itself classified as a usage-limit exit; account-wide, every poll, once `claudeSuspendedUntilTime` reports no active suspension; or when issue is closed (defensive sweep) | Distinct from GitHub's own rate-limit terminology (`engine/backoff.go`/`engine/terminal.go`) — this is the Claude account usage limit, not the GitHub GraphQL budget. `StageAttempted` is recorded (so the normal dispatch cooldown applies, preventing a tight retry loop against the limit) but `StageRetryIncremented` is deliberately never called — the stage never ran, so this does not count against `max_retries`. Neither `stage:<name>:failed` nor `fabrik:paused` is applied. See §7.3 and ADR-1119, ADR-1183. |
 | `fabrik:clear-claude-limit` | operator | Applied manually to any open board item to clear an active account-wide Claude usage-limit suspension without an engine restart | `settleClaudeLimitClearRequests`, the same poll cycle it was observed on | Consumed immediately — the scan clears the suspension once and removes the label from every carrying item in the same pass | One-shot command label, mirroring `fabrik:revalidate`. Not scoped to items also carrying `fabrik:claude-limit` — the suspension it clears is account-wide, not per-issue. See §7.3 and ADR-1183. |
 | `fabrik:api-key-helper-detected` | `handleAPIKeyHelperDetected` | On a Claude invocation skipped because the worktree's own `.claude/settings.json` or `settings.local.json` sets `apiKeyHelper` (`apiKeyHelperDetectedError`, returned by `runInvocationWithExtension` before Claude is ever invoked — a repo-resident setting Fabrik cannot see until the worktree exists, distinct from the startup-time `checkAPIKeyHelper` preflight covering the managed-policy/user/`fabrikDir`-project layers), gated on the label's own absence (idempotent — comment posted only on the absent→present transition) | The non-detection path in `finalizeStageOutcome`, unconditionally, alongside the `fabrik:claude-limit` clear — fires for success, blocked-on-input, no-work-needed, genuine failure/retry, and PR-creation failure alike; `cleanupClosedIssueTransientLabels` (defensive sweep, via `transientLifecycleLabels`) | On the next invocation that is not itself classified as a usage-limit exit or an `apiKeyHelper` detection; or when issue is closed (defensive sweep) | Mirrors `fabrik:claude-limit`'s "stage never ran" shape exactly: `StageAttempted` is recorded (normal dispatch cooldown applies) but `StageRetryIncremented` is deliberately never called — does not count against `max_retries`. Neither `stage:<name>:failed` nor `fabrik:paused` is applied. Unlike `fabrik:claude-limit`, there is no account-wide settle sweep — the condition is inherently per-worktree, self-resolving once a human removes `apiKeyHelper` from the repo. See ADR-1346, R13. |
+| `fabrik:tools-denied` | Inline in `finalizeStageOutcome`'s final `else` branch (the `toolsDenied` case) | On a Claude invocation whose tool call(s) were denied by the CLI's own permission layer (`claudeToolsDeniedError`, detected structurally in `interpretClaudeResult`'s clean-exit path from a non-empty `resp.PermissionDenials` array, gated on `!completed` — never from output prose), gated on the label's own absence (idempotent — comment posted only on the absent→present transition) | The non-denial path in `finalizeStageOutcome`, gated on `!toolsDenied` (unlike `fabrik:claude-limit`/`fabrik:api-key-helper-detected`, this invocation itself may BE the condition — the classification does not short-circuit, so the clear must not fire on the very detection it would erase); `cleanupClosedIssueTransientLabels` (defensive sweep, via `transientLifecycleLabels`) | On the next invocation that is not itself classified as a tools-denied exit; or when issue is closed (defensive sweep) | Structurally unlike its two siblings: the CLI exits cleanly (`is_error: false`, `terminal_reason: "completed"`) and real work may have happened before the denial, so this does NOT short-circuit `finalizeStageOutcome` — `commitWIP`, the branch push, and `markCommentsSeenByStage` all still run, mirroring `claudeTurnLimitError`/`claudeResumeFailureError`'s continue-processing shape rather than the did-not-run family's early return. `StageAttempted` is recorded (normal dispatch cooldown applies) but `StageRetryIncremented` is deliberately never called — does not count against `max_retries`. Bounded instead by its own `ToolsDeniedRetries`/`MaxToolsDeniedRetries` counter (default 3); at the bound, `pauseForToolsDeniedLimit` applies `fabrik:paused` + `fabrik:awaiting-input` (never `stage:<name>:failed` — the condition is never treated as a stage failure, even at the bound). Because classification is expressed as a non-nil `error` from `interpretClaudeResult`, `blockedOnInput := err == nil && ...` is structurally unreachable for a detected denial — the outcome is identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`. See §7.3b and ADR-1523. |
 | `fabrik:awaiting-done` | `handleNoWorkNeeded` | As the very first mutation, the instant `processItem` decides `completed && noWorkNeeded` — before the `fabrik:awaiting-input` clear, before the emitting stage's completion label, before anything else (idempotent: a no-op if already present) | `clearNoWorkNeededMarker` (after a fully successful `settleNoWorkNeeded` pass — status moved to Done and issue closed); `escalateNoWorkNeededFailure` (after `MaxRetries` failed settle passes) | When the Done move and issue close have both succeeded (or were already true), or when escalated (`fabrik:paused` takes over dispatch suppression instead) | Suppresses dispatch of every non-cleanup stage in `itemMayNeedWork`/`itemNeedsWork`, independent of `item.Status` — the outstanding board move is exactly what may be failing, so the item can be observed sitting at any column while this label is present. Retried every poll by the no-work-needed settle scan, `settleNoWorkNeededScan` (`engine/poll_settle.go`; called from `poll()` in `engine/poll.go`, immediately after `runValidatePRTerminalAdvance`), which resolves the current stage via `stages.FindStage(e.cfg.Stages, item.Status)` and calls `settleNoWorkNeeded`. **Deliberately excluded from `cleanupClosedIssueTransientLabels`'s closed-issue defensive sweep** — unlike other gate labels, stripping it before the settle scan has finished would silently resurrect the bug this label exists to prevent (§6.8, ADR-060) |
 | `fabrik:awaiting-member-close` | `markMergeTrainMemberCloseOutstanding` (`landSingleton`) | Only in the failure branch of `landSingleton`'s member-issue `CloseIssue` call — after the PR merge, Done-move, and member-PR close have already run (idempotent: a no-op if already present) | `clearMergeTrainMemberCloseMarker` (after a fully successful `settleMergeTrainMemberClose` pass — issue confirmed closed); `escalateMergeTrainMemberCloseFailure` (after `MaxRetries` failed settle passes) | When the member issue is confirmed closed (by us or by GitHub's own `Closes #N` auto-close), or when escalated (`fabrik:paused` takes over instead) | **Not** wired into `itemMayNeedWork`/`itemNeedsWork` or `transientLifecycleLabels` — by the time this label can be written, the item has already reached its terminal singleton-landing outcome, so there is no per-stage redispatch risk to guard against (§6.10, ADR-061). Retried every poll by `settleMergeTrainMemberCloses` (`engine/merge_train_member_close_settle.go`; called from `poll()` in `engine/poll.go`, immediately after `handleMergeTrainBatch`), which scans raw `board.Items` directly — independent of `merge_train: on/off`, `deepFetchCandidates`, and the terminal-skip optimization (#689) |
 | `fabrik:awaiting-close` | `markNonDefaultBaseCloseOutstanding` (`closeIssueIfNonDefaultBase`) | Only in the failure branch of `closeIssueIfNonDefaultBase`'s explicit `CloseIssue` call — after the caller's Done-advance has already run (idempotent: a no-op if already present) | `clearNonDefaultBaseCloseMarker` (after a fully successful `settleNonDefaultBaseClose` pass — issue confirmed closed); `escalateNonDefaultBaseCloseFailure` (after `MaxRetries` failed settle passes) | When the issue is confirmed closed (by us or by any other actor), or when escalated (`fabrik:paused` takes over instead) | **Not** wired into `itemMayNeedWork`/`itemNeedsWork` or `transientLifecycleLabels` — structurally identical to `fabrik:awaiting-member-close`: by the time this label can be written, the item has already reached Done, so there is no per-stage redispatch risk to guard against (§6.13, ADR-1097). Retried every poll by `settleNonDefaultBaseCloses` (`engine/close_nondefault_base_settle.go`; called from `poll()` in `engine/poll.go`, immediately after `settleMergeTrainMemberCloses`), which scans raw `board.Items` directly |
@@ -2777,6 +2778,104 @@ stage failure with no matching `TerminalReason` is entirely unaffected by this s
 against `MaxRetries` and still escalates via `escalateFailedStage()` (§7.2) at the limit.
 
 See ADR-1458 and #1458.
+
+### 7.3b Tool-Permission Denial Exemption
+
+On 2026-08-09, a Claude Code profile misconfiguration made every mutating tool (`Edit`, `Write`,
+any write-capable `Bash`) return a permission denial to Fabrik's stage workers, while read-only
+operations kept working. The engine responded to the same condition two incompatible ways
+depending entirely on whether the worker happened to also emit `FABRIK_BLOCKED_ON_INPUT`: two
+issues paused cleanly via the marker path, and two others (#1456, #1462) retried three times,
+burned their full `MaxRetries` budget, and marked themselves `stage:<name>:failed` — a durable
+claim that the work itself was wrong, when the machine had simply been unable to write files. See
+#1523.
+
+**Structurally unlike every sibling in this family (§7.3, §7.3a, `fabrik:api-key-helper-detected`):**
+a tool-permission denial does not abort the invocation — the CLI exits cleanly (`is_error: false`,
+`subtype: "success"`, `terminal_reason: "completed"`), and real, committable work may have happened
+before the denial (e.g. several successful edits before one write is blocked). There is also no
+dedicated `terminal_reason` enum value to key off, unlike `"blocking_limit"`/`"api_error"` — the
+only structural signal is the CLI's own `permission_denials` array on the terminal result line,
+confirmed empirically against the installed CLI (`2.1.227`) using Fabrik's own invocation flags
+(`--output-format stream-json --verbose --permission-mode dontAsk`, no
+`--dangerously-skip-permissions`): a `PreToolUse`-hook-denied tool call populates this array with
+one entry per denial (`tool_name`, `tool_use_id`, `tool_input`), on an otherwise ordinary clean
+exit.
+
+**Detection:** `classifyToolsDenied(resp claudeResponse)` (`engine/claude.go`) returns the
+deduplicated, first-seen-order list of denied tool names whenever `len(resp.PermissionDenials) > 0`.
+`interpretClaudeResult` consults it only in the clean-exit path (`runErr == nil`), gated on
+`!completed` — a denial the model worked around and still completed the stage is ordinary success,
+with no exemption and no label, exactly matching every incident report and this section's own
+empirical reproduction. When the gate matches, `interpretClaudeResult` returns a
+`*claudeToolsDeniedError{ToolNames}` sentinel in place of the unconditional `nil` the clean-exit path
+previously always returned. Detection is scoped to the clean-exit path only, per the evidence
+above — a diagnostic-only log line records a `permission_denials` array seen on a non-clean exit
+(evidence-gathering for a shape not yet observed, never a classification), mirroring §7.3's
+unmatched-`terminal_reason` diagnostic.
+
+**Handling — continue-processing, not short-circuit:** because real work can precede the denial,
+`*claudeToolsDeniedError` follows §7.3a's sibling `claudeTurnLimitError`/`claudeResumeFailureError`
+shape, not §7.3/§7.3a's did-not-run early return. `toolsDenied := errors.As(err, &toolsDeniedErr)`
+is computed in `finalizeStageOutcome` (`engine/item.go`) alongside the pre-existing `turnLimited`/
+`resumeFailed` checks; `commitWIP`, the branch push, `markCommentsSeenByStage`, and
+`InvocationRecorded` (with `Errored` excluding `toolsDenied`, alongside `turnLimited`) all still run
+exactly as for any other incomplete run — a late-invocation denial never discards earlier valid
+edits. In the final escalation block, `toolsDenied` is a fourth branch alongside `turnLimited`/
+`resumeFailed`:
+
+1. `itemstate.StageAttempted` was already recorded unconditionally above (the normal dispatch
+   cooldown applies). `itemstate.ToolsDeniedRetryIncremented` increments a distinct counter —
+   deliberately **not** `StageRetryIncremented` (R2) — so a tool-permission denial never counts
+   against `MaxRetries`.
+2. If `fabrik:tools-denied` is absent, posts an explanatory comment naming the denied tool(s)
+   (`toolsDeniedErr.ToolNames`, joined) and pointing at the permission configuration (e.g. a stray
+   `PreToolUse` hook, or an org/user-level `permissions` "ask" rule with no interactive prompt
+   available) as the thing to check, then applies the label — gated on the label's own absence, the
+   same once-per-episode idiom as `fabrik:claude-limit`/`fabrik:awaiting-ci`. A repeated detection
+   within the same episode posts neither a duplicate comment nor a duplicate label-add.
+3. Compares the running count against `MaxToolsDeniedRetries` (default **3** — see "The
+   `MaxToolsDeniedRetries` bound" below); at the bound, `pauseForToolsDeniedLimit` applies
+   `fabrik:paused` + `fabrik:awaiting-input` (via the shared `pauseIssue`/`EnginePaused` primitives,
+   mirroring `pauseForSliceLimit`'s shape exactly) — **never** `stage:<name>:failed`. The condition is
+   never treated as a stage failure, even at the bound.
+
+**Label clearing (R3, per-worktree self-resolution):** gated on `!toolsDenied` — unlike
+`fabrik:claude-limit`/`fabrik:api-key-helper-detected`, this invocation itself may *be* the condition
+being classified (the detection does not short-circuit), so an unconditional clear at the same site
+those two labels use would immediately erase the label the branch above is about to apply. On the
+next invocation that is genuinely not classified as tools-denied, the label clears — mirroring
+`fabrik:api-key-helper-detected`'s per-worktree self-resolution (a human fixes the permission
+configuration directly) rather than `fabrik:claude-limit`'s account-wide settle sweep, since the
+cause here is always local to one worktree's environment, never account-wide. `fabrik:tools-denied`
+is included in `transientLifecycleLabels` for the closed-issue defensive sweep (§7.5).
+
+**Marker independence (R6):** because classification is expressed as a non-nil `error` returned from
+`interpretClaudeResult` rather than a separately-threaded boolean, `blockedOnInput := err == nil &&
+CheckBlockedOnInput(output)` (`engine/item.go`) is structurally unreachable once a denial is
+detected — no explicit marker-suppression code exists anywhere, and none is needed. The outcome
+(label, comment, counter, escalation) is identical whether or not the worker's output also contains
+`FABRIK_BLOCKED_ON_INPUT`: that marker is a worker-side courtesy, never an engine guarantee, and the
+engine's own structural classification is what governs the outcome — the asymmetry that let #1453
+and #1498 recover cleanly while #1456 and #1462 burned their retry budget on the identical condition
+cannot recur.
+
+**The `MaxToolsDeniedRetries` bound (R5, ADR-1523):** defaults to 3 (`--max-tools-denied-retries` /
+`FABRIK_MAX_TOOLS_DENIED_RETRIES`), lower than `MaxSliceRetries` (10 — a turn-cap preemption is
+routine and self-resolving by construction) since a permission misconfiguration does not resolve
+itself the way slicing does — no retry can fix a broken permission profile — but higher than
+`MaxResumeFailures` (2) since the explanatory comment already reaches the operator on the very first
+detection (R4); the extra cycles before escalating guard only against a single spurious/flaky
+denial, never against expecting a retry to fix the underlying cause. An exempt condition that never
+escalates would be its own failure mode — an issue silently retrying an unwatched environment
+problem forever — which is exactly what this bound exists to prevent, the same rationale as §7.12's
+slice budget.
+
+**Regression guard:** a tools-denied detection followed by a genuine failure leaves the full
+`MaxRetries` budget available for the genuine failure, exactly as §7.3/§7.3a describe for their own
+conditions — `ToolsDeniedRetries` is tracked entirely independently of `Attempts`/`MaxRetries`.
+
+See ADR-1523 and #1523.
 
 ### 7.4 Multi-Instance Lock Protocol
 

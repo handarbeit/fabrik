@@ -820,6 +820,7 @@ FABRIK_USER=my-personal-username
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
 | `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
 | `--max-resume-failures` | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts the next invocation instead of resuming (0 = use default of 2; also `FABRIK_MAX_RESUME_FAILURES`). Independent of `--max-retries` — a resume failure never consumes a retry slot, so the guaranteed cold-start attempt can't be starved by the failures it exists to recover from. See the "Resume failures" troubleshooting note below | `0` (2 failures) |
+| `--max-tools-denied-retries` | Maximum number of consecutive tool-permission-denial exits per stage before pausing (0 = use default of 3; also `FABRIK_MAX_TOOLS_DENIED_RETRIES`). Independent of `--max-retries` — a permission misconfiguration is not a stage failure, so it never consumes a retry slot. See the "Tool permission denied" troubleshooting note below | `0` (3 denials) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
@@ -871,6 +872,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
 | `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
 | `FABRIK_MAX_RESUME_FAILURES` | *(no config.yaml key)* | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts (positive integer; invalid or unset values default to 2). Independent of `max_retries` — see `--max-resume-failures`. | `2` |
+| `FABRIK_MAX_TOOLS_DENIED_RETRIES` | *(no config.yaml key)* | Maximum number of consecutive tool-permission-denial exits per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Independent of `max_retries` — see `--max-tools-denied-retries`. | `3` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
@@ -1378,6 +1380,10 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
    - A consecutive `--resume` failure (the session pointer, not the stage's own
      work, is the suspected cause) is likewise exempted, up to `--max-resume-failures`
      — see below.
+   - A tool-permission denial (Claude's own permission layer blocked a mutating
+     tool call — e.g. `Edit`, `Write`, or a write-capable `Bash`) is likewise
+     exempted — a blocked worker is not a failed stage. Bounded separately by
+     `--max-tools-denied-retries` instead. See below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
@@ -1419,6 +1425,29 @@ failed label, reset the retry count, and try again immediately.
 > successful invocation resets the counter to zero. If the cold-started
 > attempt also fails, that *is* a genuine failure and flows into the normal
 > `--max-retries` → `fabrik:paused` path described above. See #1414.
+
+> **Troubleshooting: an issue carries `fabrik:tools-denied` instead of
+> `stage:<name>:failed`.** Claude's own permission layer denied one or more
+> mutating tool calls during the invocation — reported structurally by the
+> CLI (`permission_denials` on the result object), never inferred from
+> anything the assistant wrote. This is not a stage failure: the worker was
+> simply unable to write files, so it does not consume a `--max-retries`
+> slot. Fabrik posts one explanatory comment naming the denied tool(s) the
+> first time this is detected on an issue (not on every retry), then keeps
+> retrying on the normal dispatch cooldown, bounded independently by
+> `--max-tools-denied-retries` (default 3) — since no retry can fix a broken
+> permission configuration on its own, this bound is intentionally lower than
+> `--max-slice-retries`. After the bound, Fabrik pauses with `fabrik:paused` +
+> `fabrik:awaiting-input` (never `stage:<name>:failed` — the work itself was
+> never judged, only blocked). To resolve: check the permission configuration
+> outside Fabrik's control — most commonly a `PreToolUse` hook, or an
+> org/user-level `permissions` "ask" rule with no interactive prompt
+> available in this headless context — then remove `fabrik:paused` and
+> `fabrik:awaiting-input` to resume; `fabrik:tools-denied` itself clears
+> automatically on the next invocation that isn't denied. The outcome is
+> identical whether or not the worker also emitted `FABRIK_BLOCKED_ON_INPUT`
+> in its own output — Fabrik's classification does not depend on it. See
+> #1523.
 
 ### Stages Waiting for Input
 
