@@ -1,0 +1,281 @@
+package sim
+
+import (
+	"testing"
+	"time"
+
+	"github.com/handarbeit/fabrik/engine"
+)
+
+// This file ports tests/e2e/expected_reviewers_test.go's five scenarios
+// (ADR-1283's expected_reviewers — declared unrequested reviewers for the
+// review gate, #1298), the direct #1258 precedent applied to a second,
+// list-shaped stage-config field. All five exercise checkReviewGate via the
+// review_gate_helpers.go seedReviewGateItem/seedReviewGateItemDraft helpers,
+// applying a declared value per issue via one of two labels:
+//
+//	expected-reviewers:none     -> &[]string{}
+//	expected-reviewers:declared -> &[]string{expectedReviewersSyntheticName}
+//
+// (extractExpectedReviewersOverride, engine/reviews.go — expectedReviewersSyntheticName
+// there is the literal string "e2e-synthetic-declared-reviewer", matching
+// the live suite's own const of the same name exactly.)
+//
+// Divergence from the live suite (R2, recorded once here, same rationale as
+// review_authority_test.go's file doc comment): the live tests use
+// seedReviewGateItemDraft specifically to dodge #1312 (the bed's real
+// reviewer, Pruefer, landing an incidental review before the assertion
+// runs). simgh never synthesizes an incidental bot review, so that
+// determinism concern doesn't exist here — draft vs. non-draft is inert in
+// sim either way. This port mirrors the live suite's own per-scenario
+// draft/plain choice anyway (four of five below call
+// seedReviewGateItemDraft, matching the live suite's own four; only
+// TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation uses the plain
+// seedReviewGateItem, again matching its live counterpart), for structural
+// parity rather than because sim needs the draft variant for its own sake.
+//
+// Scope limitation (unchanged from the live suite, ADR-1298 following
+// ADR-1258): these scenarios only exercise the advance gate
+// (checkReviewGate), never the landing gate (reviewGateBlocksLanding),
+// reachable only through a stage literally named "Validate".
+// reviewAuthorityStages (review_authority_test.go) has no Validate stage,
+// reused here directly — same pipeline shape, same "Review" gate stage.
+//
+// Comment-content observability (corrected during this port's own review,
+// #1450): an earlier revision of this file claimed simgh's Sim/Instrumented
+// "never exposes issue/PR comment bodies back to a scenario — comments are
+// write-only from the scenario's side." That claim was wrong.
+// projectItem's Comments field (buildProjectItem, tests/sim/simgh/board.go)
+// merges both the issue's own comments and its linked PR's comments — the
+// exact same field no_work_needed_test.go's hasNoWorkNeededSkipComment
+// already reads. TestExpectedReviewersDeclaredWaitsAndReprompts below
+// carries forward the live suite's exact-@mention-text assertion using this
+// field, rather than settling for the label sequence alone.
+//
+// reviewRepromptCommentPrefix is the literal prefix of the Phase 1
+// re-prompt comment (checkAwaitingReviewTimeout, engine/reviews.go) —
+// copied here the same way ciFixCycleLimitCommentPrefix is copied in
+// ci_fix_reinvoke_test.go, since the engine's own const is unexported.
+const reviewRepromptCommentPrefix = "🏭 **Fabrik — review re-prompt**"
+
+// newExpectedReviewersTimeoutEnv backdates StartTime 24 real hours into the
+// past — the same technique timeout_test.go's
+// TestReviewWaitTimeout_FiresWithZeroRealElapsedTime uses (R3: this gate is
+// GitHub-anchored via FetchLabelAppliedAt, not engine-Clock-anchored) — so
+// both halves of the bot-reprompt ladder (Phase 1's ReviewWaitTimeout wait,
+// Phase 2's second ReviewWaitTimeout wait from fabrik:bot-reprompted) are
+// already overdue against real wall-clock time the instant each label is
+// applied, without this test waiting out any real minutes. Only
+// TestExpectedReviewersDeclaredWaitsAndReprompts uses this; every other
+// scenario in this file needs the ladder to definitely NOT fire and uses the
+// near-real-time newReviewAuthorityEnv instead.
+func newExpectedReviewersTimeoutEnv(t *testing.T) *Env {
+	t.Helper()
+	return NewEnv(t, EnvOptions{
+		Stages:    reviewAuthorityStages(),
+		StartTime: time.Now().Add(-24 * time.Hour),
+		ConfigureCfg: func(cfg *engine.Config) {
+			cfg.ReviewWaitTimeout = 15 * time.Minute
+			cfg.MaxReviewCycles = 5
+		},
+	})
+}
+
+// TestExpectedReviewersFastAdvance ports the live test of the same name
+// (requirements scenario 1): with expected_reviewers: [] declared, no
+// requested reviewer, and no submitted review, the gate fast-advances
+// instead of waiting out ReviewWaitTimeout — the #1080 stall this feature
+// exists to eliminate.
+func TestExpectedReviewersFastAdvance(t *testing.T) {
+	t.Parallel()
+	env := newReviewAuthorityEnv(t, 15*time.Minute, 5) // must never fire in this test
+
+	num, _ := seedReviewGateItemDraft(t, env, "Review", "expected-none-fast-advance", "expected-reviewers:none")
+
+	// The gate must never apply fabrik:awaiting-review at all — a fast
+	// advance clears before the label-apply branch is ever reached.
+	RunPolls(t, env, 30)
+	if hasLabel(IssueLabels(t, env, num), "fabrik:awaiting-review") {
+		t.Fatal("fabrik:awaiting-review applied despite expected_reviewers: [] and nothing requested/reviewed — gate did not fast-advance")
+	}
+	t.Logf("R1 verified: #%d fast-advanced — fabrik:awaiting-review never applied with expected_reviewers: [] declared", num)
+}
+
+// TestExpectedReviewersDeclaredWaitsAndReprompts ports the live test of the
+// same name (requirements scenario 2): with expected_reviewers: [<name>]
+// declared and no requested reviewer, the gate waits (does not fast-advance)
+// and the bot re-prompt ladder engages — behavior undeclared config cannot
+// reach at all. Uses the backdated-clock timeout env (see
+// newExpectedReviewersTimeoutEnv's doc comment) so both ladder phases fire
+// without this test waiting out real minutes.
+func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
+	t.Parallel()
+	env := newExpectedReviewersTimeoutEnv(t)
+
+	num, _ := seedReviewGateItemDraft(t, env, "Review", "expected-declared-reprompt", "expected-reviewers:declared")
+
+	// Contrast with TestExpectedReviewersFastAdvance: a declared-but-unmatched
+	// reviewer must NOT fast-advance — fabrik:awaiting-review is applied
+	// immediately, same as the undeclared default.
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	t.Logf("fabrik:awaiting-review confirmed on #%d — declared reviewer holds the gate open", num)
+
+	// Phase 1: after one ReviewWaitTimeout window with no response, the
+	// engine re-prompts the declared identity and applies fabrik:bot-reprompted.
+	WaitForIssueLabel(t, env, num, "fabrik:bot-reprompted", 80)
+	t.Logf("fabrik:bot-reprompted appeared on #%d — Phase 1 re-prompt fired", num)
+
+	// The live suite asserts the Phase 1 re-prompt comment's exact @mention
+	// text — carried forward here rather than settled for the label alone
+	// (found auditing this port, #1450): projectItem's Comments field
+	// already merges both issue and linked-PR comments (buildProjectItem,
+	// tests/sim/simgh/board.go), the same mechanism no_work_needed_test.go
+	// and ci_fix_reinvoke_test.go's #1320 check rely on — comment content is
+	// NOT write-only from a scenario's side, contrary to what an earlier
+	// revision of this file's doc comment claimed.
+	if !hasCommentWithPrefix(projectItem(t, env, num).Comments, reviewRepromptCommentPrefix) {
+		t.Fatalf("no engine-authored review re-prompt comment (prefix %q) found on #%d after fabrik:bot-reprompted appeared",
+			reviewRepromptCommentPrefix, num)
+	}
+	t.Logf("Phase 1's actual re-prompt comment confirmed on #%d, not just the label", num)
+
+	// Phase 2: the synthetic name never actually reviews, so after a second
+	// full timeout window the engine gives up and pauses for a human,
+	// removing both fabrik:bot-reprompted and fabrik:awaiting-review.
+	WaitForIssueLabel(t, env, num, "fabrik:paused", 80)
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 20)
+	t.Logf("fabrik:paused appeared on #%d — Phase 2 timed out with no response from the declared reviewer", num)
+
+	if item := projectItem(t, env, num); item.IsClosed {
+		t.Fatal("expected issue OPEN after declared-reviewer Phase 2 timeout")
+	}
+	t.Logf("R2 verified: #%d — declared reviewer held the gate open, Phase 1 re-prompted, Phase 2 paused for human", num)
+}
+
+// TestExpectedReviewersUndeclaredRegressionGuard ports the live test of the
+// same name (requirements scenario 4): undeclared (nil) expected_reviewers
+// still never fast-advances — proves the shipped default (FR-5) is
+// unchanged. Pins the `expected != nil` half of reviewGateFastAdvance
+// specifically.
+func TestExpectedReviewersUndeclaredRegressionGuard(t *testing.T) {
+	t.Parallel()
+	env := newReviewAuthorityEnv(t, 15*time.Minute, 5)
+
+	num, _ := seedReviewGateItemDraft(t, env, "Review", "expected-nil-regression") // no expected-reviewers label at all
+
+	// Undeclared (nil) must behave exactly as it did before #1283: the gate
+	// blocks unconditionally on "nothing requested, nothing reviewed yet",
+	// applying fabrik:awaiting-review immediately rather than fast-advancing.
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	t.Logf("R4 verified: #%d — undeclared (nil) expected_reviewers still applies fabrik:awaiting-review, never fast-advances", num)
+}
+
+// TestExpectedReviewersFastAdvanceComposesWithAuthoritative ports the live
+// test of the same name (requirements scenario 5): expected_reviewers: []
+// fast-advance composes with review_authority: authoritative — per
+// reviewGateFastAdvance's doc comment, this path is deliberately independent
+// of authority mode because it only fires when hasReviews is false, before
+// any verdict could be weighed.
+func TestExpectedReviewersFastAdvanceComposesWithAuthoritative(t *testing.T) {
+	t.Parallel()
+	env := newReviewAuthorityEnv(t, 15*time.Minute, 5)
+
+	num, _ := seedReviewGateItemDraft(t, env, "Review", "expected-none-authoritative",
+		"expected-reviewers:none", "review-authority:authoritative")
+
+	// Same bounded-window assertion as TestExpectedReviewersFastAdvance:
+	// fast-advance must fire before any authority-verdict branch is ever
+	// reached (that branch only activates once hasReviews is true, which
+	// never happens here — nothing is ever reviewed).
+	RunPolls(t, env, 30)
+	if hasLabel(IssueLabels(t, env, num), "fabrik:awaiting-review") {
+		t.Fatal("fabrik:awaiting-review applied despite expected_reviewers: [] and review-authority:authoritative — fast-advance did not fire ahead of the authority-verdict branch")
+	}
+	t.Logf("R5 verified: #%d fast-advanced despite review-authority:authoritative — fast-advance composes independently of authority mode", num)
+}
+
+// TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation ports the live
+// test of the same name (AC2, Finding 2/R2, #1375): a stage-declared
+// expected_reviewers bot must never defer an outstanding human reviewer's
+// authoritative escalation behind its own re-prompt ladder.
+//
+// Unlike this file's other scenarios, this reaches the state "outstanding
+// requested reviewers empty, one human review exists, a declared bot hasn't
+// responded" without ever formally requesting the human — SeedReview alone
+// (no SeedReviewRequest) leaves reviewGateOutstanding's outstanding slice
+// empty from the start, which is the state under test; the live suite's
+// RequestPRReviewer call exists purely for its own #1312 workaround, which,
+// per this file's divergence note, has no sim analogue and is not ported.
+//
+// Non-vacuity fix (found auditing this port, #1450): an earlier revision of
+// this test used newReviewAuthorityEnv's near-real-time clock and asserted
+// fabrik:bot-reprompted's absence after only ~2s of real time (RunPolls'
+// workerYield cost) against a 15-minute ReviewWaitTimeout —
+// checkAwaitingReviewTimeout's own real-time-anchored guard
+// (`time.Since(appliedAt) < timeout`) made the allBots branch this test
+// claims to cover structurally unreachable within that budget, so the
+// assertion held whether or not Finding 2's fix (engine/reviews.go's `&&
+// authorityReason == ""` clause on allBots) was present at all — confirmed
+// by reverting that clause locally and observing this test still pass.
+// Fixed by reusing newExpectedReviewersTimeoutEnv's backdated-StartTime
+// technique (the same one TestExpectedReviewersDeclaredWaitsAndReprompts
+// uses to make the timeout branch genuinely reachable) and seeding the
+// human's blocking review BEFORE the first poll ever runs, so authorityReason
+// is already non-empty (and allBots therefore already false, per the fix)
+// the very first time checkAwaitingReviewTimeout's now-immediately-overdue
+// timeout gate is evaluated — the exact race Finding 2 closes.
+func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
+	t.Parallel()
+	env := newExpectedReviewersTimeoutEnv(t) // backdated StartTime — see doc comment above
+
+	num, prNum := seedReviewGateItem(t, env, "Review", "declared-bot-no-defer",
+		"review-authority:authoritative", "expected-reviewers:declared")
+	// Seeded before any poll runs, so the human's blocking verdict is already
+	// present (authorityReason already non-empty) the first time the gate is
+	// ever evaluated — closing the window a post-hoc SeedReview would leave
+	// open (allBots briefly true before the review lands).
+	seedActionableReview(t, env, prNum, "reviewer-human", "CHANGES_REQUESTED", "please address this")
+	t.Logf("PR #%d: human REQUEST_CHANGES review pre-seeded before the first poll — declared bot still unresponsive", prNum)
+
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	t.Logf("fabrik:awaiting-review confirmed on #%d with the human verdict already in place", num)
+
+	// The human path must win: the reinvoke fires to address the feedback
+	// (Finding 1, #1375) — this alone would already fail against a
+	// pre-#1375 engine, where the authoritative reinvoke path is
+	// unreachable while blocked.
+	AdvanceUntil(t, env, func(env *Env) bool {
+		return env.Claude.CommentCallCount("Review") >= 1
+	}, 80)
+	if env.Claude.CommentCallCount("Review") < 1 {
+		t.Fatal("expected a review-reinvoke dispatch on the human's CHANGES_REQUESTED verdict")
+	}
+	t.Logf("review-reinvoke dispatched for #%d on the human's CHANGES_REQUESTED verdict", num)
+
+	// Drive a further settle window and confirm the declared bot's ladder
+	// never engages — the backdated clock means checkAwaitingReviewTimeout's
+	// real-time gate has been satisfied since the very first poll, so this is
+	// a genuine test of the allBots branch, not a budget that never reaches
+	// it: if reviewGateAllBots incorrectly read allBots=true for the
+	// still-outstanding declared bot once the human's verdict dropped
+	// outstanding to empty, fabrik:bot-reprompted would appear here.
+	//
+	// Checked after EVERY poll in the window, not just once at the end: with
+	// the backdated clock, both Phase 1 (re-prompt, applies the label) and
+	// Phase 2 (timeout, removes it again) have their own timeout windows
+	// already overdue from poll 1 — a regression that incorrectly fires
+	// Phase 1 would have it removed again by Phase 2 within the same settle
+	// window, so a single post-loop check can miss the label's entire
+	// lifetime. This was caught empirically: an earlier revision of this
+	// fix used RunPolls(20) + one check afterward, which still passed
+	// against a reverted Finding-2 fix, because by the time the check ran,
+	// Phase 2 had already cleared the transient fabrik:bot-reprompted state
+	// Phase 1 had (incorrectly) applied moments before.
+	for i := 0; i < 20; i++ {
+		RunPoll(t, env)
+		if hasLabel(IssueLabels(t, env, num), "fabrik:bot-reprompted") {
+			t.Fatalf("fabrik:bot-reprompted applied on poll %d — the declared bot's re-prompt ladder fired instead of deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)", i+1)
+		}
+	}
+	t.Logf("AC2 verified: #%d — declared bot never re-prompted at any point despite an already-overdue timeout window; human's authoritative CHANGES_REQUESTED escalation won", num)
+}

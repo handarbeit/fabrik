@@ -23,12 +23,24 @@ import (
 // README.md's table entry for this function.
 func FileIssue(t *testing.T, env *Env, title, body, status string, labels ...string) int {
 	t.Helper()
+	return FileIssueInRepo(t, env, env.OwnerRepo, title, body, status, labels...)
+}
+
+// FileIssueInRepo is FileIssue, but files into ownerRepo explicitly instead
+// of env.OwnerRepo — for a multi-repo Env (EnvOptions.SecondRepo), where a
+// scenario needs to file into env.OwnerRepoBeta. Issue numbers are drawn
+// from one shared per-Env sequence across every repo it manages: real GitHub
+// numbers issues per-repo, but nothing here depends on the absolute value,
+// only on each number being unique within its own repo, which a shared
+// monotonic sequence trivially guarantees.
+func FileIssueInRepo(t *testing.T, env *Env, ownerRepo, title, body, status string, labels ...string) int {
+	t.Helper()
 	env.issueSeqMu.Lock()
 	env.issueSeqNext++
 	num := env.issueSeqNext
 	env.issueSeqMu.Unlock()
 
-	env.Sim.Sim().SeedIssue(env.OwnerRepo, simgh.IssueSeed{
+	env.Sim.Sim().SeedIssue(ownerRepo, simgh.IssueSeed{
 		Number: num,
 		Title:  title,
 		Body:   body,
@@ -36,7 +48,7 @@ func FileIssue(t *testing.T, env *Env, title, body, status string, labels ...str
 		Labels: append([]string(nil), labels...),
 	})
 	if err := env.Sim.Sim().Err(); err != nil {
-		t.Fatalf("FileIssue: %v", err)
+		t.Fatalf("FileIssueInRepo: %v", err)
 	}
 	return num
 }
@@ -111,4 +123,3 @@ func WaitForIssueClosed(t *testing.T, env *Env, issueNumber int, maxPolls int) {
 		return projectItem(t, env, issueNumber).IsClosed
 	}, maxPolls)
 }
-
