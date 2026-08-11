@@ -394,12 +394,16 @@ func TestApplyStageRetryCleared(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	s.Apply(StageRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
 	s.Apply(SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
+	s.Apply(ToolsDeniedRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
 	applyExpect(t, s, StageRetryCleared{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
 	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
 		t.Error("Attempts not cleared")
 	}
 	if getItem(t, s, testRepo, 1).StageState.SliceRetries["Implement"] != 0 {
 		t.Error("SliceRetries not cleared alongside Attempts")
+	}
+	if getItem(t, s, testRepo, 1).StageState.ToolsDeniedRetries["Implement"] != 0 {
+		t.Error("ToolsDeniedRetries not cleared alongside Attempts")
 	}
 }
 
@@ -415,6 +419,23 @@ func TestApplySliceRetryIncremented(t *testing.T) {
 	// also count against the failure counter (#1199).
 	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
 		t.Error("Attempts must not be touched by SliceRetryIncremented")
+	}
+}
+
+// ---- ToolsDeniedRetryIncremented ----
+
+func TestApplyToolsDeniedRetryIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ToolsDeniedRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	if getItem(t, s, testRepo, 1).StageState.ToolsDeniedRetries["Implement"] != 1 {
+		t.Error("ToolsDeniedRetries not incremented to 1")
+	}
+	// ToolsDeniedRetries is independent of Attempts — a permission-denial exit
+	// must not also count against the failure counter (#1523). This is the
+	// assertion that must fail if the max_retries exemption is removed
+	// (mirrors AC8's non-vacuousness requirement at the itemstate layer).
+	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
+		t.Error("Attempts must not be touched by ToolsDeniedRetryIncremented")
 	}
 }
 
@@ -748,6 +769,22 @@ func TestSliceRetriesSnapshotIsDeepCopy(t *testing.T) {
 	s.Apply(SliceRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
 	if held.SliceRetries("Implement") != 1 {
 		t.Errorf("held snapshot mutated by later increment: SliceRetries = %d, want 1", held.SliceRetries("Implement"))
+	}
+}
+
+// TestToolsDeniedRetriesSnapshotIsDeepCopy verifies that a Snapshot taken
+// before a later ToolsDeniedRetryIncremented retains its original count —
+// confirming copyStageState deep-copies the ToolsDeniedRetries map (no shared
+// backing map). Mirrors TestSliceRetriesSnapshotIsDeepCopy.
+func TestToolsDeniedRetriesSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, ToolsDeniedRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
+	if held.ToolsDeniedRetries("Implement") != 1 {
+		t.Fatalf("precondition: held snapshot ToolsDeniedRetries = %d, want 1", held.ToolsDeniedRetries("Implement"))
+	}
+	s.Apply(ToolsDeniedRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
+	if held.ToolsDeniedRetries("Implement") != 1 {
+		t.Errorf("held snapshot mutated by later increment: ToolsDeniedRetries = %d, want 1", held.ToolsDeniedRetries("Implement"))
 	}
 }
 
