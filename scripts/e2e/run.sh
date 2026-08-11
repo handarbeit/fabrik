@@ -110,8 +110,12 @@
 # separate 0.0.78 pre-release gate runs, all of whose failures were timeouts,
 # not assertion violations). To make a throttled run fail loudly instead:
 # after each leg's suite invocation, this script scans the bed's own
-# fabrik.log (at $ENGINE_LOG, scoped to only the bytes written during that
-# leg) for the engine's one-shot rate-limit-backoff-activation line
+# fabrik.log (at $ENGINE_LOG, scoped to the bytes written since just before
+# that leg's own bed-restart step — not just since its suite invocation, so
+# a backoff activation logged by the freshly-restarted engine's very first
+# poll, before the suite even starts, is still caught rather than falling
+# into a blind spot between legs) for the engine's one-shot
+# rate-limit-backoff-activation line
 # ("...activating rate-limit backoff", engine/poll.go — NOT the companion
 # per-poll "...is low (...) consider reducing poll frequency" line, which
 # fires on every poll while low and would over-trigger on a run that dipped
@@ -303,6 +307,22 @@ switch_and_run() {
   local mode="$1"
   local parallel="$2"
   shift 2
+
+  # Captured BEFORE the restart step below (not just before the suite
+  # invocation) so the post-leg backoff scan's window covers the restart
+  # itself and the freshly-restarted engine's very first poll — a fresh
+  # process has no memory of already having activated backoff, so if the
+  # account's real (unreset-by-restart) GraphQL remaining is already at or
+  # near the 20% hysteresis threshold, that first poll's own bootstrap probe
+  # can immediately log the activation line before the suite has even
+  # started. Capturing the offset only after the restart (as an earlier
+  # version of this script did) left exactly that window — plus the idle
+  # gap since the previous leg's own scan already ran — unscanned by either
+  # leg. See engine/poll.go's rate-limit-low log line and
+  # engine/terminal.go's runProbeAndDeepFetch bootstrap probe.
+  local log_offset
+  log_offset=$(wc -c < "$ENGINE_LOG" 2>/dev/null || echo 0)
+
   echo "== switching test bed to FABRIK_MERGE_TRAIN=${mode} =="
   # KNOWN GAP: this restart step has none of the classification/auto-teardown
   # machinery below — it's a plain `-v` (non-`-json`) run with its own fixed
@@ -322,20 +342,17 @@ switch_and_run() {
   local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
   local rc=0
 
-  # Snapshot the bed's GraphQL budget and this leg's position in fabrik.log
-  # before the suite runs — the former lets the post-leg report show this
-  # leg's actual GraphQL cost (A3, #1527), the latter scopes the post-leg
-  # backoff scan below to only what this leg itself wrote, so a prior leg's
-  # (or a prior invocation's) backoff event can never cause a false positive
-  # here. Both guarded with `|| echo ...`/`2>/dev/null || echo 0` so a
-  # transient `gh` failure or a not-yet-existing log file degrades to a
-  # skipped report rather than aborting the script under `set -e`.
-  local budget_before budget_after log_offset
+  # Snapshot the bed's GraphQL budget right before the suite runs (not
+  # log_offset above, which is deliberately captured earlier — see its own
+  # comment) — this is purely for the A3 cost report, which should reflect
+  # the suite's own consumption, not the restart step's. Guarded with
+  # `|| echo ...` so a transient `gh` failure degrades to a skipped report
+  # rather than aborting the script under `set -e`.
+  local budget_before budget_after
   budget_before=""
   if [ -n "$BED_TOKEN" ]; then
     budget_before=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
   fi
-  log_offset=$(wc -c < "$ENGINE_LOG" 2>/dev/null || echo 0)
 
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
       ./tests/e2e/... "$@" 2>&1 \
