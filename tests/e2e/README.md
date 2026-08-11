@@ -473,9 +473,10 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
 ### Additional prerequisites for the merge-train scenarios (ADR-059)
 
 `TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`,
-`TestMergeTrainRestartSafety`, and `TestMergeTrainRunawayGuardPausesBatch` need
-one-time bed setup. They **skip cleanly** (`requireTrainBed`) if the `Queued`
-column is absent, so they are safe to merge before the bed is set up. They
+`TestMergeTrainRestartSafety`, `TestMergeTrainRunawayGuardPausesBatch`, and
+`TestMergeTrainRedSingletonReroutesOffQueued` need one-time bed setup. They
+**skip cleanly** (`requireTrainBed`) if the `Queued` column is absent, so they
+are safe to merge before the bed is set up. They
 also skip cleanly under train mode `"off"` — these scenarios place issues
 directly in `Queued` via the GitHub API, which succeeds regardless of mode,
 but nothing drains `Queued` when `merge_train: off` (no per-item dispatch,
@@ -500,14 +501,29 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     # on macOS/Apple Silicon a copied binary may be SIGKILL'd; build in place or:
     #   xattr -cr ~/dev/fabrik-test/fabrik && codesign --force --sign - ~/dev/fabrik-test/fabrik
     ```
-18. **`train-poison-guard` required check** on `fabrik-test-alpha` — only for
-    `TestMergeTrainBisectionEjectsPoisoner`. Commit
+18. **`train-poison-guard` required check** on `fabrik-test-alpha` — for both
+    `TestMergeTrainBisectionEjectsPoisoner` and
+    `TestMergeTrainRedSingletonReroutesOffQueued` (#1545). Commit
     `tests/e2e/testdata/train-poison-guard.yml` to the repo as
     `.github/workflows/train-poison-guard.yml` and mark the `train-poison-guard`
     check REQUIRED on branch protection, so the combined-Validate poll gates on it.
     The bisection test skips this check indirectly — if the guard is absent the
     combined batch is green and no bisection occurs, failing the `bisecting`
     log-line wait; run it only after the guard is enrolled.
+    `TestMergeTrainRedSingletonReroutesOffQueued` queues exactly one poison
+    member, so its own combined Validate goes red with nobody to bisect against —
+    the top-level `len(survivors) == 1` arity guard short-circuits straight to
+    `ejectRedSingleton` instead. It deliberately does **not** call `t.Parallel()`:
+    the train forms from every item currently in `Queued` on a repo, so running
+    concurrently with `TestMergeTrainHappyPathLanding`/
+    `TestMergeTrainBisectionEjectsPoisoner` (both parallel, same repo) risks this
+    test's lone member being batched together with a sibling test's members,
+    which would route through bisection instead of the arity guard this test
+    exists to exercise. Dropping `t.Parallel()` guarantees it completes before any
+    parallel Alpha merge-train scenario begins queueing, mirroring
+    `TestMergeTrainRunawayGuardPausesBatch`'s identical non-parallel rationale
+    below. Wall-clock: ~10–20 min (one combined validation, no bisection, no
+    landing CI).
 19. The default `E2E_TIMEOUT=4h` already covers these run in isolation
     (happy/bisect: 20–40 min; restart — two sequential landings: 25–50 min).
     Use a *smaller* override to fail faster while iterating, e.g.
