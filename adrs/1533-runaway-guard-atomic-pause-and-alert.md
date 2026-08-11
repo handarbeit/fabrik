@@ -59,6 +59,10 @@ successful land — also clears every `mergeTrainRunawayAlerted` entry for the r
 key prefix, since entries are per-member). The next trip starts a fresh episode where every
 member is eligible for a fresh alert.
 
+(A later human review round found this episode boundary incomplete for the operator-resume
+recovery path the alert text itself instructs — see "Corrections from human review" below;
+`mergeTrainRunawayAlerted` is now `map[string]int`, not `map[string]bool`.)
+
 This closes the case where the *same* member appears in two racing calls' `items` slices
 (Hook 1's two call sites, or a Hook 1/Hook 2 race) — the shape the observed e2e log's
 "already tripped ... pausing N before dispatch" line demonstrates is reachable. It does
@@ -79,8 +83,11 @@ regardless of whether any `fireRunawayGuard` call will ever reach that member ag
 success, the member is recorded in `mergeTrainRunawayAlerted` (so a still-in-flight or later
 `fireRunawayGuard` call doesn't double-post) and the marker is cleared. After `MaxRetries`
 failed retries, `escalateRunawayAlertFailure` posts a fallback comment carrying the same
-explanation and removes the marker — the member is never left paused with zero delivered
-explanation, even when the underlying failure is persistent rather than transient.
+explanation — the member is never left paused with zero delivered explanation, even when the
+underlying failure is persistent rather than transient. (A later human review round found the
+original version of this escalation removed the marker regardless of whether the fallback
+comment itself succeeded, which could reproduce exactly this failure mode under a persistent
+outage — see "Corrections from human review" below.)
 
 This reuses the shared `recordSettleRetry`/`clearSettleMarker`/`escalateSettle` helpers
 (`engine/settle.go`) already backing four other settle scans in this family
@@ -88,12 +95,18 @@ This reuses the shared `recordSettleRetry`/`clearSettleMarker`/`escalateSettle` 
 `fabrik:awaiting-advance`) — this is the eighth instance of the ADR-1270 dedicated-settle-scan
 pattern, not a new shape.
 
-### Comment-then-label ordering unchanged
+### Comment-then-label ordering — revised during Validate
 
-The pre-existing code already posts the comment before applying the pause labels; that
-ordering is preserved. The defect was the lack of atomicity/idempotency *across* calls and
-the lack of a retry path on failure, not the order of operations within one call — reordering
-was considered and rejected as solving the wrong problem.
+The pre-existing code posted the comment before applying the pause labels, and this ADR
+originally preserved that ordering as out of scope (the defect being atomicity/idempotency
+*across* calls, not the order of operations within one call). A Validate-stage bot review
+identified a residual crash window in that ordering: if the process died between
+`markRunawayAlertOutstanding` and the two `addLabel` calls, a member could end up carrying
+`fabrik:awaiting-runaway-alert` without ever actually being paused — violating
+`settleRunawayGuardAlertScan`'s own invariant that a member carrying the marker also carries
+`fabrik:paused`. `fireRunawayGuard` now applies `fabrik:paused`/`fabrik:awaiting-input`
+**before** attempting the comment, closing that window; the settle scan's invariant now holds
+unconditionally rather than "except mid-crash."
 
 ### One structural deviation from this family: no `fabrik:paused`-absence guard in the settle scan
 
@@ -106,9 +119,22 @@ mechanism, stop retrying." Here, `fabrik:paused` is applied by `fireRunawayGuard
 `fabrik:awaiting-runaway-alert` always also carries `fabrik:paused`, from the very first poll
 the marker exists. Gating `settleRunawayGuardAlertScan` on `fabrik:paused`'s absence would
 make it a permanent no-op. The marker's own presence/absence is the sole retry-eligibility
-signal; `escalateRunawayAlertFailure` removing the marker (rather than leaving it, as
-`fabrik:awaiting-advance`/ADR-1422 deliberately does) is what stops the retries once the
-fallback comment has been posted.
+signal.
+
+`escalateRunawayAlertFailure` stopping the retries by removing the marker (rather than
+leaving it, as `fabrik:awaiting-advance`/ADR-1422 deliberately does) was this ADR's original
+design — but a later human review round (`@verveguy`, changes-requested) found it did so
+*unconditionally*, discarding its fallback comment's own error via the shared `escalateSettle`
+helper. Under a persistent `AddComment` outage (not just a transient one), that meant: the
+original alert fails, `MaxRetries` settle-scan retries fail, the fallback comment fails
+silently, and the marker is removed anyway — reproducing #1533 itself (a member paused with
+no delivered explanation) through the very machinery meant to fix it, and erasing the one
+diagnostic signal (the marker) that would have let a human notice. `escalateRunawayAlertFailure`
+no longer delegates to `escalateSettle`; it checks the fallback comment's own result directly
+and only clears the marker (and records the member alerted) on confirmed success. On failure
+the marker stays, and `settleRunawayGuardAlertScan` keeps retrying — primary alert, then
+fallback — every poll, indefinitely, until a comment actually lands. See "Corrections from
+human review" below.
 
 ## Rejected alternatives
 
@@ -151,6 +177,49 @@ convention, following the identical precedent set by ADR-1528's own correction n
 the same PR to describe the corrected contract: Hook 1 and Hook 2 *can* run concurrently, and
 correctness on the alerting side now comes from `mergeTrainRunawayMu`/`mergeTrainRunawayAlerted`,
 not from an assumption that the two hooks never overlap.
+
+## Corrections from human review
+
+Two rounds of human PR review (`@verveguy`, changes-requested) found gaps in the design as
+first implemented — both fixed in the same PR, both non-vacuously verified (see Verification
+below). Recorded here rather than silently folded into the sections above, per this repo's
+usual practice for a design that changes shape mid-PR.
+
+**1. Escalation could silently reproduce #1533 itself under a persistent failure.**
+`escalateRunawayAlertFailure` originally delegated to the shared `escalateSettle` helper,
+which unconditionally removes the durable marker and discards its comment closure's error.
+Under a persistent `AddComment` outage (lost token permission, a secondary rate limit
+outlasting `MaxRetries` polls — not just a transient blip): the original alert fails, every
+settle-scan retry fails, the fallback comment fails silently, and the marker is removed
+anyway — leaving the member paused with zero delivered explanation and no diagnostic trace,
+which is bug #1533 verbatim, reproduced through the very machinery meant to fix it, and
+*harder* to detect than the original bug (the marker a human or settle scan would have
+noticed is gone). Fixed: `escalateRunawayAlertFailure` no longer uses `escalateSettle`; it
+checks the fallback comment's own result and only clears the marker (and records the member
+alerted) on confirmed success. On failure the marker stays, so the settle scan keeps
+retrying — primary alert, then fallback — every poll, indefinitely.
+
+**2. Cross-episode idempotency ignored the operator-resume recovery path.**
+`mergeTrainRunawayAlerted` was cleared only by `resetTrialCounter`, which fires solely on a
+successful land. But the alert text itself instructs operators to manually remove
+`fabrik:paused`/`fabrik:awaiting-input` to re-enable the train — a path that never calls
+`resetTrialCounter`. With old trial timestamps still inside the rolling window, a second
+genuine trip after a resume retriggered `fireRunawayGuard` for the same members while they
+were still marked alerted: pause labels reapplied, no alert comment — reproduced against the
+original branch by firing twice with no intervening reset (6 trials → 1 comment, 8 trials →
+still 1 comment total). Fixed: `mergeTrainRunawayAlerted` is now `map[string]int`, recording
+the trial count in effect when a member was last alerted. A later call is treated as
+already-alerted only while its own count is `<=` the recorded value — trials cannot
+accumulate while the guard keeps the queue paused, so an increase can only mean an operator
+resumed the train and it genuinely tripped again, which now produces a fresh alert.
+
+**3. Label-ordering crash window** (addressed above, under "Comment-then-label ordering").
+
+Two further findings from the same review rounds were explicitly left as non-blocking,
+follow-up-if-desired: `applyLabelAdd`'s `fabrik:paused` add can itself fail silently (an
+existing, codebase-wide swallowed-error pattern, not unique to this function); and
+`mergeTrainRunawayMu`'s cross-repo blocking scope was under-documented rather than
+incorrect (now called out explicitly in `fireRunawayGuard`'s own doc comment).
 
 ## Verification
 
