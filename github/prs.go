@@ -72,8 +72,7 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 // first-seen or not — rather than being treated as a verdict by omission.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
-	var raw []struct {
+	type rawReview struct {
 		ID   int `json:"id"`
 		User *struct {
 			Login string `json:"login"`
@@ -83,7 +82,16 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		CommitID    string `json:"commit_id"`
 		SubmittedAt string `json:"submitted_at"`
 	}
-	if err := c.restGetJSON(apiURL, &raw); err != nil {
+	// Paginated (#1539): the collapse below keeps the LAST eligible review per
+	// author, so reading only page one silently pins every author's verdict to
+	// whatever they last said within the first restPageSize reviews. On a
+	// long-lived PR that is an arbitrarily stale verdict — it drove a 315-review
+	// re-review loop in Pruefer and reaches the authoritative landing gate.
+	raw, err := paginateREST[rawReview](c, fmt.Sprintf("PR #%d reviews", prNumber), func(page int) string {
+		return fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d",
+			c.baseURL, owner, repo, prNumber, restPageSize, page)
+	})
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil
 		}
@@ -575,27 +583,68 @@ type CheckRun struct {
 }
 
 // FetchCheckRuns retrieves check runs for a given commit SHA via the REST API.
+//
+// Paginated and total_count-verified (#1539). This was the worst of the
+// truncating fetchers: it sent no per_page at all, so GitHub's default of 30
+// applied, and it discarded the total_count the endpoint reports — a commit with
+// more than 30 check runs therefore read as a complete, potentially all-green
+// set. Every CI gate decision (checkCIGate, the merge-train trial classifier)
+// rests on this list, so a truncated read can advance an item whose remaining
+// checks are still pending or failing.
+//
+// The count check is deliberately an error rather than a warning: a CI verdict
+// computed from a known-incomplete set is worse than no verdict, since the
+// caller cannot tell the two apart.
 func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", c.baseURL, owner, repo, sha)
-	var raw struct {
-		CheckRuns []struct {
-			ID         int64  `json:"id"`
-			Name       string `json:"name"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-			Output     struct {
-				Summary string `json:"summary"`
-				Text    string `json:"text"`
-			} `json:"output"`
-			DetailsURL string `json:"details_url"`
-			HTMLURL    string `json:"html_url"`
-		} `json:"check_runs"`
+	type rawCheckRun struct {
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		Output     struct {
+			Summary string `json:"summary"`
+			Text    string `json:"text"`
+		} `json:"output"`
+		DetailsURL string `json:"details_url"`
+		HTMLURL    string `json:"html_url"`
 	}
-	if err := c.restGetJSON(apiURL, &raw); err != nil {
-		return nil, fmt.Errorf("fetching check runs for %s: %w", sha, err)
+	var all []rawCheckRun
+	totalCount := 0
+	for page := 1; page <= restMaxPages; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d",
+			c.baseURL, owner, repo, sha, restPageSize, page)
+		var raw struct {
+			TotalCount int           `json:"total_count"`
+			CheckRuns  []rawCheckRun `json:"check_runs"`
+		}
+		if err := c.restGetJSON(apiURL, &raw); err != nil {
+			return nil, fmt.Errorf("fetching check runs for %s: %w", sha, err)
+		}
+		totalCount = raw.TotalCount
+		all = append(all, raw.CheckRuns...)
+		if len(raw.CheckRuns) < restPageSize {
+			break
+		}
+		if page == restMaxPages {
+			return nil, fmt.Errorf("fetching check runs for %s: exceeded %d pages without reaching the end — refusing to return a truncated result",
+				sha, restMaxPages)
+		}
 	}
-	out := make([]CheckRun, len(raw.CheckRuns))
-	for i, cr := range raw.CheckRuns {
+	// Only cross-check when the server actually reported a positive total.
+	// Guarding on >= 0 (as this first did) makes an ABSENT total_count — which
+	// decodes to 0 — indistinguishable from a genuine zero, so any deployment
+	// that omits the field would hard-fail every CI gate on every commit. Real
+	// github.com always sends it (see testdata/recordings/fetch_check_runs.json,
+	// a captured response), but v0.0.78 added GHES support and no equivalent
+	// recording exists for it, so this fails open on absence and closed only on
+	// a real, positive disagreement. A server reporting 0 while returning runs
+	// is incoherent and not worth defending against.
+	if totalCount > 0 && len(all) != totalCount {
+		return nil, fmt.Errorf("fetching check runs for %s: collected %d of %d reported check runs — refusing to return an incomplete set",
+			sha, len(all), totalCount)
+	}
+	out := make([]CheckRun, len(all))
+	for i, cr := range all {
 		out[i] = CheckRun{
 			ID:            cr.ID,
 			Name:          cr.Name,
@@ -791,12 +840,11 @@ func labelNames(labels []rawLabel) []string {
 
 // ListOpenPRs returns all open pull requests for a repository (draft and
 // non-draft), including author and label metadata needed for Pruefer's PR
-// selection logic. Capped at 100 results (GitHub's max per_page); a warning
-// is logged (not silently truncated) when exactly 100 are returned, since
-// more open PRs may exist.
+// selection logic. Pages until exhausted (#1539) — it previously returned only
+// the first 100 and logged a warning, so a repo with more open PRs than that
+// had the remainder invisible to PR selection and merge-train discovery.
 func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=100", c.baseURL, owner, repo)
-	var raw []struct {
+	type rawPR struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		State  string `json:"state"`
@@ -814,11 +862,12 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			Ref string `json:"ref"`
 		} `json:"base"`
 	}
-	if err := c.restGetJSON(apiURL, &raw); err != nil {
+	raw, err := paginateREST[rawPR](c, fmt.Sprintf("open PRs for %s/%s", owner, repo), func(page int) string {
+		return fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=%d&page=%d",
+			c.baseURL, owner, repo, restPageSize, page)
+	})
+	if err != nil {
 		return nil, fmt.Errorf("listing open PRs for %s/%s: %w", owner, repo, err)
-	}
-	if len(raw) == 100 {
-		logf(0, "prs", "ListOpenPRs %s/%s: received exactly 100 results — more open PRs may exist (pagination not implemented)\n", owner, repo)
 	}
 	out := make([]PRDetails, len(raw))
 	for i, pr := range raw {
@@ -858,9 +907,15 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 // page, stop on an empty page. Returns nil, nil on 404.
 func (c *Client) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
 	var out []string
-	for page := 1; ; page++ {
-		apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=100&page=%d",
-			c.baseURL, owner, repo, prNumber, page)
+	// Bounded by restMaxPages (#1539 review finding 1). This loop predates
+	// paginateREST and was written as `for page := 1; ; page++` with no cap, so a
+	// server that never returns an empty page — a misconfigured proxy, a GHES
+	// bug, a hostile endpoint — spins forever while `out` grows without bound.
+	// Not converted to paginateREST because the accumulation projects to a field
+	// rather than collecting whole records; the bound is what actually matters.
+	for page := 1; page <= restMaxPages; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d",
+			c.baseURL, owner, repo, prNumber, restPageSize, page)
 		var raw []struct {
 			Filename string `json:"filename"`
 		}
@@ -870,14 +925,15 @@ func (c *Client) FetchPRFiles(owner, repo string, prNumber int) ([]string, error
 			}
 			return nil, fmt.Errorf("fetching files for PR #%d: %w", prNumber, err)
 		}
-		if len(raw) == 0 {
-			break
-		}
 		for _, f := range raw {
 			out = append(out, f.Filename)
 		}
+		if len(raw) < restPageSize {
+			return out, nil
+		}
 	}
-	return out, nil
+	return nil, fmt.Errorf("fetching files for PR #%d: exceeded %d pages without reaching the end — refusing to return a truncated result",
+		prNumber, restMaxPages)
 }
 
 // ReviewEvent selects the wire "event" value SubmitPRReview submits. Its

@@ -147,12 +147,18 @@ func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, label
 // FetchLabelAppliedAt returns the time when labelName was last applied to the
 // given issue, using the GitHub issue events API. Returns time.Time{} (zero)
 // without error if the event is not found (fail-open: timeout will not fire).
-// Pages through all events to find the most recent application.
+// Pages through all events to find the most recent application, bounded by
+// restMaxPages (#1539 review finding 1) — this loop was previously
+// `for page := 1; ; page++` with no cap, so a server that never returns an
+// empty page would spin forever. The bound is fail-open, consistent with the
+// rest of this function: exhausting it returns the newest application seen so
+// far rather than an error, since a missed timestamp only means the timeout
+// this feeds does not fire — never a wrong action.
 func (c *Client) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 	var applied time.Time
-	for page := 1; ; page++ {
-		apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/events?per_page=100&page=%d",
-			c.baseURL, owner, repo, issueNumber, page)
+	for page := 1; page <= restMaxPages; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/events?per_page=%d&page=%d",
+			c.baseURL, owner, repo, issueNumber, restPageSize, page)
 		var events []struct {
 			Event     string `json:"event"`
 			CreatedAt string `json:"created_at"`
