@@ -237,6 +237,12 @@ func (s Snapshot) SliceRetries(stageName string) int {
 	return s.state.StageState.SliceRetries[stageName]
 }
 
+// ToolsDeniedRetries returns the tool-permission-denial retry count for a
+// given stage, or zero. Bounded independently of Attempts/MaxRetries (#1523).
+func (s Snapshot) ToolsDeniedRetries(stageName string) int {
+	return s.state.StageState.ToolsDeniedRetries[stageName]
+}
+
 // LastEnqueuedSHA returns the PR head SHA recorded at the last merge-queue enqueue,
 // or "" if not recorded (LinkedPR is nil or no enqueue has occurred).
 func (s Snapshot) LastEnqueuedSHA() string {
@@ -395,6 +401,7 @@ func copyStageState(s StageState) StageState {
 		RebaseCycles:         copyMap(s.RebaseCycles),
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
 		SliceRetries:         copyMap(s.SliceRetries),
+		ToolsDeniedRetries:   copyMap(s.ToolsDeniedRetries),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 		LastTurnsUsed:        copyMap(s.LastTurnsUsed),

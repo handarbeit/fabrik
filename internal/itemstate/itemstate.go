@@ -306,6 +306,14 @@ type StageState struct {
 	// time-slice, not a failure (#1199), so it must not count against the
 	// failure counter, but a non-converging job still needs its own bound.
 	SliceRetries map[string]int
+	// ToolsDeniedRetries counts how many consecutive tool-permission-denial
+	// exits (claudeToolsDeniedError) each stage has hit. Bounded by
+	// MaxToolsDeniedRetries, independently of Attempts/MaxRetries — the
+	// condition is an environmental permission misconfiguration, not a
+	// stage failure (#1523), so it must not count against the failure
+	// counter, but a non-converging (never-fixed) misconfiguration still
+	// needs its own bound. Mirrors SliceRetries structurally.
+	ToolsDeniedRetries map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage
