@@ -225,3 +225,47 @@ func (c *Client) restDelete(url string) error {
 	_, _, err := c.do("DELETE", url, nil)
 	return err
 }
+
+// restPageSize is the page size every paginated REST fetcher requests. GitHub
+// caps per_page at 100 for the endpoints used here; asking for more is silently
+// clamped, so this is the largest page we can actually get.
+const restPageSize = 100
+
+// restMaxPages bounds paginateREST so a server that never returns a short page
+// cannot spin forever. 100 pages × 100 items = 10,000 records, far beyond any
+// realistic PR review list, issue thread, or open-PR set. Reaching it is
+// treated as an error rather than a truncated result — see paginateREST.
+const restMaxPages = 100
+
+// paginateREST accumulates every page of a GitHub REST collection endpoint that
+// returns a bare JSON array. urlFor builds the request URL for a 1-based page
+// number and must include per_page=restPageSize.
+//
+// Why this exists (#1539): every caller here previously issued a single request
+// and treated page one as the whole collection. Past the boundary that returns a
+// partial slice with no error and no signal — indistinguishable from a complete
+// answer. On handarbeit/fabrik#1256 that let Pruefer re-review an unchanged head
+// 315 times, because FetchPRReviews could not see the reviews it had just
+// submitted; the same truncation reaches engine/reviews.go's authoritative
+// landing gate, where a stale verdict changes a merge decision.
+//
+// Termination: a page shorter than restPageSize is the last one, so a collection
+// that fits on a single page costs exactly one request (no speculative probe).
+// Hitting restMaxPages returns an error rather than the accumulated prefix —
+// silently degrading into a short list is precisely the defect being fixed, so
+// the bound fails loud.
+func paginateREST[T any](c *Client, what string, urlFor func(page int) string) ([]T, error) {
+	var all []T
+	for page := 1; page <= restMaxPages; page++ {
+		var chunk []T
+		if err := c.restGetJSON(urlFor(page), &chunk); err != nil {
+			return nil, err
+		}
+		all = append(all, chunk...)
+		if len(chunk) < restPageSize {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("fetching %s: exceeded %d pages (%d records) without reaching the end — refusing to return a truncated result",
+		what, restMaxPages, restMaxPages*restPageSize)
+}

@@ -420,16 +420,19 @@ func TestListOpenPRs(t *testing.T) {
 	}
 }
 
-func TestListOpenPRs_WarnsAtCap(t *testing.T) {
-	var warned bool
-	Logf = func(issueNumber int, tag, format string, args ...any) {
-		if tag == "prs" {
-			warned = true
-		}
-	}
-	defer func() { Logf = nil }()
-
-	entries := make([]map[string]interface{}, 100)
+// TestListOpenPRs_NeverSilentlyTruncates supersedes the former
+// TestListOpenPRs_WarnsAtCap (#1539). That test pinned the old contract — stop
+// at 100 results and log a warning — which pagination replaces outright, so its
+// assertion could not survive the fix. Its underlying intent, "a capped read is
+// never presented as a complete one", is preserved here and strengthened: the
+// call must now fail rather than return a short list.
+//
+// The fixture is a server that ignores `page` and returns a full page forever —
+// the exact pathology restMaxPages exists to bound. Completeness on a
+// well-behaved multi-page server is covered by
+// TestListOpenPRs_PagesBeyondFirstPage in pagination_test.go.
+func TestListOpenPRs_NeverSilentlyTruncates(t *testing.T) {
+	entries := make([]map[string]interface{}, restPageSize)
 	for i := range entries {
 		entries[i] = map[string]interface{}{
 			"number": i + 1, "state": "open",
@@ -437,21 +440,24 @@ func TestListOpenPRs_WarnsAtCap(t *testing.T) {
 			"head": map[string]string{"sha": "sha", "ref": "ref"},
 		}
 	}
+	var pages int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
 		json.NewEncoder(w).Encode(entries)
 	}))
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
 	prs, err := c.ListOpenPRs("owner", "repo")
-	if err != nil {
-		t.Fatalf("ListOpenPRs: %v", err)
+	if err == nil {
+		t.Fatalf("expected an error when the endpoint never returns a short page, got %d PRs and nil error — "+
+			"a bounded read must fail loudly rather than hand back a truncated set", len(prs))
 	}
-	if len(prs) != 100 {
-		t.Fatalf("expected 100 PRs, got %d", len(prs))
+	if prs != nil {
+		t.Errorf("expected nil results alongside the error, got %d PRs", len(prs))
 	}
-	if !warned {
-		t.Error("expected a warning to be logged when exactly 100 PRs are returned")
+	if pages != restMaxPages {
+		t.Errorf("served %d pages, want the restMaxPages bound of %d", pages, restMaxPages)
 	}
 }
 
