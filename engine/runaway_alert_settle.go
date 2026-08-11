@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -55,9 +56,35 @@ func (e *Engine) settleRunawayGuardAlertScan(board *gh.ProjectBoard) {
 // effectiveTrialWindow — no storage persists the original firing's exact count, and a live
 // re-read is simple and accurate enough for the retry comment's wording (the important facts
 // — that the member is paused, and why — don't change based on which count is shown).
+//
+// Runs under mergeTrainRunawayMu for its entire body, not just the map update after a
+// successful post. fireRunawayGuard's own doc comment claims "the whole pause+alert sequence
+// is ... a single critical section ... two concurrent calls can never interleave" — that
+// invariant only holds if every caller that can post this exact comment for the same member
+// participates in the same critical section. A member carrying runawayAlertMarkerLabel is
+// excluded from Hook 2's groupQueuedByRepo (it already has fabrik:paused), but Hook 1's
+// current/survivors is the worker's own in-flight member list, not a fresh board read — it
+// can still include this member if the worker hasn't ejected it, so a stale Hook 1 call can
+// legitimately reprocess a member that already picked up the marker earlier in the same
+// worker run. Without holding the lock across the comment post here, that Hook 1 call and
+// this settle retry could both observe mergeTrainRunawayAlerted[alertKey] == false and post
+// the alert concurrently — a duplicate alert, violating R2/A3.
 func (e *Engine) settleRunawayGuardAlert(item gh.ProjectItem) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoKey := owner + "/" + repo
+	alertKey := repoKey + "#" + strconv.Itoa(item.Number)
+
+	e.mergeTrainRunawayMu.Lock()
+	defer e.mergeTrainRunawayMu.Unlock()
+
+	if e.mergeTrainRunawayAlerted[alertKey] {
+		// A racing fireRunawayGuard call already delivered the alert for this member
+		// within this episode (e.g. it succeeded after this item picked up the marker
+		// but before this settle pass ran) — just clear the now-stale marker.
+		e.clearRunawayAlertMarker(item, owner, repo)
+		return
+	}
+
 	count, _ := e.isRunawayTripped(repoKey)
 	_, window := e.effectiveTrialWindow()
 
@@ -67,10 +94,7 @@ func (e *Engine) settleRunawayGuardAlert(item gh.ProjectItem) {
 		return
 	}
 
-	e.mergeTrainRunawayMu.Lock()
-	e.mergeTrainRunawayAlerted[repoKey+"#"+fmt.Sprint(item.Number)] = true
-	e.mergeTrainRunawayMu.Unlock()
-
+	e.mergeTrainRunawayAlerted[alertKey] = true
 	e.logf(item.Number, "merge-train", "posted runaway guard alert (retry)\n")
 	e.clearRunawayAlertMarker(item, owner, repo)
 }

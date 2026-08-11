@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -5312,6 +5313,51 @@ func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
 	// routeQueuedGroup must return immediately after firing the guard — no worker dispatched.
 	if _, ok := eng.mergeTrainInFlight.Load(repoKey); ok {
 		t.Error("expected no worker dispatched when the runaway guard is already tripped")
+	}
+}
+
+// TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert covers the residual race
+// between fireRunawayGuard and settleRunawayGuardAlert for the same member (#1533 R2/A3): a
+// member that already picked up the fabrik:awaiting-runaway-alert marker earlier in the same
+// episode (an earlier AddComment attempt failed) can still appear in a later Hook 1 call's
+// own current/survivors list (the worker's own in-flight member set, not a fresh board read
+// that would exclude an already-fabrik:paused item — unlike Hook 2's groupQueuedByRepo). If
+// that later fireRunawayGuard call races a concurrent settleRunawayGuardAlertScan retry for
+// the same member, both must not independently succeed in posting the alert — exactly one
+// comment must land, never two, regardless of which one wins the race.
+func TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert(t *testing.T) {
+	var commentCount int32
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			atomic.AddInt32(&commentCount, 1)
+			// Widen the race window so both goroutines are genuinely in-flight
+			// concurrently rather than incidentally serialized by scheduling luck.
+			time.Sleep(5 * time.Millisecond)
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	// Simulates the state left behind by an earlier fireRunawayGuard call within this
+	// same episode whose AddComment failed: paused, marker applied, not yet alerted.
+	member := makeTrainItem(20, "Stale Marker Member")
+	member.Labels = append(member.Labels, runawayAlertMarkerLabel, "fabrik:paused", "fabrik:awaiting-input")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	}()
+	go func() {
+		defer wg.Done()
+		eng.settleRunawayGuardAlert(member)
+	}()
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&commentCount); got != 1 {
+		t.Errorf("expected exactly 1 alert comment posted across the racing calls, got %d", got)
 	}
 }
 
