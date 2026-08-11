@@ -2216,54 +2216,103 @@ func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
 
 // resetTrialCounter clears the trial counter for repoKey after a successful landing,
 // so normal poison bisection (where survivors do land) never accumulates toward the cap.
+// This is also the runaway guard's own "episode ends" signal: a successful land can only
+// happen once the guard is no longer tripped, so it doubles as the boundary at which
+// mergeTrainRunawayAlerted's per-member idempotency entries for repoKey are cleared —
+// the next trip starts a fresh episode where every member is eligible for a fresh alert
+// (#1533).
 func (e *Engine) resetTrialCounter(repoKey string) {
 	e.mergeTrainTrialsMu.Lock()
 	delete(e.mergeTrainTrials, repoKey)
 	e.mergeTrainTrialsMu.Unlock()
+
+	prefix := repoKey + "#"
+	e.mergeTrainRunawayMu.Lock()
+	for key := range e.mergeTrainRunawayAlerted {
+		if strings.HasPrefix(key, prefix) {
+			delete(e.mergeTrainRunawayAlerted, key)
+		}
+	}
+	e.mergeTrainRunawayMu.Unlock()
 }
 
-// fireRunawayGuard pauses all Queued members for the repo, posts an alert comment on each,
-// and logs the event. Called when the trial counter reaches the runaway threshold (ADR-059 D8).
+// runawayGuardAlertMessage builds the explanatory alert comment posted (or retried) for a
+// single runaway-guard-paused member. Extracted from fireRunawayGuard so
+// settleRunawayGuardAlertScan's retry and escalateRunawayAlertFailure's fallback comment can
+// share the identical wording (#1533).
+func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) string {
+	return fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
+		"The merge-train has run **%d trial(s)** for `%s` within the last %s "+
+		"with **zero successful landings**. This indicates a persistent infra failure "+
+		"(e.g. billing-blocked CI, broken base branch, or all required checks erroring) "+
+		"rather than a code-composition issue.\n\n"+
+		"**Actions taken:** `fabrik:paused` and `fabrik:awaiting-input` applied to all Queued members.\n\n"+
+		"**What to do:**\n"+
+		"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
+		"2. Resolve the underlying issue.\n"+
+		"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
+		count, repoKey, window)
+}
+
+// fireRunawayGuard pauses every member in items and posts an alert comment on each, once per
+// member per guard episode. Called from three independent sites — twice inside
+// runMergeTrainWorker (Hook 1, the worker goroutine) and once from routeQueuedGroup (Hook 2,
+// the poll goroutine) — whenever the trial counter reaches the runaway threshold (ADR-059
+// D8). Each call site constructs its own, possibly-overlapping items slice from whatever
+// local state it holds, and nothing prevents Hook 1 and Hook 2 from running concurrently for
+// the same repoKey once the shared counter trips (the poll loop does not check whether a
+// worker is mid-firing).
+//
+// The whole pause+alert sequence is therefore a single critical section, serialized by
+// mergeTrainRunawayMu, so two concurrent calls can never interleave their loops. Within that
+// section, mergeTrainRunawayAlerted (keyed "owner/repo#N") makes re-encountering a member
+// already alerted this episode a no-op — the pause labels were applied then too — so a
+// member appearing in two racing calls' items slices is never double-alerted (R2/A3).
+// mergeTrainRunawayAlerted is cleared per-repo by resetTrialCounter, the guard's own "episode
+// ends" signal (a successful land) — the next trip starts a fresh episode.
+//
+// A member whose AddComment call fails is NOT marked alerted: it is left with the durable
+// fabrik:awaiting-runaway-alert marker instead, which settleRunawayGuardAlertScan retries
+// every poll independent of any fireRunawayGuard call ever reaching that member again. This
+// closes the residual gap a mutex alone cannot: once fabrik:paused lands, groupQueuedByRepo
+// permanently excludes the member from every future items snapshot Hook 2 could construct,
+// and Hook 1 only ever knows the members it started with — so a transient comment failure
+// here would otherwise strand the member paused with no explanation forever, exactly the
+// defect this function exists to close (#1533, R1).
 func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items []gh.ProjectItem, count int) {
-	_, m := e.effectiveTrialWindow()
+	_, window := e.effectiveTrialWindow()
 	repoKey := owner + "/" + repo
 	e.logf(0, "merge-train", "runaway guard fired for %s: %d trial(s) with zero successful lands within %s — pausing %d Queued member(s)\n",
-		repoKey, count, m, len(items))
+		repoKey, count, window, len(items))
+
+	e.mergeTrainRunawayMu.Lock()
+	defer e.mergeTrainRunawayMu.Unlock()
+
 	for _, item := range items {
-		msg := fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
-			"The merge-train has run **%d trial(s)** for `%s` within the last %s "+
-			"with **zero successful landings**. This indicates a persistent infra failure "+
-			"(e.g. billing-blocked CI, broken base branch, or all required checks erroring) "+
-			"rather than a code-composition issue.\n\n"+
-			"**Actions taken:** `fabrik:paused` and `fabrik:awaiting-input` applied to all Queued members.\n\n"+
-			"**What to do:**\n"+
-			"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
-			"2. Resolve the underlying issue.\n"+
-			"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
-			count, repoKey, m)
-		if _, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v\n", commentErr)
+		alertKey := repoKey + "#" + strconv.Itoa(item.Number)
+		if e.mergeTrainRunawayAlerted[alertKey] {
+			// Already paused and alerted this episode by an earlier call (Hook 1 or
+			// Hook 2, racing for the same member) — skip entirely to avoid a
+			// duplicate comment and redundant (though individually idempotent)
+			// label calls.
+			continue
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:paused (runaway guard): %v\n", err)
+
+		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, repoKey, window), false, true); commentErr != nil {
+			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
+			e.markRunawayAlertOutstanding(item, owner, repo)
 		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-			}
+			e.mergeTrainRunawayAlerted[alertKey] = true
+			// Best-effort: clears a marker left by an earlier failed attempt for
+			// this same member within this episode, if any. Unconditional rather
+			// than gated on item.Labels (a snapshot that can be stale relative to
+			// a marker a racing call just applied) — RemoveLabelFromIssue is a
+			// harmless no-op when the marker isn't actually present.
+			e.clearRunawayAlertMarker(item, owner, repo)
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input (runaway guard): %v\n", err)
-		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-			}
-		}
+
+		e.addLabel(item, "fabrik:paused")
+		e.addLabel(item, "fabrik:awaiting-input")
 	}
 }
 
