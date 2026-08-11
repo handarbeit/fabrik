@@ -90,6 +90,16 @@ type cloneCall struct {
 	done chan struct{} // closed when clone completes (success or failure)
 	dir  string        // bareDir on success; empty on failure
 	err  error         // clone error on failure; nil on success
+	// ownerKey identifies the item (issueKey format, "owner/repo#N") that owned
+	// a *failed* clone attempt. Set only on failure, before done is closed, so
+	// it's safely visible to waiters via the channel-close happens-before edge.
+	// It is the identity half of the retry-boundary gate (ADR-1543): a failed
+	// entry is only ever cleared by a caller whose own issueKey matches
+	// ownerKey and whose own (already-fetched) Labels no longer carry
+	// fabrik:paused — i.e. the specific item that owned the failure, redispatched
+	// after an operator has cleared the pause. See ensureRepoReady and
+	// ensureSpawnTargetReady.
+	ownerKey string
 }
 
 type Engine struct {
@@ -167,6 +177,15 @@ type Engine struct {
 	// test proving the guard exists would pass unmodified against pre-#1440 code too.
 	// Nil in production (zero cost).
 	trainRedBatchHook func()
+	// cloneAttemptHook, when non-nil, is called once per genuine clone owner
+	// attempt — right before ensureBareClone is invoked in both ensureRepoReady
+	// and ensureSpawnTargetReady — a test-only call-observation seam (ADR-1543,
+	// #1543 R5) mirroring trainRedBatchHook's pattern above. It gives tests a
+	// direct count of real clone attempts independent of AddComment counting,
+	// which isn't a valid duplicate-clone proxy for ensureSpawnTargetReady
+	// (every distinct parent legitimately posts its own comment by design).
+	// Nil in production (zero cost).
+	cloneAttemptHook func(nameWithOwner string)
 	// generatedFilesOverride overrides the package-level generatedFiles mapping when
 	// non-nil. Tests inject a synthetic path + fake regen command, since the throwaway
 	// repos built by setupTrainRepo have none of docs/llms-full.txt's real source files
@@ -528,77 +547,103 @@ var ErrSkipItem = errors.New("skip item")
 //
 // Concurrent callers for the same repo are serialized via cloneInFlight: the first
 // caller performs the clone while others wait. On failure, only the first caller
-// posts the comment/labels; waiters silently return ErrSkipItem.
+// posts the comment/labels; waiters silently return ErrSkipItem — unless a waiter
+// is the specific item that owned the failed attempt and its own (already-fetched)
+// Labels show fabrik:paused has since been removed, in which case it clears the
+// failed entry and becomes the new owner (see ADR-1543's identity-gated retry
+// boundary, and the cloneCall.ownerKey doc comment).
 func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if owner == "" || repo == "" {
 		return nil // cannot determine repo — let processItem handle it
 	}
 	nameWithOwner := owner + "/" + repo
+	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	callerKey := issueKey(item, e.defaultRepo())
 
-	// Fast path: already registered (common case after first clone).
-	e.mu.Lock()
-	_, registered := e.worktreeManagers[nameWithOwner]
-	e.mu.Unlock()
-	if registered {
-		return nil
-	}
+	for {
+		// Fast path: already registered (common case after first clone).
+		e.mu.Lock()
+		_, registered := e.worktreeManagers[nameWithOwner]
+		e.mu.Unlock()
+		if registered {
+			return nil
+		}
 
-	// Singleflight-style coordination: elect one goroutine to perform the clone.
-	call := &cloneCall{done: make(chan struct{})}
-	actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
-	if loaded {
-		// Another goroutine is already cloning (or has just cloned) this repo.
-		existing := actual.(*cloneCall)
-		<-existing.done
-		if existing.err != nil {
-			e.logf(item.Number, "warn", "bare clone of %s already failed for another worker — skipping\n", nameWithOwner)
+		// Singleflight-style coordination: elect one goroutine to perform the clone.
+		call := &cloneCall{done: make(chan struct{})}
+		actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
+		if loaded {
+			// Another goroutine is already cloning (or has just cloned) this repo.
+			existing := actual.(*cloneCall)
+			<-existing.done
+			if existing.err != nil {
+				// Retry-boundary check: only the item that owned the failed attempt,
+				// once its own pause label is confirmed gone, may retry. Any other
+				// caller — including same-burst siblings of the original owner —
+				// silently skips, exactly as before.
+				if existing.ownerKey == callerKey && !hasLabel(item.Labels, "fabrik:paused") {
+					// Clear the failed entry so this retry becomes a fresh owner.
+					// CompareAndDelete may fail if another goroutine already
+					// cleared/replaced it (e.g. a concurrent call for the same
+					// item) — either way, re-loop and re-evaluate.
+					e.cloneInFlight.CompareAndDelete(nameWithOwner, actual)
+					continue
+				}
+				e.logf(item.Number, "warn", "bare clone of %s already failed for another worker — skipping\n", nameWithOwner)
+				return ErrSkipItem
+			}
+			// Clone succeeded; register the WM using the winner's bareDir.
+			e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+			return nil
+		}
+
+		// This goroutine is the owner: perform the clone.
+		if e.cloneAttemptHook != nil {
+			e.cloneAttemptHook(nameWithOwner)
+		}
+		bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		call.dir = bareDir
+		call.err = err
+
+		if err != nil {
+			// Record who owned this failure before releasing waiters, so the
+			// retry-boundary check above can identify a legitimate retry later.
+			call.ownerKey = callerKey
+			// Signal waiters before cleanup so they can read call.err/ownerKey.
+			close(call.done)
+			// Deliberately NOT deleted here (ADR-1543): deleting before the failure
+			// is fully handled let a same-burst sibling become a second owner and
+			// duplicate the clone + comment (#1543). The entry now persists until a
+			// caller matching ownerKey retries with fabrik:paused confirmed absent.
+
+			msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
+			e.pauseIssue(item, msg, pauseOpts{
+				awaitingInput: true,
+				reactRocket:   true,
+			})
+			// Append a history entry so the TUI records the failure.
+			hist := tui.LoadHistory()
+			hist = append(hist, tui.HistoryEntry{
+				IssueNumber: item.Number,
+				Repo:        nameWithOwner,
+				Title:       item.Title,
+				StageName:   "clone",
+				Success:     false,
+				CompletedAt: time.Now(),
+			})
+			tui.SaveHistory(hist)
+			e.logf(item.Number, "error", "cannot clone repo %s: %v — pausing issue\n", nameWithOwner, err)
 			return ErrSkipItem
 		}
-		// Clone succeeded; register the WM using the winner's bareDir.
-		worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+
+		// Success: register the WM, then signal waiters.
+		// Leave the cloneInFlight entry in place (closed channel, nil err); future callers
+		// will exit at the fast-path registered check before reaching cloneInFlight.
+		e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
+		close(call.done)
 		return nil
 	}
-
-	// This goroutine is the owner: perform the clone.
-	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
-	call.dir = bareDir
-	call.err = err
-
-	if err != nil {
-		// Signal waiters before cleanup so they can read call.err.
-		close(call.done)
-		// Delete the entry so future poll cycles (after user removes fabrik:paused) can retry.
-		e.cloneInFlight.Delete(nameWithOwner)
-
-		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
-		e.pauseIssue(item, msg, pauseOpts{
-			awaitingInput: true,
-			reactRocket:   true,
-		})
-		// Append a history entry so the TUI records the failure.
-		hist := tui.LoadHistory()
-		hist = append(hist, tui.HistoryEntry{
-			IssueNumber: item.Number,
-			Repo:        nameWithOwner,
-			Title:       item.Title,
-			StageName:   "clone",
-			Success:     false,
-			CompletedAt: time.Now(),
-		})
-		tui.SaveHistory(hist)
-		e.logf(item.Number, "error", "cannot clone repo %s: %v — pausing issue\n", nameWithOwner, err)
-		return ErrSkipItem
-	}
-
-	// Success: register the WM, then signal waiters.
-	// Leave the cloneInFlight entry in place (closed channel, nil err); future callers
-	// will exit at the fast-path registered check before reaching cloneInFlight.
-	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
-	close(call.done)
-	return nil
 }
 
 // ensureSpawnTargetReady guarantees that a WorktreeManager exists for
@@ -615,6 +660,13 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 // post their own error comment and labels on parentItem so no parent issue
 // silently loses its failure notification when concurrent workers race on the
 // same new target repo.
+//
+// As with ensureRepoReady, a failed cloneInFlight entry is only ever cleared
+// by a caller whose own parentItem matches the entry's owner and whose own
+// (already-fetched) Labels no longer carry fabrik:paused — the same
+// identity-gated retry boundary (ADR-1543), closing the same-burst
+// second-owner window that would otherwise run a second concurrent
+// `git clone --bare` into the same destination directory.
 func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, targetRepo string, parentItem gh.ProjectItem) error {
 	parentOwner, parentRepo := itemOwnerRepo(parentItem, e.defaultRepo())
 	if parentOwner == "" || parentRepo == "" {
@@ -622,55 +674,75 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 	}
 	nameWithOwner := targetOwner + "/" + targetRepo
 	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	callerKey := issueKey(parentItem, e.defaultRepo())
 
-	// Fast path: already registered.
-	e.mu.Lock()
-	_, registered := e.worktreeManagers[nameWithOwner]
-	e.mu.Unlock()
-	if registered {
-		return nil
-	}
-
-	// Singleflight coordination: elect one goroutine to perform the clone.
-	call := &cloneCall{done: make(chan struct{})}
-	actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
-	if loaded {
-		// Another goroutine is already cloning (or has just cloned) this repo.
-		// Each parent item is independent here, so every waiter that observes a
-		// clone failure must post its own error comment — unlike ensureRepoReady
-		// waiters, which silently skip because the same item owns all call sites.
-		existing := actual.(*cloneCall)
-		select {
-		case <-existing.done:
-		case <-ctx.Done():
-			return ctx.Err()
+	for {
+		// Fast path: already registered.
+		e.mu.Lock()
+		_, registered := e.worktreeManagers[nameWithOwner]
+		e.mu.Unlock()
+		if registered {
+			return nil
 		}
-		if existing.err != nil {
-			e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, existing.err)
-			return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s failed: %w", targetOwner, targetRepo, existing.err)
+
+		// Singleflight coordination: elect one goroutine to perform the clone.
+		call := &cloneCall{done: make(chan struct{})}
+		actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
+		if loaded {
+			// Another goroutine is already cloning (or has just cloned) this repo.
+			// Each parent item is independent here, so every waiter that observes a
+			// clone failure must post its own error comment — unlike ensureRepoReady
+			// waiters, which silently skip because the same item owns all call sites.
+			existing := actual.(*cloneCall)
+			select {
+			case <-existing.done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if existing.err != nil {
+				// Retry-boundary check: only the parent that owned the failed
+				// attempt, once its own pause label is confirmed gone, may retry.
+				if existing.ownerKey == callerKey && !hasLabel(parentItem.Labels, "fabrik:paused") {
+					// Clear the failed entry so this retry becomes a fresh owner.
+					// CompareAndDelete may fail if another goroutine already
+					// cleared/replaced it — either way, re-loop and re-evaluate.
+					e.cloneInFlight.CompareAndDelete(nameWithOwner, actual)
+					continue
+				}
+				e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, existing.err)
+				return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s failed: %w", targetOwner, targetRepo, existing.err)
+			}
+			e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+			return nil
 		}
-		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
-		return nil
-	}
 
-	// This goroutine is the owner: perform the clone.
-	bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
-	call.dir = bareDir
-	call.err = err
+		// This goroutine is the owner: perform the clone.
+		if e.cloneAttemptHook != nil {
+			e.cloneAttemptHook(nameWithOwner)
+		}
+		bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		call.dir = bareDir
+		call.err = err
 
-	if err != nil {
-		// Signal waiters before cleanup so they can read call.err.
+		if err != nil {
+			// Record who owned this failure before releasing waiters, so the
+			// retry-boundary check above can identify a legitimate retry later.
+			call.ownerKey = callerKey
+			// Signal waiters before cleanup so they can read call.err/ownerKey.
+			close(call.done)
+			// Deliberately NOT deleted here (ADR-1543): see ensureRepoReady's
+			// identical comment. A second owner here would run a second concurrent
+			// `git clone --bare` into the same directory — the exact corruption
+			// race ADR-022 exists to prevent, so this matters more here, not less.
+			e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, err)
+			return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s: %w", targetOwner, targetRepo, err)
+		}
+
+		// Success: register WM, then signal waiters.
+		e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
 		close(call.done)
-		// Delete so future retries (after user removes fabrik:paused) can re-attempt.
-		e.cloneInFlight.Delete(nameWithOwner)
-		e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, err)
-		return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s: %w", targetOwner, targetRepo, err)
+		return nil
 	}
-
-	// Success: register WM, then signal waiters.
-	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
-	close(call.done)
-	return nil
 }
 
 // postSpawnCloneError posts an error comment and adds fabrik:paused +
