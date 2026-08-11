@@ -113,8 +113,7 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 // "/pruefer review" comment commands and apply 👀/🚀 reaction idempotency.
 // Returns nil, nil on 404.
 func (c *Client) FetchIssueComments(owner, repo string, issueNumber int) ([]Comment, error) {
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=100", c.baseURL, owner, repo, issueNumber)
-	var raw []struct {
+	type rawComment struct {
 		ID        int       `json:"id"`
 		Body      string    `json:"body"`
 		CreatedAt time.Time `json:"created_at"`
@@ -132,7 +131,15 @@ func (c *Client) FetchIssueComments(owner, repo string, issueNumber int) ([]Comm
 			Eyes     int `json:"eyes"`
 		} `json:"reactions"`
 	}
-	if err := c.restGetJSON(apiURL, &raw); err != nil {
+	// Paginated (#1539): GitHub returns issue comments oldest-first, so reading
+	// only page one drops the NEWEST comments on any thread past restPageSize —
+	// exactly the ones comment processing exists to react to. A busy issue would
+	// silently stop responding to new instructions.
+	raw, err := paginateREST[rawComment](c, fmt.Sprintf("comments for %s/%s#%d", owner, repo, issueNumber), func(page int) string {
+		return fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d",
+			c.baseURL, owner, repo, issueNumber, restPageSize, page)
+	})
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil
 		}
