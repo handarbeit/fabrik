@@ -3433,12 +3433,15 @@ func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
 	}
 }
 
-// TestMergeTrainRedSingleton_NoRetrialOnNextPoll covers #1440 R4/AC5: escalating a red
-// singleton to fabrik:paused on its first disposition must exclude it from every future
-// Queued batch snapshot, so an unchanged red singleton never re-forms into an identical
-// trial on the next poll — no separate backoff mechanism is needed because this composes
-// with groupQueuedByRepo's pre-existing poison-well guard (the same mechanism that already
-// stops a repeatedly-ejected multi-member poisoner from being re-snapshotted).
+// TestMergeTrainRedSingleton_NoRetrialOnNextPoll covers #1440 R4/AC5 together with #1545
+// R1: escalating a red singleton to fabrik:paused on its first disposition must reroute it
+// off the Queued holding column (#1545) onto stageBeforeHolding ("Implement" in
+// trainTestEngine's stage set), which by construction excludes it from every future Queued
+// batch snapshot — an unchanged red singleton never re-forms into an identical trial on the
+// next poll. Before #1545 this exclusion depended entirely on groupQueuedByRepo's
+// fabrik:paused poison-well guard while the member sat, unreachable, in Queued; this test
+// now asserts the reroute itself (the board Status actually moves), and separately confirms
+// the post-reroute Status is what drives the next-poll exclusion, not merely the label.
 func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
 	skipIfNoGit(t)
 	_, _, _, wm := setupTrainRepo(t)
@@ -3456,6 +3459,15 @@ func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
 		t.Fatalf("expected exactly 1 validation trial after the first episode, got %d", got)
 	}
 
+	// #1545 R1: the member must be rerouted off Queued to stageBeforeHolding ("Implement"
+	// in this stage set) before being paused.
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call rerouting #1 off Queued, got %d: %+v", len(client.updateStatusCalls), client.updateStatusCalls)
+	}
+	if got := client.updateStatusCalls[0].optionID; got != "opt-implement" {
+		t.Errorf("expected reroute target option opt-implement (Implement), got %q", got)
+	}
+
 	var pausedLabel bool
 	client.mu.Lock()
 	for _, c := range client.addLabelCalls {
@@ -3468,19 +3480,108 @@ func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
 		t.Fatalf("expected fabrik:paused applied to #1 after the red-singleton disposition")
 	}
 
-	// Simulate the next poll's Queued snapshot: #1 now carries the fabrik:paused label
-	// ejectRedSingleton just applied.
+	// Simulate the next poll's Queued snapshot: #1 has left Queued for Implement (the
+	// board Status move rerouteQueuedMemberOffHolding just performed) and also carries the
+	// fabrik:paused label ejectRedSingleton applied. The exclusion below follows from the
+	// Status no longer being "Queued" — not merely from the label, unlike before #1545,
+	// when the item never left Queued at all.
 	items := []gh.ProjectItem{
-		{Number: 1, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"fabrik:paused"}},
+		{Number: 1, Status: "Implement", Repo: "owner/repo", Labels: []string{"fabrik:paused"}},
 	}
-	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+	groups := groupQueuedByRepo(items, "Queued", "owner/repo")
 	if len(groups) != 0 {
-		t.Errorf("expected the paused red singleton to be excluded from the next poll's train batch, got %d group(s): %+v", len(groups), groups)
+		t.Errorf("expected the rerouted red singleton to be excluded from the next poll's train batch, got %d group(s): %+v", len(groups), groups)
 	}
 
 	// Nothing was (re-)dispatched for a second episode, so no additional trial occurred.
 	if got := rv.count(); got != 1 {
 		t.Errorf("expected no additional validation trial on the next poll, got %d", got)
+	}
+}
+
+// TestEjectRedSingleton_RerouteFailure_NoCommentNoPause covers #1545 R2/AC2: mirrors
+// TestEjectQueuedMemberForReviewFindings_RerouteFailure_NoCommentNoCount for the
+// standalone-validation-failure cause — when the reroute off Queued fails, nothing is
+// posted and the member is not paused. A failed reroute must look like nothing happened,
+// so the very next poll's train re-forms the same singleton and retries the whole
+// disposition from scratch, rather than half-applying the pause without the reroute that
+// makes it reachable.
+func TestEjectRedSingleton_RerouteFailure_NoCommentNoPause(t *testing.T) {
+	client := &mockGitHubClient{updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") }}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	m := trainMember{item: makeTrainItem(1, "Issue 1")}
+	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, nil)
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	labels := append([]addLabelCall(nil), client.addLabelCalls...)
+	client.mu.Unlock()
+
+	if comments != 0 {
+		t.Errorf("expected no red-singleton comment when reroute fails, got %d", comments)
+	}
+	for _, c := range labels {
+		if c.issueNumber == 1 && (c.labelName == "fabrik:paused" || c.labelName == "fabrik:awaiting-input") {
+			t.Errorf("expected no pause labels applied when reroute fails, got %+v", c)
+		}
+	}
+}
+
+// TestEjectRedSingleton_Success covers #1545 R1/R3/R4/AC1/AC4: on a successful reroute,
+// the member's board Status moves off Queued to stageBeforeHolding ("Implement" in
+// trainTestEngine's stage set), the posted comment names that target stage and points at
+// fabrik:revalidate (not a bare fabrik:paused removal, which would silently no-op since
+// stage:Validate:complete is already set), and the member is paused there.
+func TestEjectRedSingleton_Success(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	m := trainMember{item: makeTrainItem(1, "Issue 1")}
+	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, nil)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call rerouting #1 off Queued, got %d", len(client.updateStatusCalls))
+	}
+	if got := client.updateStatusCalls[0].optionID; got != "opt-implement" {
+		t.Errorf("expected reroute target option opt-implement (Implement), got %q", got)
+	}
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 red-singleton comment, got %d", len(calls))
+	}
+	body := calls[0].body
+	if !strings.Contains(body, "has left the Queued column for Implement") {
+		t.Errorf("expected the comment to name the reroute target stage, got: %s", body)
+	}
+	if !strings.Contains(body, "fabrik:revalidate") {
+		t.Errorf("expected the comment to point at fabrik:revalidate, got: %s", body)
+	}
+	if strings.Contains(body, "then remove `fabrik:paused` to re-enter the train") {
+		t.Errorf("expected the stale bare-unpause instruction to be gone, got: %s", body)
+	}
+
+	var sawPaused, sawAwaitingInput bool
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber != 1 {
+			continue
+		}
+		switch c.labelName {
+		case "fabrik:paused":
+			sawPaused = true
+		case "fabrik:awaiting-input":
+			sawAwaitingInput = true
+		}
+	}
+	client.mu.Unlock()
+	if !sawPaused || !sawAwaitingInput {
+		t.Errorf("expected fabrik:paused and fabrik:awaiting-input applied after the reroute, got labels: %v", client.addLabelCalls)
 	}
 }
 
