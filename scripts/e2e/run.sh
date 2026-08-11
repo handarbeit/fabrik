@@ -281,6 +281,42 @@ report_test_timings() {
     | { column -t -s "$(printf '\t')" 2>/dev/null || cat; }
 }
 
+# detect_rate_limit_backoff scans $1 (a fabrik.log path) for the engine's
+# one-shot rate-limit-backoff-activation line and returns 0 (match) or 1 (no
+# match / file absent). Extracted into its own function — rather than left
+# inline in switch_and_run — specifically so
+# scripts/e2e/backoff_detection_test.sh can exercise it directly against
+# fixtures, independent of an actual gate run.
+#
+# Scans the WHOLE current file, not a captured byte offset: each leg's own
+# bed-restart step (TestSwitchTrainMode, via StopFabrikTestBed +
+# StartFabrikTestBed) always launches a brand-new engine process, and
+# engine/poll.go's Run() opens fabrik.log with O_TRUNC on every startup — so
+# by the time that restart completes the file already contains only this
+# leg's own content, and scanning it in full naturally covers the freshly-
+# restarted engine's first poll through the end of the suite run, with no
+# offset bookkeeping needed and no blind spot between legs. (An earlier
+# version of this script tried to track a pre-restart byte offset instead;
+# that offset was measured against the pre-truncation file and so almost
+# always exceeded the truncated file's size, making `tail -c +N` — and thus
+# the whole leg's detection — silently return nothing. See #1547's review
+# thread for the incident, and backoff_detection_test.sh's
+# "historical broken (byte-offset) approach" case for a fixture that
+# reproduces it and confirms the current whole-file scan is not susceptible.)
+#
+# Matches the literal one-shot hysteresis-activation line — NOT the
+# companion per-poll "...is low (...) consider reducing poll frequency"
+# line, which fires on every poll while low and would over-trigger on a run
+# that dipped briefly without ever crossing the 20% hysteresis-activation
+# threshold. `[ -f "$1" ]` guards against a bed that hasn't produced a log
+# yet (e.g. misconfigured FABRIK_TEST_DIR) — treated as "no match" rather
+# than an error, consistent with the budget-report guards elsewhere in this
+# script.
+detect_rate_limit_backoff() {
+  local logfile="$1"
+  [ -f "$logfile" ] && grep -q 'activating rate-limit backoff' "$logfile" 2>/dev/null
+}
+
 # switch_and_run stops the bed, flips FABRIK_MERGE_TRAIN to $1 in its .env,
 # restarts it (via the dedicated TestSwitchTrainMode invocation — a separate
 # `go test` process so the restart completes, bed fully back up, before the
@@ -401,25 +437,12 @@ switch_and_run() {
   # any point during this leg, regardless of $rc — a throttled run can just
   # as easily present as a pass (if timeouts happened to land after the
   # relevant waits already succeeded) as a fail, so this must not be
-  # conditioned on the leg having failed. Scans the WHOLE current fabrik.log,
-  # not a captured byte offset: the restart step above (TestSwitchTrainMode)
-  # always launches a brand-new engine process, and engine/poll.go's Run()
-  # opens fabrik.log with O_TRUNC on every startup, so by the time that
-  # restart completes the file already contains only this leg's own content
-  # — scanning it in full naturally covers the freshly-restarted engine's
-  # first poll through the end of the suite run, with no offset bookkeeping
-  # needed. (A byte-offset approach was tried and reverted here — see the
-  # header comment's "GraphQL budget exhaustion detection" section for why
-  # an offset captured before the restart is measured against a file the
-  # restart then truncates out from under it, making `tail -c +N` silently
-  # return nothing for the rest of the leg.) Matches the literal one-shot
-  # hysteresis-activation line — see the header comment for why not the
-  # companion per-poll "...is low..." line. `[ -f "$ENGINE_LOG" ]` guards
-  # against a bed that hasn't produced a log yet (e.g. misconfigured
-  # FABRIK_TEST_DIR) — silently skipping the check rather than aborting the
-  # script under `set -e`, consistent with the budget-report guards above.
-  if [ -f "$ENGINE_LOG" ] \
-      && grep -q 'activating rate-limit backoff' "$ENGINE_LOG" 2>/dev/null; then
+  # conditioned on the leg having failed. See detect_rate_limit_backoff's own
+  # comment (above its definition) for why this scans the whole current
+  # fabrik.log rather than a captured byte offset — extracted into its own
+  # function so scripts/e2e/backoff_detection_test.sh can exercise it
+  # directly against fixtures without running an actual gate leg.
+  if detect_rate_limit_backoff "$ENGINE_LOG"; then
     {
       echo ""
       echo "############################################################"
@@ -442,14 +465,24 @@ switch_and_run() {
   fi
 }
 
-if [ -n "${E2E_TRAIN_MODE:-}" ]; then
-  # Single mode forced by the caller — one switch + one suite invocation.
-  # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
-  # E2E_PARALLEL_ON existed — see the header comment.
-  switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
-else
-  # Default: the full two-mode validation gate. "off" first — see header
-  # comment for why. "on" gets the tighter E2E_PARALLEL_ON cap.
-  switch_and_run off "$PARALLEL" "$@"
-  switch_and_run on "$PARALLEL_ON" "$@"
+# Guarded so scripts/e2e/backoff_detection_test.sh can `source` this file to
+# reach detect_rate_limit_backoff (and the other helper functions above)
+# without triggering an actual gate run. Everything above this guard (repo
+# root resolution, TEST_BED/ENGINE_LOG/BED_TOKEN setup, function
+# definitions) is safe to execute on source — read-only or pure function
+# definitions, no gate invocation. When executed directly (./run.sh or
+# `bash run.sh`), BASH_SOURCE[0] equals $0, so this still dispatches exactly
+# as before this guard existed.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  if [ -n "${E2E_TRAIN_MODE:-}" ]; then
+    # Single mode forced by the caller — one switch + one suite invocation.
+    # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
+    # E2E_PARALLEL_ON existed — see the header comment.
+    switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+  else
+    # Default: the full two-mode validation gate. "off" first — see header
+    # comment for why. "on" gets the tighter E2E_PARALLEL_ON cap.
+    switch_and_run off "$PARALLEL" "$@"
+    switch_and_run on "$PARALLEL_ON" "$@"
+  fi
 fi
