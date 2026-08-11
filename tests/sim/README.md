@@ -205,7 +205,7 @@ as authoritative — `engine/poll.go`'s `dispatched == 0` branch, `shutdown.go`'
 `inFlightSnapshot`), and `RunPoll` now waits for the *dispatched worker's own
 completion* rather than a guessed duration whenever a poll cycle actually
 dispatched something: `waitForWorkerQuiescence` polls
-`Engine.HasInFlightWorker()` at a 5ms interval, bounded by a 15s safety
+`Engine.HasInFlightWorker()` at a 5ms interval, bounded by a 60s safety
 timeout that fails the test loudly (not a silent proceed) if a worker is
 genuinely stuck. This restores the poll-count bound's meaning regardless of
 runner load, and tends to be *faster* for the common case (a scripted
@@ -215,8 +215,15 @@ fixed `workerYield` path — several existing waits (`retryCooldownPolls`, the
 real 10s stage-retry cooldown) depend on that wall-clock floor to make a real,
 non-Clock-seamed cooldown elapse across "nothing to do" polls, the same way
 it would in production; only the previously load-sensitive dispatched-worker
-case changed. See `poll.go`'s doc comments for the full detail. This is still
-the dominant contributor to this package's own runtime; see Runtime below.
+case changed. (The safety timeout started at 15s and was raised to 60s after
+an initial validation pass on this same machine — already under severe
+external load, see below — produced two spurious timeouts of its own when
+the full package's ~30 `t.Parallel()` scenarios ran concurrently under
+`-race`; both passed cleanly in isolation, confirming scheduling contention
+rather than a logic bug, and a "generous" bound has to survive the condition
+it exists to be robust against.) See `poll.go`'s doc comments for the full
+detail. This is still the dominant contributor to this package's own
+runtime; see Runtime below.
 
 ## Vocabulary mapping: `tests/e2e` ↔ `tests/sim` (R5)
 

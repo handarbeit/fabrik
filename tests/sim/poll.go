@@ -32,9 +32,21 @@ const workerQuiescencePollInterval = 5 * time.Millisecond
 // Engine.HasInFlightWorker to report quiescence before failing the test
 // loudly. Generous relative to every known real-time-bound step a single
 // dispatch can pass through — engine/item.go's lockVerifyDelay (2s) is the
-// largest — so a legitimate, if slow, dispatch is never mistaken for a hang,
-// while a genuinely stuck worker fails fast instead of hanging the suite.
-const workerQuiescenceTimeout = 15 * time.Second
+// largest under normal conditions — so a legitimate, if slow, dispatch is
+// never mistaken for a hang, while a genuinely stuck worker still fails
+// well within a single package's -timeout budget instead of hanging the
+// suite. Set to 60s rather than something closer to lockVerifyDelay's 2s:
+// an initial 15s value, chosen against an idle machine, itself produced two
+// spurious timeouts (`TestReviewAuthorityReinvokesOnChangesRequested`,
+// `TestReviewAuthorityCycleLimitPauses`) when the full package's ~30
+// t.Parallel() scenarios ran concurrently under -race on a machine already
+// under severe external CPU load (this package's own goroutines contending
+// for the same starved CPU that motivated this fix in the first place) —
+// both tests passed cleanly in isolation and on a second full-package run
+// moments later, confirming genuine scheduling contention rather than a
+// logic bug. A "generous" timeout (per #1450's own request) has to be
+// generous enough to survive the condition it exists to be robust against.
+const workerQuiescenceTimeout = 60 * time.Second
 
 // RunPoll advances Clock by env.PollInterval, drives exactly one engine poll
 // cycle via the Engine.PollOnce test seam (ADR-1449), fails the test on
