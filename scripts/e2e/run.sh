@@ -130,9 +130,13 @@
 # zero new API calls against the very budget being protected, and the log
 # line already fires at the moment of interest. Each leg is also bracketed
 # with a `gh api rate_limit` call before/after (a REST metadata call, free
-# against the GraphQL budget) to report the leg's actual consumed points —
-# this is a complementary, separate purpose (durable cost visibility, A3 of
-# #1527) from the log-scrape's fail-loud detection.
+# against the GraphQL budget), scoped to the bed's own FABRIK_TOKEN (read
+# from $TEST_BED/.env into $BED_TOKEN, mirroring reset.sh's gh_() token-
+# scoping precedent — the ambient `gh` CLI's own auth is very likely a
+# different identity than the bed's @arbeithand token and would silently
+# measure the wrong account's budget) to report the leg's actual consumed
+# points — this is a complementary, separate purpose (durable cost
+# visibility, A3 of #1527) from the log-scrape's fail-loud detection.
 #
 # Prerequisites (one-time setup):
 #   - ~/dev/fabrik-test/ exists with .env (FABRIK_TOKEN for @arbeithand)
@@ -151,6 +155,19 @@ cd "$REPO_ROOT"
 # (R2, #1527) to scope its scan to this bed's own fabrik.log.
 TEST_BED="${FABRIK_TEST_DIR:-$HOME/dev/fabrik-test}"
 ENGINE_LOG="$TEST_BED/.fabrik/fabrik.log"
+
+# The bed's own PAT (same FABRIK_TOKEN reset.sh reads and scopes its gh_()
+# helper to) — the A3 budget report below must measure the bed's own
+# GraphQL consumption, never whatever identity the ambient `gh` CLI happens
+# to be authenticated as in the invoking shell, which is very likely a
+# different account than the bed's @arbeithand token and would silently
+# report an unrelated budget. A missing/unreadable token only degrades the
+# budget report (skipped, warned) — unlike reset.sh, nothing else in this
+# script depends on it, so it's not fatal here.
+BED_TOKEN=$( { grep '^FABRIK_TOKEN=' "$TEST_BED/.env" 2>/dev/null | head -1 | cut -d= -f2-; } || echo "")
+if [ -z "$BED_TOKEN" ]; then
+  echo "warning: could not read FABRIK_TOKEN from $TEST_BED/.env — GraphQL budget reporting will be skipped" >&2
+fi
 
 # Distinct exit code for a run invalidated by GraphQL budget exhaustion — see
 # "GraphQL budget exhaustion detection" in the header comment above.
@@ -314,7 +331,10 @@ switch_and_run() {
   # transient `gh` failure or a not-yet-existing log file degrades to a
   # skipped report rather than aborting the script under `set -e`.
   local budget_before budget_after log_offset
-  budget_before=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+  budget_before=""
+  if [ -n "$BED_TOKEN" ]; then
+    budget_before=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+  fi
   log_offset=$(wc -c < "$ENGINE_LOG" 2>/dev/null || echo 0)
 
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
@@ -323,7 +343,10 @@ switch_and_run() {
     | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
     || rc=$?
 
-  budget_after=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+  budget_after=""
+  if [ -n "$BED_TOKEN" ]; then
+    budget_after=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+  fi
   if [ -n "$budget_before" ] && [ -n "$budget_after" ]; then
     if [ "$budget_after" -le "$budget_before" ]; then
       echo "== GraphQL budget (leg: ${mode}): ${budget_before} -> ${budget_after} remaining (consumed $((budget_before - budget_after)) pts) =="
