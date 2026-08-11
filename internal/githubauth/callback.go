@@ -89,8 +89,13 @@ func randomState() (string, error) {
 // known after Listen, so buildManifestFn is called with it rather than the
 // manifest being constructed up front. Returns the URL to open in a browser
 // and a channel that receives exactly one callbackResult; shutdown must be
-// called (even after a successful result) to stop the listener.
-func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[string]interface{}) (startURL string, results <-chan callbackResult, shutdown func(), err error) {
+// called (even after a successful result) to stop the listener. logf may be
+// nil (tests that don't care about the rare unexpected-Serve-error log
+// line); RunManifestFlow always passes its own logf through.
+func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[string]interface{}, logf func(string, ...any)) (startURL string, results <-chan callbackResult, shutdown func(), err error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("starting loopback listener: %w", err)
@@ -204,9 +209,27 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	// ReadHeaderTimeout guards against a slow-loris-style stray/slow local
 	// connection tying up a server goroutine indefinitely during the
 	// manifest-flow window — cheap insurance even though this listener is
-	// 127.0.0.1-only and short-lived.
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go srv.Serve(ln)
+	// 127.0.0.1-only and short-lived. ReadTimeout/WriteTimeout cover the
+	// phase ReadHeaderTimeout doesn't: a connection that finishes sending
+	// headers within 5s but then stalls (or a client that never closes a
+	// completed response) could otherwise still tie up a goroutine for the
+	// life of the process.
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			// http.ErrServerClosed is the expected return once shutdownFn
+			// calls Shutdown/Close; anything else is unexpected and would
+			// otherwise leave the manifest flow hanging until
+			// manifestCallbackTimeout with no diagnostic pointing at the
+			// actual cause.
+			logf("manifest callback server: unexpected error: %v", err)
+		}
+	}()
 
 	shutdownFn := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), manifestShutdownGraceTimeout)

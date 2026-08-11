@@ -45,7 +45,7 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 		logf = func(string, ...any) {}
 	}
 
-	startURL, results, shutdown, err := runManifestCallbackServer(buildManifest)
+	startURL, results, shutdown, err := runManifestCallbackServer(buildManifest, logf)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("starting manifest callback listener: %w", err)
 	}

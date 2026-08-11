@@ -50,7 +50,7 @@ func testManifestBuilder(redirectURL string) map[string]interface{} {
 }
 
 func TestRunManifestCallbackServer_HappyPath(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestRunManifestCallbackServer_HappyPath(t *testing.T) {
 // afterward, hanging the flow until manifestCallbackTimeout with no
 // indication of the real cause.
 func TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult(t *testing.
 }
 
 func TestRunManifestCallbackServer_MissingCodeRejected(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestRunManifestCallbackServer_MissingCodeRejected(t *testing.T) {
 // drop the genuine GitHub redirect if it arrives afterward, hanging the
 // flow until manifestCallbackTimeout with no indication of the real cause.
 func TestRunManifestCallbackServer_SpuriousBareHitDoesNotConsumeResult(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestRunManifestCallbackServer_SpuriousBareHitDoesNotConsumeResult(t *testin
 // not a plausible completion attempt (GitHub always echoes state back) and
 // must be ignored, not treated as terminal.
 func TestRunManifestCallbackServer_CodeOnlyHitDoesNotConsumeResult(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestRenderManifestForm_EscapesManifestContent(t *testing.T) {
 }
 
 func TestRunManifestCallbackServer_PortAssignedDynamically(t *testing.T) {
-	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestRunManifestCallbackServer_ManifestReceivesAssignedRedirectURL(t *testin
 	startURL, _, shutdown, err := runManifestCallbackServer(func(redirectURL string) map[string]interface{} {
 		gotRedirectURL = redirectURL
 		return map[string]interface{}{"redirect_url": redirectURL}
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestRunManifestCallbackServer_ManifestReceivesAssignedRedirectURL(t *testin
 // through to an unadorned empty 200 rather than an explicit response,
 // which could look like a hang to whoever's driving the browser.
 func TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestRunManifestCallbackServer_ShutdownForceClosesAfterGraceTimeout(t *testi
 	manifestShutdownGraceTimeout = 50 * time.Millisecond
 	defer func() { manifestShutdownGraceTimeout = oldGrace }()
 
-	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder)
+	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
