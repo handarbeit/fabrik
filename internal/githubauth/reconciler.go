@@ -290,7 +290,27 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		// explicit repair error instead, naming the fix (update or clear
 		// github_app_id), rather than looping.
 		if opts.AppID != 0 {
-			return nil, fmt.Errorf("github_app_id %d is configured but no longer resolves on GitHub (%w) — it may have been deleted, or suspended by GitHub (check https://github.com/settings/apps); update or remove github_app_id in config to let first-run setup create a new App (repair required, not auto-recreated)", opts.AppID, err)
+			// The pinned path never runs loadOrBootstrapCredentials'
+			// fingerprint-mismatch check (that check only fires for the
+			// non-pinned, AppStatePath-resolved AppID case), so a 401/403
+			// here is genuinely ambiguous between "the App is
+			// deleted/suspended" and "AppPrivateKeyPath holds the wrong or
+			// a stale, rotated private key for this still-existing App" —
+			// GitHub's App JWT auth returns the same rejection either way.
+			// Name both possibilities so an operator doesn't jump straight
+			// to recreating a perfectly fine App over a swapped key file.
+			//
+			// If github_app_installation_id is also pinned, name that too:
+			// installation IDs are App-specific, so if the App really was
+			// deleted/recreated, that pin is now stale as well — an
+			// operator who only clears github_app_id would hit a second,
+			// more confusing failure from the now-mismatched installation
+			// ID once a new App is created.
+			installationNote := ""
+			if opts.AppInstallationID != 0 {
+				installationNote = fmt.Sprintf("; if the App was deleted or suspended (not a key mismatch), github_app_installation_id %d is also now stale — installation IDs are App-specific — and must be updated or cleared too, not just github_app_id", opts.AppInstallationID)
+			}
+			return nil, fmt.Errorf("github_app_id %d is configured but no longer resolves on GitHub (%w) — either the App was deleted or suspended by GitHub (check https://github.com/settings/apps), or the private key at github_app_private_key_path no longer matches this App (e.g. a stale/rotated key); if the App still exists on GitHub, restore the correct key instead of recreating it — otherwise update or remove github_app_id in config to let first-run setup create a new App (repair required, not auto-recreated)%s", opts.AppID, err, installationNote)
 		}
 		// justBootstrapped means loadOrBootstrapCredentials manifest-created
 		// this exact App a few lines above, in this same Reconcile call. An
@@ -440,7 +460,13 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		}
 		r.auths = []*Auth{a}
 		saveInstallationRepoCache(opts.AppStatePath, opts.AppPrivateKeyPath, appID, slug, repoCache, logf)
-		logf("✓ using pinned installation %d for all watched repos", opts.AppInstallationID)
+		// Unlike the discovery path below (verifyRepoAccess), minting a
+		// token here is the only check this compat path performs — it
+		// never confirms the pinned installation actually grants access to
+		// every individual watched repo (see the trust-model comment
+		// above). Surface that explicitly so an operator who first sets
+		// this pin doesn't mistake "✓" for "every repo was verified."
+		logf("✓ using pinned installation %d for all watched repos (owner-level access not individually verified — see github_app_installation_id in the README)", opts.AppInstallationID)
 		return r, nil
 	}
 
