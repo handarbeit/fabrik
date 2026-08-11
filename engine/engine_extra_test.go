@@ -2,6 +2,9 @@ package engine
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -200,6 +203,17 @@ func TestEnsureRepoReady_CloneFailure_PostsCommentAndPauses(t *testing.T) {
 // multiple goroutines call ensureRepoReady for the same (new) repo simultaneously,
 // exactly one AddComment call is made (the clone-failure comment) and all callers
 // return ErrSkipItem. This exercises the singleflight coordination in cloneInFlight.
+//
+// Each goroutine uses a distinct item Number (same repo) — matching what actually
+// happens in production bursts (different board items racing on a never-before-cloned
+// repo), and required by the identity-gated retry boundary (ADR-1543, #1543): with a
+// single shared item and empty Labels, every goroutine would trivially match the
+// owner's identity as unpaused and treat itself as retry-eligible, which is the
+// opposite of what this test is meant to prove. See
+// TestEnsureRepoReady_DifferentItemAfterFailure_NoSecondCloneOrComment and
+// TestEnsureRepoReady_SameItemStillPaused_NoRetry /
+// TestEnsureRepoReady_SameItemUnpausedAfterFix_Retries below for the deterministic,
+// non-racing regression coverage of the actual defect (#1543 R5).
 func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 	skipIfNoGit(t)
 	// Maximize concurrency so goroutines interleave.
@@ -211,8 +225,6 @@ func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 	// ENAMETOOLONG: fails os.MkdirAll before any network call — deterministic, no git subprocess.
 	eng.fabrikDir = strings.Repeat("a", 10000)
 
-	item := gh.ProjectItem{Number: 42, Repo: "fail-test/concurrent"}
-
 	// Use a barrier so all goroutines start at the same moment.
 	var barrier sync.WaitGroup
 	barrier.Add(numWorkers)
@@ -222,6 +234,7 @@ func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 	wg.Add(numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		i := i
+		item := gh.ProjectItem{Number: 100 + i, Repo: "fail-test/concurrent"}
 		go func() {
 			defer wg.Done()
 			barrier.Done()
@@ -245,6 +258,131 @@ func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 	client.mu.Unlock()
 	if numComments != 1 {
 		t.Errorf("expected exactly 1 AddComment call, got %d", numComments)
+	}
+}
+
+// TestEnsureRepoReady_DifferentItemAfterFailure_NoSecondCloneOrComment is the
+// deterministic (sequential, non-racing) regression test for #1543: item A fails
+// to clone; item B (same repo, no scheduling luck involved) must silently skip
+// without a second clone attempt or a second comment. This directly proves the
+// identity-gated retry boundary rather than relying on goroutine scheduling.
+func TestEnsureRepoReady_DifferentItemAfterFailure_NoSecondCloneOrComment(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	// ENAMETOOLONG: fails os.MkdirAll before any network call — deterministic, no git subprocess.
+	eng.fabrikDir = strings.Repeat("a", 10000)
+
+	var cloneAttempts int
+	eng.cloneAttemptHook = func(string) { cloneAttempts++ }
+
+	itemA := gh.ProjectItem{Number: 1, Repo: "fail-test/different-item"}
+	if err := eng.ensureRepoReady(context.Background(), itemA); err != ErrSkipItem {
+		t.Fatalf("item A: expected ErrSkipItem, got %v", err)
+	}
+	if cloneAttempts != 1 {
+		t.Fatalf("item A: expected 1 clone attempt, got %d", cloneAttempts)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("item A: expected 1 AddComment call, got %d", len(client.addCommentCalls))
+	}
+
+	itemB := gh.ProjectItem{Number: 2, Repo: "fail-test/different-item"}
+	if err := eng.ensureRepoReady(context.Background(), itemB); err != ErrSkipItem {
+		t.Fatalf("item B: expected ErrSkipItem, got %v", err)
+	}
+	if cloneAttempts != 1 {
+		t.Errorf("item B: expected no additional clone attempt, got %d total", cloneAttempts)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("item B: expected no additional AddComment call, got %d total", len(client.addCommentCalls))
+	}
+}
+
+// TestEnsureRepoReady_SameItemStillPaused_NoRetry proves the other edge of the
+// identity gate: even the item that owned the failed attempt must not retry while
+// its own (already-fetched) Labels still carry fabrik:paused — otherwise the fix
+// would trade an intermittent duplicate for retrying too eagerly.
+func TestEnsureRepoReady_SameItemStillPaused_NoRetry(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.fabrikDir = strings.Repeat("a", 10000)
+
+	var cloneAttempts int
+	eng.cloneAttemptHook = func(string) { cloneAttempts++ }
+
+	item := gh.ProjectItem{Number: 1, Repo: "fail-test/still-paused"}
+	if err := eng.ensureRepoReady(context.Background(), item); err != ErrSkipItem {
+		t.Fatalf("expected ErrSkipItem on first attempt, got %v", err)
+	}
+	if cloneAttempts != 1 {
+		t.Fatalf("expected 1 clone attempt after first failure, got %d", cloneAttempts)
+	}
+
+	// Same item, but now carrying fabrik:paused — as pauseIssue would have just
+	// applied. Must not be treated as retry-eligible.
+	pausedItem := item
+	pausedItem.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"}
+	if err := eng.ensureRepoReady(context.Background(), pausedItem); err != ErrSkipItem {
+		t.Fatalf("expected ErrSkipItem while still paused, got %v", err)
+	}
+	if cloneAttempts != 1 {
+		t.Errorf("expected no additional clone attempt while paused, got %d total", cloneAttempts)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected no additional comment while paused, got %d total", len(client.addCommentCalls))
+	}
+}
+
+// TestEnsureRepoReady_SameItemUnpausedAfterFix_Retries demonstrates AC3: after a
+// clone failure, a subsequent call for the *same* item — once its Labels no longer
+// carry fabrik:paused, modeling an operator having fixed the cause and cleared the
+// label — retries and succeeds. The bare-clone directory is pre-created as a real
+// (empty) bare repo so ensureBareClone's "already exists" repair path returns
+// success deterministically, without a network dependency (see
+// .claude/rules/golang.md).
+func TestEnsureRepoReady_SameItemUnpausedAfterFix_Retries(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.fabrikDir = strings.Repeat("a", 10000)
+
+	var cloneAttempts int
+	eng.cloneAttemptHook = func(string) { cloneAttempts++ }
+
+	item := gh.ProjectItem{Number: 1, Repo: "retry-test/repo"}
+	if err := eng.ensureRepoReady(context.Background(), item); err != ErrSkipItem {
+		t.Fatalf("expected ErrSkipItem on first attempt, got %v", err)
+	}
+	if cloneAttempts != 1 {
+		t.Fatalf("expected 1 clone attempt after first failure, got %d", cloneAttempts)
+	}
+
+	// Operator fixes the underlying cause (a valid fabrikDir) and pre-creates the
+	// bare-clone destination as a real bare repo, then removes fabrik:paused.
+	validDir := t.TempDir()
+	eng.fabrikDir = validDir
+	bareDir := filepath.Join(validDir, ".fabrik", "repos", "retry-test-repo.git")
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatalf("creating bare dir: %v", err)
+	}
+	if out, err := exec.Command("git", "init", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+
+	unpausedItem := item // fresh copy, no fabrik:paused label
+	if err := eng.ensureRepoReady(context.Background(), unpausedItem); err != nil {
+		t.Fatalf("expected retry to succeed after fix, got %v", err)
+	}
+	if cloneAttempts != 2 {
+		t.Errorf("expected exactly 2 clone attempts total (initial failure + retry), got %d", cloneAttempts)
+	}
+	eng.mu.Lock()
+	_, registered := eng.worktreeManagers["retry-test/repo"]
+	eng.mu.Unlock()
+	if !registered {
+		t.Error("expected WorktreeManager registered after successful retry")
 	}
 }
 
