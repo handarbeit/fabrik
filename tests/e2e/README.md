@@ -113,6 +113,80 @@ If you hit the limit anyway, check the reset time and wait it out:
 gh api rate_limit --jq '.resources.graphql'
 ```
 
+### The two-mode gate's "on" leg: a separate, larger cost driver (#1527)
+
+The `~2x headroom` math above covers the suite's own harness reads and the
+engine's ordinary board polling — it does **not** account for the extra cost
+merge-train mode (`FABRIK_MERGE_TRAIN=on`) adds on top. During the 0.0.78
+pre-release gate (2026-08-09/10), the `on` leg alone drove the bed's GraphQL
+budget from a near-full 4,871 points down to 19% remaining **twice** in one
+run — burning more than a full hour's allowance and then more again after the
+reset — while the `off` leg (69 pass, 0 fail, 0 backoff events) was unaffected.
+The failures that resulted were **all timeouts**, not assertion violations:
+once backoff engages, polling slows enough that board items sit in `Queued` /
+`fabrik:awaiting-ci` past scenarios' wait deadlines.
+
+**Root cause, confirmed by static analysis (not the merge-train worker's own
+CI polling — that's REST, a separate budget):** the ADR-1270/ADR-1208 settle-
+scan pattern —
+[`settleAwaitingCIScan`](../../engine/ci_settle.go) (both legs, any
+`wait_for_ci` stage) and, merge-train-exclusively,
+[`settleQueuedReviewFindings`](../../engine/queued_review_settle.go) — each
+performs an unconditional, no-cooldown `FetchItemDetails` **GraphQL deep-fetch**
+(the single most expensive query in the codebase: `comments(first:100)` +
+`closedByPullRequestsReferences` with nested `comments`/`reviewThreads`/
+`latestReviews`/`reviewRequests`) for every matching item, every poll cycle.
+This is a *documented, correctness-motivated trade-off*, not a bug —
+`settleQueuedReviewFindings` exists specifically to close a review-finding
+blackout window on `Queued` merge-train members (ADR-1208), and its "every
+member, every poll" semantics are load-bearing for that guarantee. Cost is
+therefore proportional to **how many items are concurrently Queued /
+awaiting-CI**, not to how fast the train itself polls — which is why the `on`
+leg (17 scenarios vs. 13 for `off`, since train-only scenarios skip near-
+instantly under `off`) is the one that exhausts the budget.
+
+**Mitigation shipped in #1527 (does not touch the settle scans' per-item
+correctness guarantees):**
+
+- **`E2E_PARALLEL_ON`** (default 2, half of `E2E_PARALLEL`'s default 4) caps
+  concurrency specifically on the two-mode gate's `on` leg, shrinking the
+  population those scans iterate. `off` and any forced single-mode run
+  (`E2E_TRAIN_MODE` set explicitly) are unaffected — they keep using
+  `E2E_PARALLEL`.
+- **Fail-loud detection (R2), independent of whether the cap above is enough:**
+  `scripts/e2e/run.sh` now scans the bed's `fabrik.log` after each leg (scoped
+  to just that leg's own output) for the engine's one-shot
+  `"...activating rate-limit backoff"` line. On a match — regardless of the
+  leg's own pass/fail exit code — the script prints a `RUN INVALID` banner and
+  exits with a dedicated code (`3`, distinct from `go test`'s propagated `1`),
+  short-circuiting any remaining leg. A throttled run must never be reported
+  in a way that reads like a normal pass/fail; see `scripts/e2e/run.sh`'s
+  header comment ("GraphQL budget exhaustion detection") for the full
+  mechanism.
+- **Per-leg cost visibility (A3):** each leg is now bracketed with
+  `gh api rate_limit --jq '.resources.graphql.remaining'` calls, so every run
+  reports its own actual GraphQL consumption — the manual check documented
+  above is now automatic, per leg, on every invocation.
+
+**Measured per-leg cost:** not yet captured — obtaining it requires a live
+two-mode (or per-leg) gate run against the `~/dev/fabrik-test` bed, which
+is a multi-hour, real-GitHub-mutating operation not run as part of landing
+this change. To fill in this table, run:
+
+```bash
+E2E_TRAIN_MODE=off scripts/e2e/run.sh   # then, separately:
+E2E_TRAIN_MODE=on  scripts/e2e/run.sh
+```
+
+and record each leg's `== GraphQL budget (leg: ...): N -> M remaining
+(consumed D pts) ==` line below:
+
+| Leg | GraphQL pts consumed | Backoff events | Notes |
+|---|---|---|---|
+| `off` | _pending measurement_ | _pending_ | Historically 0 backoff events (0.0.78 gate) |
+| `on`, after `off` | _pending measurement_ | _pending_ | `E2E_PARALLEL_ON` applied |
+| `on`, alone (full budget) | _pending measurement_ | _pending_ | `E2E_PARALLEL_ON` applied |
+
 ### Additional prerequisites for `TestCIFixReinvoke` and `TestCIFixReinvokeCycleLimit`
 
 5. **`ci-fix-sentinel` enrolled as a required status check** on
@@ -842,6 +916,13 @@ above: a starved scenario now has enough wall-clock room to actually finish
 rather than racing a too-tight deadline. See `E2E_PARALLEL=2` /
 `E2E_PARALLEL=6` above for the documented escape hatches if you observe a
 repeated starvation pattern in practice.
+
+**Update (#1527): `E2E_PARALLEL` itself is still kept at 4** — the analysis
+above still holds — but the "on" leg specifically now gets a tighter,
+independent cap (`E2E_PARALLEL_ON`, default 2) for a different reason than
+oversubscription: it's the GraphQL cost of the ADR-1270/ADR-1208 settle-scan
+pattern, not bed contention. See "The two-mode gate's 'on' leg: a separate,
+larger cost driver (#1527)" above.
 
 #### Timeout & failure reporting
 
