@@ -386,6 +386,124 @@ func TestEnsureRepoReady_SameItemUnpausedAfterFix_Retries(t *testing.T) {
 	}
 }
 
+// TestEnsureSpawnTargetReady_CloneFailure_PostsCommentAndPausesParent is the
+// single-caller parity test for ensureSpawnTargetReady, mirroring
+// TestEnsureRepoReady_CloneFailure_PostsCommentAndPauses.
+func TestEnsureSpawnTargetReady_CloneFailure_PostsCommentAndPausesParent(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	// ENAMETOOLONG: fails os.MkdirAll before any network call — deterministic, no git subprocess.
+	eng.fabrikDir = strings.Repeat("a", 10000)
+
+	parentItem := gh.ProjectItem{Number: 5, Repo: "owner/repo"}
+	err := eng.ensureSpawnTargetReady(context.Background(), "spawn-target-owner", "spawn-target-repo", parentItem)
+	if err == nil {
+		t.Fatal("expected error on clone failure")
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected 1 AddComment call, got %d", len(client.addCommentCalls))
+	}
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused label added on parent on clone failure")
+	}
+}
+
+// TestEnsureSpawnTargetReady_DifferentParentAfterFailure_NoSecondCloneAttempt is the
+// deterministic (sequential, non-racing) regression test for #1543 R4:
+// ensureSpawnTargetReady shares cloneInFlight's identity-gated retry boundary with
+// ensureRepoReady. Two different parents racing on the same new spawn-target repo
+// must produce exactly one clone attempt — each parent still legitimately gets its
+// own error comment by design (unlike ensureRepoReady's silent waiters), so the
+// non-duplication signal here is the clone-attempt count, not the comment count.
+func TestEnsureSpawnTargetReady_DifferentParentAfterFailure_NoSecondCloneAttempt(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.fabrikDir = strings.Repeat("a", 10000)
+
+	var cloneAttempts int
+	eng.cloneAttemptHook = func(string) { cloneAttempts++ }
+
+	parentA := gh.ProjectItem{Number: 10, Repo: "owner/repo"}
+	if err := eng.ensureSpawnTargetReady(context.Background(), "spawn-target-owner", "spawn-target-repo2", parentA); err == nil {
+		t.Fatal("parent A: expected error on clone failure")
+	}
+	if cloneAttempts != 1 {
+		t.Fatalf("parent A: expected 1 clone attempt, got %d", cloneAttempts)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("parent A: expected 1 AddComment call, got %d", len(client.addCommentCalls))
+	}
+
+	parentB := gh.ProjectItem{Number: 11, Repo: "owner/repo"}
+	if err := eng.ensureSpawnTargetReady(context.Background(), "spawn-target-owner", "spawn-target-repo2", parentB); err == nil {
+		t.Fatal("parent B: expected error (own comment) on clone failure")
+	}
+	if cloneAttempts != 1 {
+		t.Errorf("parent B: expected no additional clone attempt, got %d total", cloneAttempts)
+	}
+	// Each distinct parent legitimately posts its own comment — this is by design,
+	// not the bug (see ensureSpawnTargetReady's doc comment).
+	if len(client.addCommentCalls) != 2 {
+		t.Errorf("parent B: expected its own additional comment, got %d total", len(client.addCommentCalls))
+	}
+}
+
+// TestEnsureSpawnTargetReady_SameParentUnpausedAfterFix_Retries mirrors
+// TestEnsureRepoReady_SameItemUnpausedAfterFix_Retries, keyed on the owning parent
+// item: after a clone failure, a later call from the *same* parent — once its
+// Labels no longer carry fabrik:paused — retries and succeeds.
+func TestEnsureSpawnTargetReady_SameParentUnpausedAfterFix_Retries(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.fabrikDir = strings.Repeat("a", 10000)
+
+	var cloneAttempts int
+	eng.cloneAttemptHook = func(string) { cloneAttempts++ }
+
+	parentItem := gh.ProjectItem{Number: 20, Repo: "owner/repo"}
+	if err := eng.ensureSpawnTargetReady(context.Background(), "spawn-target-owner", "spawn-target-repo3", parentItem); err == nil {
+		t.Fatal("expected error on first attempt")
+	}
+	if cloneAttempts != 1 {
+		t.Fatalf("expected 1 clone attempt after first failure, got %d", cloneAttempts)
+	}
+
+	// Operator fixes the underlying cause and pre-creates the bare-clone
+	// destination as a real bare repo, then removes fabrik:paused from the parent.
+	validDir := t.TempDir()
+	eng.fabrikDir = validDir
+	bareDir := filepath.Join(validDir, ".fabrik", "repos", "spawn-target-owner-spawn-target-repo3.git")
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatalf("creating bare dir: %v", err)
+	}
+	if out, err := exec.Command("git", "init", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+
+	unpausedParent := parentItem // fresh copy, no fabrik:paused label
+	if err := eng.ensureSpawnTargetReady(context.Background(), "spawn-target-owner", "spawn-target-repo3", unpausedParent); err != nil {
+		t.Fatalf("expected retry to succeed after fix, got %v", err)
+	}
+	if cloneAttempts != 2 {
+		t.Errorf("expected exactly 2 clone attempts total (initial failure + retry), got %d", cloneAttempts)
+	}
+	eng.mu.Lock()
+	_, registered := eng.worktreeManagers["spawn-target-owner/spawn-target-repo3"]
+	eng.mu.Unlock()
+	if !registered {
+		t.Error("expected WorktreeManager registered after successful retry")
+	}
+}
+
 func TestEnsureDraftPR_NoPR_FailedPush_ReturnsError(t *testing.T) {
 	// No existing PR; push will fail because base dir is not a real repo.
 	// fetchLinkedPRFn not set → mock returns nil, nil (no PR found).
