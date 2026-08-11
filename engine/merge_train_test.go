@@ -5197,12 +5197,19 @@ func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
 
 	client.mu.Lock()
 	paused, marker, commentAttempts := false, false, 0
-	for _, c := range client.addLabelCalls {
+	pausedIdx, markerIdx := -1, -1
+	for i, c := range client.addLabelCalls {
 		if c.issueNumber == 9 && c.labelName == "fabrik:paused" {
 			paused = true
+			if pausedIdx == -1 {
+				pausedIdx = i
+			}
 		}
 		if c.issueNumber == 9 && c.labelName == runawayAlertMarkerLabel {
 			marker = true
+			if markerIdx == -1 {
+				markerIdx = i
+			}
 		}
 	}
 	for _, c := range client.addCommentCalls {
@@ -5220,6 +5227,13 @@ func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
 	}
 	if commentAttempts != 1 {
 		t.Errorf("expected exactly 1 comment attempt, got %d", commentAttempts)
+	}
+	// #1533 review: fabrik:paused must land before the awaiting-runaway-alert marker, so a
+	// crash between the two label writes can never leave a member carrying the marker
+	// without actually being paused — the invariant runaway_alert_settle.go's settle scan
+	// depends on (it does not gate on fabrik:paused's absence, unlike its sibling scans).
+	if pausedIdx == -1 || markerIdx == -1 || pausedIdx > markerIdx {
+		t.Errorf("expected fabrik:paused applied before %s (paused at call %d, marker at call %d)", runawayAlertMarkerLabel, pausedIdx, markerIdx)
 	}
 
 	// Not marked alerted: a second firing for the same member within the same episode

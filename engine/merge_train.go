@@ -2309,6 +2309,15 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 			continue
 		}
 
+		// Pause labels are applied before the comment attempt (and thus before
+		// markRunawayAlertOutstanding, below): runaway_alert_settle.go's whole
+		// design assumes a member carrying fabrik:awaiting-runaway-alert also
+		// already carries fabrik:paused (see settleRunawayGuardAlertScan's doc
+		// comment) — a crash between the two label writes must not leave the
+		// marker applied to a member that was never actually paused (#1533 review).
+		e.addLabel(item, "fabrik:paused")
+		e.addLabel(item, "fabrik:awaiting-input")
+
 		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, repoKey, window), false, true); commentErr != nil {
 			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
 			e.markRunawayAlertOutstanding(item, owner, repo)
@@ -2321,9 +2330,6 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 			// harmless no-op when the marker isn't actually present.
 			e.clearRunawayAlertMarker(item, owner, repo)
 		}
-
-		e.addLabel(item, "fabrik:paused")
-		e.addLabel(item, "fabrik:awaiting-input")
 	}
 }
 

@@ -191,4 +191,16 @@ func TestEscalateRunawayAlertFailure_PostsFallbackCommentAtMaxRetries(t *testing
 	if !fallbackFound {
 		t.Error("expected a fallback comment attempt naming the delivery failure")
 	}
+
+	// #1533 review: escalation must also record the member as alerted, exactly like a
+	// successful direct post or retry does. Without this, a stale fireRunawayGuard call
+	// still holding this member in its own in-flight items slice would find
+	// mergeTrainRunawayAlerted false after the fallback comment already posted, and post a
+	// second, duplicate alert on top of it — violating R2/A3.
+	eng.mergeTrainRunawayMu.Lock()
+	alerted := eng.mergeTrainRunawayAlerted["owner/repo#14"]
+	eng.mergeTrainRunawayMu.Unlock()
+	if !alerted {
+		t.Error("expected the member recorded as alerted after escalation to the fallback comment")
+	}
 }

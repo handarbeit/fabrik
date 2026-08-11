@@ -115,11 +115,22 @@ func (e *Engine) recordRunawayAlertRetry(item gh.ProjectItem) {
 // marker (retry suppression is no longer needed once the fallback comment below has
 // been posted) and posts a fallback comment carrying the same explanation the original
 // alert would have, so the member is never left paused with zero delivered explanation.
+//
+// Also marks the member alerted in mergeTrainRunawayAlerted (#1533 review): this is the
+// only caller of escalateRunawayAlertFailure, and it is always reached from
+// settleRunawayGuardAlert's recordRunawayAlertRetry call while that function still holds
+// mergeTrainRunawayMu — so writing to the map here is safe, and skipping it would leave a
+// member that only ever received the fallback comment indistinguishable, map-wise, from one
+// that was never alerted at all. Without this, a stale Hook 1 call still holding this member
+// in its own in-flight items slice (fireRunawayGuard's own doc comment notes current/
+// survivors isn't re-derived from a fresh board read) would find the map entry false and
+// post a second, duplicate alert on top of the fallback one — violating R2/A3.
 func (e *Engine) escalateRunawayAlertFailure(item gh.ProjectItem) {
 	e.logf(item.Number, "escalate", "runaway guard alert failed to post %d time(s) — posting fallback comment\n", e.cfg.MaxRetries)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoKey := owner + "/" + repo
+	alertKey := repoKey + "#" + strconv.Itoa(item.Number)
 	count, _ := e.isRunawayTripped(repoKey)
 	_, window := e.effectiveTrialWindow()
 
@@ -134,6 +145,8 @@ func (e *Engine) escalateRunawayAlertFailure(item gh.ProjectItem) {
 		)
 		e.postItemComment(item, comment, false)
 	})
+
+	e.mergeTrainRunawayAlerted[alertKey] = true
 }
 
 // clearRunawayAlertMarker removes the awaiting-runaway-alert marker and clears the retry
