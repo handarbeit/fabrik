@@ -8,6 +8,7 @@
 #   scripts/e2e/run.sh -run 'Smoke|NoWork'                 # subset, both modes
 #   E2E_TRAIN_MODE=off scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch  # single mode only
 #   E2E_PARALLEL=2 scripts/e2e/run.sh        # tighten the parallelism cap for a heavy run
+#   E2E_PARALLEL_ON=1 scripts/e2e/run.sh     # tighten just the "on" leg's cap further
 #
 # --clean (if given, must be the first argument) runs scripts/e2e/reset.sh for a
 # clean-slate bed before the run. Anything else is passed to `go test`.
@@ -64,6 +65,30 @@
 # bed starvation is instead addressed by the timeout increase above, which
 # gives a starved scenario enough wall-clock room to actually finish.
 #
+# "on"-leg-specific parallelism cap (E2E_PARALLEL_ON, default 2): #1527 found
+# the "on" leg's extra GraphQL cost over "off" is NOT the merge-train worker's
+# own CI polling (that's REST, a separate budget) but the ADR-1270/ADR-1208
+# per-poll settle-scan pattern (settleAwaitingCIScan, and merge-train-exclusive
+# settleQueuedReviewFindings) — each does an unconditional, no-cooldown
+# GraphQL deep-fetch per matching item per poll, a cost proportional to how
+# many items are concurrently Queued/awaiting-CI, not to how fast the train
+# itself polls. That per-poll-per-item semantics is load-bearing for ADR-1208's
+# correctness guarantee (a Queued member's review feedback must be seen within
+# one batch cycle), so it isn't weakened here — instead, this cap shrinks the
+# population those scans iterate by admitting fewer concurrent scenarios into
+# the "on" leg specifically. Default 2 (half of E2E_PARALLEL's default 4) is a
+# reasoned starting point given the "on" leg's larger scenario count (17 vs 13
+# for "off") — not yet empirically tuned against a live gate run; see
+# tests/e2e/README.md's GraphQL budget section for measured numbers as they
+# become available. Only the default two-mode gate's "on" leg uses this
+# — a forced single-mode run (E2E_TRAIN_MODE set explicitly) always uses
+# E2E_PARALLEL, unchanged, so every documented iteration workflow above still
+# behaves exactly as before this variable existed.
+#
+# Budget-exhaustion detection (R2, #1527): a throttled run must fail loudly
+# and distinctly from a normal test failure — see "GraphQL budget exhaustion
+# detection" further below for the mechanism (exit code 3).
+#
 # Timeout/failure reporting and teardown-on-kill: the suite invocation below
 # runs `go test -json`, tees the stream to a per-leg log under $TMPDIR, and
 # on a non-zero exit classifies every top-level test by its last observed
@@ -78,6 +103,37 @@
 # nuke requiring the bed to be stopped first) — see tests/e2e/README.md's
 # "Teardown on kill" section for the remaining manual step.
 #
+# GraphQL budget exhaustion detection (R2, #1527): once backoff engages, the
+# engine's polling slows enough that board items sit past scenarios' wait
+# deadlines, producing a wall of test timeouts indistinguishable from real
+# regressions (see #1527's own incident writeup for the shape of this: three
+# separate 0.0.78 pre-release gate runs, all of whose failures were timeouts,
+# not assertion violations). To make a throttled run fail loudly instead:
+# after each leg's suite invocation, this script scans the bed's own
+# fabrik.log (at $ENGINE_LOG, scoped to only the bytes written during that
+# leg) for the engine's one-shot rate-limit-backoff-activation line
+# ("...activating rate-limit backoff", engine/poll.go — NOT the companion
+# per-poll "...is low (...) consider reducing poll frequency" line, which
+# fires on every poll while low and would over-trigger on a run that dipped
+# briefly without ever crossing the 20% hysteresis-activation threshold). A
+# match means this leg's verdict cannot be trusted — any test
+# failures/timeouts above may be throttling artifacts. The script prints an
+# unambiguous "RUN INVALID" banner and exits $BUDGET_EXHAUSTED_EXIT (3),
+# distinct from go test's propagated 1 and from a generic shell usage error
+# (2), so automation (e.g. cut-release.sh) can branch on "budget exhausted,
+# rerun" vs. "real regression, investigate" programmatically. This check runs
+# regardless of the leg's own pass/fail exit code — a throttled run can
+# present as a pass just as easily as a fail — and short-circuits any
+# remaining legs immediately (exit, not return).
+#
+# This is a log-scrape, not a live `gh api rate_limit` polling loop: it needs
+# zero new API calls against the very budget being protected, and the log
+# line already fires at the moment of interest. Each leg is also bracketed
+# with a `gh api rate_limit` call before/after (a REST metadata call, free
+# against the GraphQL budget) to report the leg's actual consumed points —
+# this is a complementary, separate purpose (durable cost visibility, A3 of
+# #1527) from the log-scrape's fail-loud detection.
+#
 # Prerequisites (one-time setup):
 #   - ~/dev/fabrik-test/ exists with .env (FABRIK_TOKEN for @arbeithand)
 #   - handarbeit/fabrik-test-alpha + fabrik-test-beta exist and seeded
@@ -89,6 +145,16 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# Test bed location and its engine log — same FABRIK_TEST_DIR convention as
+# scripts/e2e/reset.sh. Used by the GraphQL budget exhaustion detection below
+# (R2, #1527) to scope its scan to this bed's own fabrik.log.
+TEST_BED="${FABRIK_TEST_DIR:-$HOME/dev/fabrik-test}"
+ENGINE_LOG="$TEST_BED/.fabrik/fabrik.log"
+
+# Distinct exit code for a run invalidated by GraphQL budget exhaustion — see
+# "GraphQL budget exhaustion detection" in the header comment above.
+readonly BUDGET_EXHAUSTED_EXIT=3
 
 # Optional clean-slate reset before the run (must be the first argument).
 if [ "${1:-}" = "--clean" ]; then
@@ -106,6 +172,10 @@ TIMEOUT="${E2E_TIMEOUT:-4h}"
 # Cap concurrent scenarios so the full suite doesn't oversubscribe the single
 # shared bed (see header + issue #971). Default 4; override with E2E_PARALLEL.
 PARALLEL="${E2E_PARALLEL:-4}"
+
+# Tighter cap for the default two-mode gate's "on" leg specifically — see the
+# header comment's "on"-leg-specific parallelism cap section (#1527).
+PARALLEL_ON="${E2E_PARALLEL_ON:-2}"
 
 # report_test_outcomes prints a completed/still-running/never-started
 # breakdown of every top-level test from a `go test -json` log, so a killed
@@ -186,7 +256,7 @@ report_test_timings() {
 # restarts it (via the dedicated TestSwitchTrainMode invocation — a separate
 # `go test` process so the restart completes, bed fully back up, before the
 # suite invocation that follows even starts), then runs the suite with
-# E2E_TRAIN_MODE=$1 exported.
+# E2E_TRAIN_MODE=$1 exported and -parallel capped at $2.
 #
 # The suite invocation runs under `go test -json`, teed to a per-leg log, so
 # a non-zero exit can be classified (report_test_outcomes) and, if it was
@@ -202,9 +272,20 @@ report_test_timings() {
 # schema change) would abort the script before ever reaching the
 # timeout-panic check and auto-teardown that follow it — silently
 # defeating the hardening this function exists to provide.
+#
+# After the suite invocation, regardless of $rc, this function also checks
+# fabrik.log (scoped to the bytes written during this leg) for the engine's
+# rate-limit-backoff-activation line and, on a match, prints a RUN INVALID
+# banner and `exit`s the whole script with $BUDGET_EXHAUSTED_EXIT — see the
+# header comment's "GraphQL budget exhaustion detection" section (#1527).
+# This is an `exit`, not a `return`: an invalidated leg must short-circuit
+# any remaining leg immediately rather than let the two-mode gate continue
+# on to a second leg against a bed whose GraphQL budget is already
+# compromised for the current hour.
 switch_and_run() {
   local mode="$1"
-  shift
+  local parallel="$2"
+  shift 2
   echo "== switching test bed to FABRIK_MERGE_TRAIN=${mode} =="
   # KNOWN GAP: this restart step has none of the classification/auto-teardown
   # machinery below — it's a plain `-v` (non-`-json`) run with its own fixed
@@ -220,14 +301,38 @@ switch_and_run() {
   # rather than actually stuck.
   E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -count=1 -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
-  echo "== running suite with E2E_TRAIN_MODE=${mode} =="
+  echo "== running suite with E2E_TRAIN_MODE=${mode}, -parallel=${parallel} =="
   local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
   local rc=0
-  E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$PARALLEL" \
+
+  # Snapshot the bed's GraphQL budget and this leg's position in fabrik.log
+  # before the suite runs — the former lets the post-leg report show this
+  # leg's actual GraphQL cost (A3, #1527), the latter scopes the post-leg
+  # backoff scan below to only what this leg itself wrote, so a prior leg's
+  # (or a prior invocation's) backoff event can never cause a false positive
+  # here. Both guarded with `|| echo ...`/`2>/dev/null || echo 0` so a
+  # transient `gh` failure or a not-yet-existing log file degrades to a
+  # skipped report rather than aborting the script under `set -e`.
+  local budget_before budget_after log_offset
+  budget_before=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+  log_offset=$(wc -c < "$ENGINE_LOG" 2>/dev/null || echo 0)
+
+  E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
       ./tests/e2e/... "$@" 2>&1 \
     | tee "$jsonlog" \
     | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
     || rc=$?
+
+  budget_after=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+  if [ -n "$budget_before" ] && [ -n "$budget_after" ]; then
+    if [ "$budget_after" -le "$budget_before" ]; then
+      echo "== GraphQL budget (leg: ${mode}): ${budget_before} -> ${budget_after} remaining (consumed $((budget_before - budget_after)) pts) =="
+    else
+      echo "== GraphQL budget (leg: ${mode}): ${budget_before} -> ${budget_after} remaining (budget reset mid-leg; consumption not computable) =="
+    fi
+  else
+    echo "warning: could not read GraphQL rate_limit before/after leg ${mode} (gh api call failed) — skipping budget report" >&2
+  fi
 
   report_test_timings "$jsonlog" "$mode" \
     || echo "warning: failed to compute test timings (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
@@ -256,16 +361,51 @@ switch_and_run() {
       echo "NOTE: worktrees were NOT cleaned automatically (that requires stopping the bed first)." >&2
       echo "      Run scripts/e2e/reset.sh --worktrees for full parity before the next release-gate run." >&2
     fi
+  fi
+
+  # R2 (#1527): check whether the engine's own rate-limit backoff engaged at
+  # any point during this leg, regardless of $rc — a throttled run can just
+  # as easily present as a pass (if timeouts happened to land after the
+  # relevant waits already succeeded) as a fail, so this must not be
+  # conditioned on the leg having failed. Scoped to the bytes written since
+  # log_offset (never the whole file) and to the literal one-shot
+  # hysteresis-activation line — see the header comment for why not the
+  # companion per-poll "...is low..." line. `[ -f "$ENGINE_LOG" ]` guards
+  # against a bed that hasn't produced a log yet (e.g. misconfigured
+  # FABRIK_TEST_DIR) — silently skipping the check rather than aborting the
+  # script under `set -e`, consistent with the budget-report guards above.
+  if [ -f "$ENGINE_LOG" ] \
+      && tail -c "+$((log_offset + 1))" "$ENGINE_LOG" 2>/dev/null | grep -q 'activating rate-limit backoff'; then
+    {
+      echo ""
+      echo "############################################################"
+      echo "## RUN INVALID (leg: ${mode}): GraphQL rate-limit backoff engaged mid-run."
+      echo "## Any test failures/timeouts above may be throttling artifacts, not real"
+      echo "## regressions — this run's verdict cannot be trusted."
+      echo "##"
+      echo "## Engine log: $ENGINE_LOG"
+      echo "## (look for 'activating rate-limit backoff' for the exact event(s))"
+      echo "##"
+      echo "## See tests/e2e/README.md's GraphQL budget section for mitigation"
+      echo "## (E2E_PARALLEL_ON, splitting the leg across budget windows)."
+      echo "############################################################"
+    } >&2
+    exit "$BUDGET_EXHAUSTED_EXIT"
+  fi
+
+  if [ "$rc" -ne 0 ]; then
     return "$rc"
   fi
 }
 
 if [ -n "${E2E_TRAIN_MODE:-}" ]; then
   # Single mode forced by the caller — one switch + one suite invocation.
-  switch_and_run "$E2E_TRAIN_MODE" "$@"
+  # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
+  # E2E_PARALLEL_ON existed — see the header comment.
+  switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
 else
   # Default: the full two-mode validation gate. "off" first — see header
-  # comment for why.
-  switch_and_run off "$@"
-  switch_and_run on "$@"
+  # comment for why. "on" gets the tighter E2E_PARALLEL_ON cap.
+  switch_and_run off "$PARALLEL" "$@"
+  switch_and_run on "$PARALLEL_ON" "$@"
 fi
