@@ -576,7 +576,11 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		if loaded {
 			// Another goroutine is already cloning (or has just cloned) this repo.
 			existing := actual.(*cloneCall)
-			<-existing.done
+			select {
+			case <-existing.done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			if existing.err != nil {
 				// Retry-boundary check: only the item that owned the failed attempt,
 				// once its own pause label is confirmed gone, may retry. Any other
