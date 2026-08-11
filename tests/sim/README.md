@@ -187,10 +187,36 @@ Clock:
   stamped via real `time.Now()`, deliberately outside the Clock seam's scope
   (see `failure_shapes_test.go`'s `retryCooldownPolls`).
 
-`RunPoll` pauses for a small, fixed real duration (`workerYield`, 100ms)
-after every `PollOnce` call so these background goroutines get real wall-clock
-time to progress — see `poll.go`'s doc comment. This is the dominant
-contributor to this package's own runtime; see Runtime below.
+`RunPoll` originally paused for a small, fixed real duration (`workerYield`,
+100ms) after every `PollOnce` call so these background goroutines got real
+wall-clock time to progress. **Finding (#1450 follow-up, PR #1538/CI run
+31459112834):** a fixed pause is not a reliable proxy for "the worker made
+progress" under CPU contention — a CI runner failed `TestCIFixReinvokeCycleLimit`
+by exhausting its 80-poll `AdvanceUntil` bound, while the same test passed
+reliably in local runs. A starved worker goroutine needs more real time per
+poll than a fixed sleep assumes, and a poll-count bound has no way to detect
+that; it was never a scenario problem, it was a harness problem — the layer
+built to remove wall-clock nondeterminism had wall-clock nondeterminism in
+its own advance primitive.
+
+The fix is a new engine test seam, `Engine.HasInFlightWorker()` (the same
+liveness signal production's own idle-upgrade and shutdown-pause logic treat
+as authoritative — `engine/poll.go`'s `dispatched == 0` branch, `shutdown.go`'s
+`inFlightSnapshot`), and `RunPoll` now waits for the *dispatched worker's own
+completion* rather than a guessed duration whenever a poll cycle actually
+dispatched something: `waitForWorkerQuiescence` polls
+`Engine.HasInFlightWorker()` at a 5ms interval, bounded by a 15s safety
+timeout that fails the test loudly (not a silent proceed) if a worker is
+genuinely stuck. This restores the poll-count bound's meaning regardless of
+runner load, and tends to be *faster* for the common case (a scripted
+`simclaude` response returns synchronously, so most dispatches quiesce in
+well under 100ms). A poll cycle that dispatches nothing still takes the old
+fixed `workerYield` path — several existing waits (`retryCooldownPolls`, the
+real 10s stage-retry cooldown) depend on that wall-clock floor to make a real,
+non-Clock-seamed cooldown elapse across "nothing to do" polls, the same way
+it would in production; only the previously load-sensitive dispatched-worker
+case changed. See `poll.go`'s doc comments for the full detail. This is still
+the dominant contributor to this package's own runtime; see Runtime below.
 
 ## Vocabulary mapping: `tests/e2e` ↔ `tests/sim` (R5)
 
@@ -204,7 +230,7 @@ rather than re-explained per function.
 | `FileIssue(t, env, repo, title, body, labels...) int` | `FileIssue(t, env, title, body, status string, labels...) int` | No `repo` param — a sim `Env` manages exactly one repo (`env.OwnerRepo`), where the live harness's `Env` manages two (`RepoAlpha`/`RepoBeta`) and must be told which. Folds in `status` — `simgh.SeedIssue`'s `Status` field places the issue on the board in one seeding call, where live `FileIssue` only creates the issue and needs two more calls (`AddIssueToProject`, `SetIssueStatus`) to place it. |
 | `AddIssueToProject(t, env, repo, issueNumber) string` | *(none)* | Folded into `FileIssue` above — no separate step needed. |
 | `SetIssueStatus(t, env, itemID, columnName)` | *(none)* | Folded into `FileIssue` above. |
-| `WaitForProjectStatus(t, env, repo, issueNumber, columnName, timeout time.Duration)` | `WaitForProjectStatus(t, env, issueNumber, status string, maxPolls int)` | No `repo` param (as above). `timeout time.Duration` → `maxPolls int`: the live harness waits on real GitHub's own clock; the sim harness waits on `AdvanceUntil`'s poll count, driven by the shared `Clock` and `workerYield`, not wall-clock deadlines. |
+| `WaitForProjectStatus(t, env, repo, issueNumber, columnName, timeout time.Duration)` | `WaitForProjectStatus(t, env, issueNumber, status string, maxPolls int)` | No `repo` param (as above). `timeout time.Duration` → `maxPolls int`: the live harness waits on real GitHub's own clock; the sim harness waits on `AdvanceUntil`'s poll count, driven by the shared `Clock` and each `RunPoll`'s worker-quiescence wait, not wall-clock deadlines. |
 | `WaitForIssueLabel(t, env, repo, issueNumber, label, timeout)` | `WaitForIssueLabel(t, env, issueNumber, label, maxPolls int)` | Same two divergences as above. |
 | `WaitForLabelAbsent(t, env, repo, issueNumber, label, timeout)` | `WaitForLabelAbsent(t, env, issueNumber, label, maxPolls int)` | Same. |
 | `IssueLabels(t, env, repo, issueNumber) []string` | `IssueLabels(t, env, issueNumber) []string` | No `repo` param (as above); otherwise identical. |
@@ -349,6 +375,24 @@ above, still dominated by the same real-time costs (more scenarios, each
 paying the same fixed per-poll `workerYield`/cooldown costs, parallelized via
 `t.Parallel()` exactly as before). `tests/sim/simgh` (below) is unaffected by
 this port and remains the slower of the two packages.
+
+**Updated again for the worker-quiescence fix** (see "What this harness
+cannot avoid: real wall-clock time" above): `go test -race -count=1
+./tests/sim/` now measures at **~36–40s**, essentially unchanged from the
+~35s figure directly above — replacing the fixed per-dispatch `workerYield`
+sleep with a wait for the dispatched worker's actual completion did not
+meaningfully change the package's total runtime (confirmed across several
+repeated `-count=1` runs, including under sustained external CPU load on the
+measuring machine: ~36–40s each time, no exhaustion). What changed is
+variance and correctness under load, not the mean: previously, a poll that
+dispatched a worker always paid the fixed 100ms regardless of whether the
+worker actually needed that long, and a worker needing genuinely more real
+time (e.g. `lockVerifyDelay`) relied on several such polls happening to add
+up to enough real time — a bet that only paid off when the CPU wasn't
+starved. Now a dispatched poll pays exactly as long as the worker actually
+took, no more and no less, so the total is close to the same on an
+unloaded machine and — the actual point of the fix — no longer prone to
+exhausting a poll-count bound (`AdvanceUntil`'s `maxPolls`) on a loaded one.
 
 Comfortably under the ~90s line R8 sets, so **no `sim` build tag** — this
 package is part of the default `go test ./...` (and CI's `go test -race

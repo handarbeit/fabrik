@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/handarbeit/fabrik/tests/sim/simclaude"
 )
 
 // advanceUntilHelperEnvVar selects the inner (deliberately-failing) half of
@@ -27,7 +29,21 @@ func TestAdvanceUntil_ExhaustionDiagnostics(t *testing.T) {
 	if os.Getenv(advanceUntilHelperEnvVar) == "1" {
 		// Inner half: runs in the subprocess. Deliberately unsatisfiable
 		// condition with a small maxPolls, so this fails fast via t.Fatalf.
+		//
+		// The dispatched worker is scripted to never complete
+		// (TurnLimitExhausted — incomplete, no marker, StageRetryIncremented
+		// applies but the 10s real retry cooldown vastly outlasts this test's
+		// 3-poll window) so the item deterministically stays in "Specify" for
+		// the assertions below, regardless of how quickly RunPoll's worker-
+		// quiescence wait lets the single dispatched attempt actually finish.
+		// An earlier version of this test relied on a fixed-duration
+		// per-poll sleep leaving the worker still asleep mid-dispatch by the
+		// time 3 polls ran out — exactly the incidental real-time coupling
+		// RunPoll's quiescence wait (#1450 follow-up) exists to remove, and
+		// which made the item advance and archive before this test's
+		// diagnostics fired once that coupling was fixed.
 		env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
+		env.Claude.ForStage("Specify", simclaude.TurnLimitExhausted(50))
 		FileIssue(t, env, "AC7 exhaustion probe", "body", "Specify")
 		AdvanceUntil(t, env, func(env *Env) bool { return false }, 3)
 		return

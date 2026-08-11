@@ -8,34 +8,40 @@ import (
 	"time"
 )
 
-// workerYield is a small, fixed real-wall-clock pause after each poll cycle,
-// giving the goroutines PollOnce just dispatched a chance to actually run.
-//
-// This is a deliberate, narrow exception to R4's "a scenario must never
-// depend on real sleeping" — that requirement targets the live-bed anti-
-// pattern of sleeping past a GitHub-side async event (a review arriving, CI
-// finishing) that the scenario cannot otherwise observe. It says nothing
-// about the engine's own dispatch concurrency: poll() hands each item's work
-// to a background goroutine and returns immediately, and part of that
-// goroutine's real, production behavior is genuinely real-time-bound —
-// acquireLockAndVerify's multi-instance lock-verify step
-// (engine/item.go's lockVerifyDelay, 2s) sleeps on the real clock, not the
-// injected one, because it exists to let a *different Fabrik process*
-// observe a competing lock, which the Clock seam has no way to represent.
-// Without some real pause here, a tight PollOnce loop can out-run that
-// goroutine's progress indefinitely, exactly as the very first version of
-// this harness did in testing (30 polls all executing before the dispatched
-// worker's 2-second lock-verify sleep even elapsed).
-//
-// This is bounded and documented rather than open-ended: total added real
-// time for any AdvanceUntil call is at most maxPolls*workerYield, and it is
-// the honest cost R8 asks this package to measure and record, not a silent
-// flakiness source.
+// workerYield is a small, fixed real-wall-clock pause used only when a poll
+// cycle dispatched no worker at all (see RunPoll). It is what
+// retryCooldownPolls (failure_shapes_test.go) and any other real-time-
+// anchored wait (e.g. processItem's retry-cooldown check, deliberately
+// outside the Clock seam) still rely on: a sequence of "nothing to do"
+// polls must keep eating real wall-clock time for a real cooldown to ever
+// elapse, the same way it would in production. When a worker *was*
+// dispatched, RunPoll waits for its actual completion instead (see
+// waitForWorkerQuiescence) — this constant plays no part in that path.
 const workerYield = 100 * time.Millisecond
+
+// workerQuiescencePollInterval is how often RunPoll re-checks
+// Engine.HasInFlightWorker while waiting for a dispatched worker to reach
+// quiescence. Small relative to any real-time-bound step a worker might be
+// sleeping through (see workerQuiescenceTimeout's doc comment), so a worker
+// that finishes quickly — the common case, since simclaude's scripted
+// responses return synchronously — is observed almost immediately rather
+// than waiting out a fixed interval regardless of actual completion time.
+const workerQuiescencePollInterval = 5 * time.Millisecond
+
+// workerQuiescenceTimeout bounds how long RunPoll will wait for
+// Engine.HasInFlightWorker to report quiescence before failing the test
+// loudly. Generous relative to every known real-time-bound step a single
+// dispatch can pass through — engine/item.go's lockVerifyDelay (2s) is the
+// largest — so a legitimate, if slow, dispatch is never mistaken for a hang,
+// while a genuinely stuck worker fails fast instead of hanging the suite.
+const workerQuiescenceTimeout = 15 * time.Second
 
 // RunPoll advances Clock by env.PollInterval, drives exactly one engine poll
 // cycle via the Engine.PollOnce test seam (ADR-1449), fails the test on
-// error, and then pauses for workerYield (see its doc comment).
+// error, and then waits for the cycle's real-time cost to actually elapse:
+// waitForWorkerQuiescence if this cycle dispatched a worker, or a fixed
+// workerYield pause if it didn't (see each constant's doc comment for why
+// the two cases need different treatment).
 //
 // Advancing the clock here — not just before the poll loop starts — is what
 // keeps itemstate.CooldownAt-based dispatch suppression (R3's engine-local
@@ -52,7 +58,65 @@ func RunPoll(t *testing.T, env *Env) {
 	if err := env.Engine.PollOnce(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	time.Sleep(workerYield)
+	if env.Engine.HasInFlightWorker() {
+		waitForWorkerQuiescence(t, env)
+	} else {
+		time.Sleep(workerYield)
+	}
+}
+
+// waitForWorkerQuiescence blocks until Engine.HasInFlightWorker reports no
+// worker in flight, polling at workerQuiescencePollInterval, and fails the
+// test loudly if workerQuiescenceTimeout elapses first. Only called when
+// RunPoll's own PollOnce call dispatched at least one worker (checked
+// immediately after PollOnce returns — WorkerEntered is applied
+// synchronously before the goroutine starts, so this read cannot race a
+// dispatch that just happened).
+//
+// This is a deliberate, narrow exception to R4's "a scenario must never
+// depend on real sleeping" — that requirement targets the live-bed anti-
+// pattern of sleeping past a GitHub-side async event (a review arriving, CI
+// finishing) that the scenario cannot otherwise observe. It says nothing
+// about the engine's own dispatch concurrency: poll() hands each item's work
+// to a background goroutine and returns immediately, and part of that
+// goroutine's real, production behavior is genuinely real-time-bound —
+// acquireLockAndVerify's multi-instance lock-verify step (engine/item.go's
+// lockVerifyDelay, 2s) sleeps on the real clock, not the injected one,
+// because it exists to let a *different Fabrik process* observe a competing
+// lock, which the Clock seam has no way to represent.
+//
+// This replaces an earlier design where every poll — dispatched or not —
+// paid the same fixed workerYield sleep, on the theory that it gave a
+// dispatched goroutine *some* wall-clock time to progress before returning
+// control to AdvanceUntil's poll-count loop, relying on enough such cycles
+// eventually covering however long the worker really took. That assumption
+// broke under CPU contention: a CI runner failure (#1450, PR #1538, run
+// 31459112834) showed TestCIFixReinvokeCycleLimit exhausting an 80-poll
+// AdvanceUntil bound while passing reliably in local runs, because a
+// starved worker goroutine needed more real time per poll than the fixed
+// sleep assumed, and a poll-count bound has no way to detect that. Waiting
+// for the dispatched worker's *actual* completion — via
+// Engine.HasInFlightWorker, the same liveness signal production's own
+// idle-upgrade and shutdown-pause logic treat as authoritative — removes
+// the guess entirely for the case that actually needs it: RunPoll now
+// returns as soon as a dispatched worker is done, whether that took 5ms or
+// several seconds, so a poll-count bound means what it says regardless of
+// runner load. A poll that dispatched nothing still takes the old fixed
+// workerYield path (see its own doc comment) — that case was never the
+// source of the reported flake, and several existing waits
+// (retryCooldownPolls, cfg-level real-time cooldowns) depend on its
+// wall-clock floor to make a real cooldown elapse across "nothing to do"
+// polls, the same way it would in production.
+func waitForWorkerQuiescence(t *testing.T, env *Env) {
+	t.Helper()
+	deadline := time.Now().Add(workerQuiescenceTimeout)
+	for env.Engine.HasInFlightWorker() {
+		if time.Now().After(deadline) {
+			t.Fatalf("RunPoll: a dispatched worker was still in-flight after %s — either a genuinely hung invocation or workerQuiescenceTimeout needs raising\n\n%s",
+				workerQuiescenceTimeout, diagnostics(env))
+		}
+		time.Sleep(workerQuiescencePollInterval)
+	}
 }
 
 // RunPolls drives n poll cycles in sequence.
