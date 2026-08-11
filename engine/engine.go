@@ -356,6 +356,31 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	return eng
 }
 
+// RegisterWorktreeManagerForTest registers wm as the WorktreeManager for
+// nameWithOwner ("owner/repo") — bypassing the normal ensureRepoReady/
+// ensureBareClone dynamic-clone path production always uses (New's engine
+// starts with an empty worktreeManagers map and bare-clones every repo it
+// touches, including its own, from e.fabrikDir on first access).
+//
+// Test seam only (ADR-1449, tests/sim). NewWithDeps's own worktrees
+// parameter can register at most one repo, keyed off cfg.Owner+"/"+cfg.Repo
+// — sufficient for a single-repo test Env, where that key equals the one
+// real repo being tested. A multi-repo test Env (cfg.Repo == "", mirroring
+// production's own multi-repo instance topology — see
+// spawnTargetServedByThisInstance) has no such single key: NewWithDeps would
+// register the one supplied wm under the nonsensical "owner/" key, matching
+// no real repo, and every repo the engine actually touches would fall
+// through to the dynamic ensureBareClone path — which fails outside a
+// network-and-real-GitHub-connected environment, exactly the cost
+// tests/sim exists to avoid. This lets a multi-repo Env register one
+// pre-built, locally-backed WorktreeManager per repo directly instead.
+func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *WorktreeManager) {
+	wm.logfFn = e.logf
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.worktreeManagers[nameWithOwner] = wm
+}
+
 // defaultRepo returns "owner/repo" from cfg, or "" if both are empty.
 func (e *Engine) defaultRepo() string {
 	if e.cfg.Owner == "" && e.cfg.Repo == "" {

@@ -478,6 +478,35 @@ stages must declare `expected_reviewers` (ADR-1283).
 Bot classification reuses production's own `github.IsBotLogin`, rather than
 reimplementing the heuristic.
 
+### A submitted review used to leave its author's review request outstanding — **Fixed (#1450)**
+
+Real GitHub removes a reviewer from a PR's outstanding review-request list
+the instant that reviewer's review lands — a server-side side effect
+`reviewGateOutstanding` (`engine/reviews.go`) trusts implicitly: it reads
+`reviewRequests` as-is and assumes a login present there genuinely hasn't
+responded yet. Before this fix, `SeedReview`/`SeedReviewsAt` appended the
+review but left `pr.reviewRequests` untouched, so a scenario that both
+formally requested a reviewer (`SeedReviewRequest`) and then seeded that
+same login's review would see the login incorrectly remain "outstanding"
+forever — `reviewGateOutstanding`'s `len(outstanding) == 0` clearing
+condition could never be satisfied for that PR.
+
+No existing scenario had exercised this combination before #1450's
+review-authority/expected-reviewers port: `timeout_test.go`'s
+`SeedReviewRequest` caller leaves the request permanently unanswered by
+design, and no other caller seeded a request and a matching review for the
+exact same login. `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation`
+(`tests/sim/expected_reviewers_test.go`) needed exactly this shape —
+"outstanding empty because a human reviewed, no formal request ever
+made" — and was written to route around the bug rather than trigger it
+(it never calls `SeedReviewRequest` at all), which is what surfaced the gap
+under audit rather than as a test failure.
+
+**Fixed**, not just recorded: `SeedReview` and `SeedReviewsAt` now remove any
+`reviewRequests` entry matching the review's author, mirroring GitHub's own
+behavior. Verified against the full existing `tests/sim/simgh` suite with no
+regressions (no prior scenario relied on the stale-list behavior).
+
 ---
 
 ## Auto-merge and merge queue
@@ -494,6 +523,19 @@ will find the PR still open; it must call `MergePR` to make the merge happen.
 
 **Risk:** medium. Any engine behaviour that depends on GitHub completing an
 auto-merge asynchronously cannot be tested here.
+
+**Concrete finding from #1450's port** (`tests/sim/auto_merge_test.go`'s
+`TestYoloAutoMergeLabel`): this gap is exactly as advertised, no worse. The
+port proves FR-004 (the engine enables native auto-merge and applies
+`fabrik:auto-merge-enabled` at Validate-complete) genuinely, then simulates
+GitHub's async completion via a direct `MergePR` call before proving FR-005
+(`checkAutoMergeConvergence` detects the merge and clears the label). What it
+cannot prove — and does not claim to — is that GitHub would have completed
+the merge on its own once enabled; only the live `tests/e2e/auto_merge_test.go`
+covers that. No fix is proposed: teaching the sim to autonomously "watch
+checks and merge when green" would mean modelling GitHub's own scheduling
+policy, a much larger undertaking than this gap's medium risk currently
+justifies.
 
 ### Merge queue — **Simplified (bookkeeping only)**
 
@@ -811,6 +853,29 @@ merging leaves a stale record on the branch its successor reuses, and
 `engine/prcreate.go` decides whether to open a PR on exactly this answer. The
 board projection (`findPRByHeadLocked`) applies the same rule, so the two reads
 can never report different linked PRs for one issue.
+
+### Linkage and review data are base-branch-independent; production's aren't — **Simplified, surfaced by #1450's base:\<branch\> port**
+
+`FindPRForIssue`/`FetchLinkedPR` (above) match on the head branch, and
+`FetchPRReviews`/`FetchPRReviewRequests` key directly off the PR number —
+neither path treats a PR's *base* branch specially. Production's real
+GraphQL query populates `closingIssuesReferences`/
+`closedByPullRequestsReferences` (and the review data nested inside them)
+**only for PRs targeting the repo's default branch**; a PR opened against
+any other base gets those fields back empty. This asymmetry is exactly the
+defect class handarbeit/fabrik#1046 was filed against, and #1047/#1050
+shipped the fixes (issue<->PR linkage verification via
+`verifyAndHealLinkageByBody`, and a base-independent review-gate data feed).
+
+Because the model resolves both linkage and review data the same way
+regardless of base branch, that GraphQL asymmetry cannot be reproduced here:
+every base branch behaves identically to every other. `tests/sim`'s port of
+`TestBaseBranchPipeline` (`tests/sim/basebranch_test.go`) can therefore prove
+the *mechanism* — a `base:<branch>` PR is correctly targeted, the pipeline
+does not falsely pause at Implement, and the review gate clears off a real
+review — but it is not regression coverage for the #1046/#1047/#1050 defect
+itself. `tests/e2e/basebranch_test.go` remains the only coverage of that,
+and per ADR-1449/R3 stays live for exactly this reason.
 
 ### Issue and PR numbers share one sequence — **Modelled**
 
