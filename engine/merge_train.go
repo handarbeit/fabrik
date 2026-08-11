@@ -2279,6 +2279,17 @@ func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) s
 // and Hook 1 only ever knows the members it started with — so a transient comment failure
 // here would otherwise strand the member paused with no explanation forever, exactly the
 // defect this function exists to close (#1533, R1).
+//
+// mergeTrainRunawayMu is a single engine-wide mutex, not sharded per repo, and it is held
+// across each member's AddComment network call — so a slow or repeatedly-failing comment
+// post for one repo's firing does serialize fireRunawayGuard (and settleRunawayGuardAlert's
+// retry, which shares this same critical section) for every other repo, and blocks the poll
+// goroutine's progress through the rest of that cycle's repo groups. This is a deliberate
+// trade-off, not an oversight (flagged in PR review — Pruefer, #1533): the guard fires only
+// during genuine runaway incidents (rare, exceptional), so cross-repo contention costs at
+// most a few seconds in the worst case, versus the real complexity of a keyed-mutex-with-
+// cleanup scheme a per-repo/sync.Map-of-mutexes approach would require. See ADR-1533's
+// "Rejected alternatives" section.
 func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items []gh.ProjectItem, count int) {
 	_, window := e.effectiveTrialWindow()
 	repoKey := owner + "/" + repo
