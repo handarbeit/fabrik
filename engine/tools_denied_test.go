@@ -419,7 +419,22 @@ func testToolsDeniedMarkerIndependence(t *testing.T, output string, issueNumber 
 	if sawAwaitingInputLabel {
 		t.Error("fabrik:awaiting-input must not be applied via the blockOnInput path for a tools-denied exit (R6)")
 	}
-	if len(client.addCommentCalls) != 1 {
-		t.Errorf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	// Two comments are expected regardless of marker presence: the stage's own
+	// (non-empty) output text is always posted as a comment independent of
+	// err, plus the tools-denied explanatory comment (R4). The count and
+	// content must be identical whether or not FABRIK_BLOCKED_ON_INPUT is
+	// present in that output text — that identity is what this pair of tests
+	// (called with and without the marker) demonstrates.
+	if len(client.addCommentCalls) != 2 {
+		t.Fatalf("expected exactly 2 comments (stage output + tools-denied explanation), got %d", len(client.addCommentCalls))
+	}
+	var sawExplanatoryComment bool
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "permission") && strings.Contains(c.body, "Edit") {
+			sawExplanatoryComment = true
+		}
+	}
+	if !sawExplanatoryComment {
+		t.Error("expected one comment to explain the tools-denied condition, naming the denied tool")
 	}
 }
