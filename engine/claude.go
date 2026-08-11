@@ -48,6 +48,7 @@ type claudeUsageLimitError = claudeerr.UsageLimitError
 type claudeTurnLimitError = claudeerr.TurnLimitError
 type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
+type claudeToolsDeniedError = claudeerr.ToolsDeniedError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for a
 // transient Anthropic-side API error — observed live on 2026-08-08 (#1458) as
@@ -105,6 +106,47 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 		return "", false
 	}
 	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
+}
+
+// classifyToolsDenied determines whether a Claude invocation was blocked from
+// making progress by the CLI's own permission layer denying one or more
+// mutating tool calls, using only the CLI's own structured result object
+// (resp) — never text the assistant itself wrote.
+//
+// resp.PermissionDenials (the CLI's "permission_denials" array on the
+// terminal result line) is the sole structural signal: empirically captured
+// against the installed CLI (2.1.227) using Fabrik's own invocation flags
+// (--output-format stream-json --verbose --permission-mode dontAsk), a
+// PreToolUse-hook-denied tool call populates this array on an otherwise
+// ordinary clean exit (is_error=false, terminal_reason="completed") — there
+// is no dedicated terminal_reason value the way there is for a usage-limit
+// or api_error exit, so unlike classifyUsageLimitExit/classifyAPIErrorExit
+// there is no adjacent field available as a belt-and-suspenders exclusion
+// gate. See ADR-1523 for the full captured evidence and #1523.
+//
+// Callers are expected to gate this on !completed (see interpretClaudeResult)
+// — a denial the model worked around and still finished the stage is
+// ordinary success, not a condition to exempt from anything.
+//
+// toolNames is deduplicated (preserving first-seen order) so a tool denied
+// repeatedly across multiple attempts within the same invocation is named
+// once in the R4 explanatory comment, not once per denial.
+func classifyToolsDenied(resp claudeResponse) (toolNames []string, detected bool) {
+	if len(resp.PermissionDenials) == 0 {
+		return nil, false
+	}
+	seen := make(map[string]bool, len(resp.PermissionDenials))
+	for _, d := range resp.PermissionDenials {
+		if d.ToolName == "" || seen[d.ToolName] {
+			continue
+		}
+		seen[d.ToolName] = true
+		toolNames = append(toolNames, d.ToolName)
+	}
+	if len(toolNames) == 0 {
+		return nil, false
+	}
+	return toolNames, true
 }
 
 // defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
@@ -1075,6 +1117,14 @@ type claudeResponse struct {
 	// (e.g. "max_turns"), captured for logging/future use alongside Subtype.
 	// Only Subtype is consulted for the error_max_turns branch condition below.
 	TerminalReason string `json:"terminal_reason"`
+	// PermissionDenials lists each tool call the CLI's permission layer
+	// denied during this invocation (e.g. a mutating tool blocked by a
+	// PreToolUse hook or an "ask" permission rule with no interactive prompt
+	// available). Populated on an otherwise clean exit — see
+	// classifyToolsDenied and ADR-1523.
+	PermissionDenials []struct {
+		ToolName string `json:"tool_name"`
+	} `json:"permission_denials"`
 	// ModelUsage contains per-model accumulated token counts for the full session.
 	// These are more accurate than the top-level "usage" field, which reflects only
 	// the last API call rather than the entire multi-turn session.
@@ -1432,6 +1482,14 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 				// than silently dropped. Never used to trigger classification.
 				claudeLog(issueNumber, "claude", "error exit with unmatched terminal_reason=%q (not classified as usage limit)\n", resp.TerminalReason)
 			}
+			// Diagnostic-only: classifyToolsDenied is only ever consulted on
+			// the clean-exit path below (per the empirical evidence — see
+			// classifyToolsDenied's doc comment), but if permission_denials
+			// ever shows up alongside a non-zero exit too, log it for future
+			// evidence rather than silently discarding it. Never classifies.
+			if toolNames, detected := classifyToolsDenied(resp); detected {
+				claudeLog(issueNumber, "claude", "permission_denials present on non-clean exit (tools=%s, terminal_reason=%q) — not classified here, evidence only\n", strings.Join(toolNames, ", "), resp.TerminalReason)
+			}
 		}
 		// None of the classifiers above matched — the generic fallthrough.
 		// classifyResumeFailure owns the consecutive-resume-failure counter
@@ -1446,6 +1504,15 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 	// (no FABRIK_STAGE_COMPLETE). Reset the resume-failure counter (#1414).
 	resetResumeFailureCount(sessFilePath)
 	completed := stageCompleteRE.MatchString(text)
+	// Gated on !completed: a denial the model worked around and still
+	// completed the stage is ordinary success — no exemption, no label. See
+	// classifyToolsDenied's doc comment and ADR-1523.
+	if !completed && ok {
+		if toolNames, detected := classifyToolsDenied(resp); detected {
+			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (tools=%s) — stage did not make progress, not charged against max_retries\n", strings.Join(toolNames, ", "))
+			return text, false, usage, &claudeToolsDeniedError{ToolNames: toolNames}
+		}
+	}
 	return text, completed, usage, nil
 }
 
