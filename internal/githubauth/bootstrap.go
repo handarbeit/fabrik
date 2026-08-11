@@ -65,7 +65,15 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 
 	mc, err := exchangeManifestCode(ctx, opts.BaseURL, code)
 	if err != nil {
-		return Credentials{}, fmt.Errorf("exchanging manifest code: %w", err)
+		// By this point GitHub has already redirected the browser back with
+		// a code, which only happens once the App has actually been
+		// created on GitHub's side — its existence is no longer contingent
+		// on anything local. A failure here (network blip, non-2xx,
+		// decode failure) leaves that App orphaned with no local trace:
+		// the manifest code is single-use, so the only recovery is
+		// re-running this flow, which creates a *second* App. Point the
+		// operator at the orphan rather than leaving them to discover it.
+		return Credentials{}, fmt.Errorf("exchanging manifest code: %w (the GitHub App was already created — if you retry and create another, remove the orphaned one at https://github.com/settings/apps)", err)
 	}
 
 	// Persist app-state (which carries AppID) before the PEM, not after: if
@@ -87,10 +95,13 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 		PrivateKeyFingerprint: privateKeyFingerprint([]byte(mc.PEM)),
 	}
 	if err := saveCredentials(opts.AppStatePath, creds); err != nil {
-		return Credentials{}, fmt.Errorf("persisting new App's credentials: %w", err)
+		// Same orphan-App situation as the exchange failure above: the
+		// code exchange already succeeded, so this App exists on GitHub
+		// with nothing local to show for it.
+		return Credentials{}, fmt.Errorf("persisting new App's credentials: %w (the GitHub App was already created — if you retry and create another, remove the orphaned one at https://github.com/settings/apps)", err)
 	}
 	if err := savePrivateKey(opts.PrivateKeyPath, []byte(mc.PEM)); err != nil {
-		return Credentials{}, fmt.Errorf("persisting new App's private key: %w", err)
+		return Credentials{}, fmt.Errorf("persisting new App's private key: %w (the GitHub App was already created — if you retry and create another, remove the orphaned one at https://github.com/settings/apps)", err)
 	}
 
 	logf("✓ created GitHub App %q (id %d) — install it on each account you watch: https://github.com/apps/%s/installations/new", mc.Slug, mc.AppID, mc.Slug)

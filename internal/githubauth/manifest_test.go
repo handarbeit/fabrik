@@ -156,6 +156,27 @@ func TestExchangeManifestCode_MissingIDOrPEM(t *testing.T) {
 	}
 }
 
+// TestExchangeManifestCode_MissingSlug is the regression test for a review
+// finding: exchangeManifestCode validated id/pem but not slug, so a
+// malformed/unexpected GitHub response (e.g. from a misconfigured
+// non-production BaseURL) with id and pem present but no slug would
+// silently produce Credentials.Slug == "" — later yielding a bot identity
+// of just "[bot]" and a broken
+// "https://github.com/apps//installations/new" guided-install URL, rather
+// than a clear error at exchange time.
+func TestExchangeManifestCode_MissingSlug(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app-manifests/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 42, "pem": "fake-pem-content"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if _, err := exchangeManifestCode(context.Background(), srv.URL, "the-code"); err == nil {
+		t.Fatal("expected an error when the response is missing slug")
+	}
+}
+
 // TestExchangeManifestCode_HonorsContextCancellation is the regression test
 // for a review finding: exchangeManifestCode previously built its request
 // with http.NewRequest (no context), so a caller-driven cancellation (e.g.

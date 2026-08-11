@@ -141,8 +141,13 @@ func exchangeManifestCode(ctx context.Context, baseURL, code string) (ManifestCr
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return ManifestCredentials{}, fmt.Errorf("decoding manifest exchange response: %w", err)
 	}
-	if raw.ID == 0 || raw.PEM == "" {
-		return ManifestCredentials{}, fmt.Errorf("manifest exchange response missing id or pem")
+	if raw.ID == 0 || raw.PEM == "" || raw.Slug == "" {
+		// An empty Slug wouldn't fail loudly downstream — it would silently
+		// produce a bot identity of just "[bot]" and a broken
+		// "https://github.com/apps//installations/new" guided-install URL.
+		// Reject at exchange time instead, alongside the existing id/pem
+		// checks.
+		return ManifestCredentials{}, fmt.Errorf("manifest exchange response missing id, pem, or slug")
 	}
 
 	return ManifestCredentials{
