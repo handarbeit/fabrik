@@ -126,8 +126,9 @@ type ItemState struct {
 
 	// LastInvocationErrored records whether the most recent Claude invocation exited
 	// with a non-zero status (process error, timeout kill, etc.) AND was not classified
-	// as a turn-limit exit (see LastInvocationTurnLimited) — i.e. a genuine fault. This
-	// is recorded independently of LastInvocationCompleted: a stage can complete
+	// as a turn-limit exit (see LastInvocationTurnLimited) or a tool-permission-denial
+	// exit (see ToolsDeniedRetries; #1523) — i.e. a genuine fault. This is recorded
+	// independently of LastInvocationCompleted: a stage can complete
 	// (FABRIK_STAGE_COMPLETE emitted) even when the process exits non-zero — e.g. a
 	// timeout kill after the stage finished. The error is surfaced as
 	// JobCompletedEvent.Success=false in history.
@@ -306,6 +307,14 @@ type StageState struct {
 	// time-slice, not a failure (#1199), so it must not count against the
 	// failure counter, but a non-converging job still needs its own bound.
 	SliceRetries map[string]int
+	// ToolsDeniedRetries counts how many consecutive tool-permission-denial
+	// exits (claudeToolsDeniedError) each stage has hit. Bounded by
+	// MaxToolsDeniedRetries, independently of Attempts/MaxRetries — the
+	// condition is an environmental permission misconfiguration, not a
+	// stage failure (#1523), so it must not count against the failure
+	// counter, but a non-converging (never-fixed) misconfiguration still
+	// needs its own bound. Mirrors SliceRetries structurally.
+	ToolsDeniedRetries map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage

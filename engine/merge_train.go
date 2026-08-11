@@ -677,7 +677,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// singleton disposition instead of calling handleRedBatch at all.
 				e.logf(survivors[0].item.Number, "merge-train", "combined Validate RED for %s with a single member (#%d) — no poisoner to isolate; disposing as a red singleton\n", repoKey, survivors[0].item.Number)
 				e.cleanupTrialArtifacts(p.wm, trialName)
-				e.ejectRedSingleton(p.owner, p.repo, survivors[0], diag)
+				e.ejectRedSingleton(state.projectID, p.owner, p.repo, survivors[0], diag)
 				return
 			}
 			e.logf(0, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", repoKey, len(survivors))
@@ -1085,7 +1085,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			// disposition (no "different composition" promise, no shared-counter churn)
 			// rather than ejectMember's multi-member wording, which would be equally
 			// misleading here.
-			e.ejectRedSingleton(p.owner, p.repo, m, diag)
+			e.ejectRedSingleton(state.projectID, p.owner, p.repo, m, diag)
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
@@ -1775,10 +1775,39 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 // mergeTrainEjectionCounts counter (R3): that counter exists to bound genuine multi-member
 // bisection/one-at-a-time churn, and every red-singleton disposition for the same member
 // carries identical information, so counting them measures retries of an already-deterministic
-// outcome rather than train churn. Instead it pauses immediately, on the first occurrence,
-// which composes with groupQueuedByRepo's poison-well guard (it excludes fabrik:paused members
-// from every future batch snapshot) to stop the member from re-forming into an identical
-// singleton trial on the very next poll (R4) — no separate backoff mechanism is needed.
+// outcome rather than train churn.
+//
+// #1545 R1/R2: before pausing, m is rerouted off the Queued holding column via
+// rerouteQueuedMemberOffHolding — the same primitive and reroute-before-side-effects ordering
+// ejectQueuedMemberForReviewFindings (ADR-1208) established for the structurally identical
+// review-findings cause. Pausing a HoldingStage item in place left it permanently unreachable:
+// itemMayNeedWork excludes HoldingStage items from dispatch, processItem (the comment-unpause
+// path) is never reached, and settleQueuedReviewFindings applies the same closed/fabrik:paused
+// exclusion — nothing could ever act on the pause without a human manually moving the board
+// card. If the reroute fails, nothing is posted and the member is not paused (R2): it looks
+// like nothing happened, and the very next poll's train re-forms the same singleton and
+// re-hits this same disposition, retrying the whole operation — mirroring
+// ejectQueuedMemberForReviewFindings's identical failure behavior.
+//
+// Unlike the review-findings cause, a standalone combined-Validate failure has no external,
+// persistent re-detection signal once rerouted: the failure was only ever observed on the
+// synthetic combined trial branch, never on the member's own already-green PR, so nothing
+// would re-dispatch a rerouted-but-unpaused member (see ADR-1545). R3 therefore keeps the
+// pause — the human gate the original design already relied on — but now on stageBeforeHolding
+// (normally Validate), where the pause is actually reachable, and corrects the recovery
+// instruction (R4): stage:Validate:complete is already set from this item's original
+// completion, so a bare fabrik:paused removal would silently no-op (itemNeedsWork's
+// completed-stage check would just skip it again). When the reroute target is literally
+// named "Validate", the message instead points at fabrik:revalidate, whose existing
+// handler (handleRevalidateLabel) clears stage:Validate:complete alongside
+// fabrik:paused/fabrik:awaiting-input/etc. and is what actually makes Validate re-run.
+// handleRevalidateLabel is hardcoded to that literal name, not generic over
+// stageBeforeHolding's result (unlike stageBeforeHolding itself, which resolves
+// structurally by Order) — so when the target isn't literally "Validate" (a config-only
+// edge case; production .fabrik/stages/*.yaml always has Validate precede Queued, but
+// nothing enforces that, and the test fixture below exercises "Implement" instead), the
+// message names the item's real blocking labels directly instead of recommending a
+// mechanism that would silently no-op against them.
 //
 // The posted comment deliberately never uses "ejected" framing, never promises a retry "in a
 // future train with a different composition" (there is no different composition possible for
@@ -1787,7 +1816,16 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 // diag is threaded through the same rendering helpers ejectMember uses (renderBatchContext,
 // renderDiagnosticBlock) so the failing check(s) are named identically to every other
 // merge-train diagnostic (ADR-1420).
-func (e *Engine) ejectRedSingleton(owner, repo string, m trainMember, diag *trainCIDiagnostic) {
+func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember, diag *trainCIDiagnostic) {
+	if !e.rerouteQueuedMemberOffHolding(projectID, m.item) {
+		e.logf(m.item.Number, "merge-train", "#%d is a red singleton but could not be rerouted off Queued — leaving untouched for retry on the next poll\n", m.item.Number)
+		return
+	}
+	targetName := "the preceding stage"
+	if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil {
+		targetName = target.Name
+	}
+
 	sections := []string{
 		fmt.Sprintf("#%d's own combined Validate is failing — this is not a merge-train interaction; the same failure occurs whether or not #%d is combined with any other members.", m.item.Number, m.item.Number),
 		renderBatchContext(nil, m.item.Number),
@@ -1795,14 +1833,42 @@ func (e *Engine) ejectRedSingleton(owner, repo string, m trainMember, diag *trai
 	if block := renderDiagnosticBlock(diag); block != "" {
 		sections = append(sections, block)
 	}
-	sections = append(sections, "This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove `fabrik:paused` to re-enter the train.")
+	// handleRevalidateLabel (engine/item.go) clears stage:Validate:complete/failed
+	// specifically — it is hardcoded to the literal name "Validate", not generic over
+	// stageBeforeHolding's result. targetName, by contrast, is resolved structurally by
+	// Order (see stageBeforeHolding's doc comment) and can differ from "Validate" in a
+	// custom stage config — trainTestEngine's own test fixture resolves it to "Implement"
+	// for exactly this reason. Pointing at fabrik:revalidate when targetName isn't
+	// literally "Validate" would recommend a mechanism that silently no-ops against this
+	// item's actual completion label, reproducing the same class of stranding this issue
+	// fixes. Only recommend it when the names actually match; otherwise name the real
+	// blocking labels directly.
+	if targetName == "Validate" {
+		sections = append(sections, fmt.Sprintf(
+			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then apply "+
+				"`fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this item, so removing "+
+				"just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes again, this issue will "+
+				"re-queue and rejoin the train.",
+			targetName, targetName, targetName,
+		))
+	} else {
+		sections = append(sections, fmt.Sprintf(
+			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove "+
+				"`stage:%s:complete` and `fabrik:paused` (`fabrik:revalidate` only forces re-entry of a stage literally named "+
+				"Validate, so it will not help here) to re-enter %s. Once it completes again, this issue will re-queue and "+
+				"rejoin the train.",
+			targetName, targetName, targetName,
+		))
+	}
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
 
 	if _, err := e.client.AddComment(owner, repo, m.item.Number, msg); err != nil {
 		e.logf(m.item.Number, "merge-train", "warn: could not post red-singleton comment: %v\n", err)
 	}
 
-	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — pausing without bisection\n", m.item.Number)
+	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — rerouted to %s and pausing without bisection\n", m.item.Number, targetName)
 	e.pauseMergeTrainMember(owner, repo, m.item.Number)
 }
 
@@ -1884,7 +1950,11 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 // cap-reached escalation (unchanged behavior there) and shared with ejectRedSingleton's
 // immediate pause (#1440) — both callers pause a member outright, they just differ in
 // when they decide to (after N ejections vs. immediately for a self-inflicted red
-// singleton).
+// singleton). ejectMember's cap-reached call pauses the member in place in Queued
+// (deliberately — see ejectMember's stayInQueue doc comment, and #1545's Scope note
+// excluding this cap-reached path); ejectRedSingleton's call (#1545) pauses only after
+// rerouting the member off Queued, so its pause lands on a reachable, non-HoldingStage
+// column instead.
 func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
 	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:paused"); err != nil {
 		e.logf(issueNumber, "warn", "could not add fabrik:paused: %v\n", err)
@@ -1942,19 +2012,24 @@ func stageBeforeHolding(cfg Config, hs *stages.Stage) *stages.Stage {
 
 // rerouteQueuedMemberOffHolding moves item's board Status from the holding stage
 // (Queued) back to the stage stageBeforeHolding resolves (normally Validate) — the
-// routing half of #1208's new ejection cause. It is deliberately a plain status move,
-// nothing else: it must NOT add, remove, or otherwise touch stage:Validate:complete
-// (already present from the original Validate completion, and never removed by
-// advanceToQueued) or any ReviewCycles counter. Preserving both untouched is what lets
-// the existing MaxReviewCycles-bounded review-reinvoke loop pick this member back up
-// "for free" on the very next poll — see ejectQueuedMemberForReviewFindings's doc
-// comment and docs/state-machine.md's Queued Review-Finding Ejection section.
+// routing primitive shared by #1208's review-finding ejection cause and #1545's
+// standalone-validation-failure cause (ejectRedSingleton). It is deliberately a plain
+// status move, nothing else: it must NOT add, remove, or otherwise touch
+// stage:Validate:complete (already present from the original Validate completion, and
+// never removed by advanceToQueued) or any ReviewCycles counter. For #1208's caller,
+// preserving both untouched is what lets the existing MaxReviewCycles-bounded
+// review-reinvoke loop pick this member back up "for free" on the very next poll — see
+// ejectQueuedMemberForReviewFindings's doc comment and docs/state-machine.md's Queued
+// Review-Finding Ejection section. #1545's caller has no equivalent "for free" pickup
+// (see ejectRedSingleton's doc comment) and instead re-pauses the member on the newly
+// reachable target stage, pointing the recovery instruction at fabrik:revalidate.
 //
 // Returns false, with no side effect, when the status-field metadata or target stage
 // cannot be resolved, or when the status mutation itself fails — the caller must not
-// proceed to post an ejection comment or increment the ejection counter in that case,
-// so a transient failure here looks like nothing happened and is simply retried whole
-// by the next settle scan pass.
+// proceed to post an ejection/pause comment or increment any counter in that case, so
+// a transient failure here looks like nothing happened and is simply retried whole by
+// the next settle scan pass (#1208's caller) or the next poll's train re-formation
+// (#1545's caller).
 func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.ProjectItem) bool {
 	hs := holdingStage(e.cfg)
 	target := stageBeforeHolding(e.cfg, hs)
@@ -1988,7 +2063,7 @@ func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.Project
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	}
 
-	e.logf(item.Number, "merge-train", "rerouted off %s to %s — unresolved review finding will be addressed via the normal review pipeline\n", hs.Name, target.Name)
+	e.logf(item.Number, "merge-train", "rerouted off %s to %s\n", hs.Name, target.Name)
 	return true
 }
 
