@@ -398,8 +398,8 @@ type StageRetryIncremented struct {
 func (StageRetryIncremented) isMutation()       {}
 func (m StageRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// StageRetryCleared resets the attempt counter (and the sibling SliceRetries
-// counter) for a stage.
+// StageRetryCleared resets the attempt counter (and the sibling
+// SliceRetries/ToolsDeniedRetries counters) for a stage.
 type StageRetryCleared struct {
 	Repo      string
 	Number    int
@@ -422,6 +422,21 @@ type SliceRetryIncremented struct {
 
 func (SliceRetryIncremented) isMutation()       {}
 func (m SliceRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ToolsDeniedRetryIncremented increments the tool-permission-denial retry
+// counter for a stage. Applied instead of StageRetryIncremented when the
+// invocation ended in a tools-denied exit (claudeToolsDeniedError) — an
+// environmental permission misconfiguration, not a stage failure — so it is
+// bounded independently by MaxToolsDeniedRetries rather than counting against
+// MaxRetries (#1523). Mirrors SliceRetryIncremented structurally.
+type ToolsDeniedRetryIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (ToolsDeniedRetryIncremented) isMutation()       {}
+func (m ToolsDeniedRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ReviewCycleIncremented increments the review cycle counter for a stage.
 type ReviewCycleIncremented struct {

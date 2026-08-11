@@ -403,6 +403,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		ensureStageStateMaps(item)
 		item.StageState.Attempts[v.StageName] = 0
 		item.StageState.SliceRetries[v.StageName] = 0
+		item.StageState.ToolsDeniedRetries[v.StageName] = 0
 		delete(item.StageState.PRCreationFailed, v.StageName)
 		delete(item.StageState.LastTurnsUsed, v.StageName)
 		delete(item.StageState.LastTurnsCapped, v.StageName)
@@ -412,6 +413,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case SliceRetryIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.SliceRetries[v.StageName]++
+		return StageStateChanged
+
+	case ToolsDeniedRetryIncremented:
+		ensureStageStateMaps(item)
+		item.StageState.ToolsDeniedRetries[v.StageName]++
 		return StageStateChanged
 
 	case ReviewCycleIncremented:
@@ -1195,6 +1201,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.SliceRetries == nil {
 		ss.SliceRetries = make(map[string]int)
+	}
+	if ss.ToolsDeniedRetries == nil {
+		ss.ToolsDeniedRetries = make(map[string]int)
 	}
 	if ss.ProcessedComments == nil {
 		ss.ProcessedComments = make(map[string]time.Time)
