@@ -193,10 +193,16 @@ flagged for Validate to run against the e2e infrastructure.
   settle-scan retry (and, eventually, a fallback comment) until it does. No member can end up
   `fabrik:paused` with zero delivered explanation and no retry path.
 - No member can accumulate more than one alert comment per guard episode, even under the
-  Hook 1/Hook 2 concurrent-firing race the e2e bed demonstrated.
-- `fireRunawayGuard`'s pause+alert loop now holds a process-wide mutex for its duration — a
-  deliberate, documented trade-off given how rare firing is (an exceptional infra-failure
-  path), not a hot-path concern.
+  Hook 1/Hook 2 concurrent-firing race the e2e bed demonstrated, or under the narrower
+  `fireRunawayGuard`-vs-`settleRunawayGuardAlertScan` race a Review pass on this issue found:
+  `settleRunawayGuardAlert` now holds `mergeTrainRunawayMu` across its own `postComment` call
+  (not just the post-success map update), so a stale Hook 1 call reprocessing a member that
+  already carries the marker can never post concurrently with the settle scan's retry for
+  that same member. Covered by
+  `TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert`.
+- `fireRunawayGuard`'s pause+alert loop (and `settleRunawayGuardAlert`'s retry) now hold a
+  process-wide mutex for their duration — a deliberate, documented trade-off given how rare
+  firing is (an exceptional infra-failure path), not a hot-path concern.
 - Out of scope, unchanged: trial-counting, `isRunawayTripped`, the trip threshold/window, and
   #1528's green-trial exclusion (confirmed pre-existing and untouched by this fix, matching
   the issue's own "not caused by #1528" framing).
