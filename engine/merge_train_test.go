@@ -3531,9 +3531,18 @@ func TestEjectRedSingleton_RerouteFailure_NoCommentNoPause(t *testing.T) {
 
 // TestEjectRedSingleton_Success covers #1545 R1/R3/R4/AC1/AC4: on a successful reroute,
 // the member's board Status moves off Queued to stageBeforeHolding ("Implement" in
-// trainTestEngine's stage set), the posted comment names that target stage and points at
-// fabrik:revalidate (not a bare fabrik:paused removal, which would silently no-op since
-// stage:Validate:complete is already set), and the member is paused there.
+// trainTestEngine's stage set), the posted comment names that target stage, and the
+// member is paused there.
+//
+// Pruefer review finding (PR #1550): handleRevalidateLabel (engine/item.go) is hardcoded
+// to the literal stage name "Validate" — it does not generalize over stageBeforeHolding's
+// (Order-derived) result the way that resolution function itself does. trainTestEngine's
+// stage set has no stage named "Validate" at all (Research/Plan/Implement/Queued/Done),
+// so this test exercises exactly the case where naming the fabrik:revalidate mechanism
+// would be wrong: it would silently no-op against stage:Implement:complete. The comment
+// must therefore name the real blocking labels instead of fabrik:revalidate here — the
+// Validate-target case (where fabrik:revalidate is correct) is covered separately by
+// TestEjectRedSingleton_Success_ValidateTarget.
 func TestEjectRedSingleton_Success(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
@@ -3559,8 +3568,14 @@ func TestEjectRedSingleton_Success(t *testing.T) {
 	if !strings.Contains(body, "has left the Queued column for Implement") {
 		t.Errorf("expected the comment to name the reroute target stage, got: %s", body)
 	}
-	if !strings.Contains(body, "fabrik:revalidate") {
-		t.Errorf("expected the comment to point at fabrik:revalidate, got: %s", body)
+	if strings.Contains(body, "apply `fabrik:revalidate`") {
+		t.Errorf("expected the comment NOT to recommend applying fabrik:revalidate — it only forces re-entry of a stage literally named Validate, and this target is Implement — got: %s", body)
+	}
+	if !strings.Contains(body, "will not help here") {
+		t.Errorf("expected the comment to explain fabrik:revalidate would not help for a non-Validate target, got: %s", body)
+	}
+	if !strings.Contains(body, "`stage:Implement:complete`") {
+		t.Errorf("expected the comment to name the real blocking completion label stage:Implement:complete, got: %s", body)
 	}
 	if strings.Contains(body, "then remove `fabrik:paused` to re-enter the train") {
 		t.Errorf("expected the stale bare-unpause instruction to be gone, got: %s", body)
@@ -3582,6 +3597,72 @@ func TestEjectRedSingleton_Success(t *testing.T) {
 	client.mu.Unlock()
 	if !sawPaused || !sawAwaitingInput {
 		t.Errorf("expected fabrik:paused and fabrik:awaiting-input applied after the reroute, got labels: %v", client.addLabelCalls)
+	}
+}
+
+// TestEjectRedSingleton_Success_ValidateTarget covers the counterpart to the Pruefer
+// finding above: when stageBeforeHolding genuinely resolves to a stage literally named
+// "Validate" (the shape every production .fabrik/stages/*.yaml actually has), the
+// recovery instruction must point at fabrik:revalidate — the one case where
+// handleRevalidateLabel's hardcoded "Validate" match actually applies and the mechanism
+// genuinely works.
+func TestEjectRedSingleton_Success_ValidateTarget(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:                  "owner",
+			Repo:                   "repo",
+			ProjectNum:             1,
+			User:                   "testuser",
+			Token:                  "token",
+			MaxConcurrent:          5,
+			MaxMergeTrainEjections: 3,
+			MergeTrain:             "on",
+			CIBackstopTimeout:      100 * time.Millisecond,
+			Stages: []*stages.Stage{
+				{Name: "Research", Order: 1, Prompt: "Do research"},
+				{Name: "Plan", Order: 2, Prompt: "Make a plan"},
+				{Name: "Validate", Order: 3, Prompt: "Validate it"},
+				{Name: "Queued", Order: 10, HoldingStage: true, MaxTurns: 10},
+				{Name: "Done", Order: 99, Prompt: "Cleanup"},
+			},
+		},
+		client,
+		claude,
+		NewWorktreeManager(t.TempDir()),
+	)
+	eng.statusField = &gh.StatusField{
+		FieldID: "sf-test-1",
+		Options: map[string]string{
+			"Done":     "opt-done",
+			"Queued":   "opt-queued",
+			"Validate": "opt-validate",
+		},
+	}
+
+	m := trainMember{item: makeTrainItem(1, "Issue 1")}
+	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, nil)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update call rerouting #1 off Queued, got %d", len(client.updateStatusCalls))
+	}
+	if got := client.updateStatusCalls[0].optionID; got != "opt-validate" {
+		t.Errorf("expected reroute target option opt-validate (Validate), got %q", got)
+	}
+
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 red-singleton comment, got %d", len(calls))
+	}
+	body := calls[0].body
+	if !strings.Contains(body, "has left the Queued column for Validate") {
+		t.Errorf("expected the comment to name the reroute target stage, got: %s", body)
+	}
+	if !strings.Contains(body, "apply `fabrik:revalidate`") {
+		t.Errorf("expected the comment to recommend applying fabrik:revalidate when the target is literally Validate, got: %s", body)
 	}
 }
 

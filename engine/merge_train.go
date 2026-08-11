@@ -1797,10 +1797,17 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 // (normally Validate), where the pause is actually reachable, and corrects the recovery
 // instruction (R4): stage:Validate:complete is already set from this item's original
 // completion, so a bare fabrik:paused removal would silently no-op (itemNeedsWork's
-// completed-stage check would just skip it again). The message instead points at
-// fabrik:revalidate, whose existing handler (handleRevalidateLabel) clears
-// stage:Validate:complete alongside fabrik:paused/fabrik:awaiting-input/etc. and is what
-// actually makes Validate re-run.
+// completed-stage check would just skip it again). When the reroute target is literally
+// named "Validate", the message instead points at fabrik:revalidate, whose existing
+// handler (handleRevalidateLabel) clears stage:Validate:complete alongside
+// fabrik:paused/fabrik:awaiting-input/etc. and is what actually makes Validate re-run.
+// handleRevalidateLabel is hardcoded to that literal name, not generic over
+// stageBeforeHolding's result (unlike stageBeforeHolding itself, which resolves
+// structurally by Order) — so when the target isn't literally "Validate" (a config-only
+// edge case; production .fabrik/stages/*.yaml always has Validate precede Queued, but
+// nothing enforces that, and the test fixture below exercises "Implement" instead), the
+// message names the item's real blocking labels directly instead of recommending a
+// mechanism that would silently no-op against them.
 //
 // The posted comment deliberately never uses "ejected" framing, never promises a retry "in a
 // future train with a different composition" (there is no different composition possible for
@@ -1826,14 +1833,35 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 	if block := renderDiagnosticBlock(diag); block != "" {
 		sections = append(sections, block)
 	}
-	sections = append(sections, fmt.Sprintf(
-		"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
-			"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then apply "+
-			"`fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this item, so removing "+
-			"just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes again, this issue will "+
-			"re-queue and rejoin the train.",
-		targetName, targetName, targetName,
-	))
+	// handleRevalidateLabel (engine/item.go) clears stage:Validate:complete/failed
+	// specifically — it is hardcoded to the literal name "Validate", not generic over
+	// stageBeforeHolding's result. targetName, by contrast, is resolved structurally by
+	// Order (see stageBeforeHolding's doc comment) and can differ from "Validate" in a
+	// custom stage config — trainTestEngine's own test fixture resolves it to "Implement"
+	// for exactly this reason. Pointing at fabrik:revalidate when targetName isn't
+	// literally "Validate" would recommend a mechanism that silently no-ops against this
+	// item's actual completion label, reproducing the same class of stranding this issue
+	// fixes. Only recommend it when the names actually match; otherwise name the real
+	// blocking labels directly.
+	if targetName == "Validate" {
+		sections = append(sections, fmt.Sprintf(
+			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then apply "+
+				"`fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this item, so removing "+
+				"just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes again, this issue will "+
+				"re-queue and rejoin the train.",
+			targetName, targetName, targetName,
+		))
+	} else {
+		sections = append(sections, fmt.Sprintf(
+			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove "+
+				"`stage:%s:complete` and `fabrik:paused` (`fabrik:revalidate` only forces re-entry of a stage literally named "+
+				"Validate, so it will not help here) to re-enter %s. Once it completes again, this issue will re-queue and "+
+				"rejoin the train.",
+			targetName, targetName, targetName,
+		))
+	}
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
 
 	if _, err := e.client.AddComment(owner, repo, m.item.Number, msg); err != nil {

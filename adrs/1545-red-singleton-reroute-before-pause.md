@@ -87,6 +87,19 @@ handler (`handleRevalidateLabel`) already clears exactly the label set that bloc
 is itself poll-retried on partial failure — reusing it is strictly safer than inventing new
 label-clearing logic inside `ejectRedSingleton`.
 
+**Revision (review finding, Pruefer):** `handleRevalidateLabel` is hardcoded to the literal stage name
+`"Validate"` — it does not generalize over `stageBeforeHolding`'s (Order-derived) result the way that
+resolution function itself does. Since the target name is resolved structurally, a custom stage config
+could have `stageBeforeHolding` resolve to a stage not literally named `"Validate"` — the merge-train unit
+test fixture already exercises exactly this (`"Implement"`) — in which case recommending
+`fabrik:revalidate` would silently no-op against the item's real completion label
+(`stage:Implement:complete`, not `stage:Validate:complete`), reproducing the same class of stranding this
+issue fixes. The message now branches: it recommends applying `fabrik:revalidate` only when the resolved
+target name is literally `"Validate"`; otherwise it names the item's real blocking labels
+(`stage:<target>:complete`, `fabrik:paused`) directly and explains why `fabrik:revalidate` would not help.
+Covered by `TestEjectRedSingleton_Success` (non-Validate target) and
+`TestEjectRedSingleton_Success_ValidateTarget` (Validate target) in `engine/merge_train_test.go`.
+
 ### 4. Target stage name resolved locally, not by widening `rerouteQueuedMemberOffHolding`'s signature
 
 `rerouteQueuedMemberOffHolding` still returns a plain `bool`. Giving it a second return value to expose
