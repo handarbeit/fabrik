@@ -64,6 +64,21 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 				continue
 			}
 
+			// Mirrors settleAwaitingCIScan's equivalent pre-check log line
+			// (ci_settle.go) — purely diagnostic, doesn't gate the call.
+			// FetchItemDetails below goes through the same e.readClient
+			// (CacheImpl when caching is enabled), whose own internal
+			// freshness check (boardcache.go's cacheIsStale) decides
+			// cache-hit vs. real GraphQL fetch identically regardless of
+			// caller. Without this line, an operator attributing this scan's
+			// GraphQL cost (#1527) would see per-item log entries with no
+			// visibility into whether each fetch was a cache hit or a live
+			// API call.
+			if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, item.UpdatedAt) {
+				e.logf(item.Number, "queued-review-settle", "reading details from cache\n")
+			} else {
+				e.logf(item.Number, "queued-review-settle", "deep-fetching details from GitHub\n")
+			}
 			if err := e.readClient.FetchItemDetails(&item); err != nil {
 				e.logf(item.Number, "queued-review-settle", "could not deep-fetch item details: %v — will retry next poll\n", err)
 				continue
