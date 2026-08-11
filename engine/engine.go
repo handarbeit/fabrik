@@ -130,7 +130,7 @@ type Engine struct {
 	mergeTrainTrialsMu          sync.Mutex                    // guards mergeTrainTrials
 	mergeTrainTrials            map[string][]time.Time        // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
 	mergeTrainRunawayMu         sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533)
-	mergeTrainRunawayAlerted    map[string]bool               // key: "owner/repo#N"; members already alerted this runaway-guard episode. Cleared per-repo by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
+	mergeTrainRunawayAlerted    map[string]int                // key: "owner/repo#N"; value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-repo by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
 	queuedReviewEjectsMu        sync.Mutex                    // guards queuedReviewEjects
 	queuedReviewEjects          map[string]map[int]int        // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
 	issueCtxs                   sync.Map                      // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
@@ -281,7 +281,7 @@ func New(cfg Config) (*Engine, error) {
 		sem:                      make(chan struct{}, cfg.MaxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
-		mergeTrainRunawayAlerted: make(map[string]bool),
+		mergeTrainRunawayAlerted: make(map[string]int),
 		queuedReviewEjects:       make(map[string]map[int]int),
 		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
 	}
@@ -341,7 +341,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		sem:                      make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
 		mergeTrainTrials:         make(map[string][]time.Time),
-		mergeTrainRunawayAlerted: make(map[string]bool),
+		mergeTrainRunawayAlerted: make(map[string]int),
 		queuedReviewEjects:       make(map[string]map[int]int),
 		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
 	}

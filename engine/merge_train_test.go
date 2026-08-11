@@ -5180,6 +5180,42 @@ func TestFireRunawayGuard_IdempotentAcrossTwoFirings(t *testing.T) {
 	}
 }
 
+// TestFireRunawayGuard_ReAlertsAfterOperatorResumeRaisesCount verifies #1533 review finding
+// 2: the alert text itself instructs operators to manually remove fabrik:paused/
+// fabrik:awaiting-input to resume the train, and that recovery path never calls
+// resetTrialCounter (which only fires on a successful land). If the same member trips again
+// afterward, it does so at a strictly HIGHER trial count than before — trials cannot
+// accumulate while every Queued member stays paused, so a higher count is only possible once
+// an operator resume let new trials actually run. That must produce a fresh alert, not be
+// silently skipped as "already alerted this episode" the way TestFireRunawayGuard_
+// IdempotentAcrossTwoFirings correctly does for two firings at the SAME count.
+func TestFireRunawayGuard_ReAlertsAfterOperatorResumeRaisesCount(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(3, "Resumed Member")
+
+	// First trip: fires at count 6, alerts and pauses the member.
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	// A second, genuinely new trip: count is now 8, not 6 — only possible if new trials ran
+	// after an operator resumed the member (no resetTrialCounter call in between here, exactly
+	// mirroring the recovery path's own behavior).
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 8)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	alerts := 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 && strings.Contains(c.body, "runaway guard") {
+			alerts++
+		}
+	}
+	if alerts != 2 {
+		t.Errorf("expected 2 alerts across two genuinely new trips (counts 6 then 8, no resetTrialCounter in between), got %d", alerts)
+	}
+}
+
 // TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable covers R1's residual case: an
 // AddComment failure must not silently strand the (already-paused) member. It should be left
 // with the durable fabrik:awaiting-runaway-alert marker instead, and must NOT be recorded as
@@ -5352,17 +5388,30 @@ func TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert(t *testi
 	}
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxTrainTrialsPerWindow = 1
+	eng.cfg.TrainTrialWindowDuration = time.Hour
 
 	// Simulates the state left behind by an earlier fireRunawayGuard call within this
 	// same episode whose AddComment failed: paused, marker applied, not yet alerted.
 	member := makeTrainItem(20, "Stale Marker Member")
 	member.Labels = append(member.Labels, runawayAlertMarkerLabel, "fabrik:paused", "fabrik:awaiting-input")
 
+	// Seed a real trial so isRunawayTripped's count matches across both goroutines:
+	// settleRunawayGuardAlert always re-derives its own count live (#1533 review, finding
+	// 2), so fireRunawayGuard must be given the same live count here rather than an
+	// arbitrary literal — otherwise the two calls would (correctly, but irrelevantly to
+	// this test) disagree on whether the other's alert is fresh enough to skip.
+	eng.recordTrial("owner/repo")
+	count, tripped := eng.isRunawayTripped("owner/repo")
+	if !tripped {
+		t.Fatalf("expected the seeded trial to trip the guard (count=%d)", count)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+		eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, count)
 	}()
 	go func() {
 		defer wg.Done()

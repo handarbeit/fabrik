@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // runawayAlertMarkerLabel marks a merge-train member that fireRunawayGuard already paused
@@ -77,16 +78,18 @@ func (e *Engine) settleRunawayGuardAlert(item gh.ProjectItem) {
 	e.mergeTrainRunawayMu.Lock()
 	defer e.mergeTrainRunawayMu.Unlock()
 
-	if e.mergeTrainRunawayAlerted[alertKey] {
+	count, _ := e.isRunawayTripped(repoKey)
+	_, window := e.effectiveTrialWindow()
+
+	if recordedCount, ok := e.mergeTrainRunawayAlerted[alertKey]; ok && count <= recordedCount {
 		// A racing fireRunawayGuard call already delivered the alert for this member
 		// within this episode (e.g. it succeeded after this item picked up the marker
-		// but before this settle pass ran) — just clear the now-stale marker.
+		// but before this settle pass ran) — just clear the now-stale marker. See
+		// fireRunawayGuard's doc comment for why the comparison is by trial count, not
+		// a plain boolean (#1533 review, finding 2).
 		e.clearRunawayAlertMarker(item, owner, repo)
 		return
 	}
-
-	count, _ := e.isRunawayTripped(repoKey)
-	_, window := e.effectiveTrialWindow()
 
 	if _, err := e.postComment(item, runawayGuardAlertMessage(count, repoKey, window), false, true); err != nil {
 		e.logf(item.Number, "merge-train", "retry: could not post runaway guard alert: %v\n", err)
@@ -94,7 +97,7 @@ func (e *Engine) settleRunawayGuardAlert(item gh.ProjectItem) {
 		return
 	}
 
-	e.mergeTrainRunawayAlerted[alertKey] = true
+	e.mergeTrainRunawayAlerted[alertKey] = count
 	e.logf(item.Number, "merge-train", "posted runaway guard alert (retry)\n")
 	e.clearRunawayAlertMarker(item, owner, repo)
 }
@@ -110,43 +113,59 @@ func (e *Engine) recordRunawayAlertRetry(item gh.ProjectItem) {
 
 // escalateRunawayAlertFailure is called when the outstanding runaway-guard alert has failed
 // to post MaxRetries times. The member is already fabrik:paused (fireRunawayGuard's own
-// pause application, unaffected by the comment failure) — escalateSettle's own
-// fabrik:paused add is therefore a no-op here — but it removes the awaiting-runaway-alert
-// marker (retry suppression is no longer needed once the fallback comment below has
-// been posted) and posts a fallback comment carrying the same explanation the original
-// alert would have, so the member is never left paused with zero delivered explanation.
+// pause application, unaffected by the comment failure) — reapplying it here is a harmless
+// no-op — and it attempts a fallback comment carrying the same explanation the original alert
+// would have, so the member is never left paused with zero delivered explanation.
 //
-// Also marks the member alerted in mergeTrainRunawayAlerted (#1533 review): this is the
-// only caller of escalateRunawayAlertFailure, and it is always reached from
-// settleRunawayGuardAlert's recordRunawayAlertRetry call while that function still holds
-// mergeTrainRunawayMu — so writing to the map here is safe, and skipping it would leave a
-// member that only ever received the fallback comment indistinguishable, map-wise, from one
-// that was never alerted at all. Without this, a stale Hook 1 call still holding this member
-// in its own in-flight items slice (fireRunawayGuard's own doc comment notes current/
-// survivors isn't re-derived from a fresh board read) would find the map entry false and
-// post a second, duplicate alert on top of the fallback one — violating R2/A3.
+// Unlike the sibling settle scans, this deliberately does NOT delegate to the shared
+// escalateSettle helper. escalateSettle unconditionally removes the durable marker and
+// swallows its postComment closure's error (via postItemComment, whose return value every
+// other escalateSettle caller discards) — appropriate when the escalation comment is purely
+// informational and the marker's only job was retry-suppression. Here the fallback comment
+// *is* the last remaining delivery of the explanation R1 requires; if it also fails (a
+// persistent AddComment outage — lost token permission, a secondary rate limit outlasting
+// MaxRetries polls), unconditionally removing the marker and marking the member alerted would
+// erase the only remaining signal that the alert never landed and permanently suppress every
+// further retry this episode — reproducing #1533 itself through the very machinery meant to
+// fix it (#1533 review, finding 1). So the marker and the alerted-map entry are only touched
+// on confirmed success; on failure the marker stays, and the next settleRunawayGuardAlertScan
+// pass retries the primary alert (then, on renewed failure, this fallback) again next poll —
+// indefinitely, until a comment actually lands.
+//
+// The alerted-map write on success is safe here for the same reason as before this rewrite:
+// escalateRunawayAlertFailure's only caller is settleRunawayGuardAlert's
+// recordRunawayAlertRetry, reached while that function still holds mergeTrainRunawayMu.
 func (e *Engine) escalateRunawayAlertFailure(item gh.ProjectItem) {
-	e.logf(item.Number, "escalate", "runaway guard alert failed to post %d time(s) — posting fallback comment\n", e.cfg.MaxRetries)
-
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoKey := owner + "/" + repo
 	alertKey := repoKey + "#" + strconv.Itoa(item.Number)
 	count, _ := e.isRunawayTripped(repoKey)
 	_, window := e.effectiveTrialWindow()
 
-	e.escalateSettle(item, runawayAlertMarkerLabel, runawayAlertRetryStage, func(item gh.ProjectItem) {
-		comment := fmt.Sprintf(
-			"🏭 **Fabrik merge-train — runaway guard alert delivery failed**\n\n"+
-				"This member was paused by the merge-train runaway guard, but Fabrik could "+
-				"not post the explanatory alert comment after %d attempt(s). Posting this "+
-				"fallback notice instead so the pause is not left unexplained.\n\n"+
-				"%s",
-			e.cfg.MaxRetries, runawayGuardAlertMessage(count, repoKey, window),
-		)
-		e.postItemComment(item, comment, false)
-	})
+	// fabrik:paused is unconditional and idempotent, mirroring fireRunawayGuard's own
+	// "pause never depends on the comment succeeding" contract.
+	e.addLabel(item, "fabrik:paused")
 
-	e.mergeTrainRunawayAlerted[alertKey] = true
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik merge-train — runaway guard alert delivery failed**\n\n"+
+			"This member was paused by the merge-train runaway guard, but Fabrik could "+
+			"not post the explanatory alert comment after %d attempt(s). Posting this "+
+			"fallback notice instead so the pause is not left unexplained.\n\n"+
+			"%s",
+		e.cfg.MaxRetries, runawayGuardAlertMessage(count, repoKey, window),
+	)
+
+	if _, err := e.postComment(item, comment, false, true); err != nil {
+		e.logf(item.Number, "escalate", "runaway guard fallback comment also failed after %d attempt(s): %v — marker stays, will keep retrying\n", e.cfg.MaxRetries, err)
+		return
+	}
+
+	e.logf(item.Number, "escalate", "runaway guard alert failed to post %d time(s) — posted fallback comment\n", e.cfg.MaxRetries)
+	e.mergeTrainRunawayAlerted[alertKey] = count
+	e.clearRunawayAlertMarker(item, owner, repo)
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: runawayAlertRetryStage})
 }
 
 // clearRunawayAlertMarker removes the awaiting-runaway-alert marker and clears the retry

@@ -2271,6 +2271,22 @@ func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) s
 // mergeTrainRunawayAlerted is cleared per-repo by resetTrialCounter, the guard's own "episode
 // ends" signal (a successful land) — the next trip starts a fresh episode.
 //
+// Episode-scoping also has to survive the *other* documented "episode ends" path: the alert
+// text itself instructs operators to manually remove fabrik:paused/fabrik:awaiting-input to
+// resume the train, and that path never calls resetTrialCounter (#1533 review, finding 2). A
+// resumed member can trip the guard again while old trial timestamps are still inside the
+// rolling window — the count keeps climbing (it can only climb because new trials actually
+// ran, which requires the member to have been un-paused first) — and that second trip must
+// still produce a fresh alert. mergeTrainRunawayAlerted therefore records the trial count in
+// effect at the time of alerting, not just a boolean: a later call only treats a member as
+// already-alerted while its own count is <= the recorded one. Trials cannot accumulate while
+// every Queued member stays paused, so within one continuous, un-resumed episode the count
+// can only hold steady or fall (as old trials age out of the window) — confirmed by the
+// original bug report's own log, where all three log lines of one episode show the identical
+// "6 trial(s)". An increase is only possible after an operator-driven resume let new trials
+// run, at which point it is exactly the "genuinely new information" the settle-scan family
+// exists to surface, not a duplicate of the earlier alert.
+//
 // A member whose AddComment call fails is NOT marked alerted: it is left with the durable
 // fabrik:awaiting-runaway-alert marker instead, which settleRunawayGuardAlertScan retries
 // every poll independent of any fireRunawayGuard call ever reaching that member again. This
@@ -2301,11 +2317,13 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 
 	for _, item := range items {
 		alertKey := repoKey + "#" + strconv.Itoa(item.Number)
-		if e.mergeTrainRunawayAlerted[alertKey] {
+		if recordedCount, ok := e.mergeTrainRunawayAlerted[alertKey]; ok && count <= recordedCount {
 			// Already paused and alerted this episode by an earlier call (Hook 1 or
-			// Hook 2, racing for the same member) — skip entirely to avoid a
-			// duplicate comment and redundant (though individually idempotent)
-			// label calls.
+			// Hook 2, racing for the same member) at this or a higher trial count —
+			// skip entirely to avoid a duplicate comment and redundant (though
+			// individually idempotent) label calls. A strictly higher count here
+			// would mean genuinely new trials ran since the last alert (only
+			// possible after an operator resume), which falls through below.
 			continue
 		}
 
@@ -2322,7 +2340,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
 			e.markRunawayAlertOutstanding(item, owner, repo)
 		} else {
-			e.mergeTrainRunawayAlerted[alertKey] = true
+			e.mergeTrainRunawayAlerted[alertKey] = count
 			// Best-effort: clears a marker left by an earlier failed attempt for
 			// this same member within this episode, if any. Unconditional rather
 			// than gated on item.Labels (a snapshot that can be stale relative to

@@ -45,7 +45,7 @@ func TestSettleRunawayGuardAlert_RetrySucceeds(t *testing.T) {
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	alerted := eng.mergeTrainRunawayAlerted["owner/repo#10"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#10"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if !alerted {
 		t.Error("expected the member recorded as alerted after a successful retry")
@@ -80,7 +80,7 @@ func TestSettleRunawayGuardAlert_RetryFails_MarkerStays(t *testing.T) {
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	alerted := eng.mergeTrainRunawayAlerted["owner/repo#11"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#11"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if alerted {
 		t.Error("did not expect the member recorded as alerted after a failed retry")
@@ -143,11 +143,75 @@ func TestSettleRunawayGuardAlertScan_DoesNotSkipPausedItems(t *testing.T) {
 	}
 }
 
-// TestEscalateRunawayAlertFailure_PostsFallbackCommentAtMaxRetries verifies R1's terminal
-// fallback: after MaxRetries failed settle passes, a fallback comment carrying the original
-// alert's explanation is posted so the member is never left paused with zero delivered
-// explanation, and the marker is removed so the scan stops retrying.
-func TestEscalateRunawayAlertFailure_PostsFallbackCommentAtMaxRetries(t *testing.T) {
+// TestEscalateRunawayAlertFailure_FallbackSucceeds_MarkerRemovedAndAlerted verifies R1's
+// terminal fallback in its success shape: after MaxRetries failed settle passes, a fallback
+// comment carrying the original alert's explanation is posted, and once THAT comment actually
+// lands, the marker is removed (so the scan stops retrying) and the member is recorded as
+// alerted, exactly like a successful direct post or retry — so a stale fireRunawayGuard call
+// still holding this member in its own in-flight items slice (fireRunawayGuard's own doc
+// comment notes current/survivors isn't re-derived from a fresh board read) doesn't find the
+// map entry absent and post a second, duplicate alert on top of the fallback one (R2/A3).
+func TestEscalateRunawayAlertFailure_FallbackSucceeds_MarkerRemovedAndAlerted(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			if strings.Contains(body, "delivery failed") {
+				return 1, nil // the fallback comment itself succeeds
+			}
+			return 0, fmt.Errorf("rate limited") // the primary retry keeps failing
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.MaxRetries = 2
+
+	item := gh.ProjectItem{
+		Number: 15, Repo: "owner/repo",
+		Labels: []string{runawayAlertMarkerLabel, "fabrik:paused"},
+	}
+
+	for i := 0; i < eng.cfg.MaxRetries; i++ {
+		eng.settleRunawayGuardAlert(item)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	markerRemoved := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == runawayAlertMarkerLabel {
+			markerRemoved = true
+		}
+	}
+	if !markerRemoved {
+		t.Errorf("expected %s removed once the fallback comment succeeds", runawayAlertMarkerLabel)
+	}
+
+	fallbackFound := false
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 15 && strings.Contains(c.body, "runaway guard alert delivery failed") {
+			fallbackFound = true
+		}
+	}
+	if !fallbackFound {
+		t.Error("expected a fallback comment naming the delivery failure")
+	}
+
+	eng.mergeTrainRunawayMu.Lock()
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#15"]
+	eng.mergeTrainRunawayMu.Unlock()
+	if !alerted {
+		t.Error("expected the member recorded as alerted once the fallback comment succeeds")
+	}
+}
+
+// TestEscalateRunawayAlertFailure_FallbackAlsoFails_MarkerStaysAndNotAlerted verifies #1533
+// review finding 1: when the fallback comment itself also fails (a persistent AddComment
+// outage — lost token permission, a secondary rate limit outlasting MaxRetries polls — not
+// just a transient blip), the marker must NOT be removed and the member must NOT be recorded
+// as alerted. Doing either would erase the only remaining signal that the alert never landed
+// and permanently suppress every further retry for the rest of the episode — reproducing
+// #1533 itself (paused with zero delivered explanation) through the very machinery meant to
+// fix it. The marker staying in place means the next settleRunawayGuardAlertScan pass keeps
+// retrying — the primary alert, then this fallback again — every poll, indefinitely.
+func TestEscalateRunawayAlertFailure_FallbackAlsoFails_MarkerStaysAndNotAlerted(t *testing.T) {
 	client := &mockGitHubClient{
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			return 0, fmt.Errorf("rate limited")
@@ -167,23 +231,14 @@ func TestEscalateRunawayAlertFailure_PostsFallbackCommentAtMaxRetries(t *testing
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	markerRemoved := false
 	for _, c := range client.removeLabelCalls {
 		if c.labelName == runawayAlertMarkerLabel {
-			markerRemoved = true
+			t.Errorf("did not expect %s removed while the fallback comment is also failing", runawayAlertMarkerLabel)
 		}
-	}
-	if !markerRemoved {
-		t.Errorf("expected %s removed on escalation", runawayAlertMarkerLabel)
 	}
 
 	fallbackFound := false
 	for _, c := range client.addCommentCalls {
-		// addCommentFn above always errors — the fallback path goes through
-		// postItemComment, which also hits the same injected error, so assert on the
-		// attempt rather than a successfully-recorded post. The fallback body is built
-		// and passed to postItemComment regardless of whether the underlying AddComment
-		// call itself succeeds this time.
 		if c.issueNumber == 14 && strings.Contains(c.body, "runaway guard alert delivery failed") {
 			fallbackFound = true
 		}
@@ -192,15 +247,10 @@ func TestEscalateRunawayAlertFailure_PostsFallbackCommentAtMaxRetries(t *testing
 		t.Error("expected a fallback comment attempt naming the delivery failure")
 	}
 
-	// #1533 review: escalation must also record the member as alerted, exactly like a
-	// successful direct post or retry does. Without this, a stale fireRunawayGuard call
-	// still holding this member in its own in-flight items slice would find
-	// mergeTrainRunawayAlerted false after the fallback comment already posted, and post a
-	// second, duplicate alert on top of it — violating R2/A3.
 	eng.mergeTrainRunawayMu.Lock()
-	alerted := eng.mergeTrainRunawayAlerted["owner/repo#14"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#14"]
 	eng.mergeTrainRunawayMu.Unlock()
-	if !alerted {
-		t.Error("expected the member recorded as alerted after escalation to the fallback comment")
+	if alerted {
+		t.Error("did not expect the member recorded as alerted while the fallback comment is also failing")
 	}
 }
