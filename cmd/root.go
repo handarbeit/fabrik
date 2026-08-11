@@ -45,6 +45,7 @@ type Config struct {
 	MaxRetries                int
 	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
 	MaxResumeFailures         int    // Max consecutive failed --resume attempts per (issue, stage) session before discarding the session pointer and cold-starting; 0 means use default (2; #1414)
+	MaxToolsDeniedRetries     int    // Max consecutive tool-permission-denial exits per stage before pausing; 0 means use default (3; #1523)
 	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
 	MaxReviewCycles           int    // 0 means use default (5)
 	CIWaitTimeout             int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
@@ -156,6 +157,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
 	flag.IntVar(&cfg.MaxResumeFailures, "max-resume-failures", 0, "Maximum number of consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting — independent of max-retries, since a failed resume attempt is not charged against it (0 = use default of 2; also FABRIK_MAX_RESUME_FAILURES; #1414)")
+	flag.IntVar(&cfg.MaxToolsDeniedRetries, "max-tools-denied-retries", 0, "Maximum number of consecutive tool-permission-denial exits per stage before pausing — independent of max-retries, since a permission misconfiguration is not a stage failure (0 = use default of 3; also FABRIK_MAX_TOOLS_DENIED_RETRIES; #1523)")
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
@@ -337,6 +339,9 @@ func Execute() error {
 	}
 	if !explicitFlags["max-resume-failures"] {
 		cfg.MaxResumeFailures = resolveInt(cfg.MaxResumeFailures, "FABRIK_MAX_RESUME_FAILURES", "", 2)
+	}
+	if !explicitFlags["max-tools-denied-retries"] {
+		cfg.MaxToolsDeniedRetries = resolveInt(cfg.MaxToolsDeniedRetries, "FABRIK_MAX_TOOLS_DENIED_RETRIES", "", 3)
 	}
 	if !explicitFlags["review-wait-timeout"] {
 		cfg.ReviewWaitTimeout = resolveInt(cfg.ReviewWaitTimeout, "FABRIK_REVIEW_WAIT_TIMEOUT", "of minutes", 15)
@@ -722,6 +727,7 @@ func Execute() error {
 		}
 		fmt.Printf("  max-slice-retries: %d\n", maxSliceRetries(cfg.MaxSliceRetries))
 		fmt.Printf("  max-resume-failures: %d\n", maxResumeFailures(cfg.MaxResumeFailures))
+		fmt.Printf("  max-tools-denied-retries: %d\n", maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries))
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
@@ -765,6 +771,7 @@ func Execute() error {
 		MaxRetries:                cfg.MaxRetries,
 		MaxSliceRetries:           maxSliceRetries(cfg.MaxSliceRetries),
 		MaxResumeFailures:         maxResumeFailures(cfg.MaxResumeFailures),
+		MaxToolsDeniedRetries:     maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries),
 		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
@@ -1073,6 +1080,22 @@ func maxSliceRetries(n int) int {
 func maxResumeFailures(n int) int {
 	if n <= 0 {
 		return 2
+	}
+	return n
+}
+
+// maxToolsDeniedRetries returns the configured MaxToolsDeniedRetries value,
+// defaulting to 3 when n is 0 (unset). Lower than max-slice-retries (10,
+// routine/expected) since a permission misconfiguration does not resolve
+// itself the way slicing does — a retry cannot fix a broken permission
+// profile; higher than max-resume-failures (2) since the explanatory comment
+// already reaches the operator on the very first detection (R4), so the
+// extra cycles before pauseForToolsDeniedLimit only guard against a single
+// spurious/flaky denial, not against expecting retries to fix anything
+// (#1523).
+func maxToolsDeniedRetries(n int) int {
+	if n <= 0 {
+		return 3
 	}
 	return n
 }
