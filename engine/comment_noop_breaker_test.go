@@ -427,3 +427,137 @@ func TestNoOpCommentBreaker_ResetOnManualUnpause(t *testing.T) {
 		t.Errorf("NoOpCommentCycles(Review) after clearFailedStage = %d, want 0 (reset)", got)
 	}
 }
+
+// TestNoOpCommentBreaker_ResetOnAwaitingInputResume is the regression test for
+// the review finding that the breaker's *own* pause shape — fabrik:paused +
+// fabrik:awaiting-input, applied by tripNoOpCommentCycleBreaker via pauseIssue
+// — could not be cleanly resumed. isAwaitingInput(item) routes a human reply
+// through unblockAwaitingInput (engine/item.go), not clearFailedStage; before
+// this fix, unblockAwaitingInput cleared retry/pause state but never applied
+// EngineCyclesCleared, so NoOpCommentCycles survived the unpause at its
+// tripped value and could re-trip on the very first post-resume cycle even
+// though a human had just engaged — exactly the multi-round Q&A case R2/the
+// breaker's own inline comment says must be tolerated.
+//
+// Unlike the other tests in this file, this one drives the real
+// processItem/isAwaitingInput dispatch path (not processComments directly),
+// per the review finding's explicit call-out that no existing test covered
+// that route.
+func TestNoOpCommentBreaker_ResetOnAwaitingInputResume(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	claude := nonAdvancingClaude() // success (err==nil), completed=false, no commit
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.MaxNoOpCommentCycles = 3
+	// Old breaker's threshold set far above what this test drives, so its
+	// own (separately-buggy, out of scope here) reset behavior can't
+	// interfere with isolating the new counter's behavior.
+	eng.cfg.MaxCommentCyclesPerWindow = 100
+	eng.cfg.CommentCycleWindow = time.Hour
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 70, Status: "Research", Body: "spec"}
+	tripComments := []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "some-bot", Body: "stale review body, already addressed"}}
+
+	// Drive the breaker to its threshold directly via processComments (the
+	// same setup as TestNoOpCommentBreaker_TripsAfterThreshold_OldBreakerAlone_WouldNotTrip),
+	// which applies fabrik:paused + fabrik:awaiting-input via pauseIssue.
+	for i := 0; i < 3; i++ {
+		if err := eng.processComments(context.Background(), board, item, stage, tripComments); err != nil {
+			t.Fatalf("processComments call %d: %v", i, err)
+		}
+	}
+
+	repoStr := "owner/repo"
+	snap, err := eng.store.Get(repoStr, 70)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.NoOpCommentCycles("Research"); got != 3 {
+		t.Fatalf("NoOpCommentCycles(Research) before resume = %d, want 3 (tripped)", got)
+	}
+
+	var trippedPaused, trippedAwaitingInput bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			trippedPaused = true
+		}
+		if c.labelName == "fabrik:awaiting-input" {
+			trippedAwaitingInput = true
+		}
+	}
+	if !trippedPaused || !trippedAwaitingInput {
+		t.Fatalf("expected fabrik:paused + fabrik:awaiting-input after trip; addLabelCalls=%v", client.addLabelCalls)
+	}
+	tripCommentsBefore := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "no-op comment-processing circuit breaker") {
+			tripCommentsBefore++
+		}
+	}
+	if tripCommentsBefore != 1 {
+		t.Fatalf("expected exactly 1 trip comment before resume, got %d", tripCommentsBefore)
+	}
+
+	// Simulate the tripped issue as seen on the next poll: both pause labels
+	// present, and a human (not a bot) has replied — the resume trigger
+	// isAwaitingInput's branch in processItem is waiting for.
+	client.addLabelCalls = nil
+	client.removeLabelCalls = nil
+	resumedItem := gh.ProjectItem{
+		Number: 70,
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "C_2", DatabaseID: 2, Author: "some-human", Body: "still working on it, please continue"},
+		},
+	}
+
+	if err := eng.processItem(context.Background(), board, resumedItem); err != nil {
+		t.Fatalf("processItem (resume): %v", err)
+	}
+
+	// unblockAwaitingInput must have removed both pause labels...
+	var removedPaused, removedAwaitingInput bool
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			removedPaused = true
+		}
+		if c.labelName == "fabrik:awaiting-input" {
+			removedAwaitingInput = true
+		}
+	}
+	if !removedPaused || !removedAwaitingInput {
+		t.Fatalf("expected unblockAwaitingInput to remove fabrik:paused + fabrik:awaiting-input; removeLabelCalls=%v", client.removeLabelCalls)
+	}
+
+	// ...and NoOpCommentCycles must have been reset to 0 by EngineCyclesCleared
+	// before the resumed (still non-advancing) cycle ran, landing at 1 — not
+	// 4, which is what the pre-fix code produced (3 carried over + 1).
+	snap, err = eng.store.Get(repoStr, 70)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := snap.NoOpCommentCycles("Research"); got != 1 {
+		t.Errorf("NoOpCommentCycles(Research) after one post-resume no-op cycle = %d, want 1 (reset to 0 by the resume, then incremented once)", got)
+	}
+
+	// The single post-resume cycle must not have re-tripped the breaker — one
+	// invocation is far below the threshold of 3, so no new pause or trip
+	// comment should have been produced this round.
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused should not be re-applied after a single post-resume no-op cycle (threshold is 3)")
+		}
+	}
+	tripCommentsAfter := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "no-op comment-processing circuit breaker") {
+			tripCommentsAfter++
+		}
+	}
+	if tripCommentsAfter != tripCommentsBefore {
+		t.Errorf("expected no additional trip comment after resume (still %d total), got %d", tripCommentsBefore, tripCommentsAfter)
+	}
+}

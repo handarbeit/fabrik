@@ -134,13 +134,32 @@ trip comment opens `🏭 **Fabrik — comment-processing circuit breaker tripped
 breaker's opens `🏭 **Fabrik — no-op comment-processing circuit breaker tripped**` — so an
 operator reading the pause comment always knows which mechanism fired.
 
-**Manual unpause resets both.** `EngineCyclesCleared`'s `store.go` apply case gains
-`delete(item.StageState.NoOpCommentCycles, v.StageName)` alongside its existing deletes
-for `ReviewCycles`/`ReviewBlockedCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles` —
-`clearFailedStage` (`engine/item.go`) already applies `EngineCyclesCleared` on every
-manual-unpause path, so no new call site was needed. `copyStageState`
-(`internal/itemstate/snapshot.go`) deep-copies the new map, matching every other
-`StageState` map field.
+**Manual unpause resets both — from *either* pause route.** `EngineCyclesCleared`'s
+`store.go` apply case gains `delete(item.StageState.NoOpCommentCycles, v.StageName)`
+alongside its existing deletes for `ReviewCycles`/`ReviewBlockedCycles`/`CIFixCycles`/
+`RebaseCycles`/`EnqueueCycles`. `copyStageState` (`internal/itemstate/snapshot.go`)
+deep-copies the new map, matching every other `StageState` map field.
+
+There are **two** distinct manual-unpause routes, not one, and both must apply
+`EngineCyclesCleared` for the reset to actually take effect on this breaker's own pause
+shape. `clearFailedStage` (`engine/item.go`) handles the `stage:<name>:failed` +
+`fabrik:paused` family and already applied `EngineCyclesCleared`. But
+`tripNoOpCommentCycleBreaker` — like `tripCommentBreaker`, `pauseForReviewCycleLimit`, and
+every other cycle-limit escalation — pauses via `fabrik:paused` **+**
+`fabrik:awaiting-input` (no `stage:<name>:failed`), and a human reply to *that* shape is
+routed by `isAwaitingInput(item)` to a second, separate function: `unblockAwaitingInput`.
+Before this PR's final revision, `unblockAwaitingInput` cleared `StageLastAttemptCleared`/
+`StageRetryCleared`/`EngineUnpaused` but never applied `EngineCyclesCleared` or reset the
+old `CommentBreaker` — so `NoOpCommentCycles` (never time-pruned by design) survived the
+unblock at its tripped value, and the very first post-resume cycle re-tripped the breaker
+and misreported "N+1 consecutive invocations" when only one had occurred since the human
+engaged. Caught during PR review (verified empirically by driving the real
+`processItem`/`isAwaitingInput` dispatch path, not `processComments` directly — see
+`TestNoOpCommentBreaker_ResetOnAwaitingInputResume`), fixed before merge:
+`unblockAwaitingInput` now also applies `EngineCyclesCleared` and calls
+`resetCommentBreaker`, mirroring `clearFailedStage` exactly. The old `#1089` breaker had
+the identical gap in the same function; fixed at the same time since it's the same missing
+call in the same place, not a second change.
 
 **Trip action.** `tripNoOpCommentCycleBreaker` reuses `pauseIssue`/`pauseOpts`
 (`fabrik:paused` + `fabrik:awaiting-input`, ADR-069's honorable-pause guarantee) exactly
