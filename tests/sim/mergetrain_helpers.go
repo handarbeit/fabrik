@@ -159,6 +159,40 @@ func QueueMember(t *testing.T, env *Env, marker string, files map[string]string)
 	return num, pr.Number
 }
 
+// resyncIssueSeqAfterEngineActivity re-synchronizes env's own issue/PR
+// number reservation counter (issueSeqNext) with the sim's real internal
+// per-repo counter after a poll has run. Engine activity — chiefly
+// CreateDraftPR/CreatePR for merge-train trial and landing PRs — auto-assigns
+// numbers from the sim's own sequence independently of anything
+// QueueMember/FileIssue reserved through issueSeqNext, so a scenario that
+// queues a *fresh* member after running a poll (a fresh partner for a second
+// ejection round, e.g. mergetrain_ejection_test.go's
+// TestMergeTrainEjection_MaxEjectionsPausesMember) would otherwise collide
+// with a number the engine already claimed mid-poll for a trial or landing
+// PR. Call this once between RunPoll and the next QueueMember/FileIssue in
+// any scenario that interleaves the two. Scans every PR (open or closed —
+// state doesn't affect whether a number is taken) for the highest number
+// seen and bumps issueSeqNext past it; a no-op when nothing has moved past
+// env's own bookkeeping.
+func resyncIssueSeqAfterEngineActivity(t *testing.T, env *Env) {
+	t.Helper()
+	prs, err := env.Sim.Sim().ListPRs(env.Owner, env.Repo)
+	if err != nil {
+		t.Fatalf("resyncIssueSeqAfterEngineActivity: ListPRs: %v", err)
+	}
+	highest := 0
+	for _, pr := range prs {
+		if pr.Number > highest {
+			highest = pr.Number
+		}
+	}
+	env.issueSeqMu.Lock()
+	if highest > env.issueSeqNext {
+		env.issueSeqNext = highest
+	}
+	env.issueSeqMu.Unlock()
+}
+
 // greenCheckRun and redCheckRun build a single completed check run for
 // startTrialVerdictSeeder's verdictFor callback. name defaults to "ci" when
 // empty, matching this file's scenarios' habit of not caring about the
