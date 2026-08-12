@@ -45,17 +45,7 @@ Otherwise, rebase:
 git rebase origin/main
 ```
 
-**After a rebase that actually ran, push it immediately:**
-
-```bash
-git push --force-with-lease
-```
-
-A rebase rewrites every replayed commit's SHA — the result will *never* match `origin/<branch>` byte-for-byte, and that mismatch is expected, not a fault. `--force-with-lease` is safe here: `fabrik/issue-<N>` is a branch Fabrik owns exclusively for this issue, so there is no other legitimate writer to race against.
-
-**Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
-
-If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
+If the rebase reports conflicts, resolve them first — see "Merge conflict resolution — CRITICAL" immediately below — before pushing anything. Only push once the rebase is clean (either it completed with no conflicts, or you resolved them and `git status` shows a clean, non-rebasing tree).
 
 ### Merge conflict resolution — CRITICAL
 
@@ -72,6 +62,20 @@ When resolving merge conflicts during rebase, you MUST be conservative:
 5. **After the full rebase, run `go test ./...`** before proceeding with review. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
 
 Common mistake: a feature branch that doesn't have a function added on main will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/main..HEAD` after rebase to verify you haven't lost anything from main.
+
+### Push the rebase — never reset
+
+**Once the rebase is clean, push it immediately:**
+
+```bash
+git push --force-with-lease
+```
+
+A rebase rewrites every replayed commit's SHA — the result will *never* match `origin/<branch>` byte-for-byte, and that mismatch is expected, not a fault. `--force-with-lease` is safe here: `fabrik/issue-<N>` is a branch Fabrik owns exclusively for this issue, so there is no other legitimate writer to race against.
+
+**Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
+
+If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
 
 ### Install dependencies per CLAUDE.md
 

@@ -33,7 +33,8 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
    ```bash
    git rebase origin/main
    ```
-3. **If the rebase ran, push it immediately once clean:**
+3. Resolve any merge conflicts the rebase produced (main may have moved since Review) — see "Merge conflict resolution — CRITICAL" immediately below. If the rebase completed with no conflicts, skip straight to step 4.
+4. **Once the rebase is clean — no conflicts, or all resolved per step 3 — push it immediately if a rebase ran:**
    ```bash
    git push --force-with-lease
    ```
@@ -42,7 +43,6 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
    **Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** After a successful rebase, your local branch is correctly *ahead* of the remote — that's the goal, not a problem. Resetting back to `origin` discards the rebase you just did, with no way to recover it. If you find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
 
    If you narrate this outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 2 commits" or "skipped — already up to date") — never assert the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
-4. Resolve any merge conflicts (main may have moved since Review)
 
 ### Merge conflict resolution — CRITICAL
 
