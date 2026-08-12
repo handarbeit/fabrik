@@ -599,10 +599,11 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 
 	// --- SHA-tracking path (opened, closed, synchronize, reopened) ---
 	//
-	// Both PRHeadSHAUpdated calls below (the normal path at ~line 628 and the
-	// auto-heal path at ~line 663) deliberately do NOT stamp
-	// CacheImpl.linkedPRFetchedAt, even though synchronize is precisely the
-	// force-push/rebase event whose staleness linkedPRCacheTTL exists to bound.
+	// Both PRHeadSHAUpdated calls below (the normal path, for an issue already
+	// known to the Store, and the auto-heal path, for one discovered via
+	// fallback lookup) deliberately do NOT stamp CacheImpl.linkedPRFetchedAt,
+	// even though synchronize is precisely the force-push/rebase event whose
+	// staleness linkedPRCacheTTL exists to bound.
 	// This is load-bearing, not an omission — do not "fix" it by adding a
 	// stamp here. linkedPRFetchedAt records live GitHub confirmation only, by
 	// design (see its doc comment in boardcache.go); a delta-path stamp would
