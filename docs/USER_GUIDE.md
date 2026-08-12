@@ -777,6 +777,16 @@ user: your-github-username
 # Comment-processing circuit breaker (#1089): rolling window in minutes over
 # which max_comment_cycles_per_window is measured.
 # comment_cycle_window: 30
+
+# Success-agnostic comment-processing circuit breaker (#1555): maximum
+# consecutive comment-processing invocations for the same issue and stage that
+# produce no observable progress (no commit, no issue-body update, no
+# FABRIK_STAGE_COMPLETE) before pausing — regardless of whether each
+# invocation itself exited successfully, and regardless of how the window
+# above measures time. Sibling of max_comment_cycles_per_window: that one
+# bounds a burst of invocations within a rolling window; this one bounds a
+# loop whose invocations are spaced sparser than any window.
+# max_no_op_comment_cycles: 5
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
@@ -841,6 +851,7 @@ FABRIK_USER=my-personal-username
 | `--train-trial-window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `--max-train-trials-per-window` is measured (0 = use default of 60; also `FABRIK_TRAIN_TRIAL_WINDOW`). | `0` (60 min) |
 | `--max-comment-cycles-per-window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (0 = use default of 10; also `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW`). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083) — resets on any forward progress (stage completion, new commit, PR state change, issue-body edit, or manual unpause). | `0` (10) |
 | `--comment-cycle-window` | Comment-processing circuit breaker (#1089): rolling window in minutes over which `--max-comment-cycles-per-window` is measured (0 = use default of 30; also `FABRIK_COMMENT_CYCLE_WINDOW`). | `0` (30 min) |
+| `--max-no-op-comment-cycles` | Success-agnostic comment-processing circuit breaker (#1555): maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress (no commit, no issue-body update, no `FABRIK_STAGE_COMPLETE`) before pausing with `fabrik:paused` + `fabrik:awaiting-input` — regardless of whether each invocation itself exited successfully (0 = use default of 5; also `FABRIK_MAX_NO_OP_COMMENT_CYCLES`). Sibling of `--max-comment-cycles-per-window`: bounds a loop whose invocations are spaced sparser than any rolling window can see. | `0` (5) |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output; prevents worker goroutines from blocking when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits (0 = use built-in default of 30 sec; also `FABRIK_CLAUDE_WAIT_DELAY`) | `0` (30 sec) |
 | `--janitor-interval` | Hours between janitor runs (closed-issue cleanup, stale-label eviction); 0 disables the janitor; also `FABRIK_JANITOR_INTERVAL` | `1` |
 | `--log-retention-days` | Delete `.fabrik/logs/` files older than this many days; 0 disables age-based pruning; also `FABRIK_LOG_RETENTION_DAYS` | `14` |
@@ -896,6 +907,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TRAIN_TRIAL_WINDOW` | `train_trial_window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` is measured (positive integer; invalid or unset values default to 60). See `--train-trial-window`. | `60` |
 | `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW` | `max_comment_cycles_per_window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083). See `--max-comment-cycles-per-window`. | `10` |
 | `FABRIK_COMMENT_CYCLE_WINDOW` | `comment_cycle_window` | Comment-processing circuit breaker (#1089): rolling window in minutes over which `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW` is measured (positive integer; invalid or unset values default to 30). See `--comment-cycle-window`. | `30` |
+| `FABRIK_MAX_NO_OP_COMMENT_CYCLES` | `max_no_op_comment_cycles` | Success-agnostic comment-processing circuit breaker (#1555): maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress before pausing, regardless of invocation success (positive integer; invalid or unset values default to 5). See `--max-no-op-comment-cycles`. | `5` |
 | `FABRIK_CONVERGENCE_BUDGET` | *(no config.yaml key)* | Wall-clock budget for post-Validate yolo PR convergence (Go duration syntax: `30m`, `1h`, `2h30m`; `0` disables; invalid values default to 30 min). When the budget expires and the PR has not merged, Fabrik pauses the issue with `fabrik:awaiting-input`. | `30m` |
 | `FABRIK_AUTO_MERGE_STRATEGY` | `auto_merge_strategy` | Merge method Fabrik attempts first — both when calling GitHub's `enablePullRequestAutoMerge` for yolo PRs and when merging a PR directly (e.g. merge-train landings). If the repository disallows the configured method, Fabrik falls back through the remaining allowed methods (logged) rather than failing. Accepted values: `MERGE`, `SQUASH`, `REBASE`. Invalid or unset values default to `MERGE`. | `MERGE` |
 | `FABRIK_CLAUDE_WAIT_DELAY` | *(no config.yaml key)* | Seconds to wait after Claude exits before recovering buffered output (non-negative integer; `0` or unset uses the default of 30; invalid values default to 30). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits. | `30` |
