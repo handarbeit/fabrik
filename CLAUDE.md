@@ -136,9 +136,10 @@ allowed_tools:                  # Optional: REPLACES the default tool set (not a
                                 # the model and, under --permission-mode dontAsk, may still be invoked
                                 # (see #1372). It cannot make a harness tool disappear. The only mechanism
                                 # that does is `--disallowedTools`, which Fabrik emits unconditionally
-                                # (both invocation paths) for `ScheduleWakeup` and `Workflow` — harness
-                                # tools whose contract is cross-turn resumption that a headless stage
-                                # cannot deliver. See ADR-1365.
+                                # (both invocation paths) for `ScheduleWakeup`, `Workflow`, `Monitor`,
+                                # and `CronCreate` — harness tools whose contract requires delivery to
+                                # a future turn, session, or external callback that a headless stage
+                                # cannot receive. See ADR-1365.
 post_to_pr: true                # Post output to linked PR instead of issue
 create_draft_pr: true           # Create draft PR before stage runs
 mark_pr_ready_on_complete: true # Mark PR ready when stage completes
