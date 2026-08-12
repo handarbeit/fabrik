@@ -318,6 +318,14 @@ func TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindi
 	// Deliberately below 5 — if a no-op dispatch spent the budget, the fifth
 	// no-op alone would already trip the cycle limit and pause the issue.
 	eng.cfg.MaxReviewCycles = 3
+	// This test's whole point is that the #1045 refund forgives five
+	// consecutive no-op reinvokes forever — that's a distinct mechanism from
+	// the success-agnostic NoOpCommentCycles breaker (#1555), which also
+	// counts these same five cycles (it hooks the same processComments
+	// funnel). Isolate the assertion to ReviewCycles/ReviewBlockedCycles
+	// alone by giving the sibling breaker enough headroom that it can't be
+	// the one that pauses.
+	eng.cfg.MaxNoOpCommentCycles = 100
 
 	// See TestHandleReviewGate_NoOpReinvoke_LeavesCycleCounterUnchanged's
 	// comment: the no-op check needs a pre-existing worktree to compare
@@ -442,6 +450,9 @@ func TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCy
 	}
 	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
 	eng.cfg.MaxReviewCycles = 3
+	// Isolate from the sibling success-agnostic breaker (#1555) — see the
+	// identical note in TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed.
+	eng.cfg.MaxNoOpCommentCycles = 100
 
 	// See TestHandleReviewGate_NoOpReinvoke_LeavesCycleCounterUnchanged's
 	// comment: the no-op check needs a pre-existing worktree to compare HEAD

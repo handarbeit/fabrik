@@ -265,6 +265,22 @@ single-ID marker would require either dropping information or posting redundant 
   outstanding review actually exists," which is inherently bursty rather than per-poll,
   but not literally zero-cost the instant a genuinely new review arrives (only
   post-restart redeliveries are the zero-marginal-cost case once backfilled).
+- **`NoOpCommentCycles` can now reach its default threshold (5) before `MaxReviewCycles`
+  does, on the exact review-reinvoke path ADR-1518/#1045 deliberately built to *tolerate*
+  many consecutive no-op rounds via `ReviewCycleDecremented`'s refund.** Both counters
+  record the same cycle, but only `NoOpCommentCycles` never forgives — a bot reviewer
+  that submits five consecutive no-finding `COMMENTED` overviews before a sixth genuine
+  finding lands now pauses on round five by default, even though `ReviewCycles` alone
+  would have tolerated an arbitrarily long run of these. This is intentional (see
+  Decision, "Increment vs. reset": a cycle #1045 forgives for gate purposes is still zero
+  forward progress from this counter's perspective, and should count), but it does narrow
+  ADR-1518's "forgive forever" guarantee in practice to "forgive up to
+  `MaxNoOpCommentCycles` consecutive rounds." `TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed`
+  and `TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCycles`
+  (`engine/review_phase_test.go`) now set `MaxNoOpCommentCycles` explicitly high to keep
+  isolating the `ReviewCycles`/`ReviewBlockedCycles` mechanism they each target. An
+  operator whose review bots genuinely need more than 5 consecutive no-op rounds to
+  converge should raise `--max-no-op-comment-cycles` accordingly.
 
 ## Related Work
 
