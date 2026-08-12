@@ -69,3 +69,14 @@ jobs:
       # a stderr warning rather than failing under set -euo pipefail.
       - name: backoff-detection regression test (#1527)
         run: bash scripts/e2e/backoff_detection_test.sh
+
+      # ADR citation integrity. ADRs are numbered after their originating
+      # issue (CLAUDE.md's "ADR numbering"), so issue and ADR numbers share
+      # one namespace and "ADR-1303" vs "#1303" is a one-token, invisible
+      # slip — one that shipped in adrs/1408-*.md and survived until a manual
+      # sweep. The docs-drift workflow does not cover this: it regenerates
+      # docs/llms-full.txt and diffs it, verifying the bundle matches its
+      # sources rather than verifying any claim. Pure text/filesystem check —
+      # no build, no network.
+      - name: ADR reference integrity
+        run: bash scripts/check-adr-references.sh
