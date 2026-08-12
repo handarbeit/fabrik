@@ -8,6 +8,7 @@ import (
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tests/sim/simgh"
 )
 
 // noWorkNeededSkipCommentPrefix is the literal prefix shared by both variants
@@ -221,4 +222,56 @@ func TestNoWorkNeeded_NonVacuous(t *testing.T) {
 			t.Error("expected Implement to have actually been dispatched — if this fires, the positive test's per-stage StageCallCount(0) assertions are not discriminating")
 		}
 	})
+}
+
+// TestNoWorkNeeded_AwaitingDoneIsFirstMutation is R1's ADR-060
+// ordering-specific scenario (acceptance criterion 2): ADR-060's decision
+// is not merely "fabrik:awaiting-done gets applied at some point" — it is
+// that this label is written as "the very first mutation in
+// handleNoWorkNeeded — before the fabrik:awaiting-input clear, before the
+// emitting stage's completion label, before anything else" (ADR-060's own
+// Decision section), specifically so a fully rate-limited invocation still
+// leaves this one write durably recorded. Reading terminal labels cannot
+// assert an ordering claim — only the mutation log can (README.md's own
+// framing of what simgh/mutationlog.go exists for).
+//
+// This asserts fabrik:awaiting-done's add precedes both the emitting
+// stage's own completion label (stage:Plan:complete) and the final
+// CloseIssue call that ends the sequence — bracketing the whole
+// handleNoWorkNeeded/settleNoWorkNeeded run from its first write to its
+// last. A regression that reordered the marker write to anywhere later in
+// the sequence (e.g. moved after the completion label, restoring the
+// pre-ADR-060 shape) fails this test even though every terminal label and
+// comment this file's other assertions check would still end up correct —
+// exactly the gap an ordering-only bug can hide in.
+func TestNoWorkNeeded_AwaitingDoneIsFirstMutation(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: smokeStages()})
+	env.Claude.ForStage("Plan", noWorkNeededScript)
+
+	num := FileIssue(t, env, "ADR-060 ordering probe",
+		"Prove fabrik:awaiting-done is genuinely the first mutation handleNoWorkNeeded makes.",
+		"Specify")
+
+	for _, name := range []string{"Specify", "Research"} {
+		WaitForIssueLabel(t, env, num, "stage:"+name+":complete", 80)
+	}
+	WaitForIssueClosed(t, env, num, 80)
+
+	log := env.Sim.Log()
+	awaitingDoneAdd := simgh.LabelAdded(num, "fabrik:awaiting-done")
+	planComplete := simgh.LabelAdded(num, "stage:Plan:complete")
+	finalClose := simgh.And(simgh.MethodIs("CloseIssue"), simgh.OnIssue(num))
+
+	if before, err := log.Precedes(awaitingDoneAdd, planComplete); err != nil {
+		t.Fatalf("Precedes(awaiting-done add, stage:Plan:complete add): %v", err)
+	} else if !before {
+		t.Error("ADR-060 violated: fabrik:awaiting-done must be added before the emitting stage's own completion label — ordering, not just eventual presence, is the guarantee")
+	}
+
+	if before, err := log.Precedes(awaitingDoneAdd, finalClose); err != nil {
+		t.Fatalf("Precedes(awaiting-done add, CloseIssue): %v", err)
+	} else if !before {
+		t.Error("ADR-060 violated: fabrik:awaiting-done must be added before the sequence's final CloseIssue call")
+	}
 }

@@ -58,6 +58,19 @@ type Env struct {
 	// zero-valued and unused.
 	OwnerRepoBeta string
 
+	// WM is the primary repo's WorktreeManager — the same one registered with
+	// Engine (via NewWithDeps for a single-repo Env, or
+	// RegisterWorktreeManagerForTest under OwnerRepo for a multi-repo Env).
+	// Exposed so RestartEnv (restart.go, R3) can rebuild a fresh Engine that
+	// reuses this exact, already-populated worktree tree instead of
+	// re-cloning — re-cloning would silently produce a fresh worktree with
+	// nothing to recover, making a "restart recovery" scenario pass by
+	// accident rather than by proving recovery. For a multi-repo Env, WM is
+	// OwnerRepo's manager specifically ("primary", mirroring OwnerRepo's own
+	// singular-by-default role) — OwnerRepoBeta's manager is not exposed here
+	// since no restart scenario currently needs it.
+	WM *engine.WorktreeManager
+
 	// ProjectNum identifies the project board, always under Owner — unlike
 	// tests/e2e's Env, there is no independent ProjectOwner: engine.Config
 	// has no such field, and production always resolves the project board
@@ -83,6 +96,12 @@ type Env struct {
 	// filed without a round-trip to discover it.
 	issueSeqMu   sync.Mutex
 	issueSeqNext int
+
+	// cfg is the exact engine.Config NewEnv built (after EnvOptions.ConfigureCfg
+	// ran) — retained so RestartEnv (restart.go, R3) can hand an identical
+	// Config to a freshly-constructed engine.Engine. Not exposed: a scenario
+	// wanting to inspect its own config already has EnvOptions.
+	cfg engine.Config
 }
 
 // EnvOptions configures NewEnv. Every field has a working default; a
@@ -295,8 +314,10 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		Repo:          repo,
 		OwnerRepo:     ownerRepo,
 		OwnerRepoBeta: ownerRepoBeta,
+		WM:            wm,
 		ProjectNum:    projectNum,
 		PollInterval:  time.Duration(cfg.PollSeconds) * time.Second,
+		cfg:           cfg,
 	}
 }
 
