@@ -428,12 +428,13 @@ func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testin
 		t.Fatal("bystander review never started")
 	}
 
-	// Simulate another in-flight review of PR #1 by holding its stripe lock
+	// Simulate another in-flight review of PR #1 by holding its gate
 	// directly — the same state runReview would have already established
 	// for a real in-flight review.
-	prLock := d.prLock("owner", "repo", 1)
-	prLock.Lock()
-	defer prLock.Unlock()
+	gate, releaseGate := d.acquirePRGate("owner", "repo", 1)
+	gate.mu.Lock()
+	defer releaseGate()
+	defer gate.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {

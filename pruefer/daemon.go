@@ -3,7 +3,6 @@ package pruefer
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,12 +92,15 @@ type Daemon struct {
 	semOnce sync.Once
 	sem     chan struct{}
 
-	// prLocks is a small fixed-size set of stripe mutexes serializing
-	// concurrent review dispatch for the same PR across poll- and
-	// event-triggered paths — see prLock and runReview. A zero Daemon
-	// (struct literal) has a usable zero-value [prLockStripes]sync.Mutex,
-	// so no lazy-init is needed here unlike sem.
-	prLocks [prLockStripes]sync.Mutex
+	// prGates serializes concurrent review dispatch for the same PR across
+	// poll- and event-triggered paths — see acquirePRGate and runReview.
+	// Entries are reference-counted and removed when the last holder
+	// releases, so the map is bounded by in-flight dispatch (at most
+	// concurrency_cap + poll fan-out), not by the number of PRs the daemon
+	// has ever seen. Lazily created on first use, so a zero Daemon (struct
+	// literal) remains usable.
+	prGates   map[string]*prGate
+	prGatesMu sync.Mutex
 
 	// pollInFlight coalesces concurrent installation-event-triggered
 	// reconciliation polls — see triggerReconciliationPoll. A zero Daemon
@@ -107,20 +109,69 @@ type Daemon struct {
 	pollInFlight atomic.Bool
 }
 
-// prLockStripes bounds prLocks to a small fixed size instead of an
-// unbounded per-PR map that would grow for the daemon's entire lifetime.
-// Unrelated PRs occasionally hashing to the same stripe only costs
-// incidental contention (they still fully serialize against each other),
-// never a correctness gap — the property runReview needs is "no two
-// reviews of the *same* PR run concurrently," which holds regardless.
-const prLockStripes = 64
+// clientForOwner resolves the per-owner installation client, falling back to
+// a case-insensitive scan when the exact key misses. Clients is keyed by the
+// owner strings in WatchedRepos (operator-typed), but event-driven callers
+// look it up with the owner from a webhook payload (GitHub's canonical
+// casing) — see isWatchedRepo for why those two can diverge. Without the
+// fallback, a casing mismatch drops every event for that owner while
+// isWatchedRepo happily admits it.
+func (d *Daemon) clientForOwner(owner string) (GitHubLister, bool) {
+	if c, ok := d.Clients[owner]; ok {
+		return c, true
+	}
+	for k, c := range d.Clients {
+		if strings.EqualFold(k, owner) {
+			return c, true
+		}
+	}
+	return nil, false
+}
 
-// prLock returns the stripe mutex for owner/repo/prNumber, selected by
-// hashing the PR's identity. See prLocks and runReview.
-func (d *Daemon) prLock(owner, repo string, prNumber int) *sync.Mutex {
-	h := fnv.New32a()
-	fmt.Fprintf(h, "%s/%s#%d", owner, repo, prNumber)
-	return &d.prLocks[h.Sum32()%prLockStripes]
+// prGate is one PR's dispatch gate, plus the reference count that decides
+// when it can be dropped from prGates.
+type prGate struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquirePRGate returns the gate for owner/repo/prNumber and a release func
+// the caller must invoke when done (after unlocking). The gate is exact: it
+// is keyed by the PR's identity, not by a hash bucket.
+//
+// This replaces an earlier fixed 64-stripe scheme. Striping was sound for
+// runReview, which *blocks* on the lock — two unrelated PRs sharing a stripe
+// only serialize unnecessarily. It was not sound for ReviewFromEvent, which
+// *TryLocks* and drops on failure: a stripe collision there made an unrelated
+// PR's in-flight review look like this PR's, so the event was discarded with
+// the log line "a review is already in flight for this PR" — which was false,
+// and the dropped review never happened.
+//
+// The key is lowercased so the same PR referred to with different owner/repo
+// casing resolves to one gate (see isWatchedRepo on why casing can vary).
+func (d *Daemon) acquirePRGate(owner, repo string, prNumber int) (*prGate, func()) {
+	key := fmt.Sprintf("%s/%s#%d", strings.ToLower(owner), strings.ToLower(repo), prNumber)
+
+	d.prGatesMu.Lock()
+	if d.prGates == nil {
+		d.prGates = make(map[string]*prGate)
+	}
+	g, ok := d.prGates[key]
+	if !ok {
+		g = &prGate{}
+		d.prGates[key] = g
+	}
+	g.refs++
+	d.prGatesMu.Unlock()
+
+	return g, func() {
+		d.prGatesMu.Lock()
+		defer d.prGatesMu.Unlock()
+		g.refs--
+		if g.refs <= 0 {
+			delete(d.prGates, key)
+		}
+	}
 }
 
 // semaphore returns the daemon's shared concurrency-capped semaphore,
@@ -348,7 +399,13 @@ func (d *Daemon) runEventDriven(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			d.poll(ctx)
+			// Route through triggerReconciliationPoll rather than calling
+			// d.poll directly: triggerReconciliationPoll documents "only one
+			// poll runs at a time", and calling poll here bypassed the
+			// pollInFlight guard entirely, so a fallback tick could run a full
+			// ListOpenPRs sweep concurrently with an install-event- or
+			// reconnect-triggered reconciliation poll.
+			d.triggerReconciliationPoll(ctx)
 		case err := <-sourceDone:
 			if ctx.Err() != nil {
 				return nil
@@ -517,9 +574,10 @@ func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHu
 // and skip, restoring the single-flight-per-PR property the SHA-idempotency
 // guarantee assumes.
 func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
-	mu := d.prLock(owner, repo, pr.Number)
-	mu.Lock()
-	defer mu.Unlock()
+	g, release := d.acquirePRGate(owner, repo, pr.Number)
+	defer release()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	d.executeReview(ctx, client, owner, repo, pr)
 }
 
@@ -559,10 +617,17 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 // "every connection visible to this API key," not scoped to watched repos —
 // so a webhook event for an unwatched repo under a watched owner is a
 // plausible real delivery, not just a hypothetical one.
+// Matching is case-insensitive: GitHub treats owner and repository names as
+// case-insensitive, and the two sides of this comparison have different
+// provenance — `owner`/`repo` come from the webhook payload's
+// `repository.owner.login`/`repository.name` (GitHub's canonical casing at
+// delivery time), while WatchedRepos is hand-typed config. A casing
+// divergence between them, including one introduced by a later owner or repo
+// rename, would otherwise silently drop every event for that repo.
 func (d *Daemon) isWatchedRepo(owner, repo string) bool {
 	target := owner + "/" + repo
 	for _, spec := range d.Config.WatchedRepos {
-		if spec == target {
+		if strings.EqualFold(spec, target) {
 			return true
 		}
 	}
