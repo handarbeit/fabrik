@@ -68,6 +68,65 @@ type HealthEvent struct {
 	Err string
 }
 
+// DropReason classifies why one delivery was dropped instead of reaching
+// ReviewPR — see ADR-1563. Every value here already existed as a distinct
+// code branch with its own logf call before that issue (Research found nine
+// such branches across source.go and eventsink.go); DropReason turns that
+// existing classification into something a caller can count and report,
+// instead of it terminating at a rate-limited or unthrottled log line.
+//
+// The values split into two origins: the first six are raised by
+// hookdeck.Source (a malformed outer frame, a malformed attempt body, a
+// missing or invalid GitHub signature, a normalization failure, or a
+// delivery-ID dedupe hit) and reach a caller via hookdeck.Config.OnDrop,
+// since hookdeck cannot import pruefer to call back in directly. The last
+// four are raised by Daemon.ReviewFromEvent (pruefer/eventsink.go) — an
+// unrecognized owner, a repo outside watched_repos, a PR already under
+// review, or a PR no longer open — and are recorded in-package via
+// Daemon.recordDrop, with no callback indirection needed.
+type DropReason string
+
+const (
+	// DropSignatureMissing means the forwarded request carried no
+	// X-Hub-Signature-256 header at all — a Hookdeck-side forwarding
+	// problem (or source misconfiguration), not a wrong secret.
+	DropSignatureMissing DropReason = "signature_missing"
+	// DropSignatureInvalid means a X-Hub-Signature-256 header was present
+	// but did not verify against the configured webhook secret — either a
+	// misconfigured secret or a change in the byte-exact body Hookdeck
+	// forwards (see adrs/1254-*.md's byte-exactness dependency).
+	DropSignatureInvalid DropReason = "signature_invalid"
+	// DropMalformedEnvelope means the outer WebSocket frame itself failed
+	// to unmarshal as JSON — protocol drift in the transport, or a
+	// corrupting intermediary.
+	DropMalformedEnvelope DropReason = "malformed_envelope"
+	// DropMalformedAttempt means the frame's inner "attempt" body failed to
+	// unmarshal into the expected shape.
+	DropMalformedAttempt DropReason = "malformed_attempt"
+	// DropMalformedPayload means the forwarded webhook body itself failed
+	// to normalize into a GitHubEvent — a malformed body, or an unexpected
+	// content-type.
+	DropMalformedPayload DropReason = "malformed_payload"
+	// DropDedupe means this delivery ID was already seen — an expected,
+	// benign at-least-once-delivery redundancy, not a failure.
+	DropDedupe DropReason = "dedupe"
+	// DropUnwatchedOwner means no GitHubLister client is configured for the
+	// event's owner.
+	DropUnwatchedOwner DropReason = "unwatched_owner"
+	// DropUnwatchedRepo means the event's owner/repo is not in
+	// Config.WatchedRepos — expected, benign: an owner's installation token
+	// can plausibly cover repos beyond what Pruefer watches.
+	DropUnwatchedRepo DropReason = "unwatched_repo"
+	// DropReviewInFlight means a review for this exact PR is already in
+	// progress (from either dispatch path) — expected, benign.
+	DropReviewInFlight DropReason = "review_in_flight"
+	// DropPRNotOpen means the PR's authoritative current state (re-fetched
+	// from GitHub, never trusted from the webhook payload) is no longer
+	// open — e.g. a stale/delayed delivery arriving after the PR closed or
+	// merged.
+	DropPRNotOpen DropReason = "pr_not_open"
+)
+
 // EventSink receives normalized events from an EventSource. Handle must not
 // run a review synchronously — implementations hand off to an existing
 // concurrency-capped dispatch mechanism and return promptly, so the source
