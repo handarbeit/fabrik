@@ -28,13 +28,34 @@ Start by reading these files to understand what was planned and implemented. Use
 1. `git status` — commit or incorporate any uncommitted changes from prior sessions
 2. `git log --oneline -10` — understand what's been implemented
 
-### Rebase onto main
+### Rebase onto main — only when behind
 
-Ensure the branch is up to date:
+Rebasing when the branch is already current with main is pure churn: it replays every commit, produces new SHAs for identical content, and gives you nothing to push. Check first:
+
 ```bash
 git fetch origin main
+behind_count=$(git rev-list --count HEAD..origin/main)
+```
+
+If `$behind_count` is `0`, **skip the rebase** — the branch is already up to date. Do not run `git rebase origin/main` in that case.
+
+Otherwise, rebase:
+
+```bash
 git rebase origin/main
 ```
+
+**After a rebase that actually ran, push it immediately:**
+
+```bash
+git push --force-with-lease
+```
+
+A rebase rewrites every replayed commit's SHA — the result will *never* match `origin/<branch>` byte-for-byte, and that mismatch is expected, not a fault. `--force-with-lease` is safe here: `fabrik/issue-<N>` is a branch Fabrik owns exclusively for this issue, so there is no other legitimate writer to race against.
+
+**Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
+
+If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
 
 ### Merge conflict resolution — CRITICAL
 
