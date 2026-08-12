@@ -38,7 +38,7 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
    ```bash
    git push --force-with-lease
    ```
-   A rebase rewrites every replayed commit's SHA, so the result will never match `origin/<branch>` byte-for-byte — that mismatch is expected, not a fault. `--force-with-lease` is safe here: `fabrik/issue-<N>` is a branch Fabrik owns exclusively for this issue, so there's no other legitimate writer to race against.
+   A rebase rewrites every replayed commit's SHA, so the result will never match `origin/<branch>` byte-for-byte — that mismatch is expected, not a fault. `--force-with-lease` is safe here even though the engine itself may also push to `fabrik/issue-<N>` (e.g. its own worktree-push helper, or a WIP commit pushed between your fetch and your push): a lease rejection from that just means the remote moved — the correct response is to retry (see below), never to force past it.
 
    **Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** After a successful rebase, your local branch is correctly *ahead* of the remote — that's the goal, not a problem. Resetting back to `origin` discards the rebase you just did, with no way to recover it. If you find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
 
