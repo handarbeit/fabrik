@@ -537,6 +537,92 @@ func TestReviewBlockedCyclesNeverRefunded(t *testing.T) {
 	}
 }
 
+// ---- NoOpCommentCycleIncremented / NoOpCommentCycleReset (#1555) ----
+
+func TestApplyNoOpCommentCycleIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Validate"]; got != 1 {
+		t.Errorf("NoOpCommentCycles = %d, want 1", got)
+	}
+	applyExpect(t, s, NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Validate"]; got != 2 {
+		t.Errorf("NoOpCommentCycles = %d, want 2", got)
+	}
+	// Per-stage, not item-scoped — a different stage's counter is untouched.
+	if got := getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Review"]; got != 0 {
+		t.Errorf("NoOpCommentCycles[Review] = %d, want 0 (must not be touched by an increment for Validate)", got)
+	}
+}
+
+func TestApplyNoOpCommentCycleReset(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	s.Apply(NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	if getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Validate"] != 2 {
+		t.Fatal("precondition: NoOpCommentCycles not at 2")
+	}
+	applyExpect(t, s, NoOpCommentCycleReset{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Validate"]; got != 0 {
+		t.Errorf("NoOpCommentCycles = %d, want 0 after reset", got)
+	}
+}
+
+// TestApplyNoOpCommentCycleReset_AlreadyZero_NoOp mirrors
+// TestApplyReviewCycleDecremented_FlooredAtZero's I6 assertion: resetting an
+// already-zero counter must not emit a Change.
+func TestApplyNoOpCommentCycleReset_AlreadyZero_NoOp(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	_, changes, err := s.Apply(NoOpCommentCycleReset{Repo: testRepo, Number: 1, StageName: "Validate"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("Apply(NoOpCommentCycleReset) on zero counter: expected no Change (I6), got %v", changes)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Validate"]; got != 0 {
+		t.Errorf("NoOpCommentCycles = %d, want 0", got)
+	}
+}
+
+// TestNoOpCommentCyclesSnapshotIsDeepCopy verifies that a Snapshot taken
+// before a later NoOpCommentCycleIncremented retains its original count —
+// confirming copyStageState deep-copies the NoOpCommentCycles map (no shared
+// backing map with the live store).
+func TestNoOpCommentCyclesSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if held.NoOpCommentCycles("Validate") != 1 {
+		t.Fatalf("precondition: held snapshot NoOpCommentCycles = %d, want 1", held.NoOpCommentCycles("Validate"))
+	}
+	s.Apply(NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	if held.NoOpCommentCycles("Validate") != 1 {
+		t.Errorf("held snapshot mutated by later increment: NoOpCommentCycles = %d, want 1", held.NoOpCommentCycles("Validate"))
+	}
+}
+
+// TestEngineCyclesClearedClearsNoOpCommentCycles verifies EngineCyclesCleared
+// zeroes NoOpCommentCycles alongside the review/CI/rebase/enqueue counters
+// (#1555) — a manual unpause must not leave a stale no-op count that
+// immediately re-trips the breaker on the very next cycle.
+func TestEngineCyclesClearedClearsNoOpCommentCycles(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	s.Apply(NoOpCommentCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	s.Apply(RebaseCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	if getItem(t, s, testRepo, 1).StageState.NoOpCommentCycles["Validate"] != 2 {
+		t.Fatal("precondition: NoOpCommentCycles not set")
+	}
+	applyExpect(t, s, EngineCyclesCleared{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	st := getItem(t, s, testRepo, 1)
+	if got := st.StageState.NoOpCommentCycles["Validate"]; got != 0 {
+		t.Errorf("NoOpCommentCycles not cleared: got %d, want 0", got)
+	}
+	if got := st.StageState.RebaseCycles["Validate"]; got != 0 {
+		t.Errorf("RebaseCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
+	}
+}
+
 // ---- CIFixCycleIncremented ----
 
 func TestApplyCIFixCycleIncremented(t *testing.T) {

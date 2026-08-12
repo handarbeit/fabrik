@@ -47,6 +47,7 @@ type ProjectConfig struct {
 	TrainTrialWindow          *int     `yaml:"train_trial_window"`
 	MaxCommentCyclesPerWindow *int     `yaml:"max_comment_cycles_per_window"`
 	CommentCycleWindow        *int     `yaml:"comment_cycle_window"`
+	MaxNoOpCommentCycles      *int     `yaml:"max_no_op_comment_cycles"`
 	// GHESHost is the hostname of a GitHub Enterprise Server instance (e.g.
 	// "github.example.com"), with no scheme or trailing slash. Empty (the
 	// default) means github.com — no behavior change from before GHES

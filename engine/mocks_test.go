@@ -24,6 +24,7 @@ type mockGitHubClient struct {
 	addLabelToIssueFn             func(owner, repo string, issueNumber int, labelName string) error
 	removeLabelFromIssueFn        func(owner, repo string, issueNumber int, labelName string) error
 	addCommentFn                  func(owner, repo string, issueNumber int, body string) (int, error)
+	fetchIssueCommentsFn          func(owner, repo string, issueNumber int) ([]gh.Comment, error)
 	addCommentReactionFn          func(owner, repo string, commentDatabaseID int, content string) error
 	updateCommentFn               func(owner, repo string, commentDatabaseID int, body string) error
 	updateIssueBodyFn             func(owner, repo string, issueNumber int, body string) error
@@ -295,6 +296,16 @@ func (m *mockGitHubClient) AddComment(owner, repo string, issueNumber int, body 
 		return fn(owner, repo, issueNumber, body)
 	}
 	return 0, nil
+}
+
+func (m *mockGitHubClient) FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+	m.mu.Lock()
+	fn := m.fetchIssueCommentsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
