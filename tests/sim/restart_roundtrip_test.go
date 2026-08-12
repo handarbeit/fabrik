@@ -1,6 +1,8 @@
 package sim
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -15,15 +17,26 @@ import (
 // RestartEnv itself is diagnosed here rather than surfacing as a confusing
 // failure in one of them.
 //
-// Non-vacuity (AC8): the assertion that matters is not merely "a new Engine
-// exists" but that (a) the restarted Env observes the exact commit the
-// pre-restart Engine pushed — a fresh WorktreeManager pointed at a
-// re-cloned-from-scratch origin would also show *a* commit (the branch
-// still exists on the simgh-backed remote) but a broken RestartEnv that
-// dropped env.WM and rebuilt a manager pointed at the wrong local worktree
-// root would fail this specific head-SHA comparison — and (b) the
-// pipeline actually completes afterward, proving the rebuilt Engine is not
-// merely present but functional.
+// Non-vacuity (AC8): the assertion that matters most is NOT the pushed head
+// SHA — a pushed commit already exists on simgh's own backing remote, so
+// even a broken RestartEnv that discarded env.WM and rebuilt a fresh
+// WorktreeManager pointed at a brand-new re-clone would still observe it,
+// making a head-SHA comparison alone pass by accident. What only a genuine
+// env.WM reuse can preserve is *local, unpushed* worktree content — exactly
+// the "partial work" CLAUDE.md's Worktrees section says must never be
+// destroyed. This test plants an uncommitted marker file directly in the
+// pre-restart worktree (bypassing git — standing in for in-progress work a
+// real kill mid-stage could leave behind) and asserts it is still present,
+// byte-for-byte, at the identical path after RestartEnv. A RestartEnv that
+// re-clones (even into the same rootDir by coincidence) would produce a
+// clean checkout with no such file — this is the one assertion in this file
+// that a fresh-clone implementation cannot pass by accident. Confirmed
+// during review (PR #1584) that no prior version of this test, nor any of
+// restart_recovery_test.go's four kill points (which all fault a pure
+// GitHub-API call, after any relevant local commit was already pushed),
+// actually exercised this property despite the ADR calling WM reuse "the
+// single highest-risk mistake RestartEnv exists to prevent" — see
+// adrs/1451-sim-bed-restart-harness.md.
 func TestRestartEnv_RoundTrip(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages()})
@@ -33,6 +46,17 @@ func TestRestartEnv_RoundTrip(t *testing.T) {
 
 	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 80)
 	preRestart := projectItem(t, env, num)
+
+	// Plant local, unpushed worktree content that only a genuine env.WM
+	// reuse (not a fresh re-clone) can carry across the restart — see the
+	// doc comment above for why this, not the pushed head SHA, is the load-
+	// bearing check.
+	worktreeDir := env.WM.WorktreeDir(num)
+	markerPath := filepath.Join(worktreeDir, "uncommitted-work-in-progress.txt")
+	const markerContent = "partial work that was never committed or pushed\n"
+	if err := os.WriteFile(markerPath, []byte(markerContent), 0o644); err != nil {
+		t.Fatalf("planting uncommitted marker file: %v", err)
+	}
 
 	restarted := RestartEnv(t, env)
 
@@ -46,6 +70,19 @@ func TestRestartEnv_RoundTrip(t *testing.T) {
 	}
 	if !hasLabel(postRestart.Labels, "stage:Specify:complete") {
 		t.Fatalf("stage:Specify:complete lost across restart — labels: %v", postRestart.Labels)
+	}
+
+	// The load-bearing worktree-fidelity check: same path, same uncommitted
+	// content, still there post-restart.
+	if got := restarted.WM.WorktreeDir(num); got != worktreeDir {
+		t.Fatalf("WorktreeDir(%d) after restart = %q, want %q (env.WM reuse must resolve to the identical path)", num, got, worktreeDir)
+	}
+	gotContent, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("uncommitted marker file lost across restart (a fresh re-clone would not have it): %v", err)
+	}
+	if string(gotContent) != markerContent {
+		t.Fatalf("uncommitted marker file content = %q, want %q", gotContent, markerContent)
 	}
 
 	// The restarted Env's Engine keeps driving the same issue forward — not

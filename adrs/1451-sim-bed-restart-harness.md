@@ -85,14 +85,20 @@ touching `engine/` itself.
 
 Every R3 scenario (`restart_recovery_test.go`) depends on `RestartEnv` reusing the
 right worktree state. `TestRestartEnv_RoundTrip` (`tests/sim/restart_roundtrip_test.go`)
-isolates that dependency: it proves a restarted `Env` observes the exact commit SHA the
-pre-restart `Engine` pushed (not merely *a* commit — a fresh, re-cloned
-`WorktreeManager` would also show a commit, since the branch still exists on the
-simgh-backed remote; the SHA-identity check is what a broken `RestartEnv` that dropped
-`env.WM` would fail) and that the rebuilt `Engine` is not merely present but functional
-(it keeps driving the same issue to `Done`). A defect in `RestartEnv` itself is meant to
-surface here, not as a confusing failure three layers into an unrelated kill-point
-scenario.
+isolates that dependency. Note that a *pushed* commit SHA is not, on its own, a
+sufficient check here: it already exists on `simgh`'s backing remote, so even a broken
+`RestartEnv` that discarded `env.WM` and rebuilt a fresh, re-cloned `WorktreeManager`
+would still observe it — a head-SHA comparison alone would pass by accident (this
+inconsistency was caught in review of PR #1584 and fixed there; an earlier draft of
+this ADR and the test's own doc comment both asserted a SHA check existed and was
+load-bearing when neither was true). The check that actually distinguishes genuine
+`env.WM` reuse from a fresh re-clone is *local, unpushed* worktree content — exactly
+the "partial work" CLAUDE.md's Worktrees section says must never be destroyed — so the
+test plants an uncommitted marker file directly in the worktree before restarting and
+asserts it survives, byte-for-byte, at the identical path afterward. The test also
+confirms the rebuilt `Engine` is not merely present but functional (it keeps driving
+the same issue to `Done`). A defect in `RestartEnv` itself is meant to surface here,
+not as a confusing failure three layers into an unrelated kill-point scenario.
 
 ## Consequences
 
