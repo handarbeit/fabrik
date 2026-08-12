@@ -41,6 +41,28 @@ func reviewBodyCommentID(review gh.PRReview) string {
 	return reviewBodyIDPrefix + strconv.Itoa(review.DatabaseID)
 }
 
+// addressedReviewIDsFromComments extracts the review DatabaseIDs of every
+// synthetic review-body comment (reviewBodyIDPrefix) in comments — the
+// inverse of reviewBodyCommentID. Used by publishCommentOutput to derive
+// which reviews a review-feedback PR comment addressed, so
+// formatReviewFeedbackComment can embed the durable review-ids-addressed
+// marker (R3, #1555). Real inline thread comments (no such prefix) are
+// skipped; they have their own durable dedup signal (the ROCKET reaction)
+// and are not part of this marker.
+func addressedReviewIDsFromComments(comments []gh.Comment) []int {
+	var ids []int
+	for _, c := range comments {
+		idStr, ok := strings.CutPrefix(c.ID, reviewBodyIDPrefix)
+		if !ok {
+			continue
+		}
+		if n, err := strconv.Atoi(idStr); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	return ids
+}
+
 // reviewIDsAddressedMarkerRe matches the machine-readable marker
 // formatReviewFeedbackComment embeds in a review-feedback PR comment, listing
 // the review DatabaseIDs that comment addressed (R3, #1555). A comma-joined

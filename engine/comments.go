@@ -621,7 +621,8 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 			e.logf(item.Number, "warn", "review reinvoke: could not find PR for issue: %v\n", prErr)
 		} else if prNumber > 0 {
 			threads := buildThreadEntries(comments)
-			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments))
+			addressedReviewIDs := addressedReviewIDsFromComments(comments)
+			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments), addressedReviewIDs)
 			// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
 			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
