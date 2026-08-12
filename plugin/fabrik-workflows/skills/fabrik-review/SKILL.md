@@ -28,29 +28,72 @@ Start by reading these files to understand what was planned and implemented. Use
 1. `git status` — commit or incorporate any uncommitted changes from prior sessions
 2. `git log --oneline -10` — understand what's been implemented
 
-### Rebase onto main
+### Resolve the base branch
 
-Ensure the branch is up to date:
+Don't hardcode `main`. An issue carrying a `base:<branch>` label targets a different base branch — Fabrik already resolved it to fork this branch and open the PR, so read it back rather than assuming:
+
 ```bash
-git fetch origin main
-git rebase origin/main
+base_branch=$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null)
+if [ -z "$base_branch" ]; then
+  base_branch=main
+  echo "no linked PR found (or the query failed); falling back to repository default branch 'main'"
+fi
 ```
+
+By this stage a PR should already exist — Implement creates the draft PR before Review runs — so the fallback is a safety net, not the expected path. Fall back explicitly and say so; never assume `main` silently.
+
+Use `$base_branch` — never a hardcoded `origin/main` — in every rebase, diff, and comparison below and in "Merge conflict resolution" and "Push the rebase" immediately after it.
+
+### Rebase onto the base branch — only when behind
+
+Rebasing when the branch is already current with its base is pure churn: it replays every commit, produces new SHAs for identical content, and gives you nothing to push. Check first:
+
+```bash
+git fetch origin "$base_branch"
+behind_count=$(git rev-list --count HEAD..origin/"$base_branch")
+```
+
+If `$behind_count` is `0`, **skip the rebase** — the branch is already up to date. Do not run `git rebase "origin/$base_branch"` in that case.
+
+Otherwise, rebase:
+
+```bash
+git rebase "origin/$base_branch"
+```
+
+If the rebase reports conflicts, resolve them first — see "Merge conflict resolution — CRITICAL" immediately below — before pushing anything. Only push once the rebase is clean (either it completed with no conflicts, or you resolved them and `git status` shows a clean, non-rebasing tree).
 
 ### Merge conflict resolution — CRITICAL
 
 When resolving merge conflicts during rebase, you MUST be conservative:
 
-1. **Never silently drop code from main.** If main has code that your branch doesn't, it was added by another PR and must be kept. Your branch's changes should be layered on top of main's current state, not replace it.
+1. **Never silently drop code from the base branch.** If the base has code that your branch doesn't, it was added by another PR and must be kept. Your branch's changes should be layered on top of the base's current state, not replace it.
 
-2. **When in doubt, keep both sides.** If you can't tell whether code from main or your branch is correct, keep both and verify the result compiles and tests pass. It's better to have a redundant function than to silently delete one that other code depends on.
+2. **When in doubt, keep both sides.** If you can't tell whether code from the base or your branch is correct, keep both and verify the result compiles and tests pass. It's better to have a redundant function than to silently delete one that other code depends on.
 
 3. **After resolving each conflict, run `go build ./...`** to verify the resolution didn't break anything. Don't batch all conflict resolutions and hope for the best.
 
-4. **Check for new files on main.** Rebase conflicts in existing files are visible, but new files added to main (new source files, new test files, new subcommands) won't show as conflicts — they just appear. Never delete files that came from main.
+4. **Check for new files on the base branch.** Rebase conflicts in existing files are visible, but new files added to the base (new source files, new test files, new subcommands) won't show as conflicts — they just appear. Never delete files that came from the base.
 
 5. **After the full rebase, run `go test ./...`** before proceeding with review. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
 
-Common mistake: a feature branch that doesn't have a function added on main will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/main..HEAD` after rebase to verify you haven't lost anything from main.
+Common mistake: a feature branch that doesn't have a function added on the base will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/"$base_branch"..HEAD` after rebase to verify you haven't lost anything from the base.
+
+### Push the rebase — never reset
+
+**If a rebase ran above, push it immediately once clean:**
+
+```bash
+git push --force-with-lease
+```
+
+A rebase rewrites every replayed commit's SHA — the result will *never* match `origin/<branch>` byte-for-byte, and that mismatch is expected, not a fault. `--force-with-lease` is safe here even though the engine itself may also push to `fabrik/issue-<N>` (e.g. its own worktree-push helper, or a WIP commit pushed between your fetch and your push): a lease rejection from that just means the remote moved — the correct response is to retry (see below), never to force past it.
+
+**Never run `git reset --hard "origin/$base_branch"` (or any reset of this branch to the remote tip) to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
+
+**If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin "$base_branch"`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
+
+If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
 
 ### Install dependencies per CLAUDE.md
 
@@ -73,9 +116,9 @@ Address valid feedback before doing your own review.
 
 ### Read the diff, not just the code
 
-Review what changed, not the entire codebase:
+Review what changed, not the entire codebase, against the base branch resolved above (not a hardcoded `main` — see "Resolve the base branch"):
 ```bash
-git diff origin/main..HEAD
+git diff "origin/$base_branch"..HEAD
 ```
 
 ### Check for these categories
