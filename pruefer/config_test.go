@@ -52,6 +52,21 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if cfg.LogFile != DefaultLogPath {
 		t.Errorf("LogFile = %q, want %q", cfg.LogFile, DefaultLogPath)
 	}
+	if cfg.EventSource != DefaultEventSource {
+		t.Errorf("EventSource = %q, want %q", cfg.EventSource, DefaultEventSource)
+	}
+	if cfg.HookdeckAPIKeyEnv != DefaultHookdeckAPIKeyEnv {
+		t.Errorf("HookdeckAPIKeyEnv = %q, want %q", cfg.HookdeckAPIKeyEnv, DefaultHookdeckAPIKeyEnv)
+	}
+	if cfg.HookdeckWebhookSecretEnv != DefaultHookdeckWebhookSecretEnv {
+		t.Errorf("HookdeckWebhookSecretEnv = %q, want %q", cfg.HookdeckWebhookSecretEnv, DefaultHookdeckWebhookSecretEnv)
+	}
+	if cfg.ReconciliationStartup != DefaultReconciliationStartup {
+		t.Errorf("ReconciliationStartup = %v, want %v", cfg.ReconciliationStartup, DefaultReconciliationStartup)
+	}
+	if cfg.ReconciliationFallbackInterval != DefaultReconciliationFallbackInterval {
+		t.Errorf("ReconciliationFallbackInterval = %v, want %v", cfg.ReconciliationFallbackInterval, DefaultReconciliationFallbackInterval)
+	}
 }
 
 func TestLoadConfig_LogFilePrecedence(t *testing.T) {
@@ -126,6 +141,200 @@ func TestLoadConfig_LogFileFlagExplicitEmptyDisables(t *testing.T) {
 	}
 	if cfg.LogFile != "" {
 		t.Errorf("LogFile = %q, want empty (-log-file \"\" should disable file logging, overriding YAML)", cfg.LogFile)
+	}
+}
+
+// TestLoadConfig_EventSourceSurfaceUnchangedWhenUnset is the issue's
+// "byte-for-byte unchanged" regression guard: loading a config with none of
+// the new event_source/hookdeck/reconciliation keys set must produce
+// exactly the same values as before this surface existed for every
+// pre-existing field, plus the documented defaults for the new ones.
+func TestLoadConfig_EventSourceSurfaceUnchangedWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+watched_repos:
+  - handarbeit/fabrik
+model: opus
+concurrency_cap: 5
+`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourcePoll {
+		t.Errorf("EventSource = %q, want %q (poll-only mode is the unaffected default)", cfg.EventSource, EventSourcePoll)
+	}
+	if cfg.Model != "opus" || cfg.ConcurrencyCap != 5 {
+		t.Errorf("pre-existing fields affected: Model=%q ConcurrencyCap=%d", cfg.Model, cfg.ConcurrencyCap)
+	}
+	if len(cfg.WatchedRepos) != 1 || cfg.WatchedRepos[0] != "handarbeit/fabrik" {
+		t.Errorf("WatchedRepos = %v", cfg.WatchedRepos)
+	}
+}
+
+func TestLoadConfig_EventSourceValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `event_source: not-a-real-source`)
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("expected an error for an invalid event_source value")
+	}
+}
+
+func TestLoadConfig_EventSourceYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `event_source: hookdeck`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourceHookdeck {
+		t.Errorf("EventSource = %q, want %q", cfg.EventSource, EventSourceHookdeck)
+	}
+}
+
+func TestLoadConfig_EventSourcePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `event_source: hookdeck`)
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_EVENT_SOURCE", "poll")
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourcePoll {
+		t.Errorf("EventSource = %q, want %q (env should override YAML)", cfg.EventSource, EventSourcePoll)
+	}
+
+	// Flag overrides env.
+	cfg, err = LoadConfig([]string{"-config", path, "-event-source", "hookdeck"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourceHookdeck {
+		t.Errorf("EventSource = %q, want %q (flag should override env)", cfg.EventSource, EventSourceHookdeck)
+	}
+}
+
+func TestLoadConfig_HookdeckYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+event_source: hookdeck
+hookdeck:
+  api_key_env: MY_HOOKDECK_KEY
+  webhook_secret_env: MY_WEBHOOK_SECRET
+`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.HookdeckAPIKeyEnv != "MY_HOOKDECK_KEY" {
+		t.Errorf("HookdeckAPIKeyEnv = %q, want MY_HOOKDECK_KEY", cfg.HookdeckAPIKeyEnv)
+	}
+	if cfg.HookdeckWebhookSecretEnv != "MY_WEBHOOK_SECRET" {
+		t.Errorf("HookdeckWebhookSecretEnv = %q, want MY_WEBHOOK_SECRET", cfg.HookdeckWebhookSecretEnv)
+	}
+}
+
+func TestLoadConfig_HookdeckEnvOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+hookdeck:
+  api_key_env: FROM_YAML
+`)
+	t.Setenv("PRUEFER_HOOKDECK_API_KEY_ENV", "FROM_ENV")
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.HookdeckAPIKeyEnv != "FROM_ENV" {
+		t.Errorf("HookdeckAPIKeyEnv = %q, want FROM_ENV (env should override YAML)", cfg.HookdeckAPIKeyEnv)
+	}
+}
+
+func TestLoadConfig_HookdeckEnvFlagsEmptyRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, ``)
+
+	if _, err := LoadConfig([]string{"-config", path, "-hookdeck-api-key-env="}); err == nil {
+		t.Fatal("expected an error for an empty -hookdeck-api-key-env value")
+	}
+	if _, err := LoadConfig([]string{"-config", path, "-hookdeck-webhook-secret-env="}); err == nil {
+		t.Fatal("expected an error for an empty -hookdeck-webhook-secret-env value")
+	}
+}
+
+func TestLoadConfig_ReconciliationYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+reconciliation:
+  startup: false
+  fallback_interval: 5m
+`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconciliationStartup {
+		t.Error("ReconciliationStartup = true, want false (from YAML)")
+	}
+	if cfg.ReconciliationFallbackInterval != 5*time.Minute {
+		t.Errorf("ReconciliationFallbackInterval = %v, want 5m", cfg.ReconciliationFallbackInterval)
+	}
+}
+
+func TestLoadConfig_ReconciliationFallbackIntervalInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+reconciliation:
+  fallback_interval: not-a-duration
+`)
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("expected an error for an invalid reconciliation.fallback_interval value")
+	}
+}
+
+func TestLoadConfig_ReconciliationPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+reconciliation:
+  startup: true
+  fallback_interval: 5m
+`)
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_RECONCILIATION_STARTUP", "false")
+	t.Setenv("PRUEFER_RECONCILIATION_FALLBACK_INTERVAL", "10m")
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconciliationStartup {
+		t.Error("ReconciliationStartup = true, want false (env should override YAML)")
+	}
+	if cfg.ReconciliationFallbackInterval != 10*time.Minute {
+		t.Errorf("ReconciliationFallbackInterval = %v, want 10m (env should override YAML)", cfg.ReconciliationFallbackInterval)
+	}
+
+	// Flag overrides env.
+	cfg, err = LoadConfig([]string{"-config", path, "-reconciliation-startup=true", "-reconciliation-fallback-interval", "15m"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.ReconciliationStartup {
+		t.Error("ReconciliationStartup = false, want true (flag should override env)")
+	}
+	if cfg.ReconciliationFallbackInterval != 15*time.Minute {
+		t.Errorf("ReconciliationFallbackInterval = %v, want 15m (flag should override env)", cfg.ReconciliationFallbackInterval)
+	}
+}
+
+func TestLoadConfig_ReconciliationFallbackIntervalFlagInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, ``)
+	if _, err := LoadConfig([]string{"-config", path, "-reconciliation-fallback-interval", "not-a-duration"}); err == nil {
+		t.Fatal("expected an error for an invalid -reconciliation-fallback-interval value")
 	}
 }
 
