@@ -88,9 +88,11 @@ func Execute() error {
 			logf(0, "hookdeck", format, args...)
 		})
 		daemon.EventSource = hookdeck.NewSource(hookdeck.Config{
-			APIKey:        apiKey,
-			WebhookSecret: webhookSecret,
-			OnHealth:      daemon.HealthHandler(ctx),
+			APIKey:           apiKey,
+			WebhookSecret:    webhookSecret,
+			OnHealth:         daemon.HealthHandler(ctx),
+			OnDrop:           daemon.recordDrop,
+			OnSignatureDrift: daemon.SignatureDriftHandler(),
 		})
 		logf(0, "poll", "event_source: hookdeck — Hookdeck API key from $%s, webhook secret from $%s\n",
 			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)

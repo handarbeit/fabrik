@@ -116,6 +116,24 @@ func TestModel_RateLimitSnapshotRoutesToFooter(t *testing.T) {
 	_ = m.footer.View(100) // no panic; wiring reaches the footer component
 }
 
+func TestModel_DropEventRoutesToFooter(t *testing.T) {
+	m := New(nil, time.Now())
+	next, _ := m.Update(DropEvent{Reason: "dedupe", Total: 3})
+	m = next.(Model)
+	if got := m.footer.DropCount("dedupe"); got != 3 {
+		t.Errorf("footer.DropCount(\"dedupe\") = %d, want 3", got)
+	}
+}
+
+func TestModel_SignatureDriftRoutesToFooter(t *testing.T) {
+	m := New(nil, time.Now())
+	next, _ := m.Update(SignatureDriftEvent{Active: true})
+	m = next.(Model)
+	if !m.footer.SignatureDriftActive() {
+		t.Error("footer.SignatureDriftActive() = false after routing SignatureDriftEvent{Active: true}")
+	}
+}
+
 func TestModel_TickAdvancesHeaderClock(t *testing.T) {
 	start := time.Now()
 	m := New(nil, start)

@@ -107,6 +107,14 @@ type Daemon struct {
 	// has a usable zero-value atomic.Bool, so no lazy-init is needed here
 	// either.
 	pollInFlight atomic.Bool
+
+	// dropMu guards dropCounts — unlike source.go's counters (single-writer,
+	// off one WebSocket read loop), drops recorded here can originate from
+	// eventsink.go's uncapped per-event goroutines (ReviewFromEvent) as well
+	// as hookdeck.Source's OnDrop callback (invoked from its own read loop),
+	// so concurrent writers are the normal case, not an edge case.
+	dropMu     sync.Mutex
+	dropCounts map[events.DropReason]int
 }
 
 // clientForOwner resolves the per-owner installation client, falling back to
@@ -448,6 +456,83 @@ func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 		}
 		logf(0, "poll", "event source reconnected — running a reconciliation poll\n")
 		d.triggerReconciliationPoll(ctx)
+	}
+}
+
+// recordDrop increments reason's cumulative count and emits a TUI
+// DropEvent carrying the new total — see events.DropReason and ADR-1563.
+// The sole entry point for drop accounting: hookdeck.Source's OnDrop
+// callback (wired in execute.go) and eventsink.go's own four drop points
+// both call this directly, since eventsink.go already lives in this
+// package and needs no callback indirection.
+//
+// DropEvent.Total carries the cumulative count, not a delta: the TUI's own
+// d.Emit wrapper (tui_run.go) drops messages under channel backpressure
+// rather than blocking the daemon, so a delta-based counter would
+// permanently under-count on any dropped TUI message — a total-based one
+// self-heals on the next delivered event. dropCounts itself, guarded by
+// dropMu, is never lossy regardless of what the TUI momentarily displays.
+//
+// The emit happens while dropMu is still held, not after release: this
+// package's four eventsink.go drop points fan out across an uncapped number
+// of concurrent per-event goroutines (unlike hookdeck.Source's own reasons,
+// which originate from its single-threaded read loop), so two concurrent
+// callers racing between their own unlock and their own emit could
+// otherwise deliver DropEvents to the TUI out of order (e.g. Total=2
+// observed before Total=1). FooterComponent.Update overwrites rather than
+// accumulates, so a reordered lower total would stick until the next drop
+// of that reason arrived. d.emit is a non-blocking channel send (see
+// tui_run.go) with no risk of blocking or reentering dropMu, so holding the
+// lock across it is cheap and keeps increment-and-emit atomic — the total
+// ordering callers observe matches dropCounts' own serialization order.
+func (d *Daemon) recordDrop(reason events.DropReason) {
+	d.dropMu.Lock()
+	defer d.dropMu.Unlock()
+	if d.dropCounts == nil {
+		d.dropCounts = make(map[events.DropReason]int)
+	}
+	d.dropCounts[reason]++
+	d.emit(ptui.DropEvent{Reason: string(reason), Total: d.dropCounts[reason], At: time.Now()})
+}
+
+// DropCounts returns a locked snapshot of every recorded drop reason's
+// cumulative count. Exported for tests; production code has no need to
+// read this back (recordDrop's TUI emission is the only consumer).
+func (d *Daemon) DropCounts() map[events.DropReason]int {
+	d.dropMu.Lock()
+	defer d.dropMu.Unlock()
+	out := make(map[events.DropReason]int, len(d.dropCounts))
+	for k, v := range d.dropCounts {
+		out[k] = v
+	}
+	return out
+}
+
+// SignatureDriftHandler returns a callback suitable for wiring into an
+// EventSource's signature-drift hook (e.g. hookdeck.Config.OnSignatureDrift)
+// — see ADR-1563. active=true means signature verification has just failed
+// on SignatureDriftThreshold consecutive deliveries with no interleaved
+// success: not a transient blip, but a misconfigured webhook secret or a
+// wire-format change in whatever transport EventSource speaks. This is
+// deliberately transport-agnostic (no "hookdeck" in the message) — the same
+// convention HealthHandler above already follows — since Daemon has no
+// business knowing which EventSource implementation is in play.
+//
+// Escalation here is a loud log line plus a TUI banner, not a mode switch:
+// poll-fallback already always runs alongside event-driven mode
+// (runEventDriven, ADR-1254 Decision 3) regardless of signature drift, so
+// there is nothing to switch — only something to say plainly. The log
+// line's "continuing on poll-fallback only" phrasing deliberately echoes
+// runEventDriven's own sourceDone-exit message above, for a consistent
+// operator-facing vocabulary across both kinds of event-source failure.
+func (d *Daemon) SignatureDriftHandler() func(bool) {
+	return func(active bool) {
+		if active {
+			logf(0, "warn", "event source signature verification is failing on every delivery — check the configured webhook secret, or the event source's wire protocol may have changed; continuing on poll-fallback only until this clears\n")
+		} else {
+			logf(0, "poll", "event source signature verification recovered\n")
+		}
+		d.emit(ptui.SignatureDriftEvent{Active: active, At: time.Now()})
 	}
 }
 
