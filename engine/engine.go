@@ -57,6 +57,7 @@ type Config struct {
 	TrainTrialWindowDuration  time.Duration       // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
 	MaxCommentCyclesPerWindow int                 // Comment-processing circuit breaker: max non-advancing comment-processing invocations per issue before pausing (0 = default 10; #1089)
 	CommentCycleWindow        time.Duration       // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
+	MaxNoOpCommentCycles      int                 // Success-agnostic comment-processing circuit breaker: max consecutive no-progress comment-processing invocations per issue+stage before pausing, regardless of whether each invocation itself exited successfully (0 = default 5; #1555, sibling of #1089/#1382)
 	KillGraceSigInt           time.Duration       // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm          time.Duration       // Grace window after SIGTERM before SIGKILL (default 10s)
 	DrainDeadline             time.Duration       // Bound on a clean stop's worker drain, covering both the kill escalation and the shutdown pause-write phase (default 30s; ADR-1393). <= 0 falls back to the default in drainDeadline() — unlike kill_grace, a clean stop has no "0 = wait forever" mode.

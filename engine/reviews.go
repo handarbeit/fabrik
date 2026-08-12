@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,6 +39,29 @@ const reviewBodyIDPrefix = "review-body:"
 // dedup (R7) actually works: the same review always produces the same ID.
 func reviewBodyCommentID(review gh.PRReview) string {
 	return reviewBodyIDPrefix + strconv.Itoa(review.DatabaseID)
+}
+
+// reviewIDsAddressedMarkerRe matches the machine-readable marker
+// formatReviewFeedbackComment embeds in a review-feedback PR comment, listing
+// the review DatabaseIDs that comment addressed (R3, #1555). A comma-joined
+// list of decimal integers, e.g. "<!-- fabrik:review-ids-addressed: 123,456 -->".
+var reviewIDsAddressedMarkerRe = regexp.MustCompile(`<!-- fabrik:review-ids-addressed: ([0-9,]+) -->`)
+
+// parseReviewIDsAddressedMarker extracts the review DatabaseIDs embedded in a
+// comment body's review-ids-addressed marker, if present. Returns nil if body
+// carries no marker or the marker has no parseable IDs.
+func parseReviewIDsAddressedMarker(body string) []int {
+	m := reviewIDsAddressedMarkerRe.FindStringSubmatch(body)
+	if m == nil {
+		return nil
+	}
+	var ids []int
+	for _, s := range strings.Split(m[1], ",") {
+		if n, err := strconv.Atoi(s); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	return ids
 }
 
 // checkReviewGate inspects item.LinkedPRReviewRequests and item.LinkedPRReviews
@@ -1273,11 +1297,37 @@ func (e *Engine) resolveReviewsForFeedback(item gh.ProjectItem) []gh.PRReview {
 // buildReviewBodyCommentsFromReviews turns already-resolved reviews into
 // synthetic gh.Comments — the skip conditions and dedup logic are documented
 // on buildReviewBodyComments above.
+//
+// R3 (#1555): a review body has no GitHub reaction endpoint (reviewBodyIDPrefix's
+// doc comment, R7), so the in-memory snap.CommentProcessed record — wiped by
+// every self-upgrade restart — was previously the *only* idempotency guard,
+// letting an already-addressed review body be redelivered after every
+// restart (observed on #1254: "seventh consecutive identical delivery").
+// Candidates not already known-processed in memory are now also checked
+// against a durable, GitHub-sourced fallback: a machine-readable marker
+// (formatReviewFeedbackComment's <!-- fabrik:review-ids-addressed: ... -->)
+// embedded in a Fabrik review-feedback PR comment already posted for this
+// review. A durable-marker hit backfills the in-memory record so every
+// subsequent call in this process takes the fast, no-fetch path again. The
+// live fetch is only issued when at least one candidate isn't already
+// known-processed in memory — at steady state (nothing outstanding) this
+// costs nothing; immediately after a restart it costs one fetch per PR with
+// an outstanding review body, not per poll.
+//
+// Accepted residual gap: a cycle that lands no PR comment (e.g. every
+// candidate filtered upstream, output == "") never produces a durable
+// marker, so it still depends on the in-memory record alone. R1's
+// success-agnostic circuit breaker (checkNoOpCommentCycle) is the safety net
+// for that narrower case.
 func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews []gh.PRReview) []gh.Comment {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
 
-	out := make([]gh.Comment, 0, len(reviews))
+	type candidate struct {
+		review gh.PRReview
+		id     string
+	}
+	var candidates []candidate
 	for _, r := range reviews {
 		if r.DatabaseID == 0 {
 			continue
@@ -1296,6 +1346,23 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 		if !snap.CommentProcessed(id).IsZero() {
 			continue
 		}
+		candidates = append(candidates, candidate{review: r, id: id})
+	}
+
+	out := make([]gh.Comment, 0, len(candidates))
+	if len(candidates) == 0 {
+		return out
+	}
+
+	durable := e.durablyAddressedReviewIDs(item)
+
+	for _, c := range candidates {
+		if durable[c.review.DatabaseID] {
+			// Backfill the in-memory record (R3) so the fast, no-fetch path
+			// is taken on every subsequent call in this process.
+			e.store.Apply(itemstate.CommentProcessed{Repo: repoStr, Number: item.Number, CommentID: c.id, At: time.Now()})
+			continue
+		}
 		// Prefer the review's actual submission time (r.SubmittedAt, now
 		// fetched via both the GraphQL and REST paths) so a mixed batch of
 		// thread comments and a review body sorts/reads correctly by
@@ -1303,18 +1370,51 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 		// c.CreatedAt verbatim). Fall back to time.Now() only when it's
 		// genuinely unavailable (unparseable or a data source that doesn't
 		// carry it) — never leave the comment with a zero timestamp.
-		createdAt := r.SubmittedAt
+		createdAt := c.review.SubmittedAt
 		if createdAt.IsZero() {
 			createdAt = time.Now()
 		}
 		out = append(out, gh.Comment{
-			ID:        id,
-			Author:    r.Author,
-			Body:      r.Body,
+			ID:        c.id,
+			Author:    c.review.Author,
+			Body:      c.review.Body,
 			CreatedAt: createdAt,
 		})
 	}
 	return out
+}
+
+// durablyAddressedReviewIDs resolves the linked PR for item and returns the
+// set of review DatabaseIDs already marked "addressed" by a durable
+// review-ids-addressed marker on one of its existing comments (R3, #1555).
+// Returns an empty, non-nil map on any resolution or fetch failure — a
+// lookup failure must never be mistaken for "nothing addressed yet" in a way
+// that would suppress delivery, but it also must not panic a nil-map read at
+// the call site.
+func (e *Engine) durablyAddressedReviewIDs(item gh.ProjectItem) map[int]bool {
+	addressed := make(map[int]bool)
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	prNumber := item.LinkedPRNumber
+	if prNumber == 0 {
+		pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+		if err != nil || pr == nil || pr.Number == 0 {
+			return addressed
+		}
+		prNumber = pr.Number
+	}
+
+	comments, err := e.client.FetchIssueComments(owner, repo, prNumber)
+	if err != nil {
+		e.logf(item.Number, "warn", "durablyAddressedReviewIDs: FetchIssueComments failed: %v\n", err)
+		return addressed
+	}
+	for _, c := range comments {
+		for _, id := range parseReviewIDsAddressedMarker(c.Body) {
+			addressed[id] = true
+		}
+	}
+	return addressed
 }
 
 // buildReviewFeedbackCommentsFromReviews is buildReviewFeedbackComments with

@@ -420,6 +420,23 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.ToolsDeniedRetries[v.StageName]++
 		return StageStateChanged
 
+	case NoOpCommentCycleIncremented:
+		ensureStageStateMaps(item)
+		item.StageState.NoOpCommentCycles[v.StageName]++
+		return StageStateChanged
+
+	case NoOpCommentCycleReset:
+		// Check before ensureStageStateMaps, not after — same reasoning as
+		// ReviewCycleDecremented above: a nil map already reads as zero, and
+		// mutating unconditionally would make a truly-fresh item emit a
+		// spurious Change even though the counter never left zero.
+		if item.StageState.NoOpCommentCycles[v.StageName] == 0 {
+			return 0 // no-op: already at zero
+		}
+		ensureStageStateMaps(item)
+		item.StageState.NoOpCommentCycles[v.StageName] = 0
+		return StageStateChanged
+
 	case ReviewCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.ReviewCycles[v.StageName]++
@@ -481,6 +498,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		delete(item.StageState.CIFixCycles, v.StageName)
 		delete(item.StageState.RebaseCycles, v.StageName)
 		delete(item.StageState.EnqueueCycles, v.StageName)
+		delete(item.StageState.NoOpCommentCycles, v.StageName)
 		return StageStateChanged
 
 	case LinkageHealAttempted:
@@ -1204,6 +1222,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.ToolsDeniedRetries == nil {
 		ss.ToolsDeniedRetries = make(map[string]int)
+	}
+	if ss.NoOpCommentCycles == nil {
+		ss.NoOpCommentCycles = make(map[string]int)
 	}
 	if ss.ProcessedComments == nil {
 		ss.ProcessedComments = make(map[string]time.Time)
