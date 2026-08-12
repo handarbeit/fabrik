@@ -461,3 +461,70 @@ func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testin
 	}
 	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 }) // only the bystander submitted
 }
+
+// TestDaemonEventSink_RecordsDropReasons covers the four drop reasons
+// ReviewFromEvent originates (see events.DropReason and ADR-1563), each
+// asserted at the same code paths TestDaemonEventSink_UnknownOwner_
+// DropsWithoutPanic/TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview/
+// TestDaemonEventSink_ClosedOrMergedPR_DropsWithoutReview already exercise
+// for their "no review happened" assertion — this test adds the "and it
+// was counted, under the right reason" half.
+func TestDaemonEventSink_RecordsDropReasons(t *testing.T) {
+	t.Run("unwatched owner", func(t *testing.T) {
+		client := newFakeLister()
+		d := newTestDaemonForEvents(client)
+		sink := &daemonEventSink{daemon: d}
+
+		sink.Handle(context.Background(), events.GitHubEvent{
+			EventType: "pull_request", Action: "opened", Owner: "unknown-owner", Repo: "repo", ResourceID: "1",
+		})
+
+		waitUntil(t, 2*time.Second, func() bool { return d.DropCounts()[events.DropUnwatchedOwner] == 1 })
+	})
+
+	t.Run("unwatched repo", func(t *testing.T) {
+		client := newFakeLister()
+		client.prsByRepo["owner/other-repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
+		d := newTestDaemonForEvents(client) // WatchedRepos: []string{"owner/repo"} only
+		sink := &daemonEventSink{daemon: d}
+
+		sink.Handle(context.Background(), events.GitHubEvent{
+			EventType: "pull_request", Action: "opened", Owner: "owner", Repo: "other-repo", ResourceID: "1",
+		})
+
+		waitUntil(t, 2*time.Second, func() bool { return d.DropCounts()[events.DropUnwatchedRepo] == 1 })
+	})
+
+	t.Run("PR no longer open", func(t *testing.T) {
+		client := newFakeLister()
+		client.detailsByKey["owner/repo#1"] = &gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", State: "closed"}
+		d := newTestDaemonForEvents(client)
+		sink := &daemonEventSink{daemon: d}
+
+		sink.Handle(context.Background(), events.GitHubEvent{
+			EventType: "pull_request", Action: "synchronize", Owner: "owner", Repo: "repo", ResourceID: "1",
+		})
+
+		time.Sleep(100 * time.Millisecond) // ReviewFromEvent runs in its own goroutine
+		if got := d.DropCounts()[events.DropPRNotOpen]; got != 1 {
+			t.Errorf("DropCounts()[DropPRNotOpen] = %d, want 1", got)
+		}
+	})
+
+	t.Run("review already in flight", func(t *testing.T) {
+		client := newFakeLister()
+		client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
+		d := newTestDaemonForEvents(client)
+
+		gate, releaseGate := d.acquirePRGate("owner", "repo", 1)
+		gate.mu.Lock()
+		defer releaseGate()
+		defer gate.mu.Unlock()
+
+		d.ReviewFromEvent(context.Background(), "owner", "repo", 1)
+
+		if got := d.DropCounts()[events.DropReviewInFlight]; got != 1 {
+			t.Errorf("DropCounts()[DropReviewInFlight] = %d, want 1", got)
+		}
+	})
+}

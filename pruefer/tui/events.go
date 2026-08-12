@@ -81,3 +81,37 @@ type TickEvent struct {
 }
 
 func (TickEvent) tuiEvent() {}
+
+// DropEvent reports the cumulative count for one drop-reason category — see
+// events.DropReason (pruefer/events) and ADR-1563: an operator must be able
+// to tell "no events because nothing happened" apart from "no events
+// because every delivery is being silently discarded" without reading
+// logs, and a single lumped "dropped" counter wouldn't distinguish
+// benign categories (an unwatched repo, a dedupe hit) from an actionable
+// one (a signature failure). Total is the cumulative count, not a delta —
+// see Daemon.recordDrop's doc comment for why (TUI events can be dropped
+// under channel backpressure; a total self-heals on the next delivery, a
+// delta would not). Reason is the DropReason rendered as a plain string,
+// not the events.DropReason type, to keep this package free of a
+// dependency on pruefer/events — mirroring ReviewCompletedEvent.Reason.
+type DropEvent struct {
+	Reason string
+	Total  int
+	At     time.Time
+}
+
+func (DropEvent) tuiEvent() {}
+
+// SignatureDriftEvent reports a transition in whether an event source's
+// signature verification is currently failing on every delivery over a
+// sustained window — see hookdeck.Config.OnSignatureDrift and ADR-1563.
+// Active=true means the drift is ongoing (a misconfigured webhook secret,
+// or a wire-format change — not a transient blip); Active=false reports
+// recovery, fired once on the next successful verification after an
+// active streak.
+type SignatureDriftEvent struct {
+	Active bool
+	At     time.Time
+}
+
+func (SignatureDriftEvent) tuiEvent() {}
