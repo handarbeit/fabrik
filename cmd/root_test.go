@@ -370,6 +370,53 @@ func TestExecute_FineGrainedTokenWarning(t *testing.T) {
 	}
 }
 
+// TestExecute_UnrecognizedConfigKeyWarning verifies that an unrecognized
+// .fabrik/config.yaml key produces a [startup] warning on stderr — with a
+// flag/env suggestion for a key that mechanically matches a real CLI flag,
+// and without one for a pure typo. The test does not use t.Parallel() to
+// avoid races on os.Stderr.
+func TestExecute_UnrecognizedConfigKeyWarning(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"),
+		[]byte("owner: o\narchive_after: 48h\ntotally_bogus_key: 1\n"), 0644)
+	chdirTest(t, dir)
+
+	resetFlags()
+	// Omit --user so Execute fails deterministically, after our warning
+	// code but before any engine/network work.
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--token", "tok"}
+
+	Execute() //nolint:errcheck — we only care about the stderr output
+
+	w.Close()
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading stderr pipe: %v", err)
+	}
+	got := string(output)
+
+	if !strings.Contains(got, `[startup] warning: .fabrik/config.yaml: unrecognised key "archive_after"`) {
+		t.Errorf("expected base warning for archive_after, got: %q", got)
+	}
+	if !strings.Contains(got, "FABRIK_ARCHIVE_AFTER") || !strings.Contains(got, "-archive-after") {
+		t.Errorf("expected CLI/env-only suggestion for archive_after, got: %q", got)
+	}
+	if !strings.Contains(got, `[startup] warning: .fabrik/config.yaml: unrecognised key "totally_bogus_key"`) {
+		t.Errorf("expected base warning for totally_bogus_key, got: %q", got)
+	}
+}
+
 func TestExecute_ReviewWaitTimeoutFlag(t *testing.T) {
 	resetFlags()
 	stagesDir := t.TempDir()

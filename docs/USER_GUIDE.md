@@ -873,6 +873,19 @@ FABRIK_USER=my-personal-username
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
 | `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 
+#### Unrecognized `config.yaml` Key Warnings
+
+go-yaml silently discards any `.fabrik/config.yaml` key with no matching field on Fabrik's internal config struct — so a typo, a stale key left over from a past experiment, or an entry for a knob that's actually CLI/env-only (see the table below) parses cleanly and does *nothing*, with no error anywhere. At startup, Fabrik now detects every such key and reports it — non-fatal, on stderr:
+
+```
+[startup] warning: .fabrik/config.yaml: unrecognised key "archive_after"
+          (this knob is CLI/env-only — set FABRIK_ARCHIVE_AFTER or -archive-after)
+```
+
+A key with no matching flag or env var at all (a plain typo, never a real knob) gets only the base warning line, with no suggestion clause. This never fails startup — it's purely diagnostic, mirroring the [Stage YAML Drift Warning](#stage-yaml-drift-warning)'s "warn, don't block" behavior for the inverse case (an *extra* key here, vs. a *missing* one there).
+
+The flag/env suggestion is derived mechanically from Fabrik's snake_case (`config.yaml`) ↔ kebab-case (CLI flag) ↔ `FABRIK_SCREAMING_SNAKE_CASE` (env var) naming convention, verified live against the registered flag set — not a hand-maintained list, so it can't go stale as new knobs are added. Four already-recognized `config.yaml` keys break that convention (`git_ssh` vs. `--ssh`, `tui` vs. `--notui`/`FABRIK_TUI` (inverted), `project` vs. `FABRIK_PROJECT_NUMBER`, `janitor_interval_hours` vs. `--janitor-interval`) — for these four only, typo'ing the key in a way that happens to match the *other* name can produce a misleading "CLI/env-only" suggestion even though a `config.yaml` key already exists, just spelled differently. See ADR-1544.
+
 ### Environment Variables
 
 | Variable | `config.yaml` key | Description | Default |
