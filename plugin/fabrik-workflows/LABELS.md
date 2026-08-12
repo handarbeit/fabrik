@@ -94,6 +94,18 @@ part of the normal happy path, not an error condition.
   the missing option. Retried every poll, independent of dispatch
   admission, until the board is fixed; escalates to `fabrik:paused` after
   `MaxRetries`.
+- **`fabrik:awaiting-runaway-alert`** — The merge-train runaway guard
+  already paused this member (`fabrik:paused` + `fabrik:awaiting-input`,
+  applied unconditionally) but its explanatory alert comment failed to
+  post. Unlike the other `fabrik:awaiting-*` labels above, `fabrik:paused`
+  is present from the label's very first application — the pause never
+  waits on the comment succeeding — so its settle scan retries regardless
+  of the pause. Retried every poll until the alert posts; after
+  `MaxRetries` failed attempts a fallback comment is attempted instead,
+  and the marker is removed only if that fallback comment itself succeeds
+  (`fabrik:paused` remains either way) — if the fallback also fails, the
+  marker stays and retries continue indefinitely, rather than silently
+  losing the only signal that the member was never actually alerted.
 - **`fabrik:awaiting-placement`** — A spawned child issue's initial
   project-board column placement failed at spawn time. Retried every poll
   until placement succeeds or the child is observed closed; escalates to
