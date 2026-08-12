@@ -178,6 +178,19 @@ var disallowedTools = []string{
 	// headless stage, so the failure mode is the stall plus the spend. See
 	// #1345, #1365.
 	"Workflow",
+	// Monitor promises to watch for a condition over time and report back
+	// "on its own schedule" — a same-turn reply is explicitly not the
+	// contract. A headless Fabrik stage has no future turn to receive that
+	// report: the turn ends, the invocation is denied outright (a lost
+	// invocation, not just a stall), and the denial spuriously exempts the
+	// attempt from max_retries (see #1556). Confirmed reachable and denied
+	// in production. See #1558.
+	"Monitor",
+	// CronCreate enqueues a prompt for a future time and fires "only while
+	// the REPL is idle" — the same shape as ScheduleWakeup, recurring
+	// instead of one-shot. A headless stage is never later idle to receive
+	// the fire, so the promised delivery can never happen. See #1558.
+	"CronCreate",
 }
 
 // CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.

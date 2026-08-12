@@ -388,16 +388,21 @@ func TestBuildClaudeArgs_DisallowedTools(t *testing.T) {
 		t.Fatalf("expected --disallowedTools %s in args, got %v", tool, args)
 	}
 
+	// Driven off the disallowedTools slice itself (not a hand-written list of
+	// tool names) so a future addition to the slice is automatically covered
+	// here without any test edit. See #1558 AC3.
 	t.Run("dontAsk path", func(t *testing.T) {
 		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
-		assertDisallowed(t, args, "ScheduleWakeup")
-		assertDisallowed(t, args, "Workflow")
+		for _, tool := range disallowedTools {
+			assertDisallowed(t, args, tool)
+		}
 	})
 
 	t.Run("dangerously-skip-permissions path", func(t *testing.T) {
 		args := buildClaudeArgs(stage, "", "", 0, true, "", "")
-		assertDisallowed(t, args, "ScheduleWakeup")
-		assertDisallowed(t, args, "Workflow")
+		for _, tool := range disallowedTools {
+			assertDisallowed(t, args, tool)
+		}
 	})
 }
 
