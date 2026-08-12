@@ -251,7 +251,12 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
-		e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
+		// New breaker checked first (R5): if it trips, the issue is already
+		// paused and the old breaker's check is skipped for this cycle — at
+		// most one pause comment per cycle.
+		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
+			e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
+		}
 		return fmt.Errorf("adding editing label: %w", err)
 	} else {
 		e.syncLabelAdd(item, "fabrik:editing", true)
@@ -262,7 +267,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
-		e.checkCommentBreaker(item, fmt.Sprintf("resolving the base branch failed: %v", err))
+		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
+			e.checkCommentBreaker(item, fmt.Sprintf("resolving the base branch failed: %v", err))
+		}
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 	// Merge-queue awareness (ADR-058 D3): skip the preemptive rebase when the PR is
@@ -272,7 +279,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
-		e.checkCommentBreaker(item, fmt.Sprintf("setting up the worktree failed: %v", err))
+		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
+			e.checkCommentBreaker(item, fmt.Sprintf("setting up the worktree failed: %v", err))
+		}
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
@@ -320,7 +329,14 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	output, usage, invCompleted, err := e.runCommentExtensionLoop(ctx, stage, &item, comments, workDir, invokeOpts, hadExtendTurnsLabel)
 
+	// headChanged is computed once per cycle and reused below for the
+	// success-agnostic no-op breaker's "progressed" signal (R2) — a commit is
+	// one of the three progress signals it must be computed identically from,
+	// per the constraint that "no observable progress" is evaluated the same
+	// way everywhere it's checked (#1555).
+	headChanged := false
 	if postInvokeSHA, shaErr := gitHeadSHA(workDir); shaErr == nil && postInvokeSHA != preInvokeSHA {
+		headChanged = true
 		e.resetCommentBreaker(item)
 	}
 
@@ -390,9 +406,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		// separate, narrower guarantee that only applies to the stage path.
 		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		// A non-completing, erroring invocation is exactly the "no forward progress"
-		// case the circuit breaker exists to catch — check it here too, not only
-		// on the successful-completion path below.
-		e.checkCommentBreaker(item, "")
+		// case both circuit breakers exist to catch — check them here too, not
+		// only on the successful-completion path below. completed is false on
+		// this branch by construction, so progressed reduces to headChanged
+		// (publishCommentOutput, the other progress signal, has not run yet).
+		if !e.checkNoOpCommentCycle(item, stage, headChanged, lastCommentAuthor(comments)) {
+			e.checkCommentBreaker(item, "")
+		}
 		return err
 	}
 	if err != nil {
@@ -406,7 +426,24 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Checked last so any reset applied above (stage-complete inside
 	// finalizeComments, or an issue-body update inside publishCommentOutput)
 	// takes effect before evaluating whether this cycle tripped the breaker.
-	e.checkCommentBreaker(item, "")
+	// progressed mirrors R2's three signals exactly: a commit landed
+	// (headChanged), the issue body updated (extractUpdatedBody on the
+	// original, unstripped output — publishCommentOutput took output by
+	// value, so this copy is untouched by its marker-stripping), or the
+	// stage completed (FABRIK_STAGE_COMPLETE was emitted).
+	//
+	// lastCommentAuthor(comments) below is intentionally computed from this
+	// cycle's original comments slice, not a mid-loop-refreshed one:
+	// runCommentExtensionLoop's progress check (detectProgress) may re-fetch
+	// item via FetchItemDetails, but that only refreshes item's own fields —
+	// comments itself is never reassigned, and every extension iteration
+	// resumes Claude with this same, fixed slice. So the author attributed
+	// in a trip comment always matches what was actually delivered to Claude
+	// this cycle, even across an extend-turns loop.
+	progressed := headChanged || extractUpdatedBody(output) != "" || completed
+	if !e.checkNoOpCommentCycle(item, stage, progressed, lastCommentAuthor(comments)) {
+		e.checkCommentBreaker(item, "")
+	}
 
 	return nil
 }
@@ -593,7 +630,8 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 			e.logf(item.Number, "warn", "review reinvoke: could not find PR for issue: %v\n", prErr)
 		} else if prNumber > 0 {
 			threads := buildThreadEntries(comments)
-			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments))
+			addressedReviewIDs := addressedReviewIDsFromComments(comments)
+			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments), addressedReviewIDs)
 			// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
 			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)

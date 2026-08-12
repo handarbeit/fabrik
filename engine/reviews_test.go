@@ -3909,3 +3909,276 @@ func TestPauseForReviewCycleLimit_ExistingComment_NoRepost(t *testing.T) {
 		t.Error("R2: expected itemstate.EnginePaused to be (re-)applied even on the reapply branch — otherwise a second unpause after this episode would be a no-op")
 	}
 }
+
+// ---- R3/#1555: durable review-ids-addressed marker prevents post-restart redelivery ----
+
+// TestBuildReviewBodyComments_DurableMarker_PreventsRedeliveryAfterRestart
+// reproduces the #1254 shape directly: a review body was already addressed
+// (a review-feedback PR comment carrying the durable marker exists), but the
+// in-memory snap.CommentProcessed record is absent — exactly what a
+// self-upgrade restart (syscall.Exec, wiping itemstate.Store) produces.
+// Before R3's fix, buildReviewBodyCommentsFromReviews had no durable
+// fallback and would treat this as a brand-new comment, redelivering it.
+func TestBuildReviewBodyComments_DurableMarker_PreventsRedeliveryAfterRestart(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchIssueCommentsFn: func(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+			fetchCalls++
+			if issueNumber != 77 {
+				t.Errorf("expected FetchIssueComments called with linked PR #77, got #%d", issueNumber)
+			}
+			return []gh.Comment{
+				{
+					DatabaseID: 5001,
+					// Must match the test engine's e.cfg.User ("testuser",
+					// see testEngineWithStages) — the marker is only trusted
+					// when authored by Fabrik's own identity (#1555 Pruefer
+					// finding).
+					Author: "testuser",
+					Body:   "🏭 **Fabrik — stage: Validate (review feedback addressed)**\n...\n\n<!-- fabrik:review-ids-addressed: 900 -->",
+				},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{
+			// Same review, same DatabaseID as the one already addressed — no
+			// in-memory record exists for it (fresh store, simulating "after
+			// restart").
+			{Author: "handarbeit-pruefer", State: "COMMENTED", Body: "stale, already-processed findings", DatabaseID: 900},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments — the durable marker must prevent redelivery, got %d: %+v", len(comments), comments)
+	}
+	if fetchCalls != 1 {
+		t.Errorf("expected exactly 1 FetchIssueComments call, got %d", fetchCalls)
+	}
+
+	// The durable-marker hit must backfill the in-memory record so a second
+	// call in the same process takes the fast, no-fetch path.
+	snap, err := eng.store.Get("owner/repo", 10)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.CommentProcessed("review-body:900").IsZero() {
+		t.Error("expected snap.CommentProcessed(review-body:900) to be backfilled after a durable-marker hit")
+	}
+
+	comments = eng.buildReviewBodyComments(item)
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments on second call too, got %d", len(comments))
+	}
+	if fetchCalls != 1 {
+		t.Errorf("expected FetchIssueComments NOT called again on the second call (fast in-memory path after backfill), total calls = %d", fetchCalls)
+	}
+}
+
+// TestBuildReviewBodyComments_DurableMarker_UnaddressedReview_StillDelivered
+// is the companion proving the check is discriminating, not fail-closed on
+// everything: a durable marker exists for a *different* review, and a fresh,
+// never-addressed review must still be delivered.
+func TestBuildReviewBodyComments_DurableMarker_UnaddressedReview_StillDelivered(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchIssueCommentsFn: func(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+			return []gh.Comment{
+				{
+					DatabaseID: 5001,
+					Author:     "testuser", // must match e.cfg.User — see prior test
+					Body:       "🏭 **Fabrik — stage: Validate (review feedback addressed)**\n...\n\n<!-- fabrik:review-ids-addressed: 900 -->",
+				},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         11,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{
+			// DatabaseID 901 — distinct from the marker's 900 — has never been
+			// addressed.
+			{Author: "handarbeit-pruefer", State: "COMMENTED", Body: "brand new finding", DatabaseID: 901},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (unaddressed review must still be delivered), got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:901" {
+		t.Errorf("expected synthetic ID review-body:901, got %q", comments[0].ID)
+	}
+}
+
+// TestBuildReviewBodyComments_DurableMarker_UntrustedAuthor_NotHonored is the
+// regression test for the Pruefer review finding on #1555: durablyAddressedReviewIDs
+// must only trust the marker on a comment authored by e.cfg.User (Fabrik's
+// own identity). Before this fix, any PR commenter could post a comment
+// containing the literal "<!-- fabrik:review-ids-addressed: N -->" marker
+// naming an arbitrary review DatabaseID and cause that review to be silently
+// treated as already-addressed — both suppressing its delivery this cycle
+// and durably backfilling snap.CommentProcessed, so the suppression would
+// outlive this one check.
+func TestBuildReviewBodyComments_DurableMarker_UntrustedAuthor_NotHonored(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchIssueCommentsFn: func(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+			return []gh.Comment{
+				{
+					DatabaseID: 5002,
+					// Not e.cfg.User ("testuser") — an arbitrary PR commenter
+					// forging the marker text.
+					Author: "random-pr-commenter",
+					Body:   "quoting a Fabrik comment for context: <!-- fabrik:review-ids-addressed: 904 -->",
+				},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         14,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "handarbeit-pruefer", State: "COMMENTED", Body: "genuinely unaddressed finding", DatabaseID: 904},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment — an untrusted-author marker must not suppress delivery, got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:904" {
+		t.Errorf("expected synthetic ID review-body:904, got %q", comments[0].ID)
+	}
+
+	// The untrusted marker must also not have backfilled the in-memory
+	// record — a second call must still deliver it (not silently absorbed
+	// via CommentProcessed). No backfill mutation was ever applied for this
+	// item, so store.Get legitimately returns "not found" here — that itself
+	// is proof nothing was backfilled; only fail if a record somehow exists
+	// and is non-zero.
+	if snap, err := eng.store.Get("owner/repo", 14); err == nil {
+		if !snap.CommentProcessed("review-body:904").IsZero() {
+			t.Errorf("untrusted marker must not backfill snap.CommentProcessed")
+		}
+	}
+}
+
+// TestBuildReviewBodyComments_NoCandidates_SkipsDurableFetch is the
+// steady-state cost assertion the ADR claims: when every review is already
+// snap.CommentProcessed, FetchIssueComments must never be called.
+func TestBuildReviewBodyComments_NoCandidates_SkipsDurableFetch(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchIssueCommentsFn: func(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+			fetchCalls++
+			return nil, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         12,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix", DatabaseID: 902},
+		},
+	}
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 12, CommentID: "review-body:902", At: time.Now()})
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments (already processed in memory), got %d", len(comments))
+	}
+	if fetchCalls != 0 {
+		t.Errorf("expected 0 FetchIssueComments calls at steady state (nothing outstanding), got %d", fetchCalls)
+	}
+}
+
+// TestBuildReviewBodyComments_DurableFetchError_FallsBackToDelivering ensures
+// a FetchIssueComments failure fails open (delivers the candidate) rather
+// than silently swallowing a genuinely new review — mirroring the file's
+// established "block on unknown state" caution elsewhere, but inverted here:
+// an unresolvable durable check must not be mistaken for "definitely already
+// addressed."
+func TestBuildReviewBodyComments_DurableFetchError_FallsBackToDelivering(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchIssueCommentsFn: func(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+			return nil, errors.New("transient API error")
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         13,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix", DatabaseID: 903},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment delivered despite the durable-fetch error, got %d", len(comments))
+	}
+}
+
+// ---- formatReviewFeedbackComment / marker round-trip (#1555) ----
+
+func TestFormatReviewFeedbackComment_EmitsReviewIDsAddressedMarker(t *testing.T) {
+	result := formatReviewFeedbackComment("Validate", "output", "b", "c", "m", "ts", nil, 1, []int{900, 901})
+
+	if !strings.Contains(result, "<!-- fabrik:review-ids-addressed: 900,901 -->") {
+		t.Errorf("expected review-ids-addressed marker in output, got: %q", result)
+	}
+}
+
+func TestFormatReviewFeedbackComment_NoAddressedIDs_NoMarker(t *testing.T) {
+	result := formatReviewFeedbackComment("Validate", "output", "b", "c", "m", "ts", nil, 1, nil)
+
+	if strings.Contains(result, "fabrik:review-ids-addressed") {
+		t.Errorf("expected no marker when addressedReviewIDs is empty, got: %q", result)
+	}
+}
+
+func TestParseReviewIDsAddressedMarker_RoundTrip(t *testing.T) {
+	comment := formatReviewFeedbackComment("Validate", "output", "b", "c", "m", "ts", nil, 1, []int{900, 901, 902})
+
+	ids := parseReviewIDsAddressedMarker(comment)
+
+	if len(ids) != 3 || ids[0] != 900 || ids[1] != 901 || ids[2] != 902 {
+		t.Errorf("parseReviewIDsAddressedMarker round-trip = %v, want [900 901 902]", ids)
+	}
+}
+
+func TestParseReviewIDsAddressedMarker_AbsentMarker_ReturnsNil(t *testing.T) {
+	if ids := parseReviewIDsAddressedMarker("just a plain comment, no marker here"); ids != nil {
+		t.Errorf("expected nil for a comment with no marker, got %v", ids)
+	}
+}
+
+func TestAddressedReviewIDsFromComments_ExtractsReviewBodyIDsOnly(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "review-body:900", Author: "alice"},
+		{ID: "PRRC_123", ReviewThreadID: "RT_1", Author: "bob"}, // real thread comment, not a review body
+		{ID: "review-body:901", Author: "carol"},
+	}
+
+	ids := addressedReviewIDsFromComments(comments)
+
+	if len(ids) != 2 || ids[0] != 900 || ids[1] != 901 {
+		t.Errorf("addressedReviewIDsFromComments = %v, want [900 901]", ids)
+	}
+}

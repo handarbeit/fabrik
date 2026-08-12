@@ -1,6 +1,10 @@
 package simgh
 
-import "fmt"
+import (
+	"fmt"
+
+	gh "github.com/handarbeit/fabrik/github"
+)
 
 // AddComment posts a comment on an issue, or on a pull request when the number
 // identifies one. GitHub's issue-comment endpoints are shared between issues
@@ -41,6 +45,33 @@ func (s *Sim) AddComment(owner, repo string, issueNumber int, body string) (int,
 		return id, nil
 	}
 	return 0, fmt.Errorf("simgh: no issue or PR %s#%d to comment on", repoKey(owner, repo), issueNumber)
+}
+
+// FetchIssueComments returns the ordinary (top-level) comments on an issue or
+// PR — mirroring GET /issues/{n}/comments, which does not include inline
+// review-thread comments even when n identifies a PR. Used by the engine's
+// durablyAddressedReviewIDs (#1555, R3) to scan for a durable
+// review-ids-addressed marker on a previously-posted review-feedback comment.
+func (s *Sim) FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	var records []*commentRecord
+	if iss, ok := r.issues[issueNumber]; ok {
+		records = iss.comments
+	} else if pr, ok := r.prs[issueNumber]; ok {
+		records = pr.comments
+	} else {
+		return nil, fmt.Errorf("simgh: no issue or PR %s#%d to fetch comments for", repoKey(owner, repo), issueNumber)
+	}
+	out := make([]gh.Comment, len(records))
+	for i, c := range records {
+		out[i] = c.toGH()
+	}
+	return out, nil
 }
 
 // UpdateComment rewrites an existing comment's body, searching issue, PR, and

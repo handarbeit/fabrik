@@ -216,6 +216,13 @@ func (s Snapshot) ReviewBlockedCycles(stageName string) int {
 	return s.state.StageState.ReviewBlockedCycles[stageName]
 }
 
+// NoOpCommentCycles returns the success-agnostic, never-pruned no-progress
+// comment-cycle count for a given stage (#1555) — see
+// StageState.NoOpCommentCycles.
+func (s Snapshot) NoOpCommentCycles(stageName string) int {
+	return s.state.StageState.NoOpCommentCycles[stageName]
+}
+
 // CIFixCycles returns the CI-fix re-invocation cycle count for a given stage.
 func (s Snapshot) CIFixCycles(stageName string) int {
 	return s.state.StageState.CIFixCycles[stageName]
@@ -402,6 +409,7 @@ func copyStageState(s StageState) StageState {
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
 		SliceRetries:         copyMap(s.SliceRetries),
 		ToolsDeniedRetries:   copyMap(s.ToolsDeniedRetries),
+		NoOpCommentCycles:    copyMap(s.NoOpCommentCycles),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 		LastTurnsUsed:        copyMap(s.LastTurnsUsed),

@@ -315,6 +315,19 @@ type StageState struct {
 	// counter, but a non-converging (never-fixed) misconfiguration still
 	// needs its own bound. Mirrors SliceRetries structurally.
 	ToolsDeniedRetries map[string]int
+	// NoOpCommentCycles counts consecutive comment-processing invocations for
+	// a stage that produced no observable progress (no new commit, no
+	// issue-body update, no FABRIK_STAGE_COMPLETE) — success-agnostic (#1555,
+	// sibling of #1382/#1413/#1414): a cleanly-exiting invocation that
+	// redelivers and re-"processes" an already-addressed comment as a no-op
+	// counts exactly the same as a failing one. Unlike CommentBreaker's
+	// rolling 30-minute window (#1089), this counter is never time-pruned —
+	// mirrors ReviewBlockedCycles' never-refunded shape (ADR-1518) so a loop
+	// whose invocations are spaced sparser than any window (e.g. triggered
+	// only by a self-upgrade restart re-admitting a stale review body) still
+	// trips it. Reset to zero on genuine progress (see NoOpCommentCycleReset)
+	// or by EngineCyclesCleared on a manual unpause.
+	NoOpCommentCycles map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage

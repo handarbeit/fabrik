@@ -438,6 +438,35 @@ type ToolsDeniedRetryIncremented struct {
 func (ToolsDeniedRetryIncremented) isMutation()       {}
 func (m ToolsDeniedRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// NoOpCommentCycleIncremented increments the success-agnostic, never-pruned
+// no-progress counter for a stage's comment-processing loop (#1555). Applied
+// exactly once per processComments cycle — at whichever of its five mutually
+// exclusive exit points was reached — when that cycle produced no observable
+// progress (no commit, no issue-body update, no FABRIK_STAGE_COMPLETE),
+// regardless of whether the invocation itself exited successfully. See
+// StageState.NoOpCommentCycles.
+type NoOpCommentCycleIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (NoOpCommentCycleIncremented) isMutation()       {}
+func (m NoOpCommentCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// NoOpCommentCycleReset zeroes the no-op comment cycle counter for a stage
+// after a cycle makes genuine progress (R2) — a commit lands, the issue body
+// updates, or FABRIK_STAGE_COMPLETE is emitted — or after a manual unpause
+// (via EngineCyclesCleared, mirroring ReviewCycles/ReviewBlockedCycles).
+type NoOpCommentCycleReset struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (NoOpCommentCycleReset) isMutation()       {}
+func (m NoOpCommentCycleReset) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ReviewCycleIncremented increments the review cycle counter for a stage.
 type ReviewCycleIncremented struct {
 	Repo      string
@@ -798,9 +827,9 @@ func (EngineUnpaused) isMutation()       {}
 func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // EngineCyclesCleared zeroes ReviewCycles, ReviewBlockedCycles, CIFixCycles,
-// RebaseCycles, and EnqueueCycles for a stage. Called by clearFailedStage on
-// unpause/success to prevent stale counters from triggering premature
-// max-cycle pauses on the next run.
+// RebaseCycles, EnqueueCycles, and NoOpCommentCycles for a stage. Called by
+// clearFailedStage on unpause/success to prevent stale counters from
+// triggering premature max-cycle pauses on the next run.
 type EngineCyclesCleared struct {
 	Repo      string
 	Number    int
