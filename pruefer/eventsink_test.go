@@ -516,9 +516,10 @@ func TestDaemonEventSink_RecordsDropReasons(t *testing.T) {
 		client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 		d := newTestDaemonForEvents(client)
 
-		prLock := d.prLock("owner", "repo", 1)
-		prLock.Lock()
-		defer prLock.Unlock()
+		gate, releaseGate := d.acquirePRGate("owner", "repo", 1)
+		gate.mu.Lock()
+		defer releaseGate()
+		defer gate.mu.Unlock()
 
 		d.ReviewFromEvent(context.Background(), "owner", "repo", 1)
 
