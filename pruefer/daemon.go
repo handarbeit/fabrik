@@ -472,15 +472,27 @@ func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 // permanently under-count on any dropped TUI message — a total-based one
 // self-heals on the next delivered event. dropCounts itself, guarded by
 // dropMu, is never lossy regardless of what the TUI momentarily displays.
+//
+// The emit happens while dropMu is still held, not after release: this
+// package's four eventsink.go drop points fan out across an uncapped number
+// of concurrent per-event goroutines (unlike hookdeck.Source's own reasons,
+// which originate from its single-threaded read loop), so two concurrent
+// callers racing between their own unlock and their own emit could
+// otherwise deliver DropEvents to the TUI out of order (e.g. Total=2
+// observed before Total=1). FooterComponent.Update overwrites rather than
+// accumulates, so a reordered lower total would stick until the next drop
+// of that reason arrived. d.emit is a non-blocking channel send (see
+// tui_run.go) with no risk of blocking or reentering dropMu, so holding the
+// lock across it is cheap and keeps increment-and-emit atomic — the total
+// ordering callers observe matches dropCounts' own serialization order.
 func (d *Daemon) recordDrop(reason events.DropReason) {
 	d.dropMu.Lock()
+	defer d.dropMu.Unlock()
 	if d.dropCounts == nil {
 		d.dropCounts = make(map[events.DropReason]int)
 	}
 	d.dropCounts[reason]++
-	total := d.dropCounts[reason]
-	d.dropMu.Unlock()
-	d.emit(ptui.DropEvent{Reason: string(reason), Total: total, At: time.Now()})
+	d.emit(ptui.DropEvent{Reason: string(reason), Total: d.dropCounts[reason], At: time.Now()})
 }
 
 // DropCounts returns a locked snapshot of every recorded drop reason's
