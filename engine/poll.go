@@ -985,6 +985,32 @@ func (e *Engine) PollOnce(ctx context.Context) error {
 	return err
 }
 
+// HasInFlightWorker reports whether any engine-dispatched worker — per-item
+// (registered via WorkerEntered before its goroutine starts, cleared via a
+// deferred WorkerExited when it returns) or merge-train repo-scoped (see
+// mergeTrainInFlight/e.store.ExitRepoWorker) — is currently running. It is
+// the same liveness signal the idle-upgrade check below (dispatched == 0
+// branch) and the shutdown-pause path (shutdown.go's inFlightSnapshot) treat
+// as authoritative for "is the engine actually quiescent right now."
+//
+// Test seam (ADR-1449 pattern), added for tests/sim's RunPoll (#1450 follow-
+// up, PR #1538/CI run 31459112834): a poll cycle that dispatches a worker
+// returns from PollOnce immediately, leaving the goroutine running in the
+// background exactly as production does — RunPoll previously papered over
+// that gap with a small *fixed* real sleep (workerYield, 100ms) just to give
+// the goroutine some wall-clock time to progress, then relied on
+// AdvanceUntil's poll-count bound to eventually observe completion across
+// several such cycles. Under CPU contention a fixed sleep is not a reliable
+// proxy for "the worker made progress" — a starved goroutine can need many
+// more polls than expected to reach the same state, and a poll-count bound
+// has no way to know that, so it can expire before the worker ever finishes.
+// HasInFlightWorker lets RunPoll wait for the dispatched worker's *actual*
+// completion instead of a guessed duration, restoring the poll-count bound's
+// meaning regardless of runner load.
+func (e *Engine) HasInFlightWorker() bool {
+	return e.store.HasInFlightWorker()
+}
+
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
