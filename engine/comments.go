@@ -431,6 +431,15 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// original, unstripped output — publishCommentOutput took output by
 	// value, so this copy is untouched by its marker-stripping), or the
 	// stage completed (FABRIK_STAGE_COMPLETE was emitted).
+	//
+	// lastCommentAuthor(comments) below is intentionally computed from this
+	// cycle's original comments slice, not a mid-loop-refreshed one:
+	// runCommentExtensionLoop's progress check (detectProgress) may re-fetch
+	// item via FetchItemDetails, but that only refreshes item's own fields —
+	// comments itself is never reassigned, and every extension iteration
+	// resumes Claude with this same, fixed slice. So the author attributed
+	// in a trip comment always matches what was actually delivered to Claude
+	// this cycle, even across an extend-turns loop.
 	progressed := headChanged || extractUpdatedBody(output) != "" || completed
 	if !e.checkNoOpCommentCycle(item, stage, progressed, lastCommentAuthor(comments)) {
 		e.checkCommentBreaker(item, "")
