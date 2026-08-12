@@ -68,7 +68,7 @@ type SpawnBlock struct {
 // located with a bare strings.Index anywhere in the body, so a Plan that
 // mentioned the marker in prose — e.g. a markdown checklist item
 //
-//	- [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN owner/repo` block scoping the child work
+//   - [ ] Emit `FABRIK_SPAWN_CHILD_BEGIN owner/repo` block scoping the child work
 //
 // — was treated as a real block opener. The parser then ran forward to the
 // *real* END marker, swallowed the authentic block as that phantom block's
