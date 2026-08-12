@@ -495,12 +495,13 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// Use batch[0] as the repo anchor for ensureRepoReady.
 	if err := e.ensureRepoReady(ctx, batch[0]); err != nil {
 		if errors.Is(err, ErrSkipItem) {
-			e.logf(0, "merge-train", "repo %s not ready, aborting train\n", repoKey)
+			e.recordMergeTrainCloneSkip(repoKey, batch[0])
 		} else {
 			e.logf(0, "merge-train", "ensureRepoReady failed for %s: %v\n", repoKey, err)
 		}
 		return trialParams{}, nil, false
 	}
+	e.resetMergeTrainCloneSkip(repoKey)
 
 	wm := e.worktreesFor(repoKey)
 	baseBranch, err := wm.DefaultBaseBranch()
@@ -582,6 +583,116 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	e.logf(0, "merge-train", "assembled %d train member(s) for %s\n", len(current), repoKey)
 
 	return p, current, true
+}
+
+// recordMergeTrainCloneSkip tracks consecutive ensureRepoReady ErrSkipItem outcomes for
+// prepareTrainWorker's batch[0] repo anchor (#1543 follow-up). batch[0] is an arbitrary
+// Queued-column representative that can differ across polls whenever Queued membership
+// churns — plausible and normal. ADR-1543's identity-gated retry boundary only reopens
+// for the exact item pinned as cloneInFlight's ownerKey at the moment of the original
+// failure, so once a later poll selects a different batch[0], that item's identity can
+// never match and the gate stays shut — the repo would otherwise skip silently forever,
+// recoverable only by the original anchor being reselected or an engine restart.
+//
+// This escalates instead, exactly once when the streak first reaches e.cfg.MaxRetries,
+// by posting a comment on the current anchor naming the pinned owner and the remedy. It
+// deliberately does NOT pause the anchor: an earlier revision called pauseIssue here,
+// but batch[0] is an arbitrary, otherwise-healthy Queued member — pausing it removes it
+// from dispatch eligibility, and since fixing the pinned owner's clone issue never
+// un-pauses this anchor, every MaxRetries-poll streak would permanently exile a
+// *different* innocent member as Queued membership rotates, without doing anything to
+// actually resolve the wedge (review feedback on this PR). A comment-only notice keeps
+// the escalation observable — which is the actual goal — without that collateral
+// damage; the real remedy (clearing fabrik:paused on the pinned owner) is unaffected
+// either way, since that item was already paused with its own explanatory comment at
+// the moment its clone attempt failed (see ensureRepoReady).
+//
+// Unlike this file's own mergeTrainEjectionCounts/ejectMember (which resets its counter
+// after pausing, because fabrik:paused itself is the idempotency guard that stops the
+// pause path repeating), this counter is NOT reset after escalating: since the anchor
+// is deliberately never paused, there is no label to gate a repeat, so a reset here
+// would turn one escalation into a comment fired every MaxRetries skips for as long as
+// the wedge persists (review feedback on this PR — see the "escalate exactly once"
+// comment below). Escalating on count == MaxRetries (not >=, no reset) and leaving the
+// count to climb past it unremarked is what actually delivers "escalate once per
+// episode": a genuinely new episode only starts once resetMergeTrainCloneSkip deletes
+// the counter on the next ensureRepoReady success. This is otherwise keyed per repo
+// ("owner/repo"), not per member like mergeTrainEjectionCounts — the wedge is a
+// property of the repo's cloneInFlight entry, not of whichever item happens to be
+// batch[0] this poll.
+//
+// The anchor is not necessarily a bystander, though: on the very first ErrSkipItem for
+// a repo (MaxRetries: 1 is trivially reachable; the default MaxRetries: 3 is reachable
+// too, if the same anchor recurs across polls before its own fabrik:paused takes
+// visible effect), anchor IS the pinned owner. The message branches on
+// issueKey(anchor, ...) == ownerKey so it never claims a self-owning anchor's "own
+// clone was never attempted" or that it "has NOT been paused" when both are false
+// (review feedback on this PR).
+func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem) {
+	e.mergeTrainCloneSkipMu.Lock()
+	e.mergeTrainCloneSkipCounts[repoKey]++
+	count := e.mergeTrainCloneSkipCounts[repoKey]
+	e.mergeTrainCloneSkipMu.Unlock()
+
+	// Best-effort: name the pinned owner in the log/comment when known. Absent only if
+	// the entry was cleared between ensureRepoReady's read and this one (e.g. a
+	// concurrent successful retry elsewhere) — never treated as an error.
+	ownerKey := ""
+	if v, ok := e.cloneInFlight.Load(repoKey); ok {
+		if call, ok := v.(*cloneCall); ok {
+			ownerKey = call.ownerKey
+		}
+	}
+	e.logf(0, "merge-train", "repo %s not ready (skip %d, pinned owner %q) — aborting train\n", repoKey, count, ownerKey)
+
+	// Escalate exactly once per streak, at the moment count first reaches MaxRetries —
+	// not "count >= MaxRetries" and not followed by a reset. A persistent wedge (the
+	// only kind this exists for: it stays wedged until an operator clears the pin or
+	// the engine restarts) means count keeps climbing past MaxRetries on every
+	// subsequent skip; count != MaxRetries then falls through silently to the log line
+	// above for every one of those, so the comment fires exactly once (review feedback
+	// on this PR — a reset-after-escalate here turned "escalate once" into "escalate on
+	// a timer," reposting every MaxRetries skips indefinitely, sprayed across whichever
+	// item is anchor that poll). A genuinely new episode after recovery starts its own
+	// fresh count from resetMergeTrainCloneSkip's delete (see below) and gets its own
+	// single escalation when it reaches MaxRetries in turn.
+	if e.cfg.MaxRetries <= 0 || count != e.cfg.MaxRetries {
+		return
+	}
+
+	// The anchor is not always a bystander: on the very first ErrSkipItem for a repo
+	// (or any later recurrence before the anchor's own fabrik:paused has taken visible
+	// effect), anchor IS the pinned owner — its own clone attempt is what failed. The
+	// message must not claim otherwise (review feedback on this PR).
+	anchorIsOwner := ownerKey != "" && ownerKey == issueKey(anchor, e.defaultRepo())
+
+	var msg string
+	if anchorIsOwner {
+		msg = fmt.Sprintf(
+			"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is both the current train anchor and the issue whose own clone attempt failed and is pinning the retry gate — it already carries `fabrik:paused` and an explanatory \"cannot clone repo\" comment from that failure.\n\nFix the underlying clone issue and remove `fabrik:paused` here to retry.",
+			repoKey, count, anchor.Number,
+		)
+	} else {
+		ownerClause := "an earlier failed clone attempt"
+		if ownerKey != "" {
+			ownerClause = fmt.Sprintf("issue %s's failed clone attempt", ownerKey)
+		}
+		msg = fmt.Sprintf(
+			"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is the current train anchor, but its own clone was never attempted — the retry is pinned to %s, which must have its `fabrik:paused` label removed (after the underlying clone issue is fixed) before any anchor, including this one, can retry.\n\nThis item itself is otherwise healthy and has NOT been paused — it remains eligible for the next merge-train batch. No action is needed here; resolve the wedge by clearing `fabrik:paused` on the pinned issue above.",
+			repoKey, count, anchor.Number, ownerClause,
+		)
+	}
+	e.logf(anchor.Number, "escalate", "merge-train repo %s clone wedged after %d skips (anchor is pinned owner: %v)\n", repoKey, count, anchorIsOwner)
+	e.postItemComment(anchor, msg, true)
+}
+
+// resetMergeTrainCloneSkip clears the consecutive-skip counter for repoKey once
+// ensureRepoReady succeeds for the merge-train anchor, so a stale streak from a
+// previously-wedged repo doesn't count toward a future skip's escalation threshold.
+func (e *Engine) resetMergeTrainCloneSkip(repoKey string) {
+	e.mergeTrainCloneSkipMu.Lock()
+	delete(e.mergeTrainCloneSkipCounts, repoKey)
+	e.mergeTrainCloneSkipMu.Unlock()
 }
 
 // runMergeTrainWorker is the main body of the merge-train goroutine (ADR-059 D3/D4).
