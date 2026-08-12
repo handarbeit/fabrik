@@ -356,20 +356,21 @@ func TestRestartRecovery_KillDuringSpawnSequence(t *testing.T) {
 	}
 }
 
-// countChildIssuesTitled counts open items in env's own repo whose title
-// equals title — the sim-side way to observe "how many issues did
-// spawnChildren's CreateIssue call actually create", since simgh assigns
-// issue numbers sequentially with no other way to enumerate "children of
-// this spawn" short of re-deriving it from the mutation log.
+// countChildIssuesTitled counts successful CreateIssue calls in env's
+// mutation log whose title (Args.Values[0]) equals title — the sim-side way
+// to observe "how many issues did spawnChildren's CreateIssue call actually
+// create". Deliberately NOT board-membership-based (e.g. FetchProjectBoard):
+// several of this file's own scenarios fault the very step that would add
+// the child to the board (AddProjectV2ItemById) or link it
+// (AddBlockedByIssue), producing a genuinely board-orphaned child that a
+// board scan would silently miss — undercounting exactly the leaked issue
+// these scenarios exist to detect. The mutation log records the call
+// regardless of what happened to the child afterward.
 func countChildIssuesTitled(t *testing.T, env *Env, title string) int {
 	t.Helper()
-	board, err := env.Sim.FetchProjectBoard(env.Owner, env.Repo, env.ProjectNum, "User")
-	if err != nil {
-		t.Fatalf("FetchProjectBoard: %v", err)
-	}
 	n := 0
-	for _, it := range board.Items {
-		if it.Title == title {
+	for _, e := range env.Sim.Log().ByMethod("CreateIssue") {
+		if e.Err == nil && len(e.Args.Values) > 0 && e.Args.Values[0] == title {
 			n++
 		}
 	}
