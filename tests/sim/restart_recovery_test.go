@@ -210,8 +210,7 @@ func TestRestartRecovery_KillBetweenLabelPair(t *testing.T) {
 // scenario pins that as-found: the PR is confirmed to remain in draft state
 // after restart, matching R4's own "if a step is found genuinely
 // unrecoverable, pin the behavior as-found with a comment naming the
-// follow-up" allowance. Filed as follow-up: see the PR description for the
-// tracking issue.
+// follow-up" allowance. Filed as follow-up: #1582.
 func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages()})
@@ -272,12 +271,11 @@ func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 	// genuinely stuck at Validate after this restart — not a slow
 	// convergence, a structurally unrecoverable one — which is exactly the
 	// class of defect R4 asks to be pinned with a comment and a linked
-	// follow-up rather than fixed here (see the PR description for the
-	// tracking issue).
+	// follow-up rather than fixed here — filed as #1582.
 	if !finalPR.Draft {
-		t.Log("NOTE: final PR unexpectedly not draft — the as-found gap this scenario pins (no settle scan retries a failed MarkPRReady) may have been fixed; if so, this scenario's own doc comment and the tracking follow-up issue should be updated/closed.")
+		t.Log("NOTE: final PR unexpectedly not draft — the as-found gap this scenario pins (no settle scan retries a failed MarkPRReady) may have been fixed; if so, update/close #1582.")
 	} else {
-		t.Logf("as-found confirmed: PR #%d remains draft after restart+recovery polls with no mechanism ever retrying the lost MarkPRReady call, permanently blocking the direct-merge fallback (pinned, see PR description for the tracking issue)", firstPRNumber)
+		t.Logf("as-found confirmed: PR #%d remains draft after restart+recovery polls with no mechanism ever retrying the lost MarkPRReady call, permanently blocking the direct-merge fallback (pinned, see #1582)", firstPRNumber)
 	}
 	if item := projectItem(t, restarted, num); item.IsClosed {
 		t.Error("issue unexpectedly closed — the stuck-draft-PR gap this scenario pins appears to have been resolved; update this scenario's doc comment and the tracking follow-up accordingly")
@@ -301,9 +299,9 @@ func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 // SECOND child issue, per spawnChildren's own doc comment ("v1 does not
 // skip already-created children on retry"). This is exactly the kind of
 // as-found defect R4 asks to be pinned with a comment and a linked
-// follow-up rather than fixed here — see the PR description for the
-// tracking issue. Shared vehicle with partial_mutation_test.go's own
-// coverage of this same sequence (see that file's enumeration).
+// follow-up rather than fixed here — filed as #1583. Shared vehicle with
+// partial_mutation_test.go's own coverage of this same sequence (see that
+// file's enumeration).
 func TestRestartRecovery_KillDuringSpawnSequence(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: crossRepoSpawnStages()})
@@ -350,9 +348,9 @@ func TestRestartRecovery_KillDuringSpawnSequence(t *testing.T) {
 	// a second one with the same title.
 	childrenAfter := countChildIssuesTitled(t, restarted, "sim restart spawn child")
 	if childrenAfter == 1 {
-		t.Log("NOTE: exactly 1 child issue exists after the retried spawn — the as-found duplicate-child gap this scenario pins may have been fixed; if so, update/close the tracking follow-up issue this scenario names in the PR description.")
+		t.Log("NOTE: exactly 1 child issue exists after the retried spawn — the as-found duplicate-child gap this scenario pins may have been fixed; if so, update/close #1583.")
 	} else {
-		t.Logf("as-found confirmed: %d child issues exist after the retried spawn (expected exactly 1 in a fully-recovered world) — spawnChildren's retry has no memory of a prior partial attempt (pinned, see PR description for the tracking issue)", childrenAfter)
+		t.Logf("as-found confirmed: %d child issues exist after the retried spawn (expected exactly 1 in a fully-recovered world) — spawnChildren's retry has no memory of a prior partial attempt (pinned, see #1583)", childrenAfter)
 	}
 }
 

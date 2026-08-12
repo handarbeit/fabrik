@@ -416,6 +416,26 @@ their sum: this port's own `go test -race -count=1 ./tests/sim/...` measured
 **~92s total**, i.e. still bounded by `simgh`'s pre-existing runtime, not by
 this port's additions.
 
+**Updated for #1451's recovery-machinery scenarios** (~30 new test
+functions across 8 new files — R1's 7 settle-scan escalation pairs, R2's
+rebase cycle limit, R3's 4 restart kill points plus `RestartEnv`'s own
+round-trip test, R4's partial-mutation scenario, R5's 2 Claude-limit
+scenarios, R6's concurrency scenario): `go test -race -count=1
+./tests/sim/` (this package alone) now measures at **~36s**, essentially
+unchanged from the ~36–40s baseline directly above despite the added
+scenario count — the direct-seed + fault-injection technique used for 6 of
+R1's 7 settle scans (seed the marker label plus minimal item state, fault
+one call) avoids a full pipeline dispatch for most of the new coverage, and
+R6's concurrency scenario deliberately uses a single-dispatch pipeline
+rather than a PR-creating one (see `concurrency_test.go`'s own doc comment
+for why — two earlier drafts using pipeline depth for realism each measured
+100+ real wall-clock seconds on their own before this was found).
+`go test -race -count=1 ./tests/sim/...` (this package + `simgh` +
+`simclaude` + `simgh/ghfault`, run concurrently) measured **~84s total**,
+still bounded by `simgh`'s own ~84s runtime rather than by this issue's
+additions — comfortably under the ~90s line, so the "no `sim` build tag"
+decision above still holds.
+
 ## Settle-scan inventory and recovery-machinery coverage (#1451)
 
 #1451 added the sim layer's first coverage of the engine's recovery
