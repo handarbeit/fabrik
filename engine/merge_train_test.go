@@ -981,6 +981,262 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}
 }
 
+// TestRecordMergeTrainCloneSkip_EscalatesAfterMaxRetries is the deterministic regression
+// test for #1543's follow-up: prepareTrainWorker's batch[0] repo anchor can be a
+// different item on every poll, so ADR-1543's identity-gated retry boundary can wedge
+// silently forever once it can never match. This proves recordMergeTrainCloneSkip
+// escalates (posts a comment on the current anchor) once the skip streak reaches
+// e.cfg.MaxRetries, and stays silent below it — sequential, non-racing calls, mirroring
+// TestEjectMember_PausesAfterMaxEjections's shape for the sibling counter.
+//
+// It also asserts the anchor is NOT paused: an earlier revision called pauseIssue on
+// the (arbitrary, rotating) anchor, which permanently exiled a healthy Queued member
+// from dispatch eligibility every time the streak fired against a new anchor — review
+// feedback on this PR. The fix is comment-only; the anchor's dispatch eligibility must
+// be unaffected.
+func TestRecordMergeTrainCloneSkip_EscalatesAfterMaxRetries(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 3
+
+	anchor := makeTrainItem(42, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	// First two skips: below threshold, no pause/comment.
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	client.mu.Lock()
+	commentsBefore := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if commentsBefore != 0 {
+		t.Fatalf("expected no comment before threshold, got %d", commentsBefore)
+	}
+
+	// Third skip reaches MaxRetries: escalate.
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	var pausedAdded, awaitingAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber != 42 {
+			continue
+		}
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+		if c.labelName == "fabrik:awaiting-input" {
+			awaitingAdded = true
+		}
+	}
+	client.mu.Unlock()
+	if comments != 1 {
+		t.Fatalf("expected exactly 1 comment on escalation, got %d", comments)
+	}
+	if pausedAdded {
+		t.Error("expected the anchor NOT to receive fabrik:paused after escalation (would exile a healthy, rotating item)")
+	}
+	if awaitingAdded {
+		t.Error("expected the anchor NOT to receive fabrik:awaiting-input after escalation")
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner verifies the escalation comment
+// identifies the specific issue whose failed clone attempt pinned cloneInFlight's
+// ownerKey — the operator needs to know which issue's fabrik:paused to clear, since the
+// escalation comment lands on the anchor item, which is never itself paused (see
+// #1543's follow-up discussion).
+func TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 1
+
+	anchor := makeTrainItem(50, "Anchor Issue")
+	repoKey := "owner/repo"
+	eng.cloneInFlight.Store(repoKey, &cloneCall{done: make(chan struct{}), ownerKey: "owner/repo#99"})
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "owner/repo#99") {
+		t.Errorf("expected comment to name the pinned owner owner/repo#99, got: %s", body)
+	}
+	if !strings.Contains(body, "#50") {
+		t.Errorf("expected comment to reference the anchor issue #50, got: %s", body)
+	}
+	if !strings.Contains(body, "has NOT been paused") {
+		t.Errorf("anchor != owner: expected the 'has NOT been paused' bystander framing, got: %s", body)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner verifies the escalation
+// message does not misdirect an operator when the anchor itself is the pinned owner —
+// reachable on the very first ErrSkipItem for a repo (trivially with MaxRetries: 1, and
+// also at the default MaxRetries with a recurring same anchor). An earlier revision
+// unconditionally claimed "its own clone was never attempted" and "has NOT been
+// paused," both false in this case since ensureRepoReady already paused this exact
+// item with its own "cannot clone repo" comment (review feedback on this PR).
+func TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 1
+
+	anchor := makeTrainItem(50, "Anchor Issue")
+	repoKey := "owner/repo"
+	// The anchor's own issueKey ("owner/repo#50") is the pinned owner.
+	eng.cloneInFlight.Store(repoKey, &cloneCall{done: make(chan struct{}), ownerKey: "owner/repo#50"})
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "own clone was never attempted") {
+		t.Errorf("anchor IS the owner: message must not claim its own clone was never attempted, got: %s", body)
+	}
+	if strings.Contains(body, "has NOT been paused") {
+		t.Errorf("anchor IS the owner: message must not claim it has NOT been paused (it already has fabrik:paused from its own failure), got: %s", body)
+	}
+	if !strings.Contains(body, "#50") {
+		t.Errorf("expected comment to reference the anchor/owner issue #50, got: %s", body)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge verifies escalation
+// fires exactly once per streak, not on a repeating MaxRetries-poll cadence. An earlier
+// revision reset the counter to zero immediately after escalating, which (since the
+// anchor is deliberately never paused — no label exists to gate a repeat) turned one
+// escalation into a comment fired every MaxRetries skips for as long as the wedge
+// persisted, sprayed across whichever item happened to be anchor each time (review
+// feedback on this PR). A persistent wedge is simulated by many consecutive skips with
+// no intervening resetMergeTrainCloneSkip (success) call — the only way a real wedge
+// ends short of an engine restart.
+func TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(7, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	// Simulate a persistent wedge: 10 consecutive skips, well past MaxRetries, with no
+	// success in between.
+	for i := 0; i < 10; i++ {
+		eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	}
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 1 {
+		t.Errorf("expected exactly 1 escalation comment across the entire persistent wedge, got %d", comments)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain verifies that a
+// genuinely new wedge episode — one that starts only after resetMergeTrainCloneSkip has
+// cleared the counter on an intervening ensureRepoReady success — gets its own,
+// independent escalation. This is the fresh-budget-per-episode behavior
+// recordMergeTrainCloneSkip's doc comment promises, now delivered by
+// resetMergeTrainCloneSkip's delete rather than a reset-after-escalate inside this
+// function (review feedback on this PR).
+func TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(7, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates (comment 1)
+
+	eng.resetMergeTrainCloneSkip(repoKey) // operator fixed it; ensureRepoReady succeeded
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // new episode, count=1
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates again (comment 2)
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 2 {
+		t.Errorf("expected exactly 2 escalation comments (one per episode), got %d", comments)
+	}
+}
+
+// TestResetMergeTrainCloneSkip_ClearsStreakOnSuccess verifies that a successful
+// ensureRepoReady call (resetMergeTrainCloneSkip) clears an in-progress streak, so a
+// later unrelated skip doesn't inherit credit toward escalation from before the repo
+// last became ready — matching resetEjectionCount's post-landing-clear precedent.
+func TestResetMergeTrainCloneSkip_ClearsStreakOnSuccess(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(9, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1
+	eng.resetMergeTrainCloneSkip(repoKey)          // clears the streak
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1 again, not 2
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 0 {
+		t.Errorf("expected no escalation (streak was reset), got %d comment(s)", comments)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_CounterIsPerRepo verifies the skip streak is tracked
+// independently per repo, mirroring TestEjectMember_EjectionCountIsPerMember's
+// per-member independence for the sibling counter.
+func TestRecordMergeTrainCloneSkip_CounterIsPerRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 3
+
+	anchorA := makeTrainItem(1, "Repo A Anchor")
+	anchorB := makeTrainItem(2, "Repo B Anchor")
+
+	eng.recordMergeTrainCloneSkip("owner/repoA", anchorA)
+	eng.recordMergeTrainCloneSkip("owner/repoA", anchorA)
+	eng.recordMergeTrainCloneSkip("owner/repoA", anchorA) // escalates for repoA
+	eng.recordMergeTrainCloneSkip("owner/repoB", anchorB) // should NOT escalate for repoB
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	commentedIssues := make(map[int]bool)
+	for _, c := range client.addCommentCalls {
+		commentedIssues[c.issueNumber] = true
+	}
+	if !commentedIssues[1] {
+		t.Error("expected anchor #1 (repoA) to receive the escalation comment after 3 skips")
+	}
+	if commentedIssues[2] {
+		t.Error("expected anchor #2 (repoB) NOT to receive the escalation comment after only 1 skip")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("expected no fabrik:paused label anywhere (escalation is comment-only), got it on #%d", c.issueNumber)
+		}
+	}
+}
+
 // TestFireRunawayGuard_PauseVisibleToCacheAndEcho verifies the same cache/echo
 // write-through for the runaway-guard pause path.
 func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
