@@ -154,6 +154,16 @@ type Reconciler struct {
 	mu      sync.Mutex
 	clients map[string]*gh.Client
 	auths   []*Auth
+
+	// mintErrors records, per lower-cased owner, why that owner has no
+	// entry in clients despite having an installation — i.e. mintAuth
+	// failed during Reconcile (see the discovery loop below). Distinct
+	// from an owner simply having no installation at all: ClientForRepo
+	// consults this to avoid misattributing a transient mint failure as
+	// "not installed" (which would send an operator down a pointless
+	// re-install detour for a problem a Reconcile retry would likely
+	// resolve on its own).
+	mintErrors map[string]error
 }
 
 // BotLogin returns the App's own identity as it appears as a PR/review
@@ -170,6 +180,16 @@ func (r *Reconciler) ClientForRepo(ctx context.Context, owner, repo string) (*gh
 	defer r.mu.Unlock()
 	client, ok := r.clients[strings.ToLower(owner)]
 	if !ok {
+		// An installation existed for owner but minting a token from it
+		// failed during Reconcile (transient network/API error, not a
+		// missing installation) — say so, rather than the generic
+		// "no installation" message below, which would send an operator
+		// toward re-installing the App when the actual fix is retrying
+		// Reconcile (e.g. restarting Pruefer, or waiting for the next
+		// reconciliation trigger).
+		if mintErr, ok := r.mintErrors[strings.ToLower(owner)]; ok {
+			return nil, fmt.Errorf("owner %q has an App installation, but minting a token for it failed during the last reconciliation: %w — this is not a missing-installation problem; retry Reconcile (e.g. restart Pruefer)", owner, mintErr)
+		}
 		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — if it's already in watched_repos, install the App on %q (Reconcile logs the install URL at startup); otherwise add it to watched_repos and restart to trigger reconciliation", owner, owner)
 	}
 	return client, nil
@@ -405,7 +425,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	botLogin := slug + "[bot]"
 	logf("✓ authenticated as %s", botLogin)
 
-	r := &Reconciler{botLogin: botLogin, clients: map[string]*gh.Client{}}
+	r := &Reconciler{botLogin: botLogin, clients: map[string]*gh.Client{}, mintErrors: map[string]error{}}
 
 	// A single pass both validates and enumerates — see
 	// distinctOwnersLogging's own doc comment for why this replaced two
@@ -537,6 +557,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		a, err := mintAuth(appID, inst.ID, botLogin, privateKey, opts.BaseURL)
 		if err != nil {
 			logf("! minting token for owner %q (installation %d) failed: %v", owner, inst.ID, err)
+			r.mintErrors[strings.ToLower(owner)] = err
 			continue
 		}
 

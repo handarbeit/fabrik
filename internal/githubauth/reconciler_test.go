@@ -416,6 +416,63 @@ func TestReconcile_CaseVariantOwnersDedupeToOneInstallation(t *testing.T) {
 	}
 }
 
+// TestReconcile_MintFailure_ClientForRepoDistinguishesFromMissingInstallation
+// is the regression test for a review finding: an owner whose installation
+// exists but whose token mint failed during Reconcile (a transient
+// network/API error) was indistinguishable, from ClientForRepo's caller's
+// perspective, from an owner with no installation at all — both produced
+// the same "no authorized GitHub App installation" message, which points an
+// operator toward re-installing the App when the actual fix is simply
+// retrying Reconcile.
+func TestReconcile_MintFailure_ClientForRepoDistinguishesFromMissingInstallation(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "flaky"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failMint = func(instID int64) bool { return instID == 222 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik", "flaky/otherrepo"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail when one owner's mint fails, got: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "handarbeit", "fabrik"); err != nil {
+		t.Errorf("expected handarbeit to remain authorized: %v", err)
+	}
+	_, err = r.ClientForRepo(context.Background(), "flaky", "otherrepo")
+	if err == nil {
+		t.Fatal("expected flaky to have no client after a mint failure")
+	}
+	if strings.Contains(err.Error(), "no authorized GitHub App installation") {
+		t.Errorf("expected the mint-failure-specific message, got the generic missing-installation message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "simulated mint failure") {
+		t.Errorf("expected the underlying mint error to be surfaced, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not a missing-installation problem") {
+		t.Errorf("expected the message to clarify this isn't a missing-installation problem, got: %v", err)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "minting token for owner") && strings.Contains(l, "flaky") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a log line about the failed mint for flaky, got: %v", lines())
+	}
+}
+
 func TestReconcile_MissingOwnerInstallation_NoBrowserSkipsOpen(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)

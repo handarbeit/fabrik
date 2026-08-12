@@ -84,19 +84,32 @@ func (a *Auth) RunRefreshLoop(ctx context.Context, logf func(format string, args
 		if wait < 0 {
 			wait = 0
 		}
+		// time.NewTimer + defer Stop(), not time.After: this select's
+		// ctx.Done() branch fires on every ordinary shutdown, and
+		// time.After's timer isn't released until it independently fires
+		// on its own — an un-Stop()'d timer here sits in the runtime's
+		// timer heap for up to wait/tokenRefreshRetryDelay after
+		// cancellation, one per Auth. Bounded and harmless in practice
+		// (the process is exiting anyway), but inconsistent with the
+		// Stop()'d-timer convention this same package already uses
+		// elsewhere (see identityValidationSleep in reconciler.go).
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 		if err := a.refresh(); err != nil {
 			if logf != nil {
 				logf("auth: installation token refresh failed, retrying in %s: %v", tokenRefreshRetryDelay, err)
 			}
+			retryTimer := time.NewTimer(tokenRefreshRetryDelay)
 			select {
 			case <-ctx.Done():
+				retryTimer.Stop()
 				return
-			case <-time.After(tokenRefreshRetryDelay):
+			case <-retryTimer.C:
 			}
 			continue
 		}

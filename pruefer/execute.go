@@ -54,7 +54,18 @@ func Execute() error {
 	// entirely) had this call been left at its old, later position.
 	// wireLogf is idempotent — NewDaemon's own internal call becomes a
 	// no-op once Logf is already set here, so the file isn't opened twice.
+	//
+	// Deferred immediately, rather than bundled into the later
+	// waitRefreshLoops/closeLog defer below: githubauth.Reconcile (called
+	// further down) can fail before that later defer is ever registered,
+	// and closeLog must still run on that path — otherwise the open log
+	// file handle leaks and the package-level Logf hook stays wired for
+	// the rest of the process (masked today only by main.go's immediate
+	// os.Exit(1) on any Execute error, which skips no-longer-relevant
+	// deferred cleanup anyway — but a future caller of Execute that
+	// doesn't immediately exit, e.g. a test, would observe the leak).
 	closeLog := wireLogf(cfg, useTUI(cfg))
+	defer closeLog()
 
 	// Wire the github package's diagnostic logger so pagination-cap warnings
 	// (e.g. FetchAppInstallations/FetchInstallationRepositories hitting the
@@ -136,6 +147,9 @@ func Execute() error {
 	// nothing else guarantees they've stopped calling logf — and therefore
 	// stopped touching the package-level Logf hook closeLog tears down —
 	// before this deferred close runs. See RunRefreshLoops' doc comment.
+	// Deferring it here, after closeLog's own defer above, is what gets
+	// that ordering for free: defers run LIFO, so this one (registered
+	// later) fires first on return, before closeLog's.
 	//
 	// waitRefreshLoops() cannot hang here only because both return paths
 	// below (Daemon.Run and runTUI) are structurally guaranteed to return
@@ -148,10 +162,7 @@ func Execute() error {
 	// silently turn this into a shutdown hang. If that invariant ever needs
 	// to change, wire an explicit deadline into waitRefreshLoops() (or the
 	// underlying ctx) instead of assuming it away.
-	defer func() {
-		waitRefreshLoops()
-		closeLog()
-	}()
+	defer waitRefreshLoops()
 	daemon.preAcquiredLock = lockFile
 
 	if cfg.EventSource == EventSourceHookdeck {
