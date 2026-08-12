@@ -24,12 +24,25 @@ The engine has written context files to `.fabrik-context/` in your working direc
 Read these files before starting validation. The spec in `.fabrik-context/issue.md` is your ground truth for requirements verification.
 
 1. `git status` — commit any uncommitted changes
-2. Rebase onto latest main:
+2. Check whether the branch is actually behind main before rebasing — rebasing when it isn't is pure churn (it replays every commit and changes only their SHAs, giving you nothing to push):
    ```bash
    git fetch origin main
+   behind_count=$(git rev-list --count HEAD..origin/main)
+   ```
+   If `$behind_count` is `0`, **skip the rebase** — the branch is already up to date. Otherwise:
+   ```bash
    git rebase origin/main
    ```
-3. Resolve any merge conflicts (main may have moved since Review)
+3. **If the rebase ran, push it immediately once clean:**
+   ```bash
+   git push --force-with-lease
+   ```
+   A rebase rewrites every replayed commit's SHA, so the result will never match `origin/<branch>` byte-for-byte — that mismatch is expected, not a fault. `--force-with-lease` is safe here: `fabrik/issue-<N>` is a branch Fabrik owns exclusively for this issue, so there's no other legitimate writer to race against.
+
+   **Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** After a successful rebase, your local branch is correctly *ahead* of the remote — that's the goal, not a problem. Resetting back to `origin` discards the rebase you just did, with no way to recover it. If you find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
+
+   If you narrate this outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 2 commits" or "skipped — already up to date") — never assert the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
+4. Resolve any merge conflicts (main may have moved since Review)
 
 ### Merge conflict resolution — CRITICAL
 
