@@ -416,6 +416,116 @@ their sum: this port's own `go test -race -count=1 ./tests/sim/...` measured
 **~92s total**, i.e. still bounded by `simgh`'s pre-existing runtime, not by
 this port's additions.
 
+## Settle-scan inventory and recovery-machinery coverage (#1451)
+
+#1451 added the sim layer's first coverage of the engine's recovery
+machinery: settle-scan retry-and-escalation, cycle-limit termination, engine
+restart across a real process-state boundary, partial-mutation-sequence
+recovery, and the account-wide Claude-limit path — the class of behavior the
+live e2e bed structurally cannot provoke on demand (a repeatedly-failing
+GitHub call, an engine kill at a specific instant, a real usage-limit hit).
+
+### R1 — settle-scan inventory
+
+The in-scope set is defined by property, not enumeration (see the issue's
+own R1 text): every per-poll settle scan that owns a `fabrik:awaiting-*`
+label and escalates to `fabrik:paused` after `MaxRetries` sustained
+failures of the underlying GitHub call. Seven scans match on the `main`
+this issue was built against — if an eighth is ever added without a row
+here, that is the gap this table exists to make visible instead of leaving
+it latent in prose.
+
+| scan function | label | ADR | covering scenario |
+|---|---|---|---|
+| `settleNoWorkNeeded` (`engine/no_work_needed_settle.go`) | `fabrik:awaiting-done` | ADR-060 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingDone`; ordering guarantee: `no_work_needed_test.go`: `TestNoWorkNeeded_AwaitingDoneIsFirstMutation` |
+| `settleAwaitingCIScan` (`engine/ci_settle.go`) | `fabrik:awaiting-ci` | ADR-1270 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingCI` |
+| `settleMergeTrainMemberCloses` (`engine/merge_train_member_close_settle.go`) | `fabrik:awaiting-member-close` | ADR-061 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingMemberClose` |
+| `settleNonDefaultBaseCloses` (`engine/close_nondefault_base_settle.go`) | `fabrik:awaiting-close` | ADR-1097 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingClose` |
+| `settleChildPlacement` (`engine/spawn_settle.go`) | `fabrik:awaiting-placement` | ADR-062 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingPlacement` |
+| `settleAwaitingAdvanceScan` (`engine/advance_settle.go`) | `fabrik:awaiting-advance` | ADR-1422 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingAdvance` |
+| `settleRunawayGuardAlertScan` (`engine/runaway_alert_settle.go`) | `fabrik:awaiting-runaway-alert` | ADR-1533 | `settle_scan_escalation_test.go`: `TestSettleScan_AwaitingRunawayAlert` |
+
+Explicitly out of R1's scope, and why (mirrors the issue's own Scope
+section):
+
+- `settleQueuedReviewFindings` (ADR-1208) — merge-train-specific, belongs to
+  sibling issue #1452.
+- `settleClaudeLimitLabelSweep` / `settleClaudeLimitClearRequests` — no
+  `MaxRetries` counter, no escalation arc; covered under R5 instead (below).
+- `fabrik:awaiting-review` / `fabrik:awaiting-input` — not settle-scan-owned
+  in the R1 sense; the review gate and the blocked-on-input pause own them
+  respectively.
+
+Six of the seven scans are covered via direct-seed + fault injection (seed
+the marker label plus minimal item state, fault the one call the scan
+retries) — no full pipeline dispatch needed. `settleAwaitingCIScan` is the
+exception: it runs the full `catchUpPhase1Handlers` chain, so its coverage
+uses a real `wait_for_ci` stage and a genuine linked PR instead.
+
+### R2 — cycle limits
+
+| cycle limit | pause function | covering scenario |
+|---|---|---|
+| Review | `pauseForReviewCycleLimit` | `review_authority_test.go`: `TestReviewAuthorityCycleLimitPauses` (pre-dates #1451; satisfies R2/AC3 for this gate) |
+| Rebase | `pauseForRebaseCycleLimit` | `cycle_limit_test.go`: `TestRebaseCycleLimit` |
+| CI-fix | `pauseForCIFixCycleLimit` | `ci_fix_reinvoke_test.go`: `TestCIFixReinvokeCycleLimit` (pre-dates #1451) |
+
+All three share one dispatch/pause primitive, `dispatchWithCycleLimit`
+(`engine/catch_up_handlers.go`) — identical off-by-one boundary semantics
+(`cycleCount >= maxCycles` checked before incrementing, so exactly
+`maxCycles` reinvokes dispatch and the pause fires on what would be
+reinvoke `maxCycles+1`) — so a scenario proving the exact count for one is a
+faithful template for the others.
+
+### R3 — restart recovery
+
+`RestartEnv` (`restart.go`, see `adrs/1451-sim-bed-restart-harness.md`)
+discards a scenario's `*engine.Engine` and rebuilds one against a
+`simgh.Instrumented.Snapshot`/`RestoreInstrumented` round-trip, reusing the
+original `Env`'s `WorktreeManager`/`Clock`/`Claude` invoker — a genuine
+process-state boundary, not just another poll of the same process.
+`TestRestartEnv_RoundTrip` (`restart_roundtrip_test.go`) is its own
+foundation test, proving the harness itself before anything is built on
+top of it.
+
+Four kill points (`restart_recovery_test.go`): before any completion-label
+write; between the two halves of `addCompleteLabelAndRemoveCI`'s label
+pair; after a draft PR is created but before `MarkPRReady` lands; and
+mid-`spawnChildren` (`AddBlockedByIssue`, shared with R4 below).
+
+### R4 — partial-mutation sequences
+
+See `partial_mutation_test.go`'s own doc comment for the full sequence
+table (which steps are recoverable vs. genuinely unrecoverable-as-found).
+Two defects were found and pinned rather than fixed, per the issue's
+explicit scope — filed as follow-up issues, linked from both the covering
+scenario's doc comment and the PR description that introduced this table.
+
+### R5 — Claude-limit path
+
+`claude_limit_sweep_test.go`: `TestClaudeLimitLabelSweep` (the account-wide
+sweep, isolated from a per-issue redispatch via a bystander issue that
+never itself dispatches again) and
+`TestClaudeLimitExit_NeverAccumulatesTowardMaxRetries` (2 consecutive
+usage-limit hits with `MaxRetries=1` never escalate). Both use
+`fabrik:clear-claude-limit` rather than real time, since
+`activateClaudeSuspension`/`claudeSuspendedUntilTime` are anchored to real
+`time.Now()`, not this harness's injected `Clock` — see
+`claude_limit_sweep_test.go`'s own doc comment. `fabrik:clear-claude-limit`
+lifting a suspension end-to-end was already covered pre-#1451 by
+`failure_shapes_test.go`'s `TestFailureShape_UsageLimitExit`.
+
+### R6 — concurrency under `-race`
+
+`concurrency_test.go`: `TestConcurrency_MultiIssueConvergence` — 6 issues,
+`MaxConcurrent` equal to the issue count, driven by one shared
+`AdvanceUntil` so all six are genuinely interleaved. Deliberately a
+single-dispatch pipeline (`failureShapeStages()`), not a PR-creating one —
+see that file's own doc comment for two earlier drafts (a 7-stage and a
+3-stage pipeline) that each measured 100+ real wall-clock seconds before
+landing on the shallow pipeline that actually isolates R6's target
+(dispatch/lock/worktree contention), independent of pipeline depth.
+
 ## Running it
 
 ```bash
