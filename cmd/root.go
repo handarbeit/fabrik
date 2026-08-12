@@ -231,6 +231,14 @@ func Execute() error {
 	// Warn (non-fatal) if config.yaml is gitignored
 	config.WarnIfConfigIgnored()
 
+	// Warn (non-fatal) about any top-level config.yaml key with no matching
+	// ProjectConfig field — most commonly a knob that is actually CLI/env-only.
+	if unrecognized, err := config.UnrecognizedTopLevelKeys(); err != nil {
+		fmt.Fprintf(os.Stderr, "[startup] warning: checking .fabrik/config.yaml for unrecognized keys: %v\n", err)
+	} else {
+		warnUnrecognizedConfigKeys(unrecognized, os.Stderr)
+	}
+
 	// Token: flag > FABRIK_TOKEN > GITHUB_TOKEN
 	if cfg.Token == "" {
 		cfg.Token = config.Token()
