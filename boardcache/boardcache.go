@@ -170,6 +170,24 @@ const recentMissTTL = 10 * time.Minute
 // preserves the within-poll caching benefit (multiple callers for the same
 // item in one pass still share a single fetch) while ensuring staleness
 // cannot compound across polls the way it did in the incident.
+//
+// This TTL's meaning depends on linkedPRFetchedAt recording LIVE CONFIRMATION
+// ONLY (see that field's doc comment): "within linkedPRCacheTTL" means "within
+// linkedPRCacheTTL of the last live GitHub fetch," not "within linkedPRCacheTTL
+// of the record's last mutation of any kind." Webhook deltas (opened, closed,
+// synchronize, reopened, and the review/review-comment/check-run auto-heal
+// paths in delta.go) update the Store's HeadSHA correctly and immediately, but
+// deliberately do not stamp linkedPRFetchedAt — so a webhook-refreshed record
+// is still judged stale by this TTL and gets refetched. That is the intended
+// behavior, not a bug: if a delta stamp were added instead, this TTL would
+// bound time since last refresh-by-any-means, including a webhook delivery
+// that may silently have been dropped. The failure mode that reintroduces is
+// exactly what motivated this TTL in the first place: a stale HeadSHA
+// redirects every downstream check-run query at an abandoned pre-rebase
+// commit indefinitely, with the resulting stall producing no log output (see
+// settlePRMergeState's unlogged CheckRunsPending branch above). See ADR-1551
+// for the full rationale and the rejected alternative of stamping this field
+// from a delta path.
 const linkedPRCacheTTL = 45 * time.Second
 
 // parseItemKey parses "owner/repo#N" into (repo, number, true).
@@ -256,7 +274,21 @@ type CacheImpl struct {
 	// linkedPRFetchedAt records, per item key ("owner/repo#N"), the wall-clock
 	// time of the last successful live FetchLinkedPR fallback fetch. FetchLinkedPR
 	// consults this to bound how long a fully-populated Store record is trusted
-	// before being treated as a miss (see linkedPRCacheTTL, #1303).
+	// before being treated as a miss (see linkedPRCacheTTL for the failure mode
+	// this guards against).
+	//
+	// This field records LIVE CONFIRMATION ONLY, by design. It has exactly one
+	// writer in this file (the assignment immediately below the fallback fetch
+	// in FetchLinkedPR) and must never gain a second one. In particular, no
+	// webhook/delta handler in delta.go may stamp it — not even the ones that
+	// mutate the very PR head state (HeadSHA) this field's TTL exists to bound.
+	// A delta-path stamp would make freshness a function of webhook delivery,
+	// which this cache's own event-sourced design (ADR-034) admits is
+	// unconfirmed until the next reconciliation (up to 60 min). That is
+	// precisely the channel this field exists not to trust. See ADR-1551 for
+	// the full rationale, the rejected alternative (stamping on delta), and why
+	// this field is deliberately not a Store-migration candidate of the kind
+	// ADR-036's Phase 5 F2/F4 addenda record for its siblings.
 	linkedPRFetchedAt map[string]time.Time
 
 	// localDeltaAt records the last time a webhook bumped an item.
@@ -906,6 +938,8 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 			SHA:         pr.HeadSHA,
 		})
 	}
+	// This is linkedPRFetchedAt's single writer, by design — see its doc
+	// comment for why no delta path may join it here.
 	c.mu.Lock()
 	c.linkedPRFetchedAt[key] = time.Now()
 	c.mu.Unlock()
