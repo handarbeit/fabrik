@@ -255,14 +255,14 @@ repo, the streak length, and — read from the live `cloneInFlight` entry — th
 specific issue whose failed attempt still owns the retry gate, so an operator
 knows exactly which issue's `fabrik:paused` to clear. It does **not** add
 `fabrik:paused` (or any other label) to the anchor — see "Correction: the
-anchor must not be paused" below for why. The streak resets to zero both on
-escalation (so a fresh budget applies to any future streak) and whenever
-`ensureRepoReady` succeeds for that repo (`resetMergeTrainCloneSkip`) —
-mirroring `mergeTrainEjectionCounts`/`ejectMember`'s existing
-counter-then-escalate-then-reset shape in the same file, and the
-escalate-after-`MaxRetries` convention used throughout the ADR-1270 settle
-scans elsewhere in the engine package. `MaxRetries <= 0` (unlimited) never
-escalates, matching every other `MaxRetries`-gated escalation path.
+anchor must not be paused" below for why. The comment fires exactly once per
+wedge episode: escalation happens the moment the streak first reaches
+`e.cfg.MaxRetries`, with no reset on escalation itself. The streak resets to
+zero only when `ensureRepoReady` succeeds for that repo
+(`resetMergeTrainCloneSkip`) — see "Correction: escalate exactly once per
+episode" below for why an in-band reset on escalation was tried and removed.
+`MaxRetries <= 0` (unlimited) never escalates, matching every other
+`MaxRetries`-gated escalation path.
 
 **Alternatives considered**:
 
