@@ -10,13 +10,30 @@ import (
 )
 
 // effectiveMaxNoOpCommentCycles returns the success-agnostic no-op comment
-// cycle limit, applying zero-means-default semantics (default 5) — mirrors
+// cycle limit, applying zero-means-default semantics (default 10) — mirrors
 // effectiveCommentBreakerWindow's pattern (#1089).
+//
+// Deliberately higher than maxReviewCycles's default (5), not equal to it,
+// even though both counters observe the same processComments funnel
+// (checkNoOpCommentCycle runs on every dispatchReviewReinvoke cycle too).
+// ReviewCycles is refunded to ~0 on every no-op review-reinvoke
+// (ReviewCycleDecremented, #1045) specifically so a chatty bot reviewer's
+// non-actionable COMMENTED overviews are tolerated indefinitely (ADR-1518).
+// NoOpCommentCycles never refunds, so if the two thresholds collided at the
+// same value, NoOpCommentCycles would always be the one that trips first,
+// silently nullifying #1045's forgive-forever guarantee at whatever count
+// the shared default happened to be. Live evidence on this repo (#1555
+// review discussion) showed a healthy, mergeable PR accumulating 4
+// consecutive no-op comment-processing cycles under entirely normal
+// duplicate-bot-delivery — one shy of tripping at the old default of 5. 10
+// keeps a hard bound on a genuinely stuck loop while staying well clear of
+// that kind of ordinary churn and away from the review-reinvoke path's own
+// 5-round no-op tolerance test.
 func (e *Engine) effectiveMaxNoOpCommentCycles() int {
 	if e.cfg.MaxNoOpCommentCycles > 0 {
 		return e.cfg.MaxNoOpCommentCycles
 	}
-	return 5
+	return 10
 }
 
 // checkNoOpCommentCycle records this comment-processing cycle's outcome

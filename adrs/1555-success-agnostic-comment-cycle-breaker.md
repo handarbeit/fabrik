@@ -100,10 +100,12 @@ cycle change *anything observable*." A junk-overview no-op that #1045 forgives f
 purposes still correctly counts here — and should, since it is still zero forward
 progress on the issue.
 
-**Threshold.** `effectiveMaxNoOpCommentCycles()` applies zero-means-default: default **5**,
+**Threshold.** `effectiveMaxNoOpCommentCycles()` applies zero-means-default: default **10**,
 configurable via `--max-no-op-comment-cycles` / `FABRIK_MAX_NO_OP_COMMENT_CYCLES` /
 `max_no_op_comment_cycles` in `config.yaml` — the same flag > env > config.yaml > default
-precedence and plumbing shape as every other `Max*Cycles` config.
+precedence and plumbing shape as every other `Max*Cycles` config. Deliberately not equal
+to `MaxReviewCycles`'s default (5) — see Consequences' "Revision (post-review-1)" note
+for why.
 
 **Reset triggers are deliberately narrower than the old breaker's five.** No
 `PRStateChanged` reset, no new `Store` observer. R2 enumerates exactly three conditions
@@ -284,22 +286,40 @@ single-ID marker would require either dropping information or posting redundant 
   outstanding review actually exists," which is inherently bursty rather than per-poll,
   but not literally zero-cost the instant a genuinely new review arrives (only
   post-restart redeliveries are the zero-marginal-cost case once backfilled).
-- **`NoOpCommentCycles` can now reach its default threshold (5) before `MaxReviewCycles`
-  does, on the exact review-reinvoke path ADR-1518/#1045 deliberately built to *tolerate*
-  many consecutive no-op rounds via `ReviewCycleDecremented`'s refund.** Both counters
-  record the same cycle, but only `NoOpCommentCycles` never forgives — a bot reviewer
-  that submits five consecutive no-finding `COMMENTED` overviews before a sixth genuine
-  finding lands now pauses on round five by default, even though `ReviewCycles` alone
-  would have tolerated an arbitrarily long run of these. This is intentional (see
-  Decision, "Increment vs. reset": a cycle #1045 forgives for gate purposes is still zero
-  forward progress from this counter's perspective, and should count), but it does narrow
+- **`NoOpCommentCycles` observes the exact review-reinvoke path ADR-1518/#1045
+  deliberately built to *tolerate* many consecutive no-op rounds via
+  `ReviewCycleDecremented`'s refund, and does not itself forgive anything.** Both counters
+  record the same cycle, but only `ReviewCycles` is ever refunded — a bot reviewer that
+  submits N consecutive no-finding `COMMENTED` overviews before a genuine finding lands
+  eventually pauses at `MaxNoOpCommentCycles`, even though `ReviewCycles` alone would have
+  tolerated an arbitrarily long run of these. This is intentional (see Decision,
+  "Increment vs. reset": a cycle #1045 forgives for gate purposes is still zero forward
+  progress from this counter's perspective, and should count), and it does narrow
   ADR-1518's "forgive forever" guarantee in practice to "forgive up to
-  `MaxNoOpCommentCycles` consecutive rounds." `TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed`
-  and `TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCycles`
-  (`engine/review_phase_test.go`) now set `MaxNoOpCommentCycles` explicitly high to keep
-  isolating the `ReviewCycles`/`ReviewBlockedCycles` mechanism they each target. An
-  operator whose review bots genuinely need more than 5 consecutive no-op rounds to
-  converge should raise `--max-no-op-comment-cycles` accordingly.
+  `MaxNoOpCommentCycles` consecutive rounds."
+
+  **Revision (post-review-1):** the value first shipped here set `MaxNoOpCommentCycles`'s
+  default equal to `MaxReviewCycles`'s default (5) — same number, same funnel, so
+  `NoOpCommentCycles` always tripped first and the "forgive forever" guarantee was false
+  under default config, not merely narrowed. This was caught by an operator hand-review
+  who reproduced it directly: removing the isolating override from
+  `TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed`
+  turned it red on round 5, even though that test's own name promises the five-round
+  tolerance survives. The two review-reinvoke tests
+  (`TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed`,
+  `TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCycles`,
+  `engine/review_phase_test.go`) had isolated this collision out with a per-test override
+  (`eng.cfg.MaxNoOpCommentCycles = 100`) rather than fixing the shared default — which hid
+  the defect from the test suite instead of resolving it. Live evidence gathered during
+  that same review (a healthy, mergeable `handarbeit/fabrik` PR accumulating 4 consecutive
+  no-op comment-processing cycles from ordinary duplicate bot delivery, one round from
+  tripping the old default of 5) confirmed 5 was too tight for normal operation regardless
+  of the test-isolation question. The default was raised to **10** — comfortably above
+  both `MaxReviewCycles`'s default and observed ordinary-operation churn — and the two
+  tests now run at default config with an explicit assertion on the relationship between
+  the two thresholds, rather than a magic-number override that made the relationship
+  invisible. An operator whose review bots genuinely need more than 10 consecutive no-op
+  rounds to converge should still raise `--max-no-op-comment-cycles` accordingly.
 
 ## Related Work
 

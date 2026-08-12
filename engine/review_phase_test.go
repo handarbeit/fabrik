@@ -322,10 +322,16 @@ func TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindi
 	// consecutive no-op reinvokes forever — that's a distinct mechanism from
 	// the success-agnostic NoOpCommentCycles breaker (#1555), which also
 	// counts these same five cycles (it hooks the same processComments
-	// funnel). Isolate the assertion to ReviewCycles/ReviewBlockedCycles
-	// alone by giving the sibling breaker enough headroom that it can't be
-	// the one that pauses.
-	eng.cfg.MaxNoOpCommentCycles = 100
+	// funnel, never refunds, and is checked before ReviewCycles/
+	// ReviewBlockedCycles at each dispatch site). Run at default config —
+	// not an inflated per-test override — and assert the relationship
+	// between the two thresholds directly, so a future default change that
+	// collapses NoOpCommentCycles's headroom below this test's 5 rounds
+	// fails loudly here rather than being silently isolated out.
+	const noOpRounds = 5
+	if limit := eng.effectiveMaxNoOpCommentCycles(); limit <= noOpRounds {
+		t.Fatalf("MaxNoOpCommentCycles default (%d) must exceed the %d no-op rounds this test exercises, or the success-agnostic breaker (#1555) — not ReviewCycles/ReviewBlockedCycles — would be the one that pauses, defeating this test's isolation", limit, noOpRounds)
+	}
 
 	// See TestHandleReviewGate_NoOpReinvoke_LeavesCycleCounterUnchanged's
 	// comment: the no-op check needs a pre-existing worktree to compare
@@ -385,6 +391,13 @@ func TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindi
 		if got := snap.ReviewCycles("Implement"); got != 0 {
 			t.Errorf("round %d: ReviewCycles(Implement) = %d; want 0 (no-op must net to unchanged)", i+1, got)
 		}
+		// The sibling breaker (#1555) shares this funnel and never refunds —
+		// it IS ticking on every round, unlike ReviewCycles above. Assert
+		// that explicitly rather than hiding it, so the relationship between
+		// the two thresholds stays visible in this test's output.
+		if got := snap.NoOpCommentCycles("Implement"); got != i+1 {
+			t.Errorf("round %d: NoOpCommentCycles(Implement) = %d; want %d (never refunded, unlike ReviewCycles)", i+1, got, i+1)
+		}
 	}
 
 	if len(seenComments) != 5 {
@@ -405,6 +418,12 @@ func TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindi
 	snap, _ := eng.store.Get("owner/repo", 31)
 	if got := snap.ReviewCycles("Implement"); got != 1 {
 		t.Errorf("ReviewCycles(Implement) = %d; want 1 (the genuine finding is a real attempt and must count)", got)
+	}
+	// The genuine finding lands a commit, so the sibling breaker resets too —
+	// confirming the two counters' relationship holds through the reset, not
+	// just through the five no-op increments above.
+	if got := snap.NoOpCommentCycles("Implement"); got != 0 {
+		t.Errorf("NoOpCommentCycles(Implement) = %d; want 0 (the genuine commit resets it, R2)", got)
 	}
 
 	client.mu.Lock()
@@ -450,9 +469,18 @@ func TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCy
 	}
 	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
 	eng.cfg.MaxReviewCycles = 3
-	// Isolate from the sibling success-agnostic breaker (#1555) — see the
-	// identical note in TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed.
-	eng.cfg.MaxNoOpCommentCycles = 100
+	// Run at default config — see the identical note in
+	// TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindingAddressed
+	// on why an inflated per-test override is the wrong way to isolate this
+	// from the sibling success-agnostic breaker (#1555). At most
+	// eng.cfg.MaxReviewCycles == 3 rounds actually reach processComments (the
+	// final round is blocked by dispatchWithCycleLimit before dispatch, so
+	// checkNoOpCommentCycle never runs for it) — the assertion below uses a
+	// small headroom margin above that, not a tight bound.
+	const maxDispatchedRounds = 3
+	if limit := eng.effectiveMaxNoOpCommentCycles(); limit <= maxDispatchedRounds {
+		t.Fatalf("MaxNoOpCommentCycles default (%d) must exceed the %d rounds this test can dispatch through processComments, or the success-agnostic breaker (#1555) — not ReviewBlockedCycles — would be the one that pauses, defeating this test's isolation", limit, maxDispatchedRounds)
+	}
 
 	// See TestHandleReviewGate_NoOpReinvoke_LeavesCycleCounterUnchanged's
 	// comment: the no-op check needs a pre-existing worktree to compare HEAD
@@ -508,6 +536,11 @@ func TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCy
 		}
 		if got := snap.ReviewBlockedCycles("Implement"); got != i+1 {
 			t.Errorf("round %d: ReviewBlockedCycles(Implement) = %d; want %d (never refunded)", i+1, got, i+1)
+		}
+		// The sibling breaker (#1555) shares this funnel too and is also
+		// ticking, tracked here for visibility rather than isolated away.
+		if got := snap.NoOpCommentCycles("Implement"); got != i+1 {
+			t.Errorf("round %d: NoOpCommentCycles(Implement) = %d; want %d (never refunded)", i+1, got, i+1)
 		}
 	}
 

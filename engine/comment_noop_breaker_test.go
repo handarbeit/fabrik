@@ -18,8 +18,8 @@ func TestEffectiveMaxNoOpCommentCycles_Default(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
-	if got := eng.effectiveMaxNoOpCommentCycles(); got != 5 {
-		t.Errorf("default MaxNoOpCommentCycles = %d, want 5", got)
+	if got := eng.effectiveMaxNoOpCommentCycles(); got != 10 {
+		t.Errorf("default MaxNoOpCommentCycles = %d, want 10", got)
 	}
 }
 

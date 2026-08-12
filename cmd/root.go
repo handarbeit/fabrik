@@ -65,7 +65,7 @@ type Config struct {
 	TrainTrialWindowMinutes   int    // 0 means use default (60)
 	MaxCommentCyclesPerWindow int    // Comment-processing circuit breaker: 0 means use default (10)
 	CommentCycleWindowMinutes int    // Comment-processing circuit breaker: 0 means use default (30)
-	MaxNoOpCommentCycles      int    // Success-agnostic comment-processing circuit breaker: 0 means use default (5)
+	MaxNoOpCommentCycles      int    // Success-agnostic comment-processing circuit breaker: 0 means use default (10)
 	ClaudeWaitDelay           int    // seconds; 0 means use default (30)
 	PostPushDwell             int    // seconds; 0 means use default (90)
 	KillGraceSigInt           string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
@@ -178,7 +178,7 @@ func Execute() error {
 	flag.IntVar(&cfg.TrainTrialWindowMinutes, "train-trial-window", 0, "Runaway guard: rolling window in minutes over which max-train-trials-per-window is measured (0 = use default of 60; also FABRIK_TRAIN_TRIAL_WINDOW)")
 	flag.IntVar(&cfg.MaxCommentCyclesPerWindow, "max-comment-cycles-per-window", 0, "Comment-processing circuit breaker: maximum non-advancing comment-processing invocations for an issue within the window before pausing it (0 = use default of 10; also FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW)")
 	flag.IntVar(&cfg.CommentCycleWindowMinutes, "comment-cycle-window", 0, "Comment-processing circuit breaker: rolling window in minutes over which max-comment-cycles-per-window is measured (0 = use default of 30; also FABRIK_COMMENT_CYCLE_WINDOW)")
-	flag.IntVar(&cfg.MaxNoOpCommentCycles, "max-no-op-comment-cycles", 0, "Success-agnostic comment-processing circuit breaker: maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress (no commit, no issue-body update, no FABRIK_STAGE_COMPLETE) before pausing, regardless of whether each invocation itself exited successfully (0 = use default of 5; also FABRIK_MAX_NO_OP_COMMENT_CYCLES; #1555)")
+	flag.IntVar(&cfg.MaxNoOpCommentCycles, "max-no-op-comment-cycles", 0, "Success-agnostic comment-processing circuit breaker: maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress (no commit, no issue-body update, no FABRIK_STAGE_COMPLETE) before pausing, regardless of whether each invocation itself exited successfully. Deliberately higher than --max-review-cycles's default (5), not equal to it, since both counters observe the same dispatch funnel but only this one never refunds (0 = use default of 10; also FABRIK_MAX_NO_OP_COMMENT_CYCLES; #1555)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
@@ -501,11 +501,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxNoOpCommentCycles = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_NO_OP_COMMENT_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_NO_OP_COMMENT_CYCLES=%q is invalid (must be a positive integer); using default 10\n", v)
 			}
 		} else if pc.MaxNoOpCommentCycles != nil {
 			if *pc.MaxNoOpCommentCycles <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_no_op_comment_cycles=%d is invalid (must be a positive integer); using default 5\n", *pc.MaxNoOpCommentCycles)
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_no_op_comment_cycles=%d is invalid (must be a positive integer); using default 10\n", *pc.MaxNoOpCommentCycles)
 			} else {
 				cfg.MaxNoOpCommentCycles = *pc.MaxNoOpCommentCycles
 			}
@@ -811,7 +811,7 @@ func Execute() error {
 		TrainTrialWindowDuration:  trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
 		MaxCommentCyclesPerWindow: cfg.MaxCommentCyclesPerWindow,                         // 0 = derive default (10) in engine
 		CommentCycleWindow:        commentCycleWindow(cfg.CommentCycleWindowMinutes),     // 0 = derive default (30m) in engine
-		MaxNoOpCommentCycles:      cfg.MaxNoOpCommentCycles,                              // 0 = derive default (5) in engine
+		MaxNoOpCommentCycles:      cfg.MaxNoOpCommentCycles,                              // 0 = derive default (10) in engine
 		ClaudeWaitDelay:           claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:           killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:          killGraceSigTerm(cfg.KillGraceSigTerm),
