@@ -518,8 +518,11 @@ mid-`spawnChildren` (`AddBlockedByIssue`, shared with R4 below).
 See `partial_mutation_test.go`'s own doc comment for the full sequence
 table (which steps are recoverable vs. genuinely unrecoverable-as-found).
 Two defects were found and pinned rather than fixed, per the issue's
-explicit scope — filed as follow-up issues, linked from both the covering
-scenario's doc comment and the PR description that introduced this table.
+explicit scope — filed as follow-up issues #1582 (`MarkPRReady` failure
+never retried, can permanently strand a draft PR) and #1583
+(`spawnChildren` retry after an operator un-pause duplicates
+already-created children), linked from the covering scenarios' own doc
+comments.
 
 ### R5 — Claude-limit path
 

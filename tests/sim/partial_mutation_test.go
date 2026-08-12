@@ -18,9 +18,9 @@ import (
 //	---------------------------------------------|-------------------------------|--------------|------------------------------------
 //	addCompleteLabelAndRemoveCI (engine/ci.go)    | 1st call (AddLabelToIssue)   | recoverable  | restart_recovery_test.go: TestRestartRecovery_KillBeforeFirstLabelWrite
 //	addCompleteLabelAndRemoveCI                   | 2nd call (RemoveLabelFromIssue) | recoverable | restart_recovery_test.go: TestRestartRecovery_KillBetweenLabelPair
-//	ensureDraftPR -> markPRReady (engine/pr.go)   | MarkPRReady (post-PR-creation) | UNRECOVERABLE (pinned) | restart_recovery_test.go: TestRestartRecovery_KillAfterPRCreatedBeforeReady
-//	spawnChildren (engine/spawn.go)               | AddProjectV2ItemById         | UNRECOVERABLE (pinned) | TestPartialMutation_SpawnChildren_ProjectAddFails (this file)
-//	spawnChildren                                 | AddBlockedByIssue            | UNRECOVERABLE (pinned) | restart_recovery_test.go: TestRestartRecovery_KillDuringSpawnSequence
+//	ensureDraftPR -> markPRReady (engine/pr.go)   | MarkPRReady (post-PR-creation) | UNRECOVERABLE (pinned, #1582) | restart_recovery_test.go: TestRestartRecovery_KillAfterPRCreatedBeforeReady
+//	spawnChildren (engine/spawn.go)               | AddProjectV2ItemById         | UNRECOVERABLE (pinned, #1583) | TestPartialMutation_SpawnChildren_ProjectAddFails (this file)
+//	spawnChildren                                 | AddBlockedByIssue            | UNRECOVERABLE (pinned, #1583) | restart_recovery_test.go: TestRestartRecovery_KillDuringSpawnSequence
 //	spawnChildren                                 | UpdateProjectItemStatus (placement) | recoverable | settle_scan_escalation_test.go: TestSettleScan_AwaitingPlacement
 //	landSingleton (engine/merge_train.go)         | (not covered)                 | out of scope — merge-train landing is sibling issue #1452's territory (real git assembly), not this issue's (see this issue's own Scope section)
 //
@@ -83,9 +83,9 @@ func TestPartialMutation_SpawnChildren_ProjectAddFails(t *testing.T) {
 
 	childrenAfter := countChildIssuesTitled(t, env, "sim partial-mutation spawn child")
 	if childrenAfter == 1 {
-		t.Log("NOTE: exactly 1 child issue exists after the retried spawn — the as-found duplicate-child gap this scenario pins may have been fixed; if so, update/close the tracking follow-up issue named in the PR description.")
+		t.Log("NOTE: exactly 1 child issue exists after the retried spawn — the as-found duplicate-child gap this scenario pins may have been fixed; if so, update/close #1583.")
 	} else {
-		t.Logf("as-found confirmed: %d child issues exist after the retried spawn (expected exactly 1 in a fully-recovered world) — same root cause as TestRestartRecovery_KillDuringSpawnSequence, one step earlier in the sequence (pinned, see PR description for the tracking issue)", childrenAfter)
+		t.Logf("as-found confirmed: %d child issues exist after the retried spawn (expected exactly 1 in a fully-recovered world) — same root cause as TestRestartRecovery_KillDuringSpawnSequence, one step earlier in the sequence (pinned, see #1583)", childrenAfter)
 	}
 
 	// The first (board-orphaned) child is a genuinely leaked issue — never
