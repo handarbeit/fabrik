@@ -31,7 +31,7 @@ At the earlier "Before You Start" rebase point in both skills:
 
 `CLAUDE.md`'s "Rebase onto the latest base branch" convention is updated to state the same precondition and divergence rule, since it is the standing documented convention both skills are following.
 
-**`git push --force-with-lease` is safe here** because `fabrik/issue-<N>` is a branch Fabrik owns exclusively for the issue — there is no other legitimate writer to lose a race against, mirroring the existing justification in `buildRebaseComment` and `engine/worktree.go`.
+**`git push --force-with-lease` is safe here even though the engine itself may also write to `fabrik/issue-<N>`** (its own worktree-push helper, or a `commitWIP` commit pushed between the stage's fetch and its push): a lease rejection from that just means the remote moved since the fetch, and the correct response is to retry (re-fetch, repeat the behind-check, rebase and push again), never to force past it. This mirrors the existing justification in `buildRebaseComment` and `engine/worktree.go`, and is why the SKILL.md files pair the push instruction with explicit rejected-push handling rather than asserting the branch has no other writer.
 
 **The behind-check idiom (`git rev-list --count`) is reused verbatim from Validate's own Pre-Completion Gate Check B**, for in-file and cross-skill consistency, not because the two rebase points share a failure mode — they don't (see "Why not fold into ADR-1364's gate" below).
 
