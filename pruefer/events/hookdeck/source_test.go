@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -500,6 +501,271 @@ func TestSource_ProcessAttempt_LogsNormalizationFailure(t *testing.T) {
 	joined := strings.Join(*logs, "\n")
 	if !strings.Contains(joined, "normalizing webhook payload") {
 		t.Errorf("logs = %v, want a message about the normalization failure", *logs)
+	}
+}
+
+// TestSource_OnDrop_ReportsProcessAttemptReasons covers the four drop
+// reasons processAttempt can raise on its own (signature missing, signature
+// invalid, malformed payload, dedupe hit) — see events.DropReason and
+// ADR-1563. Each must report exactly its own reason, not a sibling's.
+func TestSource_OnDrop_ReportsProcessAttemptReasons(t *testing.T) {
+	t.Run("signature missing", func(t *testing.T) {
+		var got []events.DropReason
+		src := NewSource(Config{WebhookSecret: testWebhookSecret, OnDrop: func(r events.DropReason) { got = append(got, r) }})
+		body := prOpenedBody(t, 1)
+		src.processAttempt(context.Background(), &recordingSink{}, attemptBody{
+			Request: attemptRequest{
+				DataString: string(body),
+				Headers: map[string]string{
+					"X-GitHub-Event":    "pull_request",
+					"X-GitHub-Delivery": "d-missing-sig",
+				},
+			},
+		})
+		if want := []events.DropReason{events.DropSignatureMissing}; !reflect.DeepEqual(got, want) {
+			t.Errorf("OnDrop calls = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("signature invalid", func(t *testing.T) {
+		var got []events.DropReason
+		src := NewSource(Config{WebhookSecret: testWebhookSecret, OnDrop: func(r events.DropReason) { got = append(got, r) }})
+		body := prOpenedBody(t, 1)
+		src.processAttempt(context.Background(), &recordingSink{}, attemptBody{
+			Request: attemptRequest{
+				DataString: string(body),
+				Headers: map[string]string{
+					"X-Hub-Signature-256": "sha256=" + strings.Repeat("00", 32),
+					"X-GitHub-Event":      "pull_request",
+					"X-GitHub-Delivery":   "d-wrong-sig",
+				},
+			},
+		})
+		if want := []events.DropReason{events.DropSignatureInvalid}; !reflect.DeepEqual(got, want) {
+			t.Errorf("OnDrop calls = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("malformed payload", func(t *testing.T) {
+		var got []events.DropReason
+		src := NewSource(Config{WebhookSecret: testWebhookSecret, OnDrop: func(r events.DropReason) { got = append(got, r) }})
+		body := []byte("not valid json")
+		src.processAttempt(context.Background(), &recordingSink{}, attemptBody{
+			Request: attemptRequest{
+				DataString: string(body),
+				Headers: map[string]string{
+					"X-Hub-Signature-256": signBody(body, testWebhookSecret),
+					"X-GitHub-Event":      "pull_request",
+					"X-GitHub-Delivery":   "d-malformed-body",
+				},
+			},
+		})
+		if want := []events.DropReason{events.DropMalformedPayload}; !reflect.DeepEqual(got, want) {
+			t.Errorf("OnDrop calls = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("dedupe hit", func(t *testing.T) {
+		var got []events.DropReason
+		src := NewSource(Config{WebhookSecret: testWebhookSecret, OnDrop: func(r events.DropReason) { got = append(got, r) }})
+		body := prOpenedBody(t, 1)
+		attempt := attemptBody{
+			Request: attemptRequest{
+				DataString: string(body),
+				Headers: map[string]string{
+					"X-Hub-Signature-256": signBody(body, testWebhookSecret),
+					"X-GitHub-Event":      "pull_request",
+					"X-GitHub-Delivery":   "d-dup",
+				},
+			},
+		}
+		sink := &recordingSink{}
+		src.processAttempt(context.Background(), sink, attempt) // first delivery: dispatched, no drop
+		src.processAttempt(context.Background(), sink, attempt) // duplicate: dedupe hit
+		if want := []events.DropReason{events.DropDedupe}; !reflect.DeepEqual(got, want) {
+			t.Errorf("OnDrop calls = %v, want %v", got, want)
+		}
+		if sink.count() != 1 {
+			t.Errorf("sink.count() = %d, want 1", sink.count())
+		}
+	})
+}
+
+// TestSource_OnDrop_ReportsHandleFrameReasons covers the two drop reasons
+// only reachable via handleFrame's outer-envelope handling (a malformed
+// WebSocket frame, and a malformed attempt body inside a well-formed
+// frame) — these can't be exercised via a direct processAttempt call since
+// they never reach it.
+func TestSource_OnDrop_ReportsHandleFrameReasons(t *testing.T) {
+	t.Run("malformed envelope", func(t *testing.T) {
+		m := newMockHookdeckServer(t)
+		var mu sync.Mutex
+		var got []events.DropReason
+		cfg := testConfig(m)
+		cfg.OnDrop = func(r events.DropReason) {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, r)
+		}
+		src := NewSource(cfg)
+		sink := &recordingSink{}
+		runSourceInBackground(t, src, sink)
+
+		conn := m.nextConn(t)
+		if err := conn.WriteMessage(websocket.TextMessage, []byte("not json at all")); err != nil {
+			t.Fatalf("write malformed frame: %v", err)
+		}
+
+		waitUntil(t, 2*time.Second, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(got) == 1
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if want := []events.DropReason{events.DropMalformedEnvelope}; !reflect.DeepEqual(got, want) {
+			t.Errorf("OnDrop calls = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("malformed attempt body", func(t *testing.T) {
+		m := newMockHookdeckServer(t)
+		var mu sync.Mutex
+		var got []events.DropReason
+		cfg := testConfig(m)
+		cfg.OnDrop = func(r events.DropReason) {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, r)
+		}
+		src := NewSource(cfg)
+		sink := &recordingSink{}
+		runSourceInBackground(t, src, sink)
+
+		conn := m.nextConn(t)
+		// "request" must be an object per attemptBody's shape; a string
+		// value fails to unmarshal into attemptRequest without ever
+		// touching flexHeaders' always-succeeds UnmarshalJSON.
+		frameBytes, err := json.Marshal(wsFrame{Event: wsEventAttempt, Body: json.RawMessage(`{"request":"not-an-object"}`)})
+		if err != nil {
+			t.Fatalf("marshal frame: %v", err)
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, frameBytes); err != nil {
+			t.Fatalf("write malformed attempt: %v", err)
+		}
+
+		waitUntil(t, 2*time.Second, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(got) == 1
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if want := []events.DropReason{events.DropMalformedAttempt}; !reflect.DeepEqual(got, want) {
+			t.Errorf("OnDrop calls = %v, want %v", got, want)
+		}
+	})
+}
+
+// signatureFailureAttempt returns an attemptBody whose signature will fail
+// verification (wrong secret), used by the signature-drift tests below to
+// script a sequence of consecutive failures.
+func signatureFailureAttempt(t *testing.T, deliveryID string) attemptBody {
+	t.Helper()
+	body := prOpenedBody(t, 1)
+	return attemptBody{
+		Request: attemptRequest{
+			DataString: string(body),
+			Headers: map[string]string{
+				"X-Hub-Signature-256": "sha256=" + strings.Repeat("00", 32),
+				"X-GitHub-Event":      "pull_request",
+				"X-GitHub-Delivery":   deliveryID,
+			},
+		},
+	}
+}
+
+// signatureSuccessAttempt returns an attemptBody whose signature verifies.
+func signatureSuccessAttempt(t *testing.T, deliveryID string) attemptBody {
+	t.Helper()
+	body := prOpenedBody(t, 1)
+	return attemptBody{
+		Request: attemptRequest{
+			DataString: string(body),
+			Headers: map[string]string{
+				"X-Hub-Signature-256": signBody(body, testWebhookSecret),
+				"X-GitHub-Event":      "pull_request",
+				"X-GitHub-Delivery":   deliveryID,
+			},
+		},
+	}
+}
+
+// TestSource_SignatureDrift_FiresAtThresholdNotBefore pins down the exact
+// boundary: OnSignatureDrift(true) must fire on the SignatureDriftThreshold'th
+// consecutive failure, not the one before it — AC4's "a sustained
+// all-failures window triggers the escalation" needs a deterministic
+// boundary to be a non-flaky assertion.
+func TestSource_SignatureDrift_FiresAtThresholdNotBefore(t *testing.T) {
+	var calls []bool
+	src := NewSource(Config{WebhookSecret: testWebhookSecret, OnSignatureDrift: func(active bool) { calls = append(calls, active) }})
+	sink := &recordingSink{}
+
+	for i := 0; i < SignatureDriftThreshold-1; i++ {
+		src.processAttempt(context.Background(), sink, signatureFailureAttempt(t, fmt.Sprintf("d-%d", i)))
+	}
+	if len(calls) != 0 {
+		t.Fatalf("OnSignatureDrift called %d times after %d failures, want 0 (threshold is %d)", len(calls), SignatureDriftThreshold-1, SignatureDriftThreshold)
+	}
+
+	src.processAttempt(context.Background(), sink, signatureFailureAttempt(t, "d-final"))
+	if want := []bool{true}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("OnSignatureDrift calls after the %dth consecutive failure = %v, want %v", SignatureDriftThreshold, calls, want)
+	}
+}
+
+// TestSource_SignatureDrift_HealthyMixDoesNotTrigger is AC4's negative case:
+// a success interleaved before the threshold resets the streak, so a
+// healthy mix of failures and successes must never fire the escalation
+// even when the total failure count would otherwise exceed the threshold.
+func TestSource_SignatureDrift_HealthyMixDoesNotTrigger(t *testing.T) {
+	var calls []bool
+	src := NewSource(Config{WebhookSecret: testWebhookSecret, OnSignatureDrift: func(active bool) { calls = append(calls, active) }})
+	sink := &recordingSink{}
+
+	for i := 0; i < 10; i++ {
+		src.processAttempt(context.Background(), sink, signatureFailureAttempt(t, fmt.Sprintf("d-fail-%d", i)))
+	}
+	src.processAttempt(context.Background(), sink, signatureSuccessAttempt(t, "d-success")) // resets the streak
+	for i := 0; i < SignatureDriftThreshold-1; i++ {
+		src.processAttempt(context.Background(), sink, signatureFailureAttempt(t, fmt.Sprintf("d-fail2-%d", i)))
+	}
+
+	if len(calls) != 0 {
+		t.Errorf("OnSignatureDrift calls = %v, want none (a success must reset the consecutive-failure streak)", calls)
+	}
+}
+
+// TestSource_SignatureDrift_RecoversOnceAfterSuccess covers the recovery
+// transition: after an active drift streak, the next successful
+// verification must fire OnSignatureDrift(false) exactly once — not on
+// every subsequent success.
+func TestSource_SignatureDrift_RecoversOnceAfterSuccess(t *testing.T) {
+	var calls []bool
+	src := NewSource(Config{WebhookSecret: testWebhookSecret, OnSignatureDrift: func(active bool) { calls = append(calls, active) }})
+	sink := &recordingSink{}
+
+	for i := 0; i < SignatureDriftThreshold; i++ {
+		src.processAttempt(context.Background(), sink, signatureFailureAttempt(t, fmt.Sprintf("d-%d", i)))
+	}
+	if want := []bool{true}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("OnSignatureDrift calls after threshold failures = %v, want %v", calls, want)
+	}
+
+	src.processAttempt(context.Background(), sink, signatureSuccessAttempt(t, "d-recover-1"))
+	src.processAttempt(context.Background(), sink, signatureSuccessAttempt(t, "d-recover-2"))
+	if want := []bool{true, false}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("OnSignatureDrift calls after two successes following recovery = %v, want %v (recovery must fire exactly once)", calls, want)
 	}
 }
 

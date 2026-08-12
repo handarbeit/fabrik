@@ -145,6 +145,16 @@ Pruefer is the deliberate test bed for this pattern before it's ported to Fabrik
 
 Hookdeck's own transport auth (your API key) proves a request came from *your Hookdeck source*, not from GitHub. A webhook secret and its HMAC-SHA256 signature (`X-Hub-Signature-256`) is what proves the payload's *contents* actually originated at GitHub and weren't tampered with in transit or fabricated by anyone who obtained your Hookdeck forwarding URL. Pruefer verifies this signature on every received event regardless of transport; an unverified or invalid signature is dropped before it's ever normalized or acted on.
 
+Signature verification depends on Hookdeck forwarding the request body byte-identically to what GitHub signed — a property of Hookdeck's own wire format, not a documented guarantee (see [adrs/1254-event-driven-hookdeck-ingestion.md](../../adrs/1254-event-driven-hookdeck-ingestion.md)). If that ever changes, or if the webhook secret is wrong, **every** delivery fails signature verification — see the next section for how Pruefer surfaces that.
+
+### Detecting a total protocol break
+
+A dropped event is individually harmless — GitHub's at-least-once redelivery and the reconciliation-fallback poll both cover it. But if signature verification starts failing on *every* delivery (a misconfigured `hookdeck.webhook_secret_env`, or a break in Hookdeck's wire format), Pruefer degrades to poll-only silently unless you're watching for it — the ack Hookdeck receives is unaffected either way (see [ADR-1254](../../adrs/1254-event-driven-hookdeck-ingestion.md)'s accepted trade-offs), and the drop itself only used to produce a rate-limited log line.
+
+The TUI's footer now shows a running breakdown of dropped deliveries by category — `dropped: N (sig S · unwatched U · dedupe D · other O)` — so an occasional dedupe hit or an event for a repo outside `watched_repos` (expected, benign) never looks the same as a signature failure (actionable). If signature verification fails on 20 consecutive deliveries with no success in between, Pruefer escalates: a loud warning is logged, and the footer shows a `⚠ SIGNATURE DRIFT — check webhook secret` banner until the next delivery verifies successfully. Polling keeps running throughout — nothing about this escalation disables the reconciliation fallback; it only makes the fact that you're currently relying on it more than usual explicit and visible. See [adrs/1563-hookdeck-drop-accounting-and-signature-drift-escalation.md](../../adrs/1563-hookdeck-drop-accounting-and-signature-drift-escalation.md) for the design.
+
+If you see the drift banner: check that `hookdeck.webhook_secret_env` (and the environment variable it points at) matches the secret configured in your GitHub App's webhook settings; if it does, Hookdeck's forwarding format may have changed upstream and is worth reporting.
+
 ## Terminal UI
 
 When run with a real terminal attached (both stdin and stdout), Pruefer launches an interactive TUI by default — the same `bubbletea`/`bubbles`/`lipgloss` stack and model/update/view structure as Fabrik's own `tui/` package, so the two feel like the same family of tool. It shows:
@@ -154,6 +164,7 @@ When run with a real terminal attached (both stdin and stdout), Pruefer launches
 - Recently completed reviews (last 200, in-memory — not persisted across restarts): repo, PR, outcome (reviewed / skipped / errored), turns, cost, and duration.
 - Skipped PRs with their reason, covering every skip category Pruefer tracks (draft, self-authored, excluded author/label/path, already reviewed at this head SHA, diff too large).
 - Errors, plus GitHub REST API rate-limit state and a running session-total cost/turn count.
+- In `event_source: hookdeck` mode: a per-category breakdown of dropped deliveries (signature failures, unwatched-repo/owner, dedupe hits, other), and a signature-drift banner when signature verification has been failing on every delivery for a sustained stretch — see [Detecting a total protocol break](#detecting-a-total-protocol-break) below.
 
 Keyboard: `q` or `ctrl+c` to quit, `tab` to switch panes, `↑`/`↓` or `j`/`k` to scroll and select an entry, `enter` to view its detail.
 

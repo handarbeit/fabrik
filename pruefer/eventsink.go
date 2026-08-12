@@ -52,10 +52,12 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 	client, ok := d.clientForOwner(owner)
 	if !ok {
 		logf(prNumber, "warn", "event for %s/%s#%d: no client for owner %q — dropping\n", owner, repo, prNumber, owner)
+		d.recordDrop(events.DropUnwatchedOwner)
 		return
 	}
 	if !d.isWatchedRepo(owner, repo) {
 		logf(prNumber, "warn", "event for %s/%s#%d: repo is not in watched_repos — dropping\n", owner, repo, prNumber)
+		d.recordDrop(events.DropUnwatchedRepo)
 		return
 	}
 
@@ -71,6 +73,7 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 	if !g.mu.TryLock() {
 		release()
 		logf(prNumber, "info", "event for %s/%s#%d: a review is already in flight for this PR — dropping\n", owner, repo, prNumber)
+		d.recordDrop(events.DropReviewInFlight)
 		return
 	}
 	defer release()
@@ -90,6 +93,7 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 	// and submitting a formal review against a closed/merged PR.
 	if pr.State != "open" || pr.Merged {
 		logf(prNumber, "info", "event for %s/%s#%d: PR is no longer open (state=%s merged=%v) — dropping\n", owner, repo, prNumber, pr.State, pr.Merged)
+		d.recordDrop(events.DropPRNotOpen)
 		return
 	}
 
