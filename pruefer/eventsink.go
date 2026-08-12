@@ -49,7 +49,7 @@ import (
 // is always invoked in its own goroutine there) or it would stall acking
 // the current webhook and reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
-	client, ok := d.Clients[owner]
+	client, ok := d.clientForOwner(owner)
 	if !ok {
 		logf(prNumber, "warn", "event for %s/%s#%d: no client for owner %q — dropping\n", owner, repo, prNumber, owner)
 		return
@@ -67,12 +67,14 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 	}
 	defer func() { <-sem }()
 
-	mu := d.prLock(owner, repo, prNumber)
-	if !mu.TryLock() {
+	g, release := d.acquirePRGate(owner, repo, prNumber)
+	if !g.mu.TryLock() {
+		release()
 		logf(prNumber, "info", "event for %s/%s#%d: a review is already in flight for this PR — dropping\n", owner, repo, prNumber)
 		return
 	}
-	defer mu.Unlock()
+	defer release()
+	defer g.mu.Unlock()
 
 	pr, err := client.FetchPRDetails(owner, repo, prNumber)
 	if err != nil {
