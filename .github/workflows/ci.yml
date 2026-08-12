@@ -22,6 +22,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # -s matches the -s (simplify) flag CONTRIBUTING.md already tells
+      # contributors to run locally (`gofmt -s -d .` / `gofmt -s -w .`).
+      # Cheapest check in the job (no build), so it runs first.
+      - name: gofmt
+        run: |
+          files=$(gofmt -s -l .)
+          if [ -n "$files" ]; then
+            echo "The following files are not gofmt -s clean:"
+            echo "$files"
+            echo ""
+            echo "Run 'gofmt -s -w .' and commit the result."
+            exit 1
+          fi
+
       # -tags e2e so the build-tagged e2e suite is vetted too. Without the tag
       # `go vet ./...` matches no packages under tests/e2e, so that code is
       # never vetted at all.
