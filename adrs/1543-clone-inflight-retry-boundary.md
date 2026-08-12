@@ -208,27 +208,89 @@ correctness.
 - **R4 (`ensureSpawnTargetReady`)**: fixed with the identical protocol, not
   exempted — its defect (concurrent-clone directory corruption) was more
   severe than `ensureRepoReady`'s (a cosmetic duplicate comment).
-- **Documented residual limitation — merge-train's `batch[0]` anchor**:
-  `prepareTrainWorker` (`engine/merge_train.go:496`) calls
+- **Merge-train's `batch[0]` anchor — detected and escalated, not silently
+  wedged**: `prepareTrainWorker` (`engine/merge_train.go`) calls
   `ensureRepoReady(ctx, batch[0])` using an arbitrary Queued-column member as
-  the repo anchor. If that specific (now-paused) item is never reselected as
-  `batch[0]` on a later poll — e.g. another Queued item consistently sorts
-  first — the repo's `cloneInFlight` entry stays failed and every merge-train
-  pass for that repo keeps silently skipping (safe: never duplicates the
-  clone or comment) rather than retrying, until either that item does become
-  `batch[0]` again or the process restarts (an existing, uncontested reset
-  boundary for `cloneInFlight` — restarts already clear all entries). This is
-  a pre-existing characteristic of the batch-anchor design's arbitrary member
-  selection, not introduced or worsened by this fix — the old code's
-  unconditional `Delete` traded away race-safety for unconditional
-  retry-liveness in exchange for the very duplication bug this ADR fixes.
-  Redesigning batch-anchor selection to prefer a paused member (so it's
-  reselected and can self-heal) is a reasonable follow-up but is out of this
-  issue's scope.
+  the repo anchor. Because `batch[0]` can be a different item on every poll
+  whenever Queued membership churns, a later anchor's identity generally
+  cannot match the `ownerKey` pinned by the original failure, so the retry
+  gate above cannot reopen for it — left unaddressed, the repo's
+  `cloneInFlight` entry would stay failed and every merge-train pass for that
+  repo would keep silently skipping (safe: never duplicates the clone or
+  comment) rather than retrying, until either the exact original anchor is
+  reselected or the process restarts. See "Escalating the `batch[0]`
+  wedge" below for how this is now surfaced instead of left as a silent,
+  restart-only-recoverable condition.
 - `cloneInFlight` remains per-process, unpersisted; an engine restart still
   clears all entries unconditionally, as before.
-- No user-facing behavior change: `ErrSkipItem` for all non-owners,
+- No user-facing behavior change to the core `ensureRepoReady`/
+  `ensureSpawnTargetReady` protocol: `ErrSkipItem` for all non-owners,
   `fabrik:paused`/`fabrik:awaiting-input` on the affected item(s), and one
   comment per genuinely distinct failure are all unchanged in shape — only
   the internal coordination correctness and the precise retry-boundary
-  semantics improve.
+  semantics improve. The merge-train anchor now additionally escalates on a
+  bounded streak (see below) — a new, deliberate behavior, not a shape change
+  to the core protocol.
+
+## Escalating the `batch[0]` wedge (#1543 follow-up)
+
+The original version of this ADR recorded the `batch[0]` anchor gap above as
+an accepted, out-of-scope residual limitation — safe (no duplication) but
+capable of leaving a repo's merge train silently skipping forever, recoverable
+only by the exact original anchor being reselected or a process restart. Once
+this PR was in front of a human reviewer, that framing was reconsidered: the
+gap is *introduced by this PR* (the pre-fix code's unconditional `Delete`
+never had this failure mode — it traded that liveness for the duplication bug
+this ADR exists to fix), and it lands in merge-train machinery this release
+actively depends on. A silent, restart-only-recoverable wedge in new
+production code was judged not shippable as a footnote.
+
+**Decision**: `prepareTrainWorker` now tracks a consecutive-skip streak per
+repo (`Engine.mergeTrainCloneSkipCounts`, keyed `"owner/repo"` — repo-keyed
+rather than item-keyed, since `batch[0]`'s identity is exactly what varies
+across polls) each time `ensureRepoReady` returns `ErrSkipItem` for the
+anchor. Once the streak reaches `e.cfg.MaxRetries`, `recordMergeTrainCloneSkip`
+pauses the *current* anchor item with an explanatory comment that names the
+repo, the streak length, and — read from the live `cloneInFlight` entry — the
+specific issue whose failed attempt still owns the retry gate, so an operator
+knows exactly which issue's `fabrik:paused` to clear. The current anchor is
+paused (not the original owner) because it is the item a human reading the
+Queued column right now can act on; the comment makes clear its own clone was
+never attempted, so the pause reads as a wedge notification rather than a
+fresh clone failure. The streak resets to zero both on escalation (so a fresh
+budget applies to any future streak) and whenever `ensureRepoReady` succeeds
+for that repo (`resetMergeTrainCloneSkip`) — mirroring `mergeTrainEjectionCounts`/
+`ejectMember`'s existing counter-then-escalate-then-reset shape in the same
+file, and the escalate-after-`MaxRetries` convention used throughout the
+ADR-1270 settle scans elsewhere in the engine package. `MaxRetries <= 0`
+(unlimited) never escalates, matching every other `MaxRetries`-gated
+escalation path.
+
+**Alternatives considered**:
+
+- *Promote the log line to a warning only* (no pause/comment): makes the
+  condition greppable in `fabrik.log` but leaves the operator-visible symptom
+  (a repo's merge train quietly never landing anything) unexplained anywhere
+  a human would normally look — GitHub, not the daemon's log file. Rejected
+  as insufficient on its own for a condition this codebase otherwise always
+  surfaces via `fabrik:paused` + comment.
+- *Pin the retry gate to the repo instead of the anchor's item identity*
+  (removing the wedge at its source, for the merge-train call site only):
+  considered, but the identity gate's correctness depends on checking the
+  *caller's own already-fetched* `Labels` for `fabrik:paused` — a repo-level
+  pin would make that check trivially pass for whichever new, never-paused
+  item next becomes `batch[0]`, reopening a repeated-clone-attempt-and-comment
+  pattern across polls for exactly this call site (a narrower echo of the bug
+  this ADR fixes). Making it correct without that reopening would require a
+  live label fetch inside the singleflight path — the same cost this ADR's
+  main design explicitly avoids (see "Why not a live GitHub fetch" above) —
+  or a structurally separate, merge-train-only clone-failure path bypassing
+  the shared `cloneInFlight` coordination, which is exactly the
+  batch-anchor-selection redesign Plan already judged out of this issue's
+  scope. Rejected as more invasive than escalating the existing gap.
+
+This closes the residual limitation as a *shippable* one: the repo is never
+duplicated-cloned or duplicated-commented (R1 still holds), and it is now
+never silently wedged past `MaxRetries` polls either — it escalates loudly
+instead, following this codebase's established pattern rather than inventing
+a new one.

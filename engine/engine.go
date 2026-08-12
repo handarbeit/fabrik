@@ -137,6 +137,8 @@ type Engine struct {
 	mergeTrainInFlight          sync.Map                      // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
 	mergeTrainEjectionsMu       sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts    map[string]int                // key: "owner/repo#N", ejection count per member
+	mergeTrainCloneSkipMu       sync.Mutex                    // guards mergeTrainCloneSkipCounts
+	mergeTrainCloneSkipCounts   map[string]int                // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor)
 	mergeTrainTrialsMu          sync.Mutex                    // guards mergeTrainTrials
 	mergeTrainTrials            map[string][]time.Time        // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
 	mergeTrainRunawayMu         sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533)
@@ -285,24 +287,25 @@ func New(cfg Config) (*Engine, error) {
 	// (see releaseUpgradeToken's doc comment).
 	releaseClient := gh.NewClient(releaseUpgradeToken(cfg))
 	eng := &Engine{
-		cfg:                      cfg,
-		client:                   ghClient,
-		releaseClient:            releaseClient,
-		hostClient:               ghClient,
-		claude:                   &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktreeManagers:         make(map[string]*WorktreeManager),
-		fabrikDir:                fabrikDir,
-		store:                    sharedStore,
-		mayNeedWork:              make(map[string]bool),
-		seededRepos:              make(map[string]bool),
-		checkedAutoMergeRepos:    make(map[string]bool),
-		repoAccess:               make(map[string]gh.RepoAccess),
-		sem:                      make(chan struct{}, cfg.MaxConcurrent),
-		mergeTrainEjectionCounts: make(map[string]int),
-		mergeTrainTrials:         make(map[string][]time.Time),
-		mergeTrainRunawayAlerted: make(map[string]int),
-		queuedReviewEjects:       make(map[string]map[int]int),
-		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
+		cfg:                       cfg,
+		client:                    ghClient,
+		releaseClient:             releaseClient,
+		hostClient:                ghClient,
+		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
+		worktreeManagers:          make(map[string]*WorktreeManager),
+		fabrikDir:                 fabrikDir,
+		store:                     sharedStore,
+		mayNeedWork:               make(map[string]bool),
+		seededRepos:               make(map[string]bool),
+		checkedAutoMergeRepos:     make(map[string]bool),
+		repoAccess:                make(map[string]gh.RepoAccess),
+		sem:                       make(chan struct{}, cfg.MaxConcurrent),
+		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainCloneSkipCounts: make(map[string]int),
+		mergeTrainTrials:          make(map[string][]time.Time),
+		mergeTrainRunawayAlerted:  make(map[string]int),
+		queuedReviewEjects:        make(map[string]map[int]int),
+		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -347,22 +350,23 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	}
 	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
-		cfg:                      cfg,
-		client:                   client,
-		releaseClient:            client,
-		claude:                   claude,
-		worktreeManagers:         wms,
-		store:                    itemstate.NewStore(nil),
-		mayNeedWork:              make(map[string]bool),
-		seededRepos:              make(map[string]bool),
-		checkedAutoMergeRepos:    make(map[string]bool),
-		repoAccess:               make(map[string]gh.RepoAccess),
-		sem:                      make(chan struct{}, maxConcurrent),
-		mergeTrainEjectionCounts: make(map[string]int),
-		mergeTrainTrials:         make(map[string][]time.Time),
-		mergeTrainRunawayAlerted: make(map[string]int),
-		queuedReviewEjects:       make(map[string]map[int]int),
-		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
+		cfg:                       cfg,
+		client:                    client,
+		releaseClient:             client,
+		claude:                    claude,
+		worktreeManagers:          wms,
+		store:                     itemstate.NewStore(nil),
+		mayNeedWork:               make(map[string]bool),
+		seededRepos:               make(map[string]bool),
+		checkedAutoMergeRepos:     make(map[string]bool),
+		repoAccess:                make(map[string]gh.RepoAccess),
+		sem:                       make(chan struct{}, maxConcurrent),
+		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainCloneSkipCounts: make(map[string]int),
+		mergeTrainTrials:          make(map[string][]time.Time),
+		mergeTrainRunawayAlerted:  make(map[string]int),
+		queuedReviewEjects:        make(map[string]map[int]int),
+		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
