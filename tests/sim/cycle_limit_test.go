@@ -137,6 +137,26 @@ func TestRebaseCycleLimit(t *testing.T) {
 
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
 
+	// Capture the baseline HeadSHA *before* injecting the conflicting main
+	// commit — mirrors TestCIFixReinvokeCycleLimit's identical ordering
+	// (capture baseline, then arm the trigger). Fetching the baseline after
+	// waiting for fabrik:rebase-needed would race: dispatchRebaseReinvoke can
+	// run one or more full cycles (including hitting the pause) between the
+	// label appearing and this goroutine's next FetchLinkedPR call, since
+	// WaitForIssueLabel only guarantees the label was present at some poll,
+	// not that no further poll has run since. Capturing the baseline first
+	// means the reinvoke-tracking loop below always starts from a SHA that
+	// predates every cycle, however fast they land.
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil {
+		t.Fatalf("FetchLinkedPR: %v", err)
+	}
+	baselineSHA := pr.HeadSHA
+	simBareDir, err := env.Sim.Sim().RepoBareDir(env.OwnerRepo)
+	if err != nil {
+		t.Fatalf("RepoBareDir: %v", err)
+	}
+
 	// The PR now exists with Implement's own default-script commit at
 	// conflictingPath. Commit directly to main at the same path with
 	// different content — simgh's real trial-merge mergeability check
@@ -149,16 +169,6 @@ func TestRebaseCycleLimit(t *testing.T) {
 
 	WaitForIssueLabel(t, env, num, "fabrik:rebase-needed", 80)
 	t.Logf("fabrik:rebase-needed confirmed on #%d — merge gate genuinely engaged", num)
-
-	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
-	if err != nil {
-		t.Fatalf("FetchLinkedPR: %v", err)
-	}
-	baselineSHA := pr.HeadSHA
-	simBareDir, err := env.Sim.Sim().RepoBareDir(env.OwnerRepo)
-	if err != nil {
-		t.Fatalf("RepoBareDir: %v", err)
-	}
 
 	seenSHAs := map[string]bool{baselineSHA: true}
 	lastSHA := baselineSHA
