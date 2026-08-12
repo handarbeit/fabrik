@@ -69,6 +69,54 @@ Before this issue, `poll()` created a fresh per-cycle semaphore local to itself.
 - `daemon.go` gained real complexity: a shared semaphore, an extracted `reviewOne`, a `runPollOnly`/`runEventDriven` split, and a health-transition callback (`HealthHandler`) — all net-new surface area even though `runPollOnly`'s own behavior is unchanged.
 - No live Hookdeck account is exercised in CI; all coverage is `httptest`/`gorilla/websocket`-mocked at the transport boundary (signature validation, delivery-ID dedupe, normalized-event mapping, reconnect-after-drop, session-creation-failure retry). A manual smoke test against a real Hookdeck source remains a pre-production step outside this repo's test suite.
 
+## Amendment (2026-08-12, from #1563): what the reimplementation actually rests on
+
+Decision 2 and the trade-off above record that the CLI-session protocol is
+undocumented and could break upstream. Two specifics were left implicit and are
+load-bearing enough to name.
+
+**Signature verification depends on byte-exact body preservation.**
+`processAttempt` computes GitHub's HMAC over `attempt.Request.DataString`:
+
+```go
+if !events.VerifySignature([]byte(attempt.Request.DataString), sig, s.cfg.WebhookSecret) {
+```
+
+This is correct only if Hookdeck forwards the request body byte-for-byte as
+GitHub sent and signed it. Nothing enforces that; it is a property of a wire
+format traced from `hookdeck-cli`'s source, not a contract. Any re-serialization
+in transit — re-encoding, whitespace normalization, JSON key reordering — makes
+**every** signature check fail. Of everything the reimplementation assumes, this
+is the single most consequential detail, and unlike a struct-shape mismatch
+(which fails loudly at unmarshal) it fails as a uniform, silent rejection.
+
+**The resulting failure is unobservable.** Four individually defensible choices
+compose into an invisible outage:
+
+1. A failed verification drops the event.
+2. The attempt is still acked `Status: 200`, so nothing queues Hookdeck-side.
+3. The signature-failure warning is rate-limited to one line per
+   `sigFailureLogInterval` (30s) and terminates in the log.
+4. The reconciliation fallback ticker keeps polling, so reviews still happen.
+
+Degrading to poll rather than dying is Decision 3 working as designed and is
+right. Degrading *undetectably* is not: with all four in play, a total protocol
+break is distinguishable from "a quiet hour on the board" only by reading a
+rate-limited log line. #1563 tracks making that state visible.
+
+**Claim strength.** `client.go`'s reference to "the verified upstream protocol"
+overstates it. The protocol was traced from upstream source; it has not been
+verified against a published spec, and — per the CI trade-off already recorded
+above — not against a live Hookdeck session in any automated test. "Traced from
+upstream source" is the accurate phrasing.
+
+None of this changes Decision 2. Embedding `hookdeck-cli` was weighed and
+rejected on dependency weight, and the containment argument (wire structs
+isolated in `protocol.go` behind `EventSource`) still holds. The amendment
+records what the accepted risk concretely consists of, so a future reader
+diagnosing "Pruefer stopped reviewing promptly" finds the failure mode written
+down rather than having to rediscover it.
+
 ## Related Work
 
 - ADR-1113 (`adrs/1113-pruefer-v1-architecture.md`) §2 (GitHub-derived, not on-disk, review state) and §7 (poll interval defaults) — this issue is additive to both: §2's philosophy is exactly what makes at-least-once event delivery safe to build on, and §7's 120s default becomes the value `reconciliation.fallback_interval` also defaults to, kept as a genuinely separate field.
