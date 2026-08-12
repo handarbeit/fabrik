@@ -1413,6 +1413,17 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 // lookup failure must never be mistaken for "nothing addressed yet" in a way
 // that would suppress delivery, but it also must not panic a nil-map read at
 // the call site.
+//
+// Only scans comments authored by e.cfg.User (the Fabrik identity the marker
+// is always posted under — formatReviewFeedbackComment's caller uses
+// AddComment via the engine's own token) — the same author-scoping
+// findBlockedComment already uses for "is this our own comment" lookups.
+// Without this check, any PR commenter could post a comment containing the
+// literal marker text naming an arbitrary review DatabaseID and cause that
+// review's feedback to be silently treated as already addressed — both
+// skipping delivery for the rest of the run and durably backfilling
+// snap.CommentProcessed, so the suppression would outlive this one check
+// (Pruefer review finding, #1555).
 func (e *Engine) durablyAddressedReviewIDs(item gh.ProjectItem) map[int]bool {
 	addressed := make(map[int]bool)
 
@@ -1432,6 +1443,9 @@ func (e *Engine) durablyAddressedReviewIDs(item gh.ProjectItem) map[int]bool {
 		return addressed
 	}
 	for _, c := range comments {
+		if c.Author != e.cfg.User {
+			continue
+		}
 		for _, id := range parseReviewIDsAddressedMarker(c.Body) {
 			addressed[id] = true
 		}

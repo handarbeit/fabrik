@@ -3930,8 +3930,12 @@ func TestBuildReviewBodyComments_DurableMarker_PreventsRedeliveryAfterRestart(t 
 			return []gh.Comment{
 				{
 					DatabaseID: 5001,
-					Author:     "arbeithand",
-					Body:       "🏭 **Fabrik — stage: Validate (review feedback addressed)**\n...\n\n<!-- fabrik:review-ids-addressed: 900 -->",
+					// Must match the test engine's e.cfg.User ("testuser",
+					// see testEngineWithStages) — the marker is only trusted
+					// when authored by Fabrik's own identity (#1555 Pruefer
+					// finding).
+					Author: "testuser",
+					Body:   "🏭 **Fabrik — stage: Validate (review feedback addressed)**\n...\n\n<!-- fabrik:review-ids-addressed: 900 -->",
 				},
 			}, nil
 		},
@@ -3987,7 +3991,7 @@ func TestBuildReviewBodyComments_DurableMarker_UnaddressedReview_StillDelivered(
 			return []gh.Comment{
 				{
 					DatabaseID: 5001,
-					Author:     "arbeithand",
+					Author:     "testuser", // must match e.cfg.User — see prior test
 					Body:       "🏭 **Fabrik — stage: Validate (review feedback addressed)**\n...\n\n<!-- fabrik:review-ids-addressed: 900 -->",
 				},
 			}, nil
@@ -4012,6 +4016,61 @@ func TestBuildReviewBodyComments_DurableMarker_UnaddressedReview_StillDelivered(
 	}
 	if comments[0].ID != "review-body:901" {
 		t.Errorf("expected synthetic ID review-body:901, got %q", comments[0].ID)
+	}
+}
+
+// TestBuildReviewBodyComments_DurableMarker_UntrustedAuthor_NotHonored is the
+// regression test for the Pruefer review finding on #1555: durablyAddressedReviewIDs
+// must only trust the marker on a comment authored by e.cfg.User (Fabrik's
+// own identity). Before this fix, any PR commenter could post a comment
+// containing the literal "<!-- fabrik:review-ids-addressed: N -->" marker
+// naming an arbitrary review DatabaseID and cause that review to be silently
+// treated as already-addressed — both suppressing its delivery this cycle
+// and durably backfilling snap.CommentProcessed, so the suppression would
+// outlive this one check.
+func TestBuildReviewBodyComments_DurableMarker_UntrustedAuthor_NotHonored(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchIssueCommentsFn: func(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+			return []gh.Comment{
+				{
+					DatabaseID: 5002,
+					// Not e.cfg.User ("testuser") — an arbitrary PR commenter
+					// forging the marker text.
+					Author: "random-pr-commenter",
+					Body:   "quoting a Fabrik comment for context: <!-- fabrik:review-ids-addressed: 904 -->",
+				},
+			}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	item := gh.ProjectItem{
+		Number:         14,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "handarbeit-pruefer", State: "COMMENTED", Body: "genuinely unaddressed finding", DatabaseID: 904},
+		},
+	}
+
+	comments := eng.buildReviewBodyComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment — an untrusted-author marker must not suppress delivery, got %d", len(comments))
+	}
+	if comments[0].ID != "review-body:904" {
+		t.Errorf("expected synthetic ID review-body:904, got %q", comments[0].ID)
+	}
+
+	// The untrusted marker must also not have backfilled the in-memory
+	// record — a second call must still deliver it (not silently absorbed
+	// via CommentProcessed). No backfill mutation was ever applied for this
+	// item, so store.Get legitimately returns "not found" here — that itself
+	// is proof nothing was backfilled; only fail if a record somehow exists
+	// and is non-zero.
+	if snap, err := eng.store.Get("owner/repo", 14); err == nil {
+		if !snap.CommentProcessed("review-body:904").IsZero() {
+			t.Errorf("untrusted marker must not backfill snap.CommentProcessed")
+		}
 	}
 }
 
