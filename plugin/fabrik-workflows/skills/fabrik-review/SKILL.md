@@ -65,7 +65,7 @@ Common mistake: a feature branch that doesn't have a function added on main will
 
 ### Push the rebase — never reset
 
-**Once the rebase is clean, push it immediately:**
+**If a rebase ran above, push it immediately once clean:**
 
 ```bash
 git push --force-with-lease
