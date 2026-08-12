@@ -160,8 +160,8 @@ func TestFormatStatsFooter(t *testing.T) {
 				TurnsUsed: 3, MaxTurns: 10,
 				InputTokens: 100, CacheReadTokens: 5000,
 			},
-			completed: true,
-			wantEmpty: false,
+			completed:   true,
+			wantEmpty:   false,
 			wantNotSubs: []string{"cache-write"},
 		},
 	}
@@ -217,9 +217,9 @@ func TestFormatStatsLogLine(t *testing.T) {
 			},
 		},
 		{
-			name:      "no max turns",
-			stats:     TokenUsage{TurnsUsed: 10, InputTokens: 500, OutputTokens: 100},
-			wantSubs:  []string{"used 10 turns", "in: 500", "out: 100", "cache_read: 0", "cache_write: 0"},
+			name:     "no max turns",
+			stats:    TokenUsage{TurnsUsed: 10, InputTokens: 500, OutputTokens: 100},
+			wantSubs: []string{"used 10 turns", "in: 500", "out: 100", "cache_read: 0", "cache_write: 0"},
 		},
 		{
 			name:      "cache-only usage is not suppressed",
