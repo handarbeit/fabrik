@@ -82,6 +82,17 @@ type mergeTrainEnvOptions struct {
 // instead of pollTrainCI/pollForMergeable's real 30s literal, and a small
 // MaxBatchSize matching production's own default (5) so scenario batches
 // stay small without a scenario having to say so itself.
+//
+// CIBackstopTimeout is 10s, not the verdict seeder's own typical
+// sub-millisecond turnaround, deliberately: it is the safety net for the one
+// case startTrialVerdictSeeder's own doc comment accepts as a known,
+// non-flaw race — losing the race against the engine's first FetchCheckRuns
+// read on a fresh trial PR. Under this package's own heavy parallel real-git
+// load (many scenarios' worth of concurrent merge/push/gc), that race can be
+// lost repeatedly before the seeder's goroutine gets scheduled; a backstop
+// too close to the seeder's happy-path latency turns ordinary contention into
+// a spurious TrainCIPending/timeout instead of the one extra
+// SetTrainCIPollIntervalForTest-scaled retry the doc comment promises.
 func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 	t.Helper()
 	mode := opts.Mode
@@ -92,7 +103,7 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 		Stages: mergeTrainStages(),
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.MergeTrain = mode
-			cfg.CIBackstopTimeout = 4 * time.Second
+			cfg.CIBackstopTimeout = 10 * time.Second
 			cfg.MaxBatchSize = 5
 			if opts.ConfigureCfg != nil {
 				opts.ConfigureCfg(cfg)

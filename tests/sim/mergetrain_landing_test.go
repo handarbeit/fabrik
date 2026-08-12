@@ -57,16 +57,36 @@ func TestMergeTrainLanding_OneAtATimeViaInteractionOnlyPoison(t *testing.T) {
 }
 
 // TestMergeTrainLanding_BatchCloseAsymmetryPin is R6's second half: pinning
-// the as-found asymmetry, not fixing it. A real green two-member batch
-// lands via landMergeTrainBatch; the final member-issue CloseIssue call for
-// one member is made to fail. Unlike landSingleton's equivalent failure
-// (fabrik:awaiting-member-close, retried every poll, eventually escalating),
-// landMergeTrainBatch's own final close has no settle-scan-backed retry at
-// all (ADR-061's own deferred-follow-up note) — the member reaches Done on
-// the board but its issue is left open indefinitely, with only a warning in
-// the engine's own log (unobservable to a sim scenario, so this test's
-// proof is the *absence* of any retry marker or a later automatic close,
-// not a log assertion).
+// the as-found asymmetry, not fixing it. A real green two-member batch lands
+// via landMergeTrainBatch; the final member-issue CloseIssue call for one
+// member is made to fail.
+//
+// This is *not* the "member left open" scenario R6's original design
+// expected — that shape turns out to be unreachable on the path this test
+// actually exercises, and the reason is itself the interesting finding.
+// landMergeTrainBatch's integration PR body unconditionally carries a
+// "Closes #N" line per survivor (assembleTrialBranch's closesLines, R2's own
+// verdict-seeder parses the same lines). On the default branch, GitHub's own
+// merge-time auto-close (reproduced faithfully by simgh's MergePR, gated on
+// base == the repo's default branch — see simgh/prs.go) fires the instant
+// the integration PR merges, closing every member issue *before*
+// landMergeTrainBatch's own explicit member-issue CloseIssue call ever runs.
+// That explicit call is therefore redundant on this path — its failure has
+// no observable consequence, because the issue is already closed by the
+// time it's attempted.
+//
+// This is the actual, structural reason landMergeTrainBatch's close failure
+// has never needed a settle-scan-backed retry the way landSingleton's does
+// (ADR-061's deferred-follow-up note): landSingleton's own landing PR body
+// deliberately carries no "Closes #N" line (see its doc comment — a
+// marker-free body to dodge findIntegrationPR collisions across sequential
+// singleton lands), so auto-close never fires there and its own explicit
+// CloseIssue is the *only* closer, which is exactly why its failure is
+// consequential enough to need ADR-061's retry/escalation arc. This test
+// proves that asymmetry precisely: it asserts MergePR precedes the (faulted)
+// CloseIssue call, that the issue is closed anyway despite the fault, and
+// that no fabrik:awaiting-member-close marker is ever applied — because
+// nothing here needs retrying.
 func TestMergeTrainLanding_BatchCloseAsymmetryPin(t *testing.T) {
 	t.Parallel()
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
@@ -84,30 +104,30 @@ func TestMergeTrainLanding_BatchCloseAsymmetryPin(t *testing.T) {
 
 	RunPoll(t, env)
 
-	// The board advance and PR close still happen — only the final issue
-	// close is affected, and it's warn-and-continue: no fabrik:paused, no
-	// stall.
+	// The board advance, PR close, and issue close all still happen — the
+	// injected fault on #A's explicit CloseIssue is genuinely inconsequential
+	// here (see doc comment above).
 	WaitForProjectStatus(t, env, numA, "Done", 20)
 	WaitForProjectStatus(t, env, numB, "Done", 10)
-	WaitForIssueClosed(t, env, numB, 5) // B's close never faulted — lands clean
+	WaitForIssueClosed(t, env, numA, 5) // closed via MergePR's own auto-close, not the faulted call
+	WaitForIssueClosed(t, env, numB, 5) // B's close never faulted — lands clean regardless
 
-	// The asymmetry itself: A's issue is left open, with no durable retry
-	// marker recorded anywhere a settle scan could pick up (landSingleton's
-	// equivalent failure would apply fabrik:awaiting-member-close here).
-	if projectItem(t, env, numA).IsClosed {
-		t.Fatalf("expected #%d's issue to remain open after its landMergeTrainBatch close failed once — the fault should have fired", numA)
+	// The ordering that explains why: the integration PR's merge (which
+	// carries #A's "Closes #%d" line) happens before landMergeTrainBatch's
+	// own explicit, faulted CloseIssue(#A) attempt.
+	mergePRPred := simgh.MethodIs("MergePR")
+	closeAPred := simgh.And(simgh.MethodIs("CloseIssue"), simgh.OnIssue(numA), simgh.WasInjected())
+	precedes, err := env.Sim.Log().Precedes(mergePRPred, closeAPred)
+	if err != nil {
+		t.Fatalf("Precedes(MergePR, injected CloseIssue(#%d)): %v", numA, err)
 	}
+	if !precedes {
+		t.Errorf("expected the integration PR's MergePR to precede the faulted CloseIssue(#%d) — landMergeTrainBatch's own close attempt should come after the auto-close-triggering merge", numA)
+	}
+
+	// No retry marker is ever applied — there is nothing to retry, unlike
+	// landSingleton's equivalent failure (fabrik:awaiting-member-close).
 	if hasLabel(IssueLabels(t, env, numA), "fabrik:awaiting-member-close") {
-		t.Errorf("landMergeTrainBatch has no settle-scan-backed retry for its own member-issue close (ADR-061 deferred follow-up) — fabrik:awaiting-member-close must never appear here")
-	}
-
-	// No automatic retry ever closes it: run several more polls (nothing
-	// left in Queued to dispatch a fresh train, so this only exercises
-	// settle scans, none of which own this failure) and confirm it's still
-	// open — this is the asymmetry's actual, observable consequence, not
-	// just an absent label.
-	RunPolls(t, env, 3)
-	if projectItem(t, env, numA).IsClosed {
-		t.Errorf("expected #%d to remain open indefinitely — landMergeTrainBatch's close failure has no retry path to eventually succeed on its own", numA)
+		t.Errorf("landMergeTrainBatch has no settle-scan-backed retry for its own member-issue close (ADR-061 deferred follow-up), and none is needed here — fabrik:awaiting-member-close must never appear")
 	}
 }

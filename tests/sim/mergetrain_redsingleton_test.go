@@ -34,12 +34,16 @@ var errInjectedRerouteFault = errors.New("simgh: injected reroute fault")
 func TestMergeTrainRedSingleton_ReroutesOffQueued(t *testing.T) {
 	t.Parallel()
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
-	startTrialVerdictSeeder(t, env, allGreenVerdict) // overridden below to red-only-for-this-member
 
 	num, _ := QueueMember(t, env, "redsingleton", map[string]string{"solo.txt": "solo\n"})
 
-	// Replace the all-green seeder with one that reds every trial containing
-	// this lone member — a batch of one is always "this member alone".
+	// Reds every trial containing this lone member — a batch of one is
+	// always "this member alone". (Only one seeder ever runs here:
+	// startTrialVerdictSeeder starts a background goroutine with its own
+	// PR-dedup state, so starting a second one concurrently — rather than
+	// stopping the first — would race both against the engine's first
+	// FetchCheckRuns read and could seed conflicting verdicts on the same
+	// trial SHA.)
 	startTrialVerdictSeeder(t, env, poisonVerdict(num))
 
 	RunPoll(t, env)
