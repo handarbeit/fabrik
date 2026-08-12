@@ -250,30 +250,28 @@ repo (`Engine.mergeTrainCloneSkipCounts`, keyed `"owner/repo"` — repo-keyed
 rather than item-keyed, since `batch[0]`'s identity is exactly what varies
 across polls) each time `ensureRepoReady` returns `ErrSkipItem` for the
 anchor. Once the streak reaches `e.cfg.MaxRetries`, `recordMergeTrainCloneSkip`
-pauses the *current* anchor item with an explanatory comment that names the
+posts an explanatory **comment only** on the *current* anchor item, naming the
 repo, the streak length, and — read from the live `cloneInFlight` entry — the
 specific issue whose failed attempt still owns the retry gate, so an operator
-knows exactly which issue's `fabrik:paused` to clear. The current anchor is
-paused (not the original owner) because it is the item a human reading the
-Queued column right now can act on; the comment makes clear its own clone was
-never attempted, so the pause reads as a wedge notification rather than a
-fresh clone failure. The streak resets to zero both on escalation (so a fresh
-budget applies to any future streak) and whenever `ensureRepoReady` succeeds
-for that repo (`resetMergeTrainCloneSkip`) — mirroring `mergeTrainEjectionCounts`/
-`ejectMember`'s existing counter-then-escalate-then-reset shape in the same
-file, and the escalate-after-`MaxRetries` convention used throughout the
-ADR-1270 settle scans elsewhere in the engine package. `MaxRetries <= 0`
-(unlimited) never escalates, matching every other `MaxRetries`-gated
-escalation path.
+knows exactly which issue's `fabrik:paused` to clear. It does **not** add
+`fabrik:paused` (or any other label) to the anchor — see "Correction: the
+anchor must not be paused" below for why. The streak resets to zero both on
+escalation (so a fresh budget applies to any future streak) and whenever
+`ensureRepoReady` succeeds for that repo (`resetMergeTrainCloneSkip`) —
+mirroring `mergeTrainEjectionCounts`/`ejectMember`'s existing
+counter-then-escalate-then-reset shape in the same file, and the
+escalate-after-`MaxRetries` convention used throughout the ADR-1270 settle
+scans elsewhere in the engine package. `MaxRetries <= 0` (unlimited) never
+escalates, matching every other `MaxRetries`-gated escalation path.
 
 **Alternatives considered**:
 
-- *Promote the log line to a warning only* (no pause/comment): makes the
-  condition greppable in `fabrik.log` but leaves the operator-visible symptom
-  (a repo's merge train quietly never landing anything) unexplained anywhere
-  a human would normally look — GitHub, not the daemon's log file. Rejected
-  as insufficient on its own for a condition this codebase otherwise always
-  surfaces via `fabrik:paused` + comment.
+- *Promote the log line to a warning only* (no comment): makes the condition
+  greppable in `fabrik.log` but leaves the operator-visible symptom (a repo's
+  merge train quietly never landing anything) unexplained anywhere a human
+  would normally look — GitHub, not the daemon's log file. Rejected as
+  insufficient on its own for a condition this codebase otherwise always
+  surfaces via a GitHub comment.
 - *Pin the retry gate to the repo instead of the anchor's item identity*
   (removing the wedge at its source, for the merge-train call site only):
   considered, but the identity gate's correctness depends on checking the
@@ -288,9 +286,45 @@ escalation path.
   the shared `cloneInFlight` coordination, which is exactly the
   batch-anchor-selection redesign Plan already judged out of this issue's
   scope. Rejected as more invasive than escalating the existing gap.
+- *Resolve the pinned owner (`ownerKey`) to a real `gh.ProjectItem` and pause
+  that instead of the anchor*: would target the item an operator actually
+  needs to act on, but `ownerKey` is only a `"owner/repo#N"` string — turning
+  it back into a full `gh.ProjectItem` (with the GraphQL node `ID` mutations
+  need) requires an extra board lookup this path doesn't otherwise perform,
+  and it would be redundant besides: that item was already paused with its
+  own "cannot clone repo" comment by `ensureRepoReady` at the moment its
+  clone attempt failed (see "What 'a later poll may retry' now means,
+  precisely" above). Rejected as unnecessary complexity for a state that's
+  already durable.
 
 This closes the residual limitation as a *shippable* one: the repo is never
 duplicated-cloned or duplicated-commented (R1 still holds), and it is now
 never silently wedged past `MaxRetries` polls either — it escalates loudly
 instead, following this codebase's established pattern rather than inventing
 a new one.
+
+### Correction: the anchor must not be paused
+
+The first version of this escalation called `pauseIssue` on the current
+anchor (adding `fabrik:paused` + `fabrik:awaiting-input` alongside the
+comment), reasoning that the anchor was "the item a human reading the Queued
+column right now can act on." PR review (both a bot review pass and a human
+reviewer, independently) identified a real defect in that reasoning:
+`batch[0]` is an **arbitrary, otherwise-healthy** Queued member — it did
+nothing wrong, and pausing it removes it from dispatch eligibility exactly
+like any other `fabrik:paused` item. Because fixing the *pinned owner's*
+clone issue never un-pauses the *anchor* (they are different items, and
+nothing links the two labels), every time the streak fired against a newly
+rotated anchor, a **different**, previously-innocent Queued member would be
+permanently exiled — with no effect on the actual wedge, since the anchor's
+own clone was never even attempted. Left unaddressed, an unresolved clone
+failure would progressively bench the repo's entire Queued population one
+member at a time, purely as a side effect of an escalation mechanism meant
+only to make the wedge *visible*.
+
+The fix is the comment-only design described above: `recordMergeTrainCloneSkip`
+now calls `postItemComment`, not `pauseIssue`. This preserves the goal
+(the wedge is visible on GitHub, and the comment names exactly which issue's
+`fabrik:paused` an operator needs to clear) without the collateral damage —
+the anchor remains fully eligible for the next batch, since it never leaves
+Queued in the first place.

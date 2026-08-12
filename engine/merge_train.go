@@ -594,13 +594,26 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 // never match and the gate stays shut — the repo would otherwise skip silently forever,
 // recoverable only by the original anchor being reselected or an engine restart.
 //
-// This escalates instead, once the streak reaches e.cfg.MaxRetries, mirroring both this
-// file's own mergeTrainEjectionCounts/ejectMember shape (in-memory counter, escalate,
-// reset) and the escalate-after-MaxRetries convention used throughout the ADR-1270 settle
-// scans elsewhere in the engine package. Unlike mergeTrainEjectionCounts (keyed per
-// member, "owner/repo#N", because an ejection is inherently about one member), this is
-// keyed per repo ("owner/repo") — the wedge is a property of the repo's cloneInFlight
-// entry, not of whichever item happens to be batch[0] this poll.
+// This escalates instead, once the streak reaches e.cfg.MaxRetries, by posting a
+// comment on the current anchor naming the pinned owner and the remedy. It deliberately
+// does NOT pause the anchor: an earlier revision called pauseIssue here, but batch[0] is
+// an arbitrary, otherwise-healthy Queued member — pausing it removes it from dispatch
+// eligibility, and since fixing the pinned owner's clone issue never un-pauses this
+// anchor, every MaxRetries-poll streak would permanently exile a *different* innocent
+// member as Queued membership rotates, without doing anything to actually resolve the
+// wedge (review feedback on this PR). A comment-only notice keeps the escalation
+// observable — which is the actual goal — without that collateral damage; the real
+// remedy (clearing fabrik:paused on the pinned owner) is unaffected either way, since
+// that item was already paused with its own explanatory comment at the moment its clone
+// attempt failed (see ensureRepoReady).
+//
+// Mirrors this file's own mergeTrainEjectionCounts/ejectMember shape (in-memory
+// counter, escalate, reset) and the escalate-after-MaxRetries convention used
+// throughout the ADR-1270 settle scans elsewhere in the engine package. Unlike
+// mergeTrainEjectionCounts (keyed per member, "owner/repo#N", because an ejection is
+// inherently about one member), this is keyed per repo ("owner/repo") — the wedge is a
+// property of the repo's cloneInFlight entry, not of whichever item happens to be
+// batch[0] this poll.
 func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem) {
 	e.mergeTrainCloneSkipMu.Lock()
 	e.mergeTrainCloneSkipCounts[repoKey]++
@@ -633,11 +646,11 @@ func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem
 		ownerClause = fmt.Sprintf("issue %s's failed clone attempt", ownerKey)
 	}
 	msg := fmt.Sprintf(
-		"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is the current train anchor, but its own clone was never attempted — the retry is pinned to %s, which must have its `fabrik:paused` label removed (after the underlying clone issue is fixed) before any anchor, including this one, can retry.\n\nThis item has been paused so the wedge is visible. Remove `fabrik:paused` here once the pinned issue above is resolved and the clone succeeds again.",
+		"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is the current train anchor, but its own clone was never attempted — the retry is pinned to %s, which must have its `fabrik:paused` label removed (after the underlying clone issue is fixed) before any anchor, including this one, can retry.\n\nThis item itself is otherwise healthy and has NOT been paused — it remains eligible for the next merge-train batch. No action is needed here; resolve the wedge by clearing `fabrik:paused` on the pinned issue above.",
 		repoKey, count, anchor.Number, ownerClause,
 	)
-	e.logf(anchor.Number, "escalate", "merge-train repo %s clone wedged after %d skips — pausing anchor\n", repoKey, count)
-	e.pauseIssue(anchor, msg, pauseOpts{awaitingInput: true, reactRocket: true})
+	e.logf(anchor.Number, "escalate", "merge-train repo %s clone wedged after %d skips — notifying anchor (not pausing)\n", repoKey, count)
+	e.postItemComment(anchor, msg, true)
 }
 
 // resetMergeTrainCloneSkip clears the consecutive-skip counter for repoKey once

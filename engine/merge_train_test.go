@@ -985,9 +985,15 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 // test for #1543's follow-up: prepareTrainWorker's batch[0] repo anchor can be a
 // different item on every poll, so ADR-1543's identity-gated retry boundary can wedge
 // silently forever once it can never match. This proves recordMergeTrainCloneSkip
-// escalates (pauses the current anchor, posts a comment) once the skip streak reaches
+// escalates (posts a comment on the current anchor) once the skip streak reaches
 // e.cfg.MaxRetries, and stays silent below it — sequential, non-racing calls, mirroring
 // TestEjectMember_PausesAfterMaxEjections's shape for the sibling counter.
+//
+// It also asserts the anchor is NOT paused: an earlier revision called pauseIssue on
+// the (arbitrary, rotating) anchor, which permanently exiled a healthy Queued member
+// from dispatch eligibility every time the streak fired against a new anchor — review
+// feedback on this PR. The fix is comment-only; the anchor's dispatch eligibility must
+// be unaffected.
 func TestRecordMergeTrainCloneSkip_EscalatesAfterMaxRetries(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
@@ -1027,18 +1033,19 @@ func TestRecordMergeTrainCloneSkip_EscalatesAfterMaxRetries(t *testing.T) {
 	if comments != 1 {
 		t.Fatalf("expected exactly 1 comment on escalation, got %d", comments)
 	}
-	if !pausedAdded {
-		t.Error("expected fabrik:paused on the anchor after escalation")
+	if pausedAdded {
+		t.Error("expected the anchor NOT to receive fabrik:paused after escalation (would exile a healthy, rotating item)")
 	}
-	if !awaitingAdded {
-		t.Error("expected fabrik:awaiting-input on the anchor after escalation")
+	if awaitingAdded {
+		t.Error("expected the anchor NOT to receive fabrik:awaiting-input after escalation")
 	}
 }
 
 // TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner verifies the escalation comment
 // identifies the specific issue whose failed clone attempt pinned cloneInFlight's
-// ownerKey — the operator needs to know which issue's fabrik:paused to clear, since it's
-// not necessarily the anchor item being paused here (see #1543's follow-up discussion).
+// ownerKey — the operator needs to know which issue's fabrik:paused to clear, since the
+// escalation comment lands on the anchor item, which is never itself paused (see
+// #1543's follow-up discussion).
 func TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
@@ -1133,17 +1140,20 @@ func TestRecordMergeTrainCloneSkip_CounterIsPerRepo(t *testing.T) {
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	pausedIssues := make(map[int]bool)
+	commentedIssues := make(map[int]bool)
+	for _, c := range client.addCommentCalls {
+		commentedIssues[c.issueNumber] = true
+	}
+	if !commentedIssues[1] {
+		t.Error("expected anchor #1 (repoA) to receive the escalation comment after 3 skips")
+	}
+	if commentedIssues[2] {
+		t.Error("expected anchor #2 (repoB) NOT to receive the escalation comment after only 1 skip")
+	}
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
-			pausedIssues[c.issueNumber] = true
+			t.Errorf("expected no fabrik:paused label anywhere (escalation is comment-only), got it on #%d", c.issueNumber)
 		}
-	}
-	if !pausedIssues[1] {
-		t.Error("expected anchor #1 (repoA) to be paused after 3 skips")
-	}
-	if pausedIssues[2] {
-		t.Error("expected anchor #2 (repoB) NOT to be paused after only 1 skip")
 	}
 }
 
