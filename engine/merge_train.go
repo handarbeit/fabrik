@@ -614,6 +614,14 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 // inherently about one member), this is keyed per repo ("owner/repo") — the wedge is a
 // property of the repo's cloneInFlight entry, not of whichever item happens to be
 // batch[0] this poll.
+//
+// The anchor is not necessarily a bystander, though: on the very first ErrSkipItem for
+// a repo (MaxRetries: 1 is trivially reachable; the default MaxRetries: 3 is reachable
+// too, if the same anchor recurs across polls before its own fabrik:paused takes
+// visible effect), anchor IS the pinned owner. The message branches on
+// issueKey(anchor, ...) == ownerKey so it never claims a self-owning anchor's "own
+// clone was never attempted" or that it "has NOT been paused" when both are false
+// (review feedback on this PR).
 func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem) {
 	e.mergeTrainCloneSkipMu.Lock()
 	e.mergeTrainCloneSkipCounts[repoKey]++
@@ -641,15 +649,29 @@ func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem
 	e.mergeTrainCloneSkipCounts[repoKey] = 0
 	e.mergeTrainCloneSkipMu.Unlock()
 
-	ownerClause := "an earlier failed clone attempt"
-	if ownerKey != "" {
-		ownerClause = fmt.Sprintf("issue %s's failed clone attempt", ownerKey)
+	// The anchor is not always a bystander: on the very first ErrSkipItem for a repo
+	// (or any later recurrence before the anchor's own fabrik:paused has taken visible
+	// effect), anchor IS the pinned owner — its own clone attempt is what failed. The
+	// message must not claim otherwise (review feedback on this PR).
+	anchorIsOwner := ownerKey != "" && ownerKey == issueKey(anchor, e.defaultRepo())
+
+	var msg string
+	if anchorIsOwner {
+		msg = fmt.Sprintf(
+			"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is both the current train anchor and the issue whose own clone attempt failed and is pinning the retry gate — it already carries `fabrik:paused` and an explanatory \"cannot clone repo\" comment from that failure.\n\nFix the underlying clone issue and remove `fabrik:paused` here to retry.",
+			repoKey, count, anchor.Number,
+		)
+	} else {
+		ownerClause := "an earlier failed clone attempt"
+		if ownerKey != "" {
+			ownerClause = fmt.Sprintf("issue %s's failed clone attempt", ownerKey)
+		}
+		msg = fmt.Sprintf(
+			"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is the current train anchor, but its own clone was never attempted — the retry is pinned to %s, which must have its `fabrik:paused` label removed (after the underlying clone issue is fixed) before any anchor, including this one, can retry.\n\nThis item itself is otherwise healthy and has NOT been paused — it remains eligible for the next merge-train batch. No action is needed here; resolve the wedge by clearing `fabrik:paused` on the pinned issue above.",
+			repoKey, count, anchor.Number, ownerClause,
+		)
 	}
-	msg := fmt.Sprintf(
-		"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is the current train anchor, but its own clone was never attempted — the retry is pinned to %s, which must have its `fabrik:paused` label removed (after the underlying clone issue is fixed) before any anchor, including this one, can retry.\n\nThis item itself is otherwise healthy and has NOT been paused — it remains eligible for the next merge-train batch. No action is needed here; resolve the wedge by clearing `fabrik:paused` on the pinned issue above.",
-		repoKey, count, anchor.Number, ownerClause,
-	)
-	e.logf(anchor.Number, "escalate", "merge-train repo %s clone wedged after %d skips — notifying anchor (not pausing)\n", repoKey, count)
+	e.logf(anchor.Number, "escalate", "merge-train repo %s clone wedged after %d skips (anchor is pinned owner: %v)\n", repoKey, count, anchorIsOwner)
 	e.postItemComment(anchor, msg, true)
 }
 

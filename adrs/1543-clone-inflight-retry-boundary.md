@@ -328,3 +328,28 @@ now calls `postItemComment`, not `pauseIssue`. This preserves the goal
 `fabrik:paused` an operator needs to clear) without the collateral damage —
 the anchor remains fully eligible for the next batch, since it never leaves
 Queued in the first place.
+
+### Correction: the anchor can *be* the pinned owner
+
+A second review pass (again both a bot pass and independently) caught a
+remaining defect in the escalation message itself: it unconditionally
+asserted the anchor's "own clone was never attempted" and that it "has NOT
+been paused." Both claims are false whenever the anchor *is* the pinned
+owner — reachable on the very first `ErrSkipItem` for a repo (trivially with
+`MaxRetries: 1`; also reachable at the default `MaxRetries: 3` if the same
+anchor recurs across polls before its own `fabrik:paused` takes visible
+effect). In that case the anchor's clone attempt is exactly what failed, and
+`ensureRepoReady` already paused it with its own "cannot clone repo" comment
+— telling that same issue to go look at a separately "pinned" issue that
+doesn't exist would misdirect the one operator most able to act.
+
+`recordMergeTrainCloneSkip` now compares `issueKey(anchor, e.defaultRepo())`
+against the pinned `ownerKey` and branches the message: when they match, the
+comment states plainly that this item's own clone attempt is the one pinning
+the retry gate, and that it already carries `fabrik:paused`; only when they
+differ does it use the original bystander framing ("its own clone was never
+attempted... has NOT been paused"). Covered by
+`TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner` (anchor-is-owner
+case) alongside the existing `TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner`
+(anchor-is-bystander case, now also asserting the bystander framing is
+present).

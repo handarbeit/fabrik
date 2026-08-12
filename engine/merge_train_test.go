@@ -1070,6 +1070,46 @@ func TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner(t *testing.T) {
 	if !strings.Contains(body, "#50") {
 		t.Errorf("expected comment to reference the anchor issue #50, got: %s", body)
 	}
+	if !strings.Contains(body, "has NOT been paused") {
+		t.Errorf("anchor != owner: expected the 'has NOT been paused' bystander framing, got: %s", body)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner verifies the escalation
+// message does not misdirect an operator when the anchor itself is the pinned owner —
+// reachable on the very first ErrSkipItem for a repo (trivially with MaxRetries: 1, and
+// also at the default MaxRetries with a recurring same anchor). An earlier revision
+// unconditionally claimed "its own clone was never attempted" and "has NOT been
+// paused," both false in this case since ensureRepoReady already paused this exact
+// item with its own "cannot clone repo" comment (review feedback on this PR).
+func TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 1
+
+	anchor := makeTrainItem(50, "Anchor Issue")
+	repoKey := "owner/repo"
+	// The anchor's own issueKey ("owner/repo#50") is the pinned owner.
+	eng.cloneInFlight.Store(repoKey, &cloneCall{done: make(chan struct{}), ownerKey: "owner/repo#50"})
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "own clone was never attempted") {
+		t.Errorf("anchor IS the owner: message must not claim its own clone was never attempted, got: %s", body)
+	}
+	if strings.Contains(body, "has NOT been paused") {
+		t.Errorf("anchor IS the owner: message must not claim it has NOT been paused (it already has fabrik:paused from its own failure), got: %s", body)
+	}
+	if !strings.Contains(body, "#50") {
+		t.Errorf("expected comment to reference the anchor/owner issue #50, got: %s", body)
+	}
 }
 
 // TestRecordMergeTrainCloneSkip_ResetAfterEscalationGivesFreshBudget verifies the
