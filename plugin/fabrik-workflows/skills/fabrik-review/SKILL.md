@@ -75,6 +75,8 @@ A rebase rewrites every replayed commit's SHA — the result will *never* match 
 
 **Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
 
+**If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin main`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
+
 If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
 
 ### Install dependencies per CLAUDE.md

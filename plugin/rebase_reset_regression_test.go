@@ -58,6 +58,12 @@ var (
 	// test (see plan Task 5).
 	resetHardRe        = regexp.MustCompile(`reset --hard`)
 	resetProhibitionRe = regexp.MustCompile(`(?i)(never|do not|don't)[^.\n]{0,80}reset --hard|reset --hard[^.\n]{0,80}(never|discard|data loss)`)
+	// A rejected --force-with-lease push (the remote moved since fetch — e.g.
+	// the engine's own worktree push or commitWIP wrote the branch in the
+	// meantime) is the same unguided-divergence state the fix exists to
+	// close, one level down: without explicit guidance here, an agent facing
+	// a rejected push has nothing to do but improvise again.
+	rejectedPushRe = regexp.MustCompile(`(?i)rejected`)
 )
 
 // assertRebaseSectionIsFixed checks a section of text (a SKILL.md's "Before
@@ -79,6 +85,9 @@ func assertRebaseSectionIsFixed(t *testing.T, label, section string) {
 	}
 	if !resetHardRe.MatchString(section) {
 		t.Errorf("%s never mentions \"reset --hard\" at all — expected an explicit prohibition against resetting to the remote tip", label)
+	}
+	if !rejectedPushRe.MatchString(section) {
+		t.Errorf("%s is missing guidance for a rejected --force-with-lease push (expected \"rejected\")", label)
 	}
 }
 
