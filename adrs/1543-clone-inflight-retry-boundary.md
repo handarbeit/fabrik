@@ -353,3 +353,45 @@ attempted... has NOT been paused"). Covered by
 case) alongside the existing `TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner`
 (anchor-is-bystander case, now also asserting the bystander framing is
 present).
+
+### Correction: escalate exactly once per episode, not once per `MaxRetries` skips
+
+A third review pass (human, this time) traced through the consequence of
+removing `pauseIssue` (the first correction above): in this codebase's
+established escalate-after-`MaxRetries` convention (ADR-060, ADR-061,
+ADR-1097, ADR-1422), `fabrik:paused` *is* the idempotency guard — it's
+applied once, the comment rides along, and the label's presence stops the
+path repeating on a later poll. Once the anchor is deliberately never
+paused, that guard no longer exists, but the original implementation still
+reset `mergeTrainCloneSkipCounts[repoKey]` to `0` immediately after
+escalating — intended (per its own comment) to give "a future streak... a
+fresh budget." On a **persistent** wedge — the only kind this mechanism
+exists for; it stays wedged until an operator clears the pinned owner's
+`fabrik:paused` or the engine restarts — the counter simply climbs back up
+to `MaxRetries` and escalates again, indefinitely, once every `MaxRetries`
+skips, sprayed across whichever item happens to be anchor at that moment
+(review feedback on this PR; the interaction was flagged as something that
+should have been caught when escalation was first requested).
+`TestRecordMergeTrainCloneSkip_ResetAfterEscalationGivesFreshBudget` had
+certified exactly this behavior as a feature — it only proved the *next*
+call didn't re-escalate, not that the call after that didn't either.
+
+The fix drops the reset entirely and changes the escalation condition from
+`count >= MaxRetries` to `count == MaxRetries`: the counter still climbs on
+every subsequent skip of a persistent wedge, but since it only ever equals
+`MaxRetries` once per monotonically-increasing streak, the comment fires
+exactly once, and every later skip falls through silently to the existing
+per-skip log line. `resetMergeTrainCloneSkip` — already called whenever
+`ensureRepoReady` succeeds for the repo — is what now delivers the
+originally-intended "fresh budget for a future streak": deleting the map
+entry on recovery is what makes a genuinely new episode start its own count
+from `1` and earn its own single escalation when it reaches `MaxRetries` in
+turn, without needing an in-band reset inside the escalation branch itself.
+Renamed the test to `TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge`
+(asserts exactly one comment across ten consecutive skips past `MaxRetries`,
+with no intervening success) and added
+`TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain`
+(asserts a second, independent escalation after an intervening
+`resetMergeTrainCloneSkip`). Verified non-vacuous by reintroducing the old
+reset-after-escalate behavior and confirming the persistent-wedge test fails
+5/5, then reverting.

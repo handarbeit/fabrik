@@ -594,24 +594,30 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 // never match and the gate stays shut — the repo would otherwise skip silently forever,
 // recoverable only by the original anchor being reselected or an engine restart.
 //
-// This escalates instead, once the streak reaches e.cfg.MaxRetries, by posting a
-// comment on the current anchor naming the pinned owner and the remedy. It deliberately
-// does NOT pause the anchor: an earlier revision called pauseIssue here, but batch[0] is
-// an arbitrary, otherwise-healthy Queued member — pausing it removes it from dispatch
-// eligibility, and since fixing the pinned owner's clone issue never un-pauses this
-// anchor, every MaxRetries-poll streak would permanently exile a *different* innocent
-// member as Queued membership rotates, without doing anything to actually resolve the
-// wedge (review feedback on this PR). A comment-only notice keeps the escalation
-// observable — which is the actual goal — without that collateral damage; the real
-// remedy (clearing fabrik:paused on the pinned owner) is unaffected either way, since
-// that item was already paused with its own explanatory comment at the moment its clone
-// attempt failed (see ensureRepoReady).
+// This escalates instead, exactly once when the streak first reaches e.cfg.MaxRetries,
+// by posting a comment on the current anchor naming the pinned owner and the remedy. It
+// deliberately does NOT pause the anchor: an earlier revision called pauseIssue here,
+// but batch[0] is an arbitrary, otherwise-healthy Queued member — pausing it removes it
+// from dispatch eligibility, and since fixing the pinned owner's clone issue never
+// un-pauses this anchor, every MaxRetries-poll streak would permanently exile a
+// *different* innocent member as Queued membership rotates, without doing anything to
+// actually resolve the wedge (review feedback on this PR). A comment-only notice keeps
+// the escalation observable — which is the actual goal — without that collateral
+// damage; the real remedy (clearing fabrik:paused on the pinned owner) is unaffected
+// either way, since that item was already paused with its own explanatory comment at
+// the moment its clone attempt failed (see ensureRepoReady).
 //
-// Mirrors this file's own mergeTrainEjectionCounts/ejectMember shape (in-memory
-// counter, escalate, reset) and the escalate-after-MaxRetries convention used
-// throughout the ADR-1270 settle scans elsewhere in the engine package. Unlike
-// mergeTrainEjectionCounts (keyed per member, "owner/repo#N", because an ejection is
-// inherently about one member), this is keyed per repo ("owner/repo") — the wedge is a
+// Unlike this file's own mergeTrainEjectionCounts/ejectMember (which resets its counter
+// after pausing, because fabrik:paused itself is the idempotency guard that stops the
+// pause path repeating), this counter is NOT reset after escalating: since the anchor
+// is deliberately never paused, there is no label to gate a repeat, so a reset here
+// would turn one escalation into a comment fired every MaxRetries skips for as long as
+// the wedge persists (review feedback on this PR — see the "escalate exactly once"
+// comment below). Escalating on count == MaxRetries (not >=, no reset) and leaving the
+// count to climb past it unremarked is what actually delivers "escalate once per
+// episode": a genuinely new episode only starts once resetMergeTrainCloneSkip deletes
+// the counter on the next ensureRepoReady success. This is otherwise keyed per repo
+// ("owner/repo"), not per member like mergeTrainEjectionCounts — the wedge is a
 // property of the repo's cloneInFlight entry, not of whichever item happens to be
 // batch[0] this poll.
 //
@@ -639,15 +645,20 @@ func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem
 	}
 	e.logf(0, "merge-train", "repo %s not ready (skip %d, pinned owner %q) — aborting train\n", repoKey, count, ownerKey)
 
-	if e.cfg.MaxRetries <= 0 || count < e.cfg.MaxRetries {
+	// Escalate exactly once per streak, at the moment count first reaches MaxRetries —
+	// not "count >= MaxRetries" and not followed by a reset. A persistent wedge (the
+	// only kind this exists for: it stays wedged until an operator clears the pin or
+	// the engine restarts) means count keeps climbing past MaxRetries on every
+	// subsequent skip; count != MaxRetries then falls through silently to the log line
+	// above for every one of those, so the comment fires exactly once (review feedback
+	// on this PR — a reset-after-escalate here turned "escalate once" into "escalate on
+	// a timer," reposting every MaxRetries skips indefinitely, sprayed across whichever
+	// item is anchor that poll). A genuinely new episode after recovery starts its own
+	// fresh count from resetMergeTrainCloneSkip's delete (see below) and gets its own
+	// single escalation when it reaches MaxRetries in turn.
+	if e.cfg.MaxRetries <= 0 || count != e.cfg.MaxRetries {
 		return
 	}
-
-	// Reset so that once an operator resolves the wedge, a future streak gets a fresh
-	// budget before escalating again — mirrors ejectMember's counter reset.
-	e.mergeTrainCloneSkipMu.Lock()
-	e.mergeTrainCloneSkipCounts[repoKey] = 0
-	e.mergeTrainCloneSkipMu.Unlock()
 
 	// The anchor is not always a bystander: on the very first ErrSkipItem for a repo
 	// (or any later recurrence before the anchor's own fabrik:paused has taken visible

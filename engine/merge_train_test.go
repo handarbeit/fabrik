@@ -1112,10 +1112,46 @@ func TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner(t *testing.T) {
 	}
 }
 
-// TestRecordMergeTrainCloneSkip_ResetAfterEscalationGivesFreshBudget verifies the
-// counter is reset once escalation fires, so a further single skip right after doesn't
-// immediately re-escalate — mirrors ejectMember's own reset-on-pause behavior.
-func TestRecordMergeTrainCloneSkip_ResetAfterEscalationGivesFreshBudget(t *testing.T) {
+// TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge verifies escalation
+// fires exactly once per streak, not on a repeating MaxRetries-poll cadence. An earlier
+// revision reset the counter to zero immediately after escalating, which (since the
+// anchor is deliberately never paused — no label exists to gate a repeat) turned one
+// escalation into a comment fired every MaxRetries skips for as long as the wedge
+// persisted, sprayed across whichever item happened to be anchor each time (review
+// feedback on this PR). A persistent wedge is simulated by many consecutive skips with
+// no intervening resetMergeTrainCloneSkip (success) call — the only way a real wedge
+// ends short of an engine restart.
+func TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(7, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	// Simulate a persistent wedge: 10 consecutive skips, well past MaxRetries, with no
+	// success in between.
+	for i := 0; i < 10; i++ {
+		eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	}
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 1 {
+		t.Errorf("expected exactly 1 escalation comment across the entire persistent wedge, got %d", comments)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain verifies that a
+// genuinely new wedge episode — one that starts only after resetMergeTrainCloneSkip has
+// cleared the counter on an intervening ensureRepoReady success — gets its own,
+// independent escalation. This is the fresh-budget-per-episode behavior
+// recordMergeTrainCloneSkip's doc comment promises, now delivered by
+// resetMergeTrainCloneSkip's delete rather than a reset-after-escalate inside this
+// function (review feedback on this PR).
+func TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
@@ -1125,14 +1161,18 @@ func TestRecordMergeTrainCloneSkip_ResetAfterEscalationGivesFreshBudget(t *testi
 	repoKey := "owner/repo"
 
 	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1
-	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates + resets to 0
-	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1 again, below threshold
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates (comment 1)
+
+	eng.resetMergeTrainCloneSkip(repoKey) // operator fixed it; ensureRepoReady succeeded
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // new episode, count=1
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates again (comment 2)
 
 	client.mu.Lock()
 	comments := len(client.addCommentCalls)
 	client.mu.Unlock()
-	if comments != 1 {
-		t.Errorf("expected exactly 1 escalation comment (counter reset after firing), got %d", comments)
+	if comments != 2 {
+		t.Errorf("expected exactly 2 escalation comments (one per episode), got %d", comments)
 	}
 }
 
