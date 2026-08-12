@@ -55,3 +55,17 @@ jobs:
       # network call. There is no TestMain, so nothing runs. Takes <1s.
       - name: compile e2e suite (not run)
         run: go test -tags e2e -run '^$' ./tests/e2e/...
+
+      # scripts/e2e/run.sh's own header states this script exists so a future
+      # edit that regresses R2's rate-limit-backoff detection (#1527) — e.g.
+      # reintroducing the byte-offset scan that fabrik.log's O_TRUNC-on-startup
+      # silently defeated — fails a check instead of only being caught by a
+      # real, multi-hour release-gate run. That guarantee only holds if this
+      # actually runs somewhere; wired in here per #1547's review. Needs no
+      # test bed, token, or network: it sources run.sh for the function
+      # definitions only (guarded so sourcing doesn't trigger a gate run) and
+      # drives fixtures entirely via mktemp. On a bare runner with no
+      # ~/dev/fabrik-test, run.sh's TEST_BED/BED_TOKEN resolution degrades to
+      # a stderr warning rather than failing under set -euo pipefail.
+      - name: backoff-detection regression test (#1527)
+        run: bash scripts/e2e/backoff_detection_test.sh

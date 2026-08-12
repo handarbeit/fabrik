@@ -34,6 +34,21 @@ const (
 	DefaultLogPath      = ".pruefer/pruefer.log"
 )
 
+// Defaults for the event-driven (Hookdeck) ingestion surface, justified in
+// adrs/1254-*.md. EventSourcePoll is the default: with it selected,
+// Pruefer's behavior is byte-for-byte unchanged from before this surface
+// existed.
+const (
+	EventSourcePoll     = "poll"
+	EventSourceHookdeck = "hookdeck"
+
+	DefaultEventSource                    = EventSourcePoll
+	DefaultHookdeckAPIKeyEnv              = "HOOKDECK_API_KEY"
+	DefaultHookdeckWebhookSecretEnv       = "PRUEFER_GITHUB_WEBHOOK_SECRET"
+	DefaultReconciliationStartup          = true
+	DefaultReconciliationFallbackInterval = 2 * time.Minute
+)
+
 // Config holds Pruefer's fully-resolved runtime configuration, after
 // applying the flag > env > YAML file > default precedence chain in
 // LoadConfig.
@@ -106,6 +121,34 @@ type Config struct {
 	// before validating required config (AppID/WatchedRepos) so `pruefer
 	// --version` works without a fully configured environment.
 	VersionRequested bool
+
+	// EventSource selects Pruefer's event ingestion mode: EventSourcePoll
+	// (default — behavior is byte-for-byte unchanged from before this
+	// field existed) or EventSourceHookdeck (event-driven, with poll
+	// demoted to a low-frequency reconciliation fallback — see the
+	// Reconciliation* fields below). See adrs/1254-*.md.
+	EventSource string
+
+	// HookdeckAPIKeyEnv names the environment variable holding the
+	// Hookdeck API key. Only consulted when EventSource ==
+	// EventSourceHookdeck.
+	HookdeckAPIKeyEnv string
+	// HookdeckWebhookSecretEnv names the environment variable holding the
+	// GitHub App's webhook secret, used to verify every forwarded
+	// delivery's signature — required regardless of Hookdeck's own
+	// transport auth. Only consulted when EventSource ==
+	// EventSourceHookdeck.
+	HookdeckWebhookSecretEnv string
+
+	// ReconciliationStartup controls whether an event-driven run performs
+	// a full poll reconciliation pass at startup, before event delivery
+	// begins. Only consulted when EventSource == EventSourceHookdeck.
+	ReconciliationStartup bool
+	// ReconciliationFallbackInterval is the low-frequency poll interval
+	// used as a safety net in event-driven mode — a separate field from
+	// PollInterval, which remains poll-only mode's interval, unaffected by
+	// this one. Only consulted when EventSource == EventSourceHookdeck.
+	ReconciliationFallbackInterval time.Duration
 }
 
 // yamlConfig is the shape of Pruefer's YAML config file. All fields are
@@ -131,6 +174,19 @@ type yamlConfig struct {
 	TUI                     *bool    `yaml:"tui"`
 	LogFile                 *string  `yaml:"log_file"`
 	AutoUpgrade             *bool    `yaml:"auto_upgrade"`
+
+	EventSource string `yaml:"event_source"`
+	Hookdeck    *struct {
+		APIKeyEnv        string `yaml:"api_key_env"`
+		WebhookSecretEnv string `yaml:"webhook_secret_env"`
+	} `yaml:"hookdeck"`
+	Reconciliation *struct {
+		Startup *bool `yaml:"startup"`
+		// FallbackInterval is a Go duration string (e.g. "2m"), matching
+		// the issue's literal config example — unlike this file's other
+		// duration fields, which use a "_seconds" int convention.
+		FallbackInterval string `yaml:"fallback_interval"`
+	} `yaml:"reconciliation"`
 }
 
 // loadYAMLConfig reads path, returning a zero-value yamlConfig (no error) if
@@ -173,6 +229,12 @@ type flagValues struct {
 	logFile                 string
 	autoUpgrade             bool
 	versionRequested        bool
+
+	eventSource                    string
+	hookdeckAPIKeyEnv              string
+	hookdeckWebhookSecretEnv       string
+	reconciliationStartup          bool
+	reconciliationFallbackInterval string
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -205,6 +267,11 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
 	fs.BoolVar(&fv.autoUpgrade, "auto-upgrade", false, "At each poll boundary (never mid-review), check GitHub Releases for a newer version and self-upgrade; dev builds (built from the fabrik source checkout) rebuild from origin/main instead")
 	fs.BoolVar(&fv.versionRequested, "version", false, "Print the pruefer version and exit")
+	fs.StringVar(&fv.eventSource, "event-source", "", "Event ingestion mode: poll (default) or hookdeck")
+	fs.StringVar(&fv.hookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Environment variable name holding the Hookdeck API key")
+	fs.StringVar(&fv.hookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Environment variable name holding the GitHub App's webhook secret")
+	fs.BoolVar(&fv.reconciliationStartup, "reconciliation-startup", true, "Run a full poll reconciliation pass at startup in event-driven mode")
+	fs.StringVar(&fv.reconciliationFallbackInterval, "reconciliation-fallback-interval", "", "Low-frequency poll interval used as a safety net in event-driven mode (Go duration, e.g. 2m)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -243,6 +310,12 @@ func LoadConfig(args []string) (Config, error) {
 		TUI:               true,
 		LogFile:           DefaultLogPath,
 		AutoUpgrade:       false,
+
+		EventSource:                    DefaultEventSource,
+		HookdeckAPIKeyEnv:              DefaultHookdeckAPIKeyEnv,
+		HookdeckWebhookSecretEnv:       DefaultHookdeckWebhookSecretEnv,
+		ReconciliationStartup:          DefaultReconciliationStartup,
+		ReconciliationFallbackInterval: DefaultReconciliationFallbackInterval,
 	}
 	if yc.RequestChangesThreshold != "" {
 		cfg.RequestChangesThreshold = Severity(yc.RequestChangesThreshold)
@@ -288,6 +361,29 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.LogFile != nil {
 		cfg.LogFile = *yc.LogFile
+	}
+	if yc.EventSource != "" {
+		cfg.EventSource = yc.EventSource
+	}
+	if yc.Hookdeck != nil {
+		if yc.Hookdeck.APIKeyEnv != "" {
+			cfg.HookdeckAPIKeyEnv = yc.Hookdeck.APIKeyEnv
+		}
+		if yc.Hookdeck.WebhookSecretEnv != "" {
+			cfg.HookdeckWebhookSecretEnv = yc.Hookdeck.WebhookSecretEnv
+		}
+	}
+	if yc.Reconciliation != nil {
+		if yc.Reconciliation.Startup != nil {
+			cfg.ReconciliationStartup = *yc.Reconciliation.Startup
+		}
+		if yc.Reconciliation.FallbackInterval != "" {
+			d, err := time.ParseDuration(yc.Reconciliation.FallbackInterval)
+			if err != nil {
+				return Config{}, fmt.Errorf("parsing reconciliation.fallback_interval %q: %w", yc.Reconciliation.FallbackInterval, err)
+			}
+			cfg.ReconciliationFallbackInterval = d
+		}
 	}
 
 	applyEnv(&cfg)
@@ -348,6 +444,35 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["auto-upgrade"] {
 		cfg.AutoUpgrade = fv.autoUpgrade
+	}
+	if explicit["event-source"] {
+		cfg.EventSource = fv.eventSource
+	}
+	if explicit["hookdeck-api-key-env"] {
+		if fv.hookdeckAPIKeyEnv == "" {
+			return Config{}, fmt.Errorf("-hookdeck-api-key-env cannot be empty")
+		}
+		cfg.HookdeckAPIKeyEnv = fv.hookdeckAPIKeyEnv
+	}
+	if explicit["hookdeck-webhook-secret-env"] {
+		if fv.hookdeckWebhookSecretEnv == "" {
+			return Config{}, fmt.Errorf("-hookdeck-webhook-secret-env cannot be empty")
+		}
+		cfg.HookdeckWebhookSecretEnv = fv.hookdeckWebhookSecretEnv
+	}
+	if explicit["reconciliation-startup"] {
+		cfg.ReconciliationStartup = fv.reconciliationStartup
+	}
+	if explicit["reconciliation-fallback-interval"] {
+		d, err := time.ParseDuration(fv.reconciliationFallbackInterval)
+		if err != nil {
+			return Config{}, fmt.Errorf("parsing -reconciliation-fallback-interval %q: %w", fv.reconciliationFallbackInterval, err)
+		}
+		cfg.ReconciliationFallbackInterval = d
+	}
+
+	if cfg.EventSource != EventSourcePoll && cfg.EventSource != EventSourceHookdeck {
+		return Config{}, fmt.Errorf("invalid event_source %q: must be %q or %q", cfg.EventSource, EventSourcePoll, EventSourceHookdeck)
 	}
 
 	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
@@ -437,6 +562,25 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_AUTO_UPGRADE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AutoUpgrade = b
+		}
+	}
+	if v := os.Getenv("PRUEFER_EVENT_SOURCE"); v != "" {
+		cfg.EventSource = v
+	}
+	if v := os.Getenv("PRUEFER_HOOKDECK_API_KEY_ENV"); v != "" {
+		cfg.HookdeckAPIKeyEnv = v
+	}
+	if v := os.Getenv("PRUEFER_HOOKDECK_WEBHOOK_SECRET_ENV"); v != "" {
+		cfg.HookdeckWebhookSecretEnv = v
+	}
+	if v := os.Getenv("PRUEFER_RECONCILIATION_STARTUP"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.ReconciliationStartup = b
+		}
+	}
+	if v := os.Getenv("PRUEFER_RECONCILIATION_FALLBACK_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ReconciliationFallbackInterval = d
 		}
 	}
 }

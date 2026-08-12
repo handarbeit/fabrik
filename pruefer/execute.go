@@ -11,6 +11,7 @@ import (
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
+	"github.com/handarbeit/fabrik/pruefer/events/hookdeck"
 )
 
 // Execute is Pruefer's entry point: loads .env, resolves configuration,
@@ -152,6 +153,33 @@ func Execute() error {
 		closeLog()
 	}()
 	daemon.preAcquiredLock = lockFile
+
+	if cfg.EventSource == EventSourceHookdeck {
+		apiKey := os.Getenv(cfg.HookdeckAPIKeyEnv)
+		if apiKey == "" {
+			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.api_key_env)", cfg.HookdeckAPIKeyEnv)
+		}
+		webhookSecret := os.Getenv(cfg.HookdeckWebhookSecretEnv)
+		if webhookSecret == "" {
+			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.webhook_secret_env)", cfg.HookdeckWebhookSecretEnv)
+		}
+		// Route hookdeck's package-level log hook through pruefer's own —
+		// hookdeck can't import pruefer (pruefer imports hookdeck), so
+		// without this its logs would write straight to os.Stderr
+		// unconditionally, bypassing whatever pruefer.Logf is ever wired to
+		// (e.g. a future TUI-safe sink) and diverging from every other
+		// pruefer log line's routing.
+		hookdeck.SetLogf(func(format string, args ...any) {
+			logf(0, "hookdeck", format, args...)
+		})
+		daemon.EventSource = hookdeck.NewSource(hookdeck.Config{
+			APIKey:        apiKey,
+			WebhookSecret: webhookSecret,
+			OnHealth:      daemon.HealthHandler(ctx),
+		})
+		logf(0, "poll", "event_source: hookdeck — Hookdeck API key from $%s, webhook secret from $%s\n",
+			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)
+	}
 
 	if useTUI(cfg) {
 		return runTUI(ctx, daemon)
