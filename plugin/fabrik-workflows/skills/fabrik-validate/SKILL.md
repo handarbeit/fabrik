@@ -24,25 +24,34 @@ The engine has written context files to `.fabrik-context/` in your working direc
 Read these files before starting validation. The spec in `.fabrik-context/issue.md` is your ground truth for requirements verification.
 
 1. `git status` — commit any uncommitted changes
-2. Check whether the branch is actually behind main before rebasing — rebasing when it isn't is pure churn (it replays every commit and changes only their SHAs, giving you nothing to push):
+2. Resolve the base branch — don't hardcode `main`. An issue carrying a `base:<branch>` label targets a different base branch — Fabrik already resolved it to fork this branch and open the PR, so read it back rather than assuming:
    ```bash
-   git fetch origin main
-   behind_count=$(git rev-list --count HEAD..origin/main)
+   base_branch=$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null)
+   if [ -z "$base_branch" ]; then
+     base_branch=main
+     echo "no linked PR found (or the query failed); falling back to repository default branch 'main'"
+   fi
+   ```
+   Use `$base_branch` — never a hardcoded `origin/main` — in every step below, including "Merge conflict resolution."
+3. Check whether the branch is actually behind its base before rebasing — rebasing when it isn't is pure churn (it replays every commit and changes only their SHAs, giving you nothing to push):
+   ```bash
+   git fetch origin "$base_branch"
+   behind_count=$(git rev-list --count HEAD..origin/"$base_branch")
    ```
    If `$behind_count` is `0`, **skip the rebase** — the branch is already up to date. Otherwise:
    ```bash
-   git rebase origin/main
+   git rebase "origin/$base_branch"
    ```
-3. Resolve any merge conflicts the rebase produced (main may have moved since Review) — see "Merge conflict resolution — CRITICAL" immediately below. If the rebase completed with no conflicts, skip straight to step 4.
-4. **Once the rebase is clean — no conflicts, or all resolved per step 3 — push it immediately if a rebase ran:**
+4. Resolve any merge conflicts the rebase produced (the base may have moved since Review) — see "Merge conflict resolution — CRITICAL" immediately below. If the rebase completed with no conflicts, skip straight to step 5.
+5. **Once the rebase is clean — no conflicts, or all resolved per step 4 — push it immediately if a rebase ran:**
    ```bash
    git push --force-with-lease
    ```
    A rebase rewrites every replayed commit's SHA, so the result will never match `origin/<branch>` byte-for-byte — that mismatch is expected, not a fault. `--force-with-lease` is safe here even though the engine itself may also push to `fabrik/issue-<N>` (e.g. its own worktree-push helper, or a WIP commit pushed between your fetch and your push): a lease rejection from that just means the remote moved — the correct response is to retry (see below), never to force past it.
 
-   **Never run `git reset --hard origin/main` (or any reset of this branch to the remote tip) to resolve that mismatch.** After a successful rebase, your local branch is correctly *ahead* of the remote — that's the goal, not a problem. Resetting back to `origin` discards the rebase you just did, with no way to recover it. If you find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
+   **Never run `git reset --hard "origin/$base_branch"` (or any reset of this branch to the remote tip) to resolve that mismatch.** After a successful rebase, your local branch is correctly *ahead* of the remote — that's the goal, not a problem. Resetting back to `origin` discards the rebase you just did, with no way to recover it. If you find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
 
-   **If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin main`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
+   **If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin "$base_branch"`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
 
    If you narrate this outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 2 commits" or "skipped — already up to date") — never assert the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
 
@@ -50,9 +59,9 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
 
 If the rebase produces conflicts, resolve them conservatively:
 
-- **Never drop code from main.** Code on main was merged from other PRs and must be preserved. Your branch adds to main, it doesn't replace it.
+- **Never drop code from the base branch.** Code on the base was merged from other PRs and must be preserved. Your branch adds to the base, it doesn't replace it.
 - **After resolving conflicts, run `go build ./...` and `go test ./...` immediately.** If either fails, the resolution was wrong — fix it before proceeding with validation.
-- **Check for missing files.** Run `git diff origin/main..HEAD --name-only` and verify no files from main were accidentally deleted. New files added to main (source, tests, subcommands) should all be present.
+- **Check for missing files.** Run `git diff "origin/$base_branch"..HEAD --name-only` and verify no files from the base were accidentally deleted. New files added to the base (source, tests, subcommands) should all be present.
 - **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
 
 ### Install dependencies per CLAUDE.md

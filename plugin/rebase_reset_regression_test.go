@@ -48,6 +48,75 @@ func TestBeforeYouStartRebaseIsConditionalAndPushesNotResets(t *testing.T) {
 	})
 }
 
+// TestBeforeYouStartResolvesBaseBranchDynamically guards against the
+// regression identified during #1554's review: the initial fix added a
+// force-with-lease push after the "Before You Start" rebase, but both
+// skills still hardcoded `origin/main` for that rebase point. For an issue
+// carrying a `base:<branch>` label, that combination turns a previously
+// self-cancelling bug (a wrong-base rebase got reset away, discarding
+// itself) into a persisted one (the wrong-base rebase now gets
+// force-pushed onto the PR's actual, different base — silent corruption).
+// The fix resolves the base branch dynamically via `gh pr view --json
+// baseRefName` (the same mechanism fabrik-validate's own, untouched
+// Pre-Completion Gate already uses ~230 lines below) and uses it
+// throughout, instead of a literal `origin/main`.
+func TestBeforeYouStartResolvesBaseBranchDynamically(t *testing.T) {
+	for _, skill := range []string{"fabrik-review", "fabrik-validate"} {
+		t.Run(skill, func(t *testing.T) {
+			content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/" + skill + "/SKILL.md")
+			if err != nil {
+				t.Fatalf("reading %s/SKILL.md from embed: %v", skill, err)
+			}
+			section := extractTopLevelSection(string(content), "## Before You Start")
+			if section == "" {
+				t.Fatalf("%s/SKILL.md has no '## Before You Start' section — did the heading change?", skill)
+			}
+			assertBaseBranchIsResolvedDynamically(t, skill+"/SKILL.md \"Before You Start\" section", section)
+		})
+	}
+
+	// fabrik-review's "Read the diff, not just the code" step (under "## How
+	// You Review", not "## Before You Start") had the same hardcoded-origin/main
+	// defect flagged by the same review — verify it was swept too.
+	t.Run("fabrik-review/read-the-diff", func(t *testing.T) {
+		content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/fabrik-review/SKILL.md")
+		if err != nil {
+			t.Fatalf("reading fabrik-review/SKILL.md from embed: %v", err)
+		}
+		if hardcodedDiffRe.MatchString(string(content)) {
+			t.Errorf("fabrik-review/SKILL.md still has a hardcoded `git diff origin/main..HEAD` — should diff against the resolved $base_branch")
+		}
+	})
+}
+
+var (
+	baseRefNameRe     = regexp.MustCompile(`baseRefName`)
+	hardcodedRebaseRe = regexp.MustCompile(`git rebase origin/main\b`)
+	hardcodedBehindRe = regexp.MustCompile(`HEAD\.\.origin/main\b`)
+	hardcodedResetRe  = regexp.MustCompile(`reset --hard origin/main\b`)
+	hardcodedDiffRe   = regexp.MustCompile(`git diff origin/main\.\.HEAD\b`)
+)
+
+// assertBaseBranchIsResolvedDynamically checks a "Before You Start" section
+// resolves the base branch from the PR (`baseRefName`) rather than hardcoding
+// `origin/main` in its rebase, behind-check, or reset-prohibition commands.
+func assertBaseBranchIsResolvedDynamically(t *testing.T, label, section string) {
+	t.Helper()
+
+	if !baseRefNameRe.MatchString(section) {
+		t.Errorf("%s does not resolve the base branch dynamically (expected \"baseRefName\" via `gh pr view --json baseRefName`)", label)
+	}
+	if hardcodedRebaseRe.MatchString(section) {
+		t.Errorf("%s still hardcodes `git rebase origin/main` — must rebase onto the resolved $base_branch instead", label)
+	}
+	if hardcodedBehindRe.MatchString(section) {
+		t.Errorf("%s still hardcodes `HEAD..origin/main` in its behind-check — must compare against the resolved $base_branch instead", label)
+	}
+	if hardcodedResetRe.MatchString(section) {
+		t.Errorf("%s still hardcodes `reset --hard origin/main` in its reset prohibition — must name the resolved $base_branch instead", label)
+	}
+}
+
 var (
 	behindCheckRe    = regexp.MustCompile(`rev-list --count|behind_count`)
 	forceWithLeaseRe = regexp.MustCompile(`force-with-lease`)
