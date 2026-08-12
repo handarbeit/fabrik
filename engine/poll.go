@@ -1387,6 +1387,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// the setting is later turned off.
 	e.settleMergeTrainMemberCloses(board)
 
+	// Runaway guard alert settle scan (ADR-1533): retries the outstanding
+	// fireRunawayGuard alert comment for any member carrying
+	// fabrik:awaiting-runaway-alert (a member the guard already paused but whose
+	// AddComment call failed). Runs unconditionally every poll, independent of
+	// merge_train: on/off — a marker written while it was enabled keeps draining
+	// even if the setting is later turned off, mirroring
+	// settleMergeTrainMemberCloses immediately above.
+	e.settleRunawayGuardAlertScan(board)
+
 	// Non-default-base explicit close settle scan (ADR-1097): retries the outstanding
 	// closeIssueIfNonDefaultBase CloseIssue call for any item carrying
 	// fabrik:awaiting-close. Runs unconditionally every poll, independent of
