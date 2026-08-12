@@ -38,18 +38,49 @@ func (s *Sim) UpdateIssueBody(owner, repo string, issueNumber int, body string) 
 
 // CloseIssue closes an issue. Closing an already-closed issue is a no-op, as
 // on GitHub.
+//
+// issueNumber may also name a PR: real GitHub's issues-close endpoint
+// (`PATCH /repos/{owner}/{repo}/issues/{issue_number}`) accepts a PR number
+// too, since every PR is also an issue — and production's CloseIssue is
+// literally that endpoint (github/issues.go), so it closes a PR without
+// merging it exactly the same way. Merge-train relies on this: closing a
+// landed member's own PR (landOneAtATime, landMergeTrainBatch) and a
+// superseded trial's integration PR (dissolveBatch, reconstructTrainState)
+// both go through CloseIssue, not a PR-specific call — there is no ClosePR
+// (see dissolveBatch's own doc comment: "PRs are issues; no ClosePR"). The
+// model's issues and PRs live in separate maps (issueLocked has no
+// visibility into r.prs), so this falls back to the PR record when the
+// number isn't a tracked issue — confirmed necessary directly: without it,
+// merge-train's landing/dissolve paths as exercised by tests/sim's
+// merge-train scenarios (#1452) never actually close a PR, and
+// reconstructTrainState re-discovers the same nominally-still-open, already
+// branch-deleted trial PR on every subsequent poll, wedging the worker.
 func (s *Sim) CloseIssue(owner, repo string, issueNumber int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	iss, err := s.issueLocked(owner, repo, issueNumber)
-	if err != nil {
-		return err
-	}
-	if iss.state == "CLOSED" {
+	if err == nil {
+		if iss.state == "CLOSED" {
+			return nil
+		}
+		iss.state = "CLOSED"
+		iss.updatedAt = s.now()
 		return nil
 	}
-	iss.state = "CLOSED"
-	iss.updatedAt = s.now()
+
+	r, rerr := s.lookupRepo(owner, repo)
+	if rerr != nil {
+		return err
+	}
+	pr, ok := r.prs[issueNumber]
+	if !ok {
+		return err
+	}
+	if pr.state == "closed" {
+		return nil
+	}
+	pr.state = "closed"
+	pr.updatedAt = s.now()
 	return nil
 }
 
