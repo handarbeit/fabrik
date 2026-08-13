@@ -719,15 +719,63 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     shift
   fi
 
+  # Scenarios that deliberately exhaust a repo's merge-train state, and so
+  # cannot share that repo with anything else under "on".
+  #
+  # TestMergeTrainRunawayGuardPausesBatch queues poison members on RepoBeta
+  # until the runaway guard fires — that IS the scenario. The guard's state is
+  # keyed per repo with a 1h window (ADR-059 D8), so for the next hour every
+  # Queued member on Beta is paused before dispatch. TestCrossRepoSpawn puts
+  # its child on Beta, so under "on" it inherits that pause, never closes, and
+  # its parent blocks until the scenario times out ~52 minutes later.
+  #
+  # Measured 2026-08-13 across two independent runs (-parallel 4 and 2):
+  # guard fired 16:47:46, cross-repo child queued 17:41:44 and was paused by
+  # the already-tripped guard. The engine is correct at every step; the bed
+  # scheduling is what's wrong.
+  #
+  # Only Alpha and Beta exist, and neither is free: Alpha hosts the other four
+  # train scenarios (poisoning it would be strictly worse) and cross-repo
+  # spawn structurally needs two distinct repos, so it cannot vacate Beta.
+  # Temporal separation is therefore the available fix, not relocation — and a
+  # different project board would not help, since the guard is keyed by repo
+  # and one engine instance serves both.
+  #
+  # Running it last also lowers the peak concurrent Queued/awaiting-CI
+  # population, which is what drives the ADR-1270/ADR-1208 settle scans'
+  # GraphQL cost (#1527) — the same cost that invalidated both on-leg runs
+  # that day with a rate-limit backoff.
+  TRAIN_ISOLATED_RE='TestMergeTrainRunawayGuardPausesBatch'
+
+  # A caller-supplied -run means they are targeting specific scenarios; honour
+  # that exactly rather than forcing an isolated leg they did not ask for.
+  caller_has_run=0
+  for a in "$@"; do
+    case "$a" in -run | -run=* | --run | --run=*) caller_has_run=1 ;; esac
+  done
+
   if [ -n "${E2E_TRAIN_MODE:-}" ]; then
     # Single mode forced by the caller — one switch + one suite invocation.
     # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
     # E2E_PARALLEL_ON existed — see the header comment.
-    switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+    if [ "$E2E_TRAIN_MODE" = "on" ] && [ "$caller_has_run" -eq 0 ]; then
+      switch_and_run on "$PARALLEL" -skip "$TRAIN_ISOLATED_RE" "$@"
+      switch_and_run on "$PARALLEL" -run "^(${TRAIN_ISOLATED_RE})\$"
+    else
+      switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+    fi
   else
-    # Default: the full two-mode validation gate. "off" first — see header
-    # comment for why. "on" gets the tighter E2E_PARALLEL_ON cap.
+    # Default: the full validation gate. "off" first — see header comment for
+    # why. "on" gets the tighter E2E_PARALLEL_ON cap, and is split into a main
+    # leg plus an isolated leg for the scenarios above. switch_and_run
+    # restarts the bed each time, which also clears the in-memory guard state
+    # — so the isolation is explicit, not merely dependent on ordering.
     switch_and_run off "$PARALLEL" "$@"
-    switch_and_run on "$PARALLEL_ON" "$@"
+    if [ "$caller_has_run" -eq 0 ]; then
+      switch_and_run on "$PARALLEL_ON" -skip "$TRAIN_ISOLATED_RE" "$@"
+      switch_and_run on "$PARALLEL_ON" -run "^(${TRAIN_ISOLATED_RE})\$"
+    else
+      switch_and_run on "$PARALLEL_ON" "$@"
+    fi
   fi
 fi
