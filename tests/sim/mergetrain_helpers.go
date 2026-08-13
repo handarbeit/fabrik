@@ -42,6 +42,28 @@ import (
 // (WaitForIntegrationPR matches the same literal directly).
 const mergeTrainBranchPrefix = "fabrik/merge-train/"
 
+// mergeTrainBatchMarker mirrors engine's own unexported mergeTrainBatchMarker
+// constant (engine/merge_train.go) — the idempotency marker every landing
+// integration PR body carries, and reconstructTrainState's Route 1 matches
+// on. Duplicated here for the same reason mergeTrainBranchPrefix is: R7's
+// restart scenarios construct crash-artifact PR bodies directly and need the
+// exact literal the engine's own matching checks for.
+const mergeTrainBatchMarker = "<!-- fabrik-merge-train-batch -->"
+
+// containsBranchName reports whether name is present in branches — the R7
+// restart scenarios' own local helper for asserting against
+// WorktreeManager.ListTrainBranchesOnOrigin's return value (engine's own
+// like-named containsBranch is unexported and unreachable from this
+// external test package).
+func containsBranchName(branches []string, name string) bool {
+	for _, b := range branches {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeTrainStages returns the pipeline shape every scenario in this file
 // uses: Specify through Validate (never actually dispatched — QueueMember
 // seeds members directly at Queued, bypassing the pipeline entirely, exactly
@@ -112,6 +134,23 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 	})
 	env.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
 	return env
+}
+
+// restartMergeTrainEnv wraps RestartEnv (restart.go) with the one piece of
+// bookkeeping every merge-train restart scenario needs on top of it:
+// SetTrainCIPollIntervalForTest is a field on engine.Engine itself, not on
+// engine.Config, so RestartEnv's freshly-constructed Engine (env.cfg carries
+// forward, but the Engine's own in-memory fields do not — see restart.go's
+// own doc comment on what is and isn't carried across) reverts silently to
+// pollTrainCI/pollForMergeable's real 30s literal unless this is reapplied
+// immediately. A restart scenario that forgot this would still pass — just
+// after minutes-long real sleeps instead of milliseconds — which is exactly
+// the kind of silent regression worth a named helper to prevent.
+func restartMergeTrainEnv(t *testing.T, env *Env) *Env {
+	t.Helper()
+	restarted := RestartEnv(t, env)
+	restarted.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
+	return restarted
 }
 
 // QueueMember seeds one merge-train batch member: an issue at "Queued" and a
