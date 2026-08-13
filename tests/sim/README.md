@@ -437,6 +437,59 @@ still bounded by `simgh`'s own ~84s runtime rather than by this issue's
 additions — comfortably under the ~90s line, so the "no `sim` build tag"
 decision above still holds.
 
+**Updated for #1452's merge-train suite** (~25 new test functions across 9
+new files, one shared helper file): this is the first addition to genuinely
+exceed the ~90s line, and honestly, not by a small margin — each merge-train
+scenario does real, repeated `git merge`/push/`git gc` work (per trial, and
+several scenarios run multiple trials), which is qualitatively heavier than
+anything else in this package. `go test -race -count=1 -run TestMergeTrain
+./tests/sim/` (this issue's scenarios alone) measures at **~90–130s**
+depending on machine load. Two mitigations were applied, both documented in
+`adrs/1452-mergetrain-sim-harness-seams.md`:
+
+- `mergeTrainEnv`'s `CIBackstopTimeout` (10s) and
+  `SetTrainCIPollIntervalForTest` (15ms) give the verdict seeder headroom
+  against contention without changing the common-case (sub-millisecond)
+  latency.
+- `mergeTrainSlots`, a package-level semaphore capping concurrent
+  merge-train real-git activity at 3 scenarios regardless of how many
+  `t.Parallel()`-marked merge-train test functions exist. Measured directly:
+  running all merge-train scenarios with unlimited concurrency (no
+  semaphore) pushed individual scenario wall-clock to 40–70s apiece under
+  `-race` and — more importantly — starved *other, unrelated* package tests
+  badly enough to fail four of them
+  (`TestCruiseFullPipeline_NonVacuous`, `TestRestartEnv_RoundTrip`,
+  `TestYoloAutoMergeLabel`, `TestSmoke_FullPipelineToDone`) via
+  `workerQuiescenceTimeout`/`AdvanceUntil` exhaustion in one full-package
+  `-race` run, and drove the whole package to **~660s**. With the semaphore,
+  `go test -race -count=1 ./tests/sim/...` (this package + `simgh` +
+  `simclaude` + `simgh/ghfault`, run concurrently) measured **~106–130s** in
+  clean runs — still a real increase over the ~84s baseline directly above,
+  now the actual bottleneck rather than `simgh`. One further run, under
+  unusually heavy external load on the measuring machine, saw a single
+  *pre-existing, unrelated* test (`TestRebaseCycleLimit`) exhaust
+  `workerQuiescenceTimeout` at ~440s total — the same environment-contention
+  risk class this file's "worker-quiescence fix" section above already
+  documents, not a new failure mode this issue introduced, but the
+  semaphore's 3-way cap is a *mitigation* of that risk, not an elimination
+  of it under genuinely adverse load.
+
+**The "no `sim` build tag" decision is revisited, not reaffirmed, by this
+issue.** ~90–130s (typical) to ~440s (adverse-load outlier) is no longer
+"comfortably under" anything — it is argued to remain acceptable rather than
+gated behind a build tag, for three reasons: (1) merge-train is exactly the
+subsystem this package exists to make safe to test at all, per this issue's
+own Problem statement — gating its only sim coverage behind an opt-in tag
+would mean it silently stops running in ordinary CI; (2) the semaphore
+already bounds the worst realistic case to roughly 2–3x the package's
+pre-existing runtime, not open-ended; (3) `tests/sim/simgh`'s own ~90–100s
+is already comparable in magnitude and already ungated. If this package's
+total continues to grow with future additions, revisiting the build-tag
+question is a reasonable future call — but not one this issue's own
+Scope (which explicitly does not include changing this package's own testing
+infrastructure beyond what its scenarios need) is positioned to make
+unilaterally.
+
 ## Settle-scan inventory and recovery-machinery coverage (#1451)
 
 #1451 added the sim layer's first coverage of the engine's recovery
