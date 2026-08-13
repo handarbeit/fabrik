@@ -297,26 +297,71 @@ func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
 	t.Logf("fabrik:awaiting-review confirmed on %s#%d — gate is genuinely engaged", env.RepoAlpha, num)
 
-	// A SINGLE unresolved CHANGES_REQUESTED review is enough to drive the whole
-	// budget: while an authoritative gate is blocking, checkReviewGate
-	// re-invokes once per poll ("authoritative gate still blocking:
-	// reviewDecision=CHANGES_REQUESTED") without waiting for a fresh review,
-	// and every such dispatch increments ReviewBlockedCycles — the counter
-	// ADR-1518 deliberately never refunds, precisely so a non-converging gate
-	// cannot loop forever behind #1045's ReviewCycles refund.
+	// Drive fresh CHANGES_REQUESTED reviews until the engine pauses, rather
+	// than assuming a fixed review-to-reinvoke mapping in either direction.
 	//
-	// This test previously submitted one review per cycle and waited for a
-	// reinvoke after each, on the premise (in its doc comment) that "each cycle
-	// requires a full reinvoke before the next distinct REQUEST_CHANGES review
-	// can be submitted." The engine never promised that 1:1 mapping. It races
-	// the poll loop and loses under -parallel contention: the engine burned all
-	// maxCycles blocked cycles from earlier reviews and paused, so the final
-	// iteration's WaitForLogLine sat waiting for a reinvoke that could no
-	// longer come. Observed at offset 21233 scanning for a line the engine had
-	// already written at 19615.
+	// What the engine actually does: it dispatches a reinvoke when there is
+	// NEW unaddressed review feedback, batching every unaddressed review body
+	// into one dispatch, and each dispatch increments ReviewBlockedCycles —
+	// the counter ADR-1518 never refunds, so a non-converging gate cannot loop
+	// forever behind #1045's ReviewCycles refund. It does NOT reinvoke merely
+	// because the gate is blocking: with no new review, #4723 sat on
+	// "authoritative gate still blocking" for 14 minutes with zero dispatches
+	// and then paused via the review-WAIT timeout, which is a different
+	// terminal state than the one AC4 is about.
+	//
+	// Two earlier shapes both failed, for opposite reasons:
+	//   - one review per cycle, waiting for a reinvoke after each: assumes a
+	//     strict 1:1 ordering. The bed's own bot reviewer lands incidental
+	//     reviews, so the engine's dispatch count runs ahead of the test's
+	//     submissions; cycle 5 captured its scan offset at 21233 while the
+	//     reinvoke it was waiting for had already been written at 19615, and
+	//     the budget was spent before the wait began.
+	//   - a single review, expecting the engine to self-drive: no further
+	//     dispatches ever come, so the cycle limit is never reached.
+	//
+	// Driving until the terminal state, with the submission count merely
+	// bounded, is robust to both: extra bot-driven dispatches only make the
+	// limit arrive sooner, and a quiet engine gets another review to consume.
 	offset := LogOffset(t, env)
-	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
-	t.Logf("submitted one unresolved REQUEST_CHANGES review on %s PR #%d — the engine now self-drives its blocked-cycle budget", env.RepoAlpha, prNum)
+	const submitBudget = 12 // generous headroom over maxCycles; bot reviews can spend it faster
+	submissions := 0
+	paused := false
+
+	for i := 0; i < submitBudget && !paused; i++ {
+		if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && slices.Contains(labels, "fabrik:paused") {
+			paused = true
+			break
+		}
+
+		before := CountLogLines(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset)
+		SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
+		submissions++
+		t.Logf("submission %d: fresh REQUEST_CHANGES review on %s PR #%d (dispatches so far: %d)", submissions, env.RepoAlpha, prNum, before)
+
+		// Wait for the engine to consume it — either another dispatch, or the
+		// pause that ends the loop. Submitting again before the previous review
+		// is consumed would let the engine batch them into one dispatch and
+		// spend fewer cycles than reviews.
+		deadline := time.Now().Add(8 * time.Minute)
+		for time.Now().Before(deadline) {
+			if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && slices.Contains(labels, "fabrik:paused") {
+				paused = true
+				break
+			}
+			if CountLogLines(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset) > before {
+				break
+			}
+			time.Sleep(10 * time.Second)
+		}
+	}
+
+	if !paused && submissions >= submitBudget {
+		t.Fatalf("submitted %d CHANGES_REQUESTED reviews on %s#%d without reaching the cycle-limit pause — "+
+			"the reinvoke loop is not bounded by MaxReviewCycles=%d, which is exactly what AC4 exists to rule out",
+			submissions, env.RepoAlpha, num, maxCycles)
+	}
+	t.Logf("engine paused after %d submitted review(s)", submissions)
 
 	// The terminal assertion (AC4): bounded, and terminating in the cycle-limit
 	// pause rather than an unbounded loop.
