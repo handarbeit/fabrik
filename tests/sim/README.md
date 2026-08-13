@@ -469,8 +469,13 @@ it latent in prose.
 Explicitly out of R1's scope, and why (mirrors the issue's own Scope
 section):
 
-- `settleQueuedReviewFindings` (ADR-1208) — merge-train-specific, belongs to
-  sibling issue #1452.
+- `settleQueuedReviewFindings` (ADR-1208) — merge-train-specific; #1452's own
+  scope covers the *standalone-validation-failure* reroute-off-Queued cause
+  (`ejectRedSingleton`/`rerouteQueuedMemberOffHolding`, R9,
+  `mergetrain_redsingleton_test.go`), which is `settleQueuedReviewFindings`'s
+  structural sibling but not the same scan — the *PR-review-finding* cause
+  `settleQueuedReviewFindings` itself owns (`ejectQueuedMemberForReviewFindings`,
+  ADR-1208) remains untested at the sim layer, left as a follow-up.
 - `settleClaudeLimitLabelSweep` / `settleClaudeLimitClearRequests` — no
   `MaxRetries` counter, no escalation arc; covered under R5 instead (below).
 - `fabrik:awaiting-review` / `fabrik:awaiting-input` — not settle-scan-owned

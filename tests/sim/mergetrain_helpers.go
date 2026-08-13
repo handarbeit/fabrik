@@ -96,6 +96,34 @@ type mergeTrainEnvOptions struct {
 	ConfigureCfg func(*engine.Config)
 }
 
+// mergeTrainSlots bounds how many merge-train scenarios may run their
+// real-git-heavy work (repeated `git merge`/push/gc across possibly many
+// trials, per scenario) at once — a package-level semaphore, not a per-file
+// or per-test one, because every merge-train test funnels through
+// mergeTrainEnv regardless of which file it lives in. Every other scenario
+// in this package is cheap enough that `t.Parallel()` alone (bounded by
+// go test's own -parallel/GOMAXPROCS default) is the right amount of
+// concurrency; merge-train's own scenarios are not; letting all of them
+// (~25 at last count) launch their real git work simultaneously was measured
+// to push individual scenario wall-clock from single-digit seconds to
+// 40-60s apiece under `-race` — not because any one scenario does more work,
+// but because that many concurrent `git merge`/push/`git gc` invocations
+// contend for the same CPU/disk regardless of available core count. Capping
+// concurrent real-git activity trades some serialization for a dramatically
+// shorter total, and does not affect this package's other (non-merge-train)
+// tests, which never touch this semaphore.
+var mergeTrainSlots = make(chan struct{}, 3)
+
+// acquireMergeTrainSlot blocks until fewer than cap(mergeTrainSlots)
+// merge-train scenarios are doing real-git work concurrently, then
+// registers automatic release via t.Cleanup. See mergeTrainSlots' own doc
+// comment for why this exists.
+func acquireMergeTrainSlot(t *testing.T) {
+	t.Helper()
+	mergeTrainSlots <- struct{}{}
+	t.Cleanup(func() { <-mergeTrainSlots })
+}
+
 // mergeTrainEnv wraps NewEnv with the configuration every merge-train
 // scenario needs: cfg.MergeTrain (R8), a short CIBackstopTimeout and a
 // millisecond-scale CI poll interval (via SetTrainCIPollIntervalForTest —
@@ -103,7 +131,8 @@ type mergeTrainEnvOptions struct {
 // matrix's dozen-plus real trials complete in a test-suite-appropriate time
 // instead of pollTrainCI/pollForMergeable's real 30s literal, and a small
 // MaxBatchSize matching production's own default (5) so scenario batches
-// stay small without a scenario having to say so itself.
+// stay small without a scenario having to say so itself. Also acquires a
+// mergeTrainSlots slot (released on test cleanup) — see its own doc comment.
 //
 // CIBackstopTimeout is 10s, not the verdict seeder's own typical
 // sub-millisecond turnaround, deliberately: it is the safety net for the one
@@ -117,6 +146,7 @@ type mergeTrainEnvOptions struct {
 // SetTrainCIPollIntervalForTest-scaled retry the doc comment promises.
 func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 	t.Helper()
+	acquireMergeTrainSlot(t)
 	mode := opts.Mode
 	if mode == "" {
 		mode = "on"
