@@ -1898,9 +1898,29 @@ func ghOutputWithToken(token string, args ...string) (string, error) {
 // GitHub's API requires a non-empty body for REQUEST_CHANGES/COMMENT (only
 // APPROVE may omit it), so a fixed body is always sent — harmless for APPROVE.
 // Fails the test on API error (e.g. 422 if reviewerToken == env.GHToken).
+// Deliberately does NOT go through SubmitPRReviewID: that variant must parse
+// the response to return the review ID, and a response it cannot parse is
+// fatal there. Callers that don't need the ID must not inherit that failure
+// mode — this one discards the response, exactly as it did before
+// SubmitPRReviewID existed.
+//
+// Not hypothetical. Routing this through the parsing variant made every caller
+// fail on `unexpected end of JSON input` when the API returned a body jq could
+// not read: TestConjunctiveCIReviewGate died on an APPROVE it only needed to
+// succeed, not to identify (2026-08-13 gate, off leg).
 func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, prNumber int, action string) {
 	t.Helper()
-	SubmitPRReviewID(t, env, reviewerToken, repo, prNumber, action)
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
+	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
+		"-f", "event="+action,
+		"-f", "body=e2e harness review ("+action+")")
+	if err != nil {
+		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
+	}
 }
 
 // SubmitPRReviewID submits a review and returns its GitHub DatabaseID.
@@ -1925,18 +1945,27 @@ func SubmitPRReviewID(t *testing.T, env *Env, reviewerToken string, repo string,
 		t.Fatalf("bad repo: %q", repo)
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
+	// No --jq: jq failing on an unparseable body reports "unexpected end of
+	// JSON input" and nothing about the request, which is close to
+	// undiagnosable from a test log. Parse here so the failure names the PR,
+	// the action, and the actual response text.
 	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
 		"-f", "event="+action,
-		"-f", "body=e2e harness review ("+action+")",
-		"--jq", ".id")
+		"-f", "body=e2e harness review ("+action+")")
 	if err != nil {
-		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
+		t.Fatalf("SubmitPRReviewID %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
 	}
-	id, convErr := strconv.Atoi(strings.TrimSpace(out))
-	if convErr != nil {
-		t.Fatalf("SubmitPRReview %s on %s PR #%d: could not parse review id from %q: %v", action, repo, prNumber, out, convErr)
+	var resp struct {
+		ID int `json:"id"`
 	}
-	return id
+	if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); uerr != nil {
+		t.Fatalf("SubmitPRReviewID %s on %s PR #%d: could not parse review id from response: %v\nresponse was: %q",
+			action, repo, prNumber, uerr, out)
+	}
+	if resp.ID == 0 {
+		t.Fatalf("SubmitPRReviewID %s on %s PR #%d: response carried no review id\nresponse was: %q", action, repo, prNumber, out)
+	}
+	return resp.ID
 }
 
 // TokenLogin returns the GitHub login that owns the given token. Used to resolve
