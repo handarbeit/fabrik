@@ -30,9 +30,21 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 		}
 		return nil, fmt.Errorf("fetching PR #%d body: %w", prNumber, err)
 	}
-	matches := reClosingKeyword.FindAllStringSubmatch(raw.Body, -1)
+	return ParseClosingIssues(raw.Body), nil
+}
+
+// ParseClosingIssues extracts the issue numbers referenced by GitHub closing
+// keywords (Closes, Fixes, Resolves + #N) directly from an already-fetched PR
+// body, without an API call. This is the pure-parse core of
+// FetchPRClosingIssues, exported so callers holding a body in hand (e.g. a
+// heal routine that just fetched it for editing) can check for an existing
+// closing keyword without a redundant round trip. Only same-repo references
+// are returned; cross-repo references are out of scope. Returns nil when the
+// body contains no recognized closing references.
+func ParseClosingIssues(body string) []int {
+	matches := reClosingKeyword.FindAllStringSubmatch(body, -1)
 	if len(matches) == 0 {
-		return nil, nil
+		return nil
 	}
 	out := make([]int, 0, len(matches))
 	for _, m := range matches {
@@ -42,7 +54,7 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 		}
 		out = append(out, n)
 	}
-	return out, nil
+	return out
 }
 
 // FetchPRReviews returns the latest submitted review per author for a pull request
