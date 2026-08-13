@@ -283,9 +283,17 @@ func (e *Engine) verifyAndHealLinkageByBody(item gh.ProjectItem, stage *stages.S
 	}
 
 	// PR exists but its body lacks the closing keyword. Attempt auto-heal.
-	closingLine, ok := e.attemptLinkageHeal(item, pr, stage, owner, repo, repoStr)
+	closingLine, wrote, ok := e.attemptLinkageHeal(item, pr, stage, owner, repo, repoStr)
 	if !ok {
 		return false
+	}
+	if !wrote {
+		// R2 guard found the keyword already present — attemptLinkageHeal made no
+		// write, so there is nothing to re-verify (and no auto-correction comment
+		// to post): the outer FetchPRClosingIssues check above simply raced a
+		// concurrent body edit. Treat linkage as confirmed immediately.
+		e.logf(item.Number, "pr", "verifyAndHealLinkageByBody: linkage already present in PR #%d body (raced outer check) — no heal needed\n", pr.Number)
+		return true
 	}
 
 	// Re-verify by re-parsing the PR body (base-independent).
@@ -325,9 +333,14 @@ func (e *Engine) verifyAndHealLinkageByBody(item gh.ProjectItem, stage *stages.S
 // and the idempotency-guard bookkeeping are both skipped entirely.
 //
 // On failure it pauses the issue itself and returns ok=false; the caller should return
-// immediately. On success it returns the closing line and ok=true; the caller is
-// responsible for re-verifying linkage afterward.
-func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage *stages.Stage, owner, repo, repoStr string) (closingLine string, ok bool) {
+// immediately. On success it returns the closing line and ok=true, plus wrote reporting
+// whether a body write actually happened: wrote=false means the R2 guard found the
+// keyword already present and the caller can treat linkage as confirmed immediately,
+// without a fresh re-verification round trip (which — for the default-branch caller —
+// would otherwise re-read the same async field this whole change exists to stop
+// trusting). wrote=true means the caller is responsible for re-verifying linkage
+// afterward.
+func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage *stages.Stage, owner, repo, repoStr string) (closingLine string, wrote bool, ok bool) {
 	prSHA := pr.HeadSHA
 	closingLine = fmt.Sprintf("Closes #%d", item.Number)
 
@@ -336,7 +349,7 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	if fetchErr != nil {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not fetch PR #%d body: %v\n", pr.Number, fetchErr)
 		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "could not fetch PR body for auto-heal")
-		return closingLine, false
+		return closingLine, false, false
 	}
 
 	// R2: the keyword may already be present — the caller's own presence check
@@ -344,7 +357,7 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	// Don't double-write.
 	if slices.Contains(gh.ParseClosingIssues(currentBody), item.Number) {
 		e.logf(item.Number, "pr", "attemptLinkageHeal: PR #%d body already contains '%s' — skipping write\n", pr.Number, closingLine)
-		return closingLine, true
+		return closingLine, false, true
 	}
 
 	// Body-length safety (FR-015): ensure prepend doesn't overflow GitHub's limit.
@@ -352,7 +365,7 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	if len(currentBody)+len(closingLine)+2 > maxBodyLen {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: PR #%d body is too long (%d chars) to prepend closing keyword\n", pr.Number, len(currentBody))
 		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "PR body too long for auto-heal")
-		return closingLine, false
+		return closingLine, false, false
 	}
 
 	// Idempotency guard: only attempt one heal per PR head SHA.
@@ -360,7 +373,7 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	if snap.LinkageHealAttempted(stage.Name, prSHA) {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: heal already attempted for PR #%d (SHA %s) — pausing\n", pr.Number, prSHA)
 		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal was already attempted once but linkage is still missing")
-		return closingLine, false
+		return closingLine, false, false
 	}
 
 	// Record that we're attempting the heal.
@@ -379,14 +392,14 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	if err := e.client.UpdateIssueBody(owner, repo, pr.Number, healedBody); err != nil {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not update PR #%d body: %v\n", pr.Number, err)
 		e.pauseForBrokenLinkage(item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))
-		return closingLine, false
+		return closingLine, false, false
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, pr.Number))
 	}
 	e.logf(item.Number, "pr", "verifyAndHealLinkage: prepended '%s' to PR #%d body\n", closingLine, pr.Number)
 
-	return closingLine, true
+	return closingLine, true, true
 }
 
 // pauseForBrokenLinkage pauses the issue with fabrik:paused and posts a comment

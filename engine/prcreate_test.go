@@ -610,6 +610,67 @@ func TestVerifyAndHealLinkage_NonDefaultBase_HealSuccess(t *testing.T) {
 	}
 }
 
+// TestVerifyAndHealLinkage_NonDefaultBase_KeywordRaceNoFalseHealComment reproduces the
+// finding from Pruefer's review of #1598: the outer FetchPRClosingIssues check (in
+// verifyAndHealLinkageByBody) can race a concurrent body edit and miss a keyword that
+// attemptLinkageHeal's own GetIssueBody read then finds present. attemptLinkageHeal
+// returns ok=true via the R2 guard without writing anything (wrote=false). Before this
+// fix, the caller unconditionally re-verified via a second FetchPRClosingIssues call —
+// by which point the race had resolved and the keyword was visible — and posted a
+// "PR body auto-corrected: Closes #N prepended" comment describing a write that never
+// happened. The fix must treat linkage as already confirmed the moment wrote=false and
+// skip that second call and comment entirely.
+func TestVerifyAndHealLinkage_NonDefaultBase_KeywordRaceNoFalseHealComment(t *testing.T) {
+	fetchClosingIssuesCalls := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			fetchClosingIssuesCalls++
+			if fetchClosingIssuesCalls == 1 {
+				return nil, nil // outer presence check races the concurrent edit and misses it
+			}
+			// A second call (the old unconditional re-verify) would find it — the
+			// race has resolved by then. The fix must never make this call.
+			return []int{1}, nil
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			// attemptLinkageHeal's own read already sees the keyword.
+			return "Closes #1\n\n## Summary\n\nThis PR does something.", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			t.Error("body should not be edited when the R2 guard finds the keyword already present")
+			return nil
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"base:develop"}}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("should return true when attemptLinkageHeal's R2 guard confirms linkage")
+	}
+	if fetchClosingIssuesCalls != 1 {
+		t.Errorf("should not re-verify via FetchPRClosingIssues when attemptLinkageHeal made no write, got %d calls", fetchClosingIssuesCalls)
+	}
+	client.mu.Lock()
+	comments := client.addCommentCalls
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, c := range comments {
+		if strings.Contains(c.body, "auto-corrected") {
+			t.Errorf("should not post a false 'auto-corrected' comment when nothing was written, got: %q", c.body)
+		}
+	}
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when the R2 guard confirms linkage")
+		}
+	}
+}
+
 func TestVerifyAndHealLinkage_NonDefaultBase_HealFails_Pauses(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -690,9 +751,12 @@ func TestAttemptLinkageHeal_KeywordAlreadyPresent_SkipsWrite(t *testing.T) {
 	pr := &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}
 	stage := &stages.Stage{Name: "Implement"}
 
-	closingLine, ok := eng.attemptLinkageHeal(item, pr, stage, "owner", "repo", "owner/repo")
+	closingLine, wrote, ok := eng.attemptLinkageHeal(item, pr, stage, "owner", "repo", "owner/repo")
 	if !ok {
 		t.Error("should return ok=true when the keyword is already present")
+	}
+	if wrote {
+		t.Error("wrote should be false when the keyword was already present — nothing was written")
 	}
 	if closingLine != "Closes #1" {
 		t.Errorf("want closingLine %q, got %q", "Closes #1", closingLine)
