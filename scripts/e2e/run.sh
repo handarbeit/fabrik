@@ -383,29 +383,39 @@ preflight_bed_start() {
   echo "   bed running: $banner"
 }
 
-# BED_REF_SHORT is set by preflight_bed and consumed by preflight_bed_start;
-# when prep is skipped it is derived so the start-time banner check still runs.
+# BED_REF_SHORT is set by preflight_bed and consumed by preflight_bed_start.
+# Declared here (a bare assignment, safe on source) rather than inside the
+# dispatch guard so both functions can see it under `set -u`.
 BED_REF_SHORT=""
 
-if [ -n "${E2E_SKIP_PREP:-}" ]; then
-  echo "== preflight skipped (E2E_SKIP_PREP set) — bed assumed prepared =="
-else
-  preflight_bed
-fi
+# prepare_bed_and_reset runs the side-effecting pre-run sequence. It is invoked
+# ONLY from the dispatch guard at the bottom of this file, never at top level:
+# everything above that guard must be safe to execute on `source`, because
+# scripts/e2e/backoff_detection_test.sh sources this file for its function
+# definitions and runs in CI, where no bed exists at all. An earlier revision
+# called preflight at top level and broke that test (exit 4,
+# "not a git checkout") — the preflight was right, its placement wasn't.
+#
+# Ordering here is load-bearing: preflight leaves the bed stopped, reset.sh
+# runs against the stopped bed (it refuses a live one), then the engine starts.
+prepare_bed_and_reset() {
+  if [ -n "${E2E_SKIP_PREP:-}" ]; then
+    echo "== preflight skipped (E2E_SKIP_PREP set) — bed assumed prepared =="
+  else
+    preflight_bed
+  fi
 
-# Optional clean-slate reset before the run (must be the first argument).
-# Runs with the bed stopped (preflight leaves it that way) because reset.sh
-# refuses to operate against a live instance.
-if [ "${1:-}" = "--clean" ]; then
-  shift
-  echo "== --clean: resetting the test bed via scripts/e2e/reset.sh =="
-  "$REPO_ROOT/scripts/e2e/reset.sh"
-  echo "== reset complete =="
-fi
+  # Optional clean-slate reset before the run (must be the first argument).
+  if [ "${1:-}" = "--clean" ]; then
+    echo "== --clean: resetting the test bed via scripts/e2e/reset.sh =="
+    "$REPO_ROOT/scripts/e2e/reset.sh"
+    echo "== reset complete =="
+  fi
 
-if [ -z "${E2E_SKIP_PREP:-}" ] && [ -z "${E2E_BED_NO_BUILD:-}" ]; then
-  preflight_bed_start "$BED_REF_SHORT"
-fi
+  if [ -z "${E2E_SKIP_PREP:-}" ] && [ -z "${E2E_BED_NO_BUILD:-}" ]; then
+    preflight_bed_start "$BED_REF_SHORT"
+  fi
+}
 
 # Default timeout — generous because scenarios can wait on Claude for
 # minutes, and a full two-mode gate run under contention needs headroom above
@@ -688,6 +698,17 @@ switch_and_run() {
 # `bash run.sh`), BASH_SOURCE[0] equals $0, so this still dispatches exactly
 # as before this guard existed.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  # Bed preflight + optional --clean reset. Inside the guard so sourcing this
+  # file (backoff_detection_test.sh) never touches a bed — or, in CI, aborts
+  # on the absence of one.
+  prepare_bed_and_reset "$@"
+  # --clean is consumed here, not inside the function: `shift` there would only
+  # affect the function's own positional parameters, leaving --clean in "$@"
+  # to be passed on to `go test` as an unknown flag.
+  if [ "${1:-}" = "--clean" ]; then
+    shift
+  fi
+
   if [ -n "${E2E_TRAIN_MODE:-}" ]; then
     # Single mode forced by the caller — one switch + one suite invocation.
     # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
