@@ -957,6 +957,48 @@ func WaitForLogLine(t *testing.T, env *Env, substring string, startOffset int64,
 	return ""
 }
 
+// CountLogLines does a single, non-blocking scan of the test bed's fabrik.log
+// from startOffset to EOF and returns how many lines contain substring.
+//
+// Unlike WaitForLogLine this never waits: call it once the terminal state it
+// is counting up to has already been observed through GitHub state (a label,
+// a comment), so the log is known to be complete for the window of interest.
+// Its purpose is asserting a BOUND — "the engine dispatched exactly N of
+// these, not N+1" — which a wait-for-first-match cannot express.
+//
+// Carries WaitForLogLine's caveat: log formats are less stable than
+// label/state transitions, so prefer observable GitHub state where the
+// property can be expressed that way. A count of dispatches cannot.
+func CountLogLines(t *testing.T, env *Env, substring string, startOffset int64) int {
+	t.Helper()
+
+	f, err := os.Open(env.LogPath)
+	if err != nil {
+		t.Fatalf("open %s: %v", env.LogPath, err)
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		t.Fatalf("seek %s to %d: %v", env.LogPath, startOffset, err)
+	}
+
+	count := 0
+	scanner := bufio.NewScanner(f)
+	// Engine log lines can exceed bufio.Scanner's 64KB default (a reinvoke
+	// line enumerates every dispatched comment ID), which would otherwise
+	// silently truncate the scan and undercount.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), substring) {
+			count++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scanning %s from offset %d: %v", env.LogPath, startOffset, err)
+	}
+	return count
+}
+
 // tryLogLineContaining does a single, non-fatal scan of the test bed's
 // fabrik.log starting at startOffset for a line containing substring —
 // unlike WaitForLogLine, it does not wait/retry and does not fail the test;
@@ -1858,6 +1900,26 @@ func ghOutputWithToken(token string, args ...string) (string, error) {
 // Fails the test on API error (e.g. 422 if reviewerToken == env.GHToken).
 func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, prNumber int, action string) {
 	t.Helper()
+	SubmitPRReviewID(t, env, reviewerToken, repo, prNumber, action)
+}
+
+// SubmitPRReviewID submits a review and returns its GitHub DatabaseID.
+//
+// Use this when a scenario needs to identify the review it just submitted
+// among all reviews on the PR. The engine derives a synthetic comment ID from
+// exactly this value (reviewBodyCommentID = "review-body:<DatabaseID>",
+// engine/reviews.go), so "review-body:" + this ID is the token that appears in
+// the engine's reinvoke log line for this specific review.
+//
+// Identifying the review by its own ID is necessary because a PR on the bed
+// can carry reviews the scenario did not submit: the bed has a real reviewer
+// (Pruefer, #1396) that lands incidental reviews, and since #1045 every
+// non-DISMISSED review body is actionable, so a reinvoke legitimately
+// enumerates several. A scenario that assumes "there is exactly one review
+// body, so it must be mine" is asserting something the bed never guaranteed —
+// the #1519 failure shape.
+func SubmitPRReviewID(t *testing.T, env *Env, reviewerToken string, repo string, prNumber int, action string) int {
+	t.Helper()
 	owner, name, ok := splitRepo(repo)
 	if !ok {
 		t.Fatalf("bad repo: %q", repo)
@@ -1865,10 +1927,16 @@ func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, p
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
 	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
 		"-f", "event="+action,
-		"-f", "body=e2e harness review ("+action+")")
+		"-f", "body=e2e harness review ("+action+")",
+		"--jq", ".id")
 	if err != nil {
 		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
 	}
+	id, convErr := strconv.Atoi(strings.TrimSpace(out))
+	if convErr != nil {
+		t.Fatalf("SubmitPRReview %s on %s PR #%d: could not parse review id from %q: %v", action, repo, prNumber, out, convErr)
+	}
+	return id
 }
 
 // TokenLogin returns the GitHub login that owns the given token. Used to resolve
