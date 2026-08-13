@@ -251,7 +251,17 @@ preflight_bed() {
     exit "$PREFLIGHT_FAILED_EXIT"
   fi
 
-  ( cd "$TEST_BED" && git fetch origin --quiet )
+  # Wrapped, not bare: under `set -e` a bare fetch aborts the script with git's
+  # own exit code (128) and git's own message, so the run looks like it died of
+  # nothing in particular. The most common cause is an SSH key that is not
+  # loaded or no longer accepted, which reads as "Permission denied
+  # (publickey)" with no indication it came from the bed preflight.
+  if ! ( cd "$TEST_BED" && git fetch origin --quiet ); then
+    echo "preflight: git fetch failed in $TEST_BED — cannot resolve $ref." >&2
+    echo "  Most likely the SSH key for the remote is not loaded: try 'ssh-add' (see 'ssh-add -l')." >&2
+    echo "  The bed is untouched; nothing was stopped, rebuilt, or reset." >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
 
   local want
   want="$(cd "$TEST_BED" && git rev-parse "$ref")"
