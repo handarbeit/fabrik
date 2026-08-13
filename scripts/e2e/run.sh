@@ -357,17 +357,23 @@ preflight_bed_start() {
   echo "== preflight: starting bed instance (-notui, no --auto-upgrade) =="
   ( cd "$TEST_BED" && nohup ./fabrik -notui > "$TEST_BED/bed-run.log" 2>&1 & )
 
+  # The startup banner goes to the engine's STDOUT (captured in bed-run.log),
+  # while ENGINE_LOG holds the structured per-item log — which never contains
+  # it. Check both rather than picking one: which stream carries the banner is
+  # exactly the kind of detail that drifts, and getting it wrong here fails the
+  # run for a bed that is in fact perfectly healthy.
+  local bed_stdout="$TEST_BED/bed-run.log"
   local i=0
   while [ "$i" -lt 90 ]; do
-    if grep -q 'Fabrik starting' "$ENGINE_LOG" 2>/dev/null; then break; fi
+    if grep -qh 'Fabrik starting' "$bed_stdout" "$ENGINE_LOG" 2>/dev/null; then break; fi
     sleep 1
     i=$((i + 1))
   done
 
   local banner
-  banner="$(grep -m1 'Fabrik starting' "$ENGINE_LOG" 2>/dev/null || echo "")"
+  banner="$(grep -hm1 'Fabrik starting' "$bed_stdout" "$ENGINE_LOG" 2>/dev/null | head -1 || echo "")"
   if [ -z "$banner" ]; then
-    echo "preflight: bed did not report startup within 90s — see $TEST_BED/bed-run.log" >&2
+    echo "preflight: bed did not report startup within 90s — see $bed_stdout and $ENGINE_LOG" >&2
     exit "$PREFLIGHT_FAILED_EXIT"
   fi
   if ! printf '%s' "$banner" | grep -q "$want_short"; then
