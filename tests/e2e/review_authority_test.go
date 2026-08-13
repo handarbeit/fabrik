@@ -13,7 +13,7 @@ import (
 // This file covers ADR-1250's review_authority: authoritative mode
 // end-to-end (issue #1258), using deterministic harness-posted verdicts
 // (SubmitPRReview + FABRIK_REVIEWER_TOKEN) — never the bed's real reviewer
-// (Pruefer, as of #1396; formerly claude-review.yml, now disabled) — for
+// (Pruefer; claude-review.yml was deleted 2026-08-13) — for
 // every verdict assertion.
 //
 // Mechanism: all scenarios seed a member PR directly via the GitHub API
@@ -63,8 +63,8 @@ import (
 // ADR-1258's original "no RequestPRReviewer call is needed" rationale — that
 // reasoning covered checkReviewGate's outer clearing condition
 // (len(outstanding)==0 && hasReviews) in isolation, but didn't account for
-// the bed's own incidental reviewer (formerly claude-review.yml, now
-// Pruefer as of #1396) satisfying that same condition with an incidental
+// the bed's own incidental reviewer (claude-review.yml until 2026-08-13,
+// Pruefer since) satisfying that same condition with an incidental
 // review before the engine's first gate evaluation, which is exactly what
 // #1312 reports. YoloDoesNotBypassBlock's two fabrik:awaiting-review waits
 // need no such fix: both occur after this test's own genuine
