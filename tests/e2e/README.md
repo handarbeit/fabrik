@@ -605,11 +605,13 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     seed issue.
 23. **Why the bed's real reviewer (Pruefer, as of #1396 — see "Reviewer topology"
     below) is not used for verdict assertions here**: this is narrower than it
-    once was. Before #1396, the bed's incidental reviewer was `claude-review.yml`,
-    which submits `gh pr review --comment` in both its agent path and its fallback
-    path — it could never produce `APPROVE` or `CHANGES_REQUESTED`, so it could not
-    exercise authoritative mode's blocking or clearing paths at all. #1396 disabled
-    that workflow and made Pruefer the bed's real reviewer, and Pruefer *can* submit
+    once was. Until 2026-08-13 the bed's incidental reviewer was
+    `claude-review.yml`, which submits `gh pr review --comment` in both its agent
+    path and its fallback path — it could never produce `APPROVE` or
+    `CHANGES_REQUESTED`, so it could not exercise authoritative mode's blocking or
+    clearing paths at all. #1396 intended to retire it in favour of Pruefer, but
+    the handover was only completed on 2026-08-13 (see "Reviewer topology"); the
+    workflow ran until then. Pruefer *can* submit
     APPROVE/REQUEST_CHANGES verdicts — but using it as the deterministic verdict
     source for `TestReviewAuthority*`'s assertions was explicitly rejected for issue
     #1258, and #1396 does not reopen that rejection: non-determinism (verdict
@@ -740,8 +742,8 @@ is a documented, accepted e2e gap.
     `RequestPRReviewer`, so unlike `TestReviewAuthority*` these scenarios can't
     win the race deterministically that way. Opening the member
     PR as a draft instead removes the race altogether: Pruefer (the bed's real
-    reviewer as of #1396 — see "Reviewer topology" below; formerly
-    `claude-review.yml`, disabled) only lists "open, non-draft PRs" each poll
+    reviewer — see "Reviewer topology" below; `claude-review.yml` was
+    deleted 2026-08-13) only lists "open, non-draft PRs" each poll
     (`cmd/pruefer/README.md`), so a draft PR that is never marked ready is
     permanently invisible to it — there is no incidental bot review to land
     before the engine's first gate evaluation, or before these scenarios' own
@@ -770,13 +772,26 @@ reviewer topology is:
   (`engine/reviews.go:523`) — used by scenarios that need a declared-but-
   never-responding reviewer (`TestExpectedReviewersDeclaredWaitsAndReprompts`
   and friends), independent of Pruefer's own presence or health.
-- **`claude-review.yml` is disabled, not deleted, on both test repos**
-  (`gh workflow disable`, the same mechanism used to retire it on
-  `handarbeit/fabrik` when Pruefer took over there). The file itself is
-  untouched — its trigger set (`opened`/`ready_for_review`, deliberately
-  excluding `synchronize` per #1078) is preserved for the record, but the
-  workflow no longer runs and no longer participates in the bed's reviewer
-  topology.
+- **`claude-review.yml` is deleted from both test repos** (2026-08-13), along
+  with the copy on `handarbeit/fabrik`. Pruefer is the only reviewer bot in
+  this topology.
+
+  This section previously claimed the workflow was "disabled, not deleted"
+  via `gh workflow disable`, and that #1396 had disabled it when Pruefer took
+  over. **Neither was true.** The workflow was enabled and reviewed every bed
+  PR right up to its deletion, and Pruefer's `watched_repos` never included
+  the test repos, so the reviewer the bed's stage configs declared
+  (`expected_reviewers: [handarbeit-pruefer]`) could not reach it — #1396
+  Defect 1, on a closed issue. The prose described the intended end state as
+  if it had been reached; nothing re-checked it, so it read as settled fact
+  for weeks.
+
+  What actually made the handover real: adding both repos to Pruefer's
+  `watched_repos`, then confirming empirically that it posts reviews
+  (`fabrik-test-alpha#4731`, 2026-08-13T12:56:11Z) before deleting anything.
+  If you are reading this because reviews stopped arriving, check Pruefer's
+  TUI row for the repo — and note that its "polled N ago" counter climbing
+  means the PR count beside it is *stale*, not that the repo is empty.
 - **Gemini does not participate in this topology at all.** It was considered
   as the deliberately-absent reviewer and rejected: Gemini is *usually*
   silent on the bed but not reliably so, which would make a scenario's

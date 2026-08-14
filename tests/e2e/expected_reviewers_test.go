@@ -14,7 +14,7 @@ import (
 // reviewers for the review gate) end-to-end (issue #1298), using
 // deterministic harness-posted verdicts (SubmitPRReview +
 // FABRIK_REVIEWER_TOKEN) — never the bed's real reviewer (Pruefer, as of
-// #1396; formerly claude-review.yml, now disabled) — for every verdict
+// #1396; claude-review.yml was deleted 2026-08-13) — for every verdict
 // assertion. This is the direct #1258 precedent applied to a second,
 // list-shaped stage-config field.
 //
