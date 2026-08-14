@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -784,13 +783,7 @@ func TestAddReviewRequest_Error(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func extractIssueNums(body string) []int {
-	matches := reClosingKeyword.FindAllStringSubmatch(body, -1)
-	var out []int
-	for _, m := range matches {
-		n, _ := strconv.Atoi(m[1])
-		out = append(out, n)
-	}
-	return out
+	return ParseClosingIssues(body)
 }
 
 func TestReClosingKeyword_LineEndCloses(t *testing.T) {

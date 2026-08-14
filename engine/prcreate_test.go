@@ -339,20 +339,25 @@ func TestVerifyAndHealLinkage_BranchMismatch_NoLinkedPR(t *testing.T) {
 }
 
 func TestVerifyAndHealLinkage_HealSuccess(t *testing.T) {
-	callCount := 0
+	closingIssuesCallCount := 0
 	var capturedHealBody string
 	client := &mockGitHubClient{
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
-			callCount++
-			if callCount == 1 {
-				item.LinkedPRNumber = 0 // linkage missing on first check
-			} else {
-				item.LinkedPRNumber = 42 // linkage present after heal
-			}
+			item.LinkedPRNumber = 0 // derived field never catches up within this test
 			return nil
 		},
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		// Re-verification is now body-based (verifyAndHealLinkageByBody), not a
+		// second FetchItemDetails call — mirrors
+		// TestVerifyAndHealLinkage_NonDefaultBase_HealSuccess's existing pattern.
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			closingIssuesCallCount++
+			if closingIssuesCallCount == 1 {
+				return nil, nil // linkage missing on first check
+			}
+			return []int{1}, nil // linkage present after heal
 		},
 		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
 			return "## Summary\n\nThis PR does something.", nil
@@ -384,6 +389,54 @@ func TestVerifyAndHealLinkage_HealSuccess(t *testing.T) {
 		if l.labelName == "fabrik:paused" {
 			t.Error("should not pause on successful heal")
 		}
+	}
+}
+
+// TestVerifyAndHealLinkage_DerivedFieldLags_BodyAlreadyLinked is AC1's non-vacuous
+// proof: a PR whose body already carries "Closes #N", read before GitHub has derived
+// closedByPullRequestsReferences, must not pause the issue and must not have its body
+// edited. fetchItemDetailsFn always reports LinkedPRNumber == 0 (the derived field
+// never catches up within this test), simulating the #1598 race exactly. Reverting
+// the R1 restructuring in verifyAndHealLinkage (delegating to
+// verifyAndHealLinkageByBody instead of trusting the lagging derived field a second
+// time) makes this test pause the issue — the old default-branch-only heal/re-verify
+// block re-read the same lagging field and had no other source of truth.
+func TestVerifyAndHealLinkage_DerivedFieldLags_BodyAlreadyLinked(t *testing.T) {
+	bodyEdited := false
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRNumber = 0 // derived field never catches up within this test
+			return nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil // body already carries "Closes #1"
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			bodyEdited = true
+			return nil
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("should return true when the PR body already carries the closing keyword")
+	}
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when body already carries the closing keyword")
+		}
+	}
+	if bodyEdited {
+		t.Error("body should not be edited when the closing keyword is already present")
 	}
 }
 
@@ -557,6 +610,67 @@ func TestVerifyAndHealLinkage_NonDefaultBase_HealSuccess(t *testing.T) {
 	}
 }
 
+// TestVerifyAndHealLinkage_NonDefaultBase_KeywordRaceNoFalseHealComment reproduces the
+// finding from Pruefer's review of #1598: the outer FetchPRClosingIssues check (in
+// verifyAndHealLinkageByBody) can race a concurrent body edit and miss a keyword that
+// attemptLinkageHeal's own GetIssueBody read then finds present. attemptLinkageHeal
+// returns ok=true via the R2 guard without writing anything (wrote=false). Before this
+// fix, the caller unconditionally re-verified via a second FetchPRClosingIssues call —
+// by which point the race had resolved and the keyword was visible — and posted a
+// "PR body auto-corrected: Closes #N prepended" comment describing a write that never
+// happened. The fix must treat linkage as already confirmed the moment wrote=false and
+// skip that second call and comment entirely.
+func TestVerifyAndHealLinkage_NonDefaultBase_KeywordRaceNoFalseHealComment(t *testing.T) {
+	fetchClosingIssuesCalls := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			fetchClosingIssuesCalls++
+			if fetchClosingIssuesCalls == 1 {
+				return nil, nil // outer presence check races the concurrent edit and misses it
+			}
+			// A second call (the old unconditional re-verify) would find it — the
+			// race has resolved by then. The fix must never make this call.
+			return []int{1}, nil
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			// attemptLinkageHeal's own read already sees the keyword.
+			return "Closes #1\n\n## Summary\n\nThis PR does something.", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			t.Error("body should not be edited when the R2 guard finds the keyword already present")
+			return nil
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"base:develop"}}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("should return true when attemptLinkageHeal's R2 guard confirms linkage")
+	}
+	if fetchClosingIssuesCalls != 1 {
+		t.Errorf("should not re-verify via FetchPRClosingIssues when attemptLinkageHeal made no write, got %d calls", fetchClosingIssuesCalls)
+	}
+	client.mu.Lock()
+	comments := client.addCommentCalls
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, c := range comments {
+		if strings.Contains(c.body, "auto-corrected") {
+			t.Errorf("should not post a false 'auto-corrected' comment when nothing was written, got: %q", c.body)
+		}
+	}
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when the R2 guard confirms linkage")
+		}
+	}
+}
+
 func TestVerifyAndHealLinkage_NonDefaultBase_HealFails_Pauses(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -612,5 +726,49 @@ func TestVerifyAndHealLinkage_NonDefaultBase_NoPRFound(t *testing.T) {
 		if l.labelName == "fabrik:paused" {
 			t.Error("should not pause when no PR found via branch lookup")
 		}
+	}
+}
+
+// ---- attemptLinkageHeal tests: R2 (never double-write an existing keyword) ----
+
+// TestAttemptLinkageHeal_KeywordAlreadyPresent_SkipsWrite is AC3's direct proof:
+// attemptLinkageHeal itself must not prepend a second closing keyword when the
+// fetched body already carries one for this issue, regardless of what the caller's
+// own pre-check concluded.
+func TestAttemptLinkageHeal_KeywordAlreadyPresent_SkipsWrite(t *testing.T) {
+	bodyEdited := false
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "Closes #1\n\n## Summary\n\nThis PR does something.", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			bodyEdited = true
+			return nil
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	pr := &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}
+	stage := &stages.Stage{Name: "Implement"}
+
+	closingLine, wrote, ok := eng.attemptLinkageHeal(item, pr, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("should return ok=true when the keyword is already present")
+	}
+	if wrote {
+		t.Error("wrote should be false when the keyword was already present — nothing was written")
+	}
+	if closingLine != "Closes #1" {
+		t.Errorf("want closingLine %q, got %q", "Closes #1", closingLine)
+	}
+	if bodyEdited {
+		t.Error("body should not be edited when the closing keyword is already present")
+	}
+
+	// The idempotency guard must not be consumed by a skipped write — a genuine
+	// heal attempted later for the same head SHA must still be allowed to run.
+	snap, _ := eng.store.Get("owner/repo", item.Number)
+	if snap.LinkageHealAttempted(stage.Name, pr.HeadSHA) {
+		t.Error("idempotency guard should not be recorded when no write occurred")
 	}
 }
