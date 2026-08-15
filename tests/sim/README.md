@@ -133,9 +133,9 @@ re-run needed.
 [`tests/e2e/harness.go`](../e2e/harness.go)'s vocabulary — see the mapping
 table below for where they diverge.
 
-### Two production seams, both additive
+### Production seams, all additive
 
-Neither changes any existing call site's behavior; both are documented test
+None changes any existing call site's behavior; all are documented test
 seams, not new capabilities:
 
 - **`Engine.PollOnce(ctx) error`** (`engine/poll.go`) — a thin delegation to
@@ -155,6 +155,42 @@ seams, not new capabilities:
   type aliases to the moved types, so every existing construction site and
   every existing `errors.As` assertion in `engine`'s own tests keeps
   compiling and behaving unchanged.
+- **`Engine.RegisterObservers() (unregister func())`** (`engine/poll.go`,
+  #1592/ADR-1592) — moves the reactive `itemstate.Store` observer
+  registration block (`mayNeedWorkObserver`, `InvocationObserver`,
+  `StageChangeObserver`, `PushUnblockObserver`, `CommentBreakerObserver`,
+  the `cacheImpl`-gated `WebhookHealthObserver` subscription) out of `Run()`
+  into its own method — `PollOnce` alone never registered any of them,
+  which nothing in this package's coverage happened to depend on until
+  #1592's dependency-unblock scenario needed `PushUnblockObserver`
+  specifically. `NewEnv`/`RestartEnv` call it once, immediately after
+  constructing the `Engine`, mirroring where `Run()` calls it.
+- **`Engine.PollWithBackoff(ctx, configuredInterval) (PollBackoffResult, error)`**
+  (`engine/poll.go`, #1592/ADR-1592) — moves `Run()`'s `doPollCycle` closure
+  body (the REST/core rate-limit hard gate, `poll()` itself, idle-timer
+  bookkeeping, GraphQL rate-limit hysteresis, the resulting effective
+  next-poll interval) into its own method, returning only the computed
+  `NextInterval` a caller needs to reset its own ticker. `backoff.go`'s five
+  pure functions had no call site outside that closure, so `PollOnce` alone
+  never reached any of them. The five backoff-state locals the closure held
+  became `Engine` fields (`backoffPrevMultiplier` etc.), mirroring
+  `idleStart`'s own precedent, since the method must now be callable
+  repeatedly across successive polls from a test.
+- **`Engine.RunStartupCleanup()`** (`engine/worker_liveness.go`,
+  #1592/ADR-1592) — delegates, in order, to the five one-shot startup
+  recovery scans `Run()` has always run once, immediately after its first
+  successful poll cycle (`runStartupCleanup` and four siblings) — all
+  unexported and `Run()`-only, so `PollOnce` alone never reached them
+  either. A scenario calls this once after `RestartEnv` rebuilds the
+  `Engine`, mirroring where `Run()` calls it in production.
+
+See `adrs/1592-sim-bed-backoff-and-startup-cleanup-seams.md` for the full
+rationale on the three newest seams, including the one behavior widening
+that rode along with `PollWithBackoff`'s extraction (the REST hard gate now
+compares against `e.now()` instead of `time.Now()` — byte-identical in
+production, since `e.now()` falls back to `time.Now()` when no `Clock` is
+injected, and necessary for the gate to be observable at all from a
+`tests/sim` scenario's injected `Clock`).
 
 Plus one **engine-local clock seam** (`Engine.Clock`/`SetClock`/`now()`,
 `engine/clock.go`), structurally identical to `simgh.Clock` so a scenario can
@@ -668,6 +704,180 @@ cover every gap the sim has — `simgh/FIDELITY.md`'s "Absent"-labeled entries a
 accepted blind spots, not violations of this rule — it covers the specific, high-signal
 case where live e2e actually caught something in production use that the pre-gate should
 have caught first.
+
+## Sequence-shaped coverage (#1592)
+
+#1451 covered settle-scan retry-and-escalation, restart recovery, and
+adversarial invoker shapes. #1592 covers a different class the sim exists
+for just as much: behavior that only manifests **across multiple polls or
+across two interacting items**, where reading a terminal label — the
+convention every earlier scenario in this package otherwise follows —
+cannot distinguish the correct sequence from a wrong one that happens to
+land in the same final state. `TestNoWorkNeeded_AwaitingDoneIsFirstMutation`
+(pre-dating #1592) is the canonical example this issue generalizes from: the
+unit suite executes the same line and cannot say it came first.
+
+The set below is defined by property, not enumeration, matching R1's own
+framing and the settle-scan table above's convention: a mechanism belongs
+here if the assertion that actually distinguishes correct from incorrect
+behavior is an ordering or sequence claim, not a state claim. Four
+mechanisms qualified when #1592 was filed — if a fifth is ever added
+without a row here, that is the gap this table exists to make visible
+instead of leaving it latent in prose.
+
+| mechanism | covering scenario | seam needed |
+|---|---|---|
+| Dependency blocking/unblocking (`PushUnblockObserver`, `engine/observers.go`) | `dependency_unblock_test.go`: `TestDependencyUnblock_OnBlockerClose`, `TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver` | `Engine.RegisterObservers` |
+| GraphQL rate-limit backoff / REST hard gate (`engine/backoff.go`) | `backoff_test.go`: `TestBackoff_GraphQLRateLimitIntervalEscalatesAndRecovers`, `TestBackoff_RESTHardGateSkipsPollUntilReset` | `Engine.PollWithBackoff` |
+| Stale-worker-label reaping (`forEachStaleUnworkedItem`, `engine/worker_liveness.go`) | `stale_worker_reap_test.go`: `TestStaleWorkerReap_OrphanedLockAndEditingLabels` | `Engine.RunStartupCleanup` + `RestartEnv` |
+| Review/no-op reinvoke-cycle counters and their interaction (`ReviewCycleDecremented`/#1045/ADR-1518, `NoOpCommentCycles`/#1555) | `reinvoke_cycle_counters_test.go`: `TestReviewCycleDecremented_NoCommitRefundsIndefinitely`, `TestNoOpCommentCycles_TripsBreakerAndResetsOnProgress`, `TestReviewCycleVsNoOpCommentCycle_Invariant` | none — reached through the existing `PollOnce`/catch-up-handler-chain path |
+
+### Gap 1 — dependency blocking and unblocking
+
+`PushUnblockObserver` fires on two distinct, asymmetric paths (R2): Path 1
+(a blocker's own `StateChanged`, scanning the store for dependents) and
+Path 2 (`BlockedByChanged` on the dependent's own snapshot, which
+deliberately declines to act when the new `BlockedBy` list is empty —
+ADR-1419's protection against a stale-empty cache falsely unblocking an
+issue). `TestDependencyUnblock_OnBlockerClose` drives the close-and-unblock
+sequence; `TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver`
+proves the empty-list guard holds and that recovery instead falls to the
+`dep-blocked` cooldown-gated pull path in `checkDependencies` — the
+behaviour #1453's chain work hit in practice.
+
+`dependency_unblock_test.go`'s own doc comment records a `tests/sim`-only
+wrinkle surfaced while writing the close-and-unblock scenario: without
+`boardcache.CacheImpl` (which `tests/sim` deliberately never wires in — see
+`NewWithDeps`'s own doc comment), the store's per-item `IsClosed` field is
+kept fresh only for items individually admitted for a deep-fetch, not for
+every board item the way production's `runProbeAndDeepFetch` keeps it. A
+blocker parked on an `Unmanaged` column that later closes can end up with a
+store entry that durably reads `IsClosed()==false` despite genuinely being
+closed — no production consequence (this exact race cannot occur once
+`CacheImpl` is in the loop), but reachable in this harness. The scenario
+routes around it by filing the blocker as a plain repo issue never added to
+any project board — never touched by any settle scan, and its real
+open/closed state is always available via the dependency edge's own
+`State` field regardless.
+
+### Gap 2 — GraphQL rate-limit backoff and the REST hard gate
+
+Driven entirely through `Engine.PollWithBackoff` (ADR-1592) — the control
+surface question (R3) resolved to `SeedRateLimits`
+(`tests/sim/simgh/seed.go`, #1457) over fault injection: `RateLimitStats` is
+documented in `simgh/FIDELITY.md` as the one interface method fault
+injection cannot fail, and `backoff.go` consumes budget *ratios*, not a
+failing call. `TestBackoff_GraphQLRateLimitIntervalEscalatesAndRecovers`
+drives the full escalation ladder (`>=10%`: 2x, `>=5%`: 4x, `>=1%`: 6x,
+`<1%`: 10x configured interval) plus the two-threshold hysteresis sticky
+zone (activates below 20%, clears only above 50%) across successive
+`PollWithBackoff` calls. `TestBackoff_RESTHardGateSkipsPollUntilReset`
+proves the hard gate skips `poll()` entirely — no `FetchProjectBoard` call
+at all — while the REST budget is exhausted, and that a fresh
+`SeedRateLimits` call (modelling GitHub's own hourly rollover) resumes it;
+simgh's `RateLimitStats` always reports `Reset` relative to the current
+injected clock instant, not a fixed timestamp a scenario could wait out.
+
+### Gap 3 — stale-worker-label reaping
+
+`forEachStaleUnworkedItem` reaps an orphaned `fabrik:locked:<user>` or
+`fabrik:editing` label left behind when a worker dies mid-dispatch.
+`TestStaleWorkerReap_OrphanedLockAndEditingLabels` reuses `RestartEnv`
+(#1451) for the genuine process-state boundary the scenario needs — the
+label is seeded directly on the pre-restart `Env` (no attempt to kill a
+real dispatched goroutine mid-flight, which would be inherently racy to
+land deterministically and isn't what `forEachStaleUnworkedItem`'s own
+precondition, `Worker() == nil` plus the label present, cares about) —
+then `Engine.RunStartupCleanup` (ADR-1592) reaps it on the restarted
+engine's first poll. Both seeded issues also carry `stage:<Name>:complete`
+from the start, isolating `RunStartupCleanup` as the only mechanism in the
+sequence that could touch either label.
+
+Deliberately scoped to the startup-cleanup shape only, not the periodic
+`runWorkerDetectorScan` sweep: that scan is real-wall-clock-bound end to
+end (`time.Since`, not the injected `Clock`) on both its heartbeat-staleness
+and its PID-unset fallback checks, and every `tests/sim`-dispatched worker
+has `PID == 0` (`simclaude` never calls `onPIDReady`), routing it
+exclusively into the also-wall-clock-bound `StartedAt` branch — reachable
+only via a genuine sleep, a narrower and more fragile addition for no real
+gain over the startup-cleanup path this issue already needed.
+
+### Gap 4 — the two reinvoke-cycle counters, and the invariant between them
+
+Two distinct, previously-uncovered mechanisms observing the same
+`processComments` funnel, plus the interaction between them (R6) — this
+issue's largest single piece, requiring no new engine seam (both
+mechanisms are reached through the ordinary `PollOnce`/catch-up-handler-
+chain path every earlier scenario in this package already exercises).
+
+- **4a — `ReviewCycleDecremented`** (#1045, ADR-1518,
+  `dispatchReviewReinvoke`'s `after` hook, `engine/reviews.go`): a
+  review-reinvoke that lands no new commit refunds its own prior
+  `ReviewCycleIncremented` — the forgive-forever guarantee that keeps a
+  chatty bot reviewer's non-actionable `COMMENTED` overviews from ever
+  accumulating toward `MaxReviewCycles`.
+  `TestReviewCycleDecremented_NoCommitRefundsIndefinitely` drives 3 rounds
+  at `MaxReviewCycles=1` and proves none of them pause. The other
+  direction — a commit-landing reinvoke does *not* refund — is not
+  duplicated here: `TestReviewAuthorityCycleLimitPauses`
+  (`review_authority_test.go`, pre-dating #1592) already commits a real
+  marker file every round via `DefaultCommentScript`, and its own
+  exact-`maxCycles`-then-pause behavior is itself the structural proof.
+- **4b — `NoOpCommentCycles`** (`checkNoOpCommentCycle`, #1555,
+  `engine/comment_noop_breaker.go`): a separate, never-refunded counter
+  over the same funnel, resetting to zero (not merely decrementing) on any
+  genuine progress. `TestNoOpCommentCycles_TripsBreakerAndResetsOnProgress`
+  drives a `[NoOp, NoOp, Commit, NoOp, NoOp, NoOp]` script sequence and
+  proves the breaker trips exactly on round 6, not round 5 — the
+  round-5-not-yet-paused check is what pins reset-to-zero specifically,
+  since a decrement-instead-of-reset regression would trip one round
+  earlier while still eventually pausing.
+- **4c — the interaction, and this gap's primary deliverable (R6):** the
+  invariant that `NoOpCommentCycles`' default (10) is deliberately higher
+  than `ReviewCycles`' default (5) *because* one refunds and the other
+  never does — stated only in `effectiveMaxNoOpCommentCycles`'s doc comment
+  before #1592, with no terminal-state test able to notice a regression
+  that collapsed the two thresholds together (the issue would still pause,
+  just for the wrong reason and at the wrong count).
+  `TestReviewCycleVsNoOpCommentCycle_Invariant` drives one sustained
+  no-op-reinvoke sequence through both halves: past `MaxReviewCycles=3`
+  without pausing (4a's refund holding), then pausing exactly at
+  `MaxNoOpCommentCycles=6` via the no-op breaker specifically — naming
+  which limit tripped via each pause comment's own literal prefix, not
+  merely that a pause occurred.
+
+Two fidelity notes surfaced while building gap 4, recorded in
+`reinvoke_cycle_counters_test.go`'s own doc comments: `simgh`'s
+`FetchPRReviews` collapses same-author `COMMENTED` follow-ups
+(`latestReviewsByAuthor`, modelling GitHub's own per-author reduction), so
+each round's seeded review needs a distinct author, not merely a distinct
+`DatabaseID`, or every round after the first is invisible to the engine;
+and `dispatchReviewReinvoke`'s `build()` hook captures `headBefore` via
+`gitHeadSHA` *before* `processComments` itself calls `EnsureWorktree` (see
+`dispatchReinvoke`, `engine/reinvoke.go`), so a zero-Claude-cost
+`seedReviewGateItem` construction needs its worktree pre-created
+(`preCreateWorktree`) or round 1's own refund is silently skipped — a
+confound specific to never having dispatched a real stage for the issue
+first, not a defect in the refund mechanism itself.
+
+### Fixture additions
+
+- **`Sim.SeedRemoveBlockedBy`** (`tests/sim/simgh/seed.go`) — removes one
+  `blockedBy` edge, modelling a human deleting the dependency link directly
+  (GitHub UI, or the REST dependencies API). No `GitHubClient` interface
+  counterpart: production only ever *adds* an edge (`AddBlockedByIssue`, at
+  spawn time), never removes one. Deliberately does not bump the
+  dependent's `updatedAt` — mirroring #977's real-API gap, and exactly the
+  staleness gap 1's companion scenario needs to exercise the empty-list
+  guard rather than the ordinary probe-driven refresh. See
+  `simgh/FIDELITY.md`'s own entry for the full rationale.
+- **`simclaude.NoOpCommentReview() CommentScript`** — touches nothing in
+  `workDir` and signals no progress (`completed=false`, no commit, no
+  `FABRIK_ISSUE_UPDATE` body) — the exact shape `processComments`'s own
+  `progressed` check treats as a no-op cycle, which both 4a and 4b's
+  mechanisms key off. Named distinctly from `DefaultCommentScript`/
+  `CommentReviewCompleted` (both of which commit), mirroring
+  `simclaude/scripts.go`'s existing naming convention.
 
 ## Running it
 
