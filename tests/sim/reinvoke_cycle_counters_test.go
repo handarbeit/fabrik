@@ -82,7 +82,7 @@ func reinvokeCycleCountersEnv(t *testing.T, maxReviewCycles, maxNoOpCommentCycle
 			cfg.MaxNoOpCommentCycles = maxNoOpCommentCycles
 		},
 	})
-	env.Engine.RegisterObservers()
+	t.Cleanup(env.Engine.RegisterObservers())
 	return env
 }
 
