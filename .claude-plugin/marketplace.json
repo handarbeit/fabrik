@@ -3,8 +3,8 @@
   "name": "fabrik",
   "description": "The Fabrik plugin marketplace — ambient awareness of Fabrik (a GitHub-Project-driven SDLC pipeline orchestrator) for your interactive Claude Code session.",
   "owner": {
-    "name": "Tenacious Ventures",
-    "url": "https://github.com/handarbeit/fabrik"
+    "name": "handarbeit.io",
+    "url": "https://handarbeit.io"
   },
   "plugins": [
     {
@@ -19,8 +19,8 @@
       },
       "homepage": "https://fabrik.handarbeit.io",
       "author": {
-        "name": "Tenacious Ventures",
-        "url": "https://github.com/handarbeit/fabrik"
+        "name": "handarbeit.io",
+        "url": "https://handarbeit.io"
       }
     },
     {
