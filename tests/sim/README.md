@@ -163,8 +163,21 @@ seams, not new capabilities:
   into its own method — `PollOnce` alone never registered any of them,
   which nothing in this package's coverage happened to depend on until
   #1592's dependency-unblock scenario needed `PushUnblockObserver`
-  specifically. `NewEnv`/`RestartEnv` call it once, immediately after
-  constructing the `Engine`, mirroring where `Run()` calls it.
+  specifically. **`NewEnv`/`RestartEnv` deliberately do NOT call it by
+  default** — see `NewEnv`'s own doc comment: registering it unconditionally
+  changes dispatch *timing* for every scenario in this package, since
+  `mayNeedWorkObserver`'s cycleSet is a fast-path that bypasses
+  `itemMayNeedWork`'s cooldown-based admission gate, and wiring it in
+  broke several pre-existing, unrelated scenarios whose own timing
+  assumptions predate this observer being reachable from `tests/sim` at
+  all. A scenario that needs it — currently `dependency_unblock_test.go`
+  (gap 1, for `PushUnblockObserver` itself) and
+  `reinvoke_cycle_counters_test.go` (gap 4, for a different reason: see
+  that file's own doc comment on `reinvokeCycleCountersEnv` — advisory-mode
+  multi-round reinvokes have no other cooldown path back to re-admission
+  once `dispatchWithCycleLimit`'s `advancedItems` marking suppresses the
+  periodic-re-eval stamp) — calls `env.Engine.RegisterObservers()` itself,
+  scoping the timing change to exactly the scenarios that require it.
 - **`Engine.PollWithBackoff(ctx, configuredInterval) (PollBackoffResult, error)`**
   (`engine/poll.go`, #1592/ADR-1592) — moves `Run()`'s `doPollCycle` closure
   body (the REST/core rate-limit hard gate, `poll()` itself, idle-timer
@@ -730,7 +743,7 @@ instead of leaving it latent in prose.
 | Dependency blocking/unblocking (`PushUnblockObserver`, `engine/observers.go`) | `dependency_unblock_test.go`: `TestDependencyUnblock_OnBlockerClose`, `TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver` | `Engine.RegisterObservers` |
 | GraphQL rate-limit backoff / REST hard gate (`engine/backoff.go`) | `backoff_test.go`: `TestBackoff_GraphQLRateLimitIntervalEscalatesAndRecovers`, `TestBackoff_RESTHardGateSkipsPollUntilReset` | `Engine.PollWithBackoff` |
 | Stale-worker-label reaping (`forEachStaleUnworkedItem`, `engine/worker_liveness.go`) | `stale_worker_reap_test.go`: `TestStaleWorkerReap_OrphanedLockAndEditingLabels` | `Engine.RunStartupCleanup` + `RestartEnv` |
-| Review/no-op reinvoke-cycle counters and their interaction (`ReviewCycleDecremented`/#1045/ADR-1518, `NoOpCommentCycles`/#1555) | `reinvoke_cycle_counters_test.go`: `TestReviewCycleDecremented_NoCommitRefundsIndefinitely`, `TestNoOpCommentCycles_TripsBreakerAndResetsOnProgress`, `TestReviewCycleVsNoOpCommentCycle_Invariant` | none — reached through the existing `PollOnce`/catch-up-handler-chain path |
+| Review/no-op reinvoke-cycle counters and their interaction (`ReviewCycleDecremented`/#1045/ADR-1518, `NoOpCommentCycles`/#1555) | `reinvoke_cycle_counters_test.go`: `TestReviewCycleDecremented_NoCommitRefundsIndefinitely`, `TestNoOpCommentCycles_TripsBreakerAndResetsOnProgress`, `TestReviewCycleVsNoOpCommentCycle_Invariant` | no new engine seam, but reuses `Engine.RegisterObservers` — see that file's own doc comment |
 
 ### Gap 1 — dependency blocking and unblocking
 
@@ -808,7 +821,11 @@ Two distinct, previously-uncovered mechanisms observing the same
 `processComments` funnel, plus the interaction between them (R6) — this
 issue's largest single piece, requiring no new engine seam (both
 mechanisms are reached through the ordinary `PollOnce`/catch-up-handler-
-chain path every earlier scenario in this package already exercises).
+chain path every earlier scenario in this package already exercises). It
+does reuse `Engine.RegisterObservers` (ADR-1592), for a reason discovered
+only once the scenario was actually driven for more than one round: see
+`reinvoke_cycle_counters_test.go`'s own doc comment on
+`reinvokeCycleCountersEnv`.
 
 - **4a — `ReviewCycleDecremented`** (#1045, ADR-1518,
   `dispatchReviewReinvoke`'s `after` hook, `engine/reviews.go`): a

@@ -106,6 +106,9 @@ func dependencyUnblockStages() []*stages.Stage {
 func TestDependencyUnblock_OnBlockerClose(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: dependencyUnblockStages()})
+	// PushUnblockObserver is not registered by default — see NewEnv's own
+	// doc comment (ADR-1592). Both scenarios in this file specifically need it.
+	env.Engine.RegisterObservers()
 
 	const blocker = 1000
 	env.Sim.Sim().SeedIssue(env.OwnerRepo, simgh.IssueSeed{
@@ -194,6 +197,9 @@ func TestDependencyUnblock_OnBlockerClose(t *testing.T) {
 func TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: dependencyUnblockStages()})
+	// PushUnblockObserver is not registered by default — see NewEnv's own
+	// doc comment (ADR-1592). Both scenarios in this file specifically need it.
+	env.Engine.RegisterObservers()
 
 	blocker := FileIssue(t, env, "blocker",
 		"Blocker issue — deliberately never closed in this scenario; the edge is removed by hand instead.",

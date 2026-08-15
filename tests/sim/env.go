@@ -191,6 +191,25 @@ func stageColumns(stgs []*stages.Stage) []string {
 // — see ADR-1449), reproduces production's git topology by cloning simgh's
 // backing repo as a local "origin" (R6), and boots a real engine.Engine via
 // NewWithDeps with the shared Clock wired to both simgh and the engine.
+//
+// Deliberately does NOT call Engine.RegisterObservers (ADR-1592/#1592). It
+// is tempting to register it unconditionally here, mirroring where Run()
+// calls it in production — and an earlier revision of this function did
+// exactly that — but it changes dispatch *timing* for every scenario in
+// this package, not just the ones that need it: mayNeedWorkObserver
+// populates the cycleSet fast-path that bypasses itemMayNeedWork's
+// cooldown-based admission gate, so once active, previously-cooldown-paced
+// items are re-admitted for deep-fetch immediately on any relevant Store
+// change instead of waiting out the cooldown. Wiring it in here made four
+// pre-existing, unrelated scenarios fail — some by racing an item through
+// multiple stages before an intermediate WaitForProjectStatus checkpoint
+// could observe it, one by hanging the whole package past its 10-minute
+// timeout — none of which is a mayNeedWorkObserver defect; those scenarios'
+// own timing assumptions simply predate this observer ever being reachable
+// from tests/sim at all. A scenario that specifically needs a reactive
+// itemstate.Store observer (currently only PushUnblockObserver, gap 1 —
+// dependency_unblock_test.go) calls env.Engine.RegisterObservers() itself,
+// scoping the timing change to exactly the scenario that requires it.
 func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	t.Helper()
 	skipIfNoGit(t)
@@ -303,11 +322,6 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
-	// Mirrors what Run() does immediately after construction, in production —
-	// see Engine.RegisterObservers's own doc comment (ADR-1592). Without this,
-	// PushUnblockObserver (and every other reactive observer Run() registers)
-	// is unreachable from a scenario driven through PollOnce alone.
-	eng.RegisterObservers()
 
 	return &Env{
 		T:             t,

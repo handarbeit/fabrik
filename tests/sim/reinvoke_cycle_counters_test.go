@@ -53,9 +53,27 @@ import (
 // cycle limits configured explicitly — engine.Config has no built-in
 // fallback for either when NewEnv's Config literal bypasses cmd/root.go's
 // flag-resolution defaults.
+//
+// Also calls Engine.RegisterObservers (ADR-1592), which NewEnv deliberately
+// leaves uncalled by default (see NewEnv's own doc comment) — required here
+// for a reason specific to this file's advisory-mode, multi-round shape,
+// not merely a speed-up: dispatchWithCycleLimit (engine/catch_up_handlers.go)
+// marks every dispatched item as "advanced" (pctx.advancedItems[iKey] =
+// true) whether or not it genuinely left its stage, which suppresses
+// poll()'s own periodic-re-eval CooldownAt stamp for that item on the very
+// poll that dispatched it. In advisory mode the review gate clears
+// (blocked=false) every round, so handleReviewGate never takes the
+// alternate blocked-only branch that stamps a real, expiring
+// "review-blocked" cooldown instead (the branch TestReviewAuthorityCycle-
+// LimitPauses's authoritative-mode CHANGES_REQUESTED rounds always take,
+// which is why that pre-existing test never needed this). Without any
+// cooldown at all, and without mayNeedWorkObserver's cycleSet fast-path to
+// notice the dispatch's own fabrik:editing add/remove churn, the item is
+// never re-admitted for a second round's deep-fetch — confirmed empirically
+// by tracing round 2 hanging indefinitely with RegisterObservers uncalled.
 func reinvokeCycleCountersEnv(t *testing.T, maxReviewCycles, maxNoOpCommentCycles int) *Env {
 	t.Helper()
-	return NewEnv(t, EnvOptions{
+	env := NewEnv(t, EnvOptions{
 		Stages:    reviewAuthorityStages(),
 		StartTime: time.Now(),
 		ConfigureCfg: func(cfg *engine.Config) {
@@ -64,6 +82,8 @@ func reinvokeCycleCountersEnv(t *testing.T, maxReviewCycles, maxNoOpCommentCycle
 			cfg.MaxNoOpCommentCycles = maxNoOpCommentCycles
 		},
 	})
+	env.Engine.RegisterObservers()
+	return env
 }
 
 // preCreateWorktree creates issueNum's worktree on disk (checking out the

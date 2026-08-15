@@ -48,12 +48,26 @@ new, minimal, additive seam.
 observer-registration block out of `Run()` into its own method — same observers, same
 construction, same order — and returns an unsubscribe function. `Run()` now calls
 `e.RegisterObservers()` and defers the returned function, exactly replacing the block it used to
-inline. `tests/sim`'s `NewEnv` and `RestartEnv` each call it once, immediately after
-constructing the `Engine`, mirroring where `Run()` calls it in production (immediately before
-entering the poll loop). Registering twice on one `Engine` (e.g. a test that both calls this
-directly and later calls `Run()`) subscribes every observer twice — never done in production,
-and not a scenario this method guards against; a caller that also invokes `Run()` must not call
-this itself.
+inline. Registering twice on one `Engine` (e.g. a test that both calls this directly and later
+calls `Run()`) subscribes every observer twice — never done in production, and not a scenario
+this method guards against; a caller that also invokes `Run()` must not call this itself.
+
+`tests/sim`'s `NewEnv`/`RestartEnv` deliberately do **not** call this by default, unlike the
+other two seams below (which change no scenario's behavior merely by existing). Registering
+every observer for every scenario in the package changes dispatch *timing*, not just
+reachability: `mayNeedWorkObserver` populates a fast-path (`cycleSet`) that bypasses
+`itemMayNeedWork`'s cooldown-based admission gate, so once active, an item that changed for any
+tracked reason is re-admitted for deep-fetch immediately instead of waiting out its cooldown.
+Wiring it in unconditionally, during Implement, broke four pre-existing, unrelated scenarios —
+some raced an item through multiple stages before an intermediate status checkpoint could
+observe it, one hung the whole package past its 10-minute test timeout — none of which was a
+`mayNeedWorkObserver` defect; those scenarios' own timing assumptions simply predated this
+observer ever being reachable from `tests/sim` at all. `tests/sim/env.go`'s `NewEnv` doc comment
+records this finding in full. The two scenario files that do need it call
+`env.Engine.RegisterObservers()` themselves: `dependency_unblock_test.go` (gap 1, for
+`PushUnblockObserver` itself) and `reinvoke_cycle_counters_test.go` (gap 4, for a different,
+also-discovered-empirically reason — see that file's own doc comment on
+`reinvokeCycleCountersEnv`).
 
 **`Engine.PollWithBackoff(ctx, configuredInterval) (PollBackoffResult, error)`**
 (`engine/poll.go`) moves `doPollCycle`'s entire body — the REST/core rate-limit hard gate,
@@ -107,12 +121,17 @@ before and after, confirmed by the same full `engine` test suite. Only a scenari
   additive production surface, alongside the two new exported methods. No existing call site's
   *behavior* changes; both are confirmed byte-identical to prior behavior by the full existing
   `go test ./engine/...` suite.
-- `tests/sim/dependency_unblock_test.go` (gap 1), `tests/sim/backoff_test.go` (gap 2), and
-  `tests/sim/stale_worker_reap_test.go` (gap 3) are the first sim scenarios to depend on
-  `RegisterObservers`, `PollWithBackoff`, and `RunStartupCleanup` respectively — every other
-  existing `tests/sim` scenario continues to use `PollOnce` alone and is unaffected by any of the
-  three (`RegisterObservers` was silently a no-op for them before this issue, since none of the
-  observers it registers gate any assertion those scenarios already made).
+- `tests/sim/backoff_test.go` (gap 2) and `tests/sim/stale_worker_reap_test.go` (gap 3) are the
+  first sim scenarios to depend on `PollWithBackoff` and `RunStartupCleanup` respectively; both
+  are called explicitly only by the scenario that needs them, so every other existing `tests/sim`
+  scenario continues to use `PollOnce` alone, unaffected. `RegisterObservers` is different:
+  unlike the other two, it is never called by default at all — see the Decision section above and
+  `tests/sim/env.go`'s `NewEnv` doc comment for why an unconditional call broke four unrelated,
+  pre-existing scenarios during Implement. `tests/sim/dependency_unblock_test.go` (gap 1) and
+  `tests/sim/reinvoke_cycle_counters_test.go` (gap 4) each call it themselves, for two distinct
+  reasons neither Research nor Plan anticipated (`PushUnblockObserver`'s own registration for
+  gap 1; a cooldown-suppression interaction specific to advisory-mode multi-round reinvokes for
+  gap 4 — see that file's own doc comment).
 - A future contributor writing a new sim scenario that exercises engine behavior gated by a
   reactive `itemstate.Store` observer, GraphQL/REST rate-limit response, or a one-shot
   startup-recovery scan should reach for these three methods directly rather than re-deriving
