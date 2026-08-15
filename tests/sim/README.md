@@ -268,14 +268,15 @@ never scenarios to begin with. No row is blank.
 | `paused_merged_pr_recovery_test.go` | Ported | `paused_merged_pr_recovery_test.go` — `TestPausedMergedPRRecovery`'s 3 sub-cases as `t.Run` subtests (gate=`fabrik:awaiting-ci`, gate=`fabrik:awaiting-review`, no gate). The live test's fixed 45s real-wall-clock sync-barrier sleep has no port — `RunPoll`/`AdvanceUntil` drive the engine directly against synchronous sim state, so there is no board-cache-refetch race to guard against (R2: sim asserts *more*, deterministically). |
 | `convergence_race_test.go` | Live-only | Not in R1's target set (R6 assessment only). Its genuine subject — two concurrently-dispatched engine workers racing a server-side atomic auto-merge — is structurally unreproducible: `simgh`'s native auto-merge is flag-only and never resolves spontaneously (see "Native auto-merge" in `simgh/FIDELITY.md`), and its own compare-and-swap window (`FIDELITY.md`'s "A PR retargeted after the gate cleared it") models a different, sim-only mechanism, not GitHub's server-side atomicity. The conflict-*detection-and-recovery* mechanism it also exercises (`checkMergeabilityGate` → `fabrik:rebase-needed` → `dispatchRebaseReinvoke`) was confirmed exercisable in sim in principle — `simclaude.DefaultScript`'s same-path-different-content collision reproduces a genuine same-anchor git conflict for free, with no custom scripting needed to provoke it — but the planned `convergence_recovery_test.go` (a new, honestly-named, narrower scenario for the recovery mechanism only, per R6) was not completed within this port's time budget. Recorded as a follow-up opportunity, not a regression against R1 (this file was never an R1 obligation). |
 | `cross_repo_spawn_test.go` | Ported | `cross_repo_spawn_test.go` — `TestCrossRepoSpawn` (positive path) and `TestCrossRepoSpawn_RefusesUnservedTarget` (this port's AC3 non-vacuity proof, the ADR-1419 board-servability companion). Required extending `Env` with opt-in `EnvOptions.SecondRepo` and a new engine test seam, `Engine.RegisterWorktreeManagerForTest` (`engine/engine.go`) — see the harness note below. The parent's Plan-stage spawn declaration is seeded directly (`SeedComment`) rather than produced by a scripted live Plan invocation — see that file's own doc comment for the git-worktree corruption this sidesteps (below). |
-| `train_mode_switch_test.go` | Live-only | Per R6: restarts the bed process to force it to re-read `FABRIK_MERGE_TRAIN` at startup — a process-lifecycle property, not a state-machine one. `Engine.PollOnce` drives an in-process engine directly; there is no subprocess boundary for this package to restart. No sim analogue is possible by construction. |
+| `train_mode_switch_test.go` | Live-only | Per R6: restarts the bed process to force it to re-read `FABRIK_MERGE_TRAIN` at startup — a process-lifecycle property, not a state-machine one. `Engine.PollOnce` drives an in-process engine directly; there is no subprocess boundary for this package to restart. No sim analogue is possible by construction. (The adjacent state-machine question — does an "off" engine ever drain Queued, and does an "on" one land normally — is covered separately by #1452's `mergetrain_mode_test.go`, construction-time rather than restart-time; see the `mergetrain_helpers.go` row below.) |
 | `marker_paths_test.go` | N/A | Per R6/the issue body: a static consistency check over the live harness's own path map. Zero live-bed content, no sim analogue needed. |
 | `review_failfast_test.go` | N/A | Per R6/the issue body: a pure boundary-condition unit test of `reviewFailFastDue`, zero live-bed content per its own doc comment. |
-| `mergetrain_happy_test.go` | Out of scope | Merge-train scenario — separate issue in this chain (issue Scope section). |
-| `mergetrain_bisect_test.go` | Out of scope | Same. |
-| `mergetrain_restart_test.go` | Out of scope | Same. |
-| `mergetrain_runaway_test.go` | Out of scope | Same. |
-| `mergetrain_helpers.go` | Out of scope | Support code exclusively for the 4 merge-train scenario files above. |
+| `mergetrain_happy_test.go` | Ported | Superseded by a broader combinatorial matrix rather than a 1:1 port: `mergetrain_assembly_test.go`'s all-green subtest covers the happy path directly, and `mergetrain_mode_test.go`'s `TestMergeTrainMode_On` is a second, minimal positive control. See #1452. |
+| `mergetrain_bisect_test.go` | Ported | `mergetrain_assembly_test.go` (R2 poison matrix: real-conflict proof, all-green, single poison at first/middle/last position, two independent poisons, a member poisonous only in combination) + `mergetrain_bisect_bound_test.go` (R3: trial counts asserted against `ceilLog2`/`effectiveBisectCap`, cost-cap-honored proof via forced fallback to `landOneAtATime`) + `mergetrain_ejection_test.go` (R5 ejection half: comment wording, `MaxMergeTrainEjections` pause-after-N, no-Queued-without-comment invariant) + `mergetrain_landing_test.go` (R6: `landOneAtATime`/`landSingleton`, plus the `landMergeTrainBatch` asymmetry pin — no live counterpart). See #1452. |
+| `mergetrain_restart_test.go` | Ported | `mergetrain_restart_test.go` (sim) — R7's three `reconstructTrainState` routes (orphaned-branch cleanup, resume from a live trial, deferred landing after a merge) via `RestartEnv` (ADR-1451), direct-seeded rather than goroutine-raced against a real kill signal. Building this scenario surfaced and fixed a real `RestartEnv` defect (stale `origin` remote across a restart) — see ADR-1452. See #1452. |
+| `mergetrain_runaway_test.go` | Ported | `mergetrain_runaway_test.go` (sim) — `TestMergeTrainRunaway_TripsAndPausesQueuedMembers` plus its own non-vacuity "does not trip with a generous window" subtest. `recordTrial`/`isRunawayTripped` are real-wall-clock-anchored, not `Clock`-seamed, so this cannot fast-forward the rolling window — mirrors the live suite's own small-window real-time trial-cycling technique. See #1452. |
+| `mergetrain_redsingleton_test.go` | Ported | `mergetrain_redsingleton_test.go` (sim) — the #1440/#1545 red-singleton-reroute shape (R2's mandatory batch-size-1 red case), plus R9's two reroute-off-holding scenarios (state-transition dispatchability via `fabrik:revalidate`; failed-reroute ordering via `Instrumented.Log().Precedes`, no comment/count on failure). See #1452. |
+| `mergetrain_helpers.go` | Ported | `mergetrain_helpers.go` (sim) — `mergeTrainStages`/`mergeTrainEnv`/`QueueMember` (mirroring the live file's own idiom) plus `startTrialVerdictSeeder`, the per-SHA poison-declaration mechanism this port's real-git approach needed and the live suite does not (it observes real CI, sim scripts it) — see ADR-1452. Also carries R4's scripted-conflict-resolution `CommentScript` builders (`mergetrain_conflict_resolution_test.go`'s three failure shapes: unresolvable-eject, usage-limit-no-eject, mixed-mode-premature-commit — no live counterpart, since the live suite exercises a real Claude resolver rather than scripting its failure modes) and R8's mode on/off regression guard (`mergetrain_mode_test.go` — a construction-time property in sim, distinct from `train_mode_switch_test.go`'s bed-restart/config-reread property, which stays live-only — see that file's own row above). See #1452. |
 | `doc.go` | N/A | Package doc comment only, no scenario content. |
 | `harness.go` | N/A | Support/harness code (the live assertion vocabulary this package's `assertions.go`/`poll.go` are deliberately named after), not a scenario itself. |
 | `lifecycle.go` | N/A | Support/harness code (bed start/stop, `.env` readers), not a scenario. |
@@ -436,6 +437,59 @@ still bounded by `simgh`'s own ~84s runtime rather than by this issue's
 additions — comfortably under the ~90s line, so the "no `sim` build tag"
 decision above still holds.
 
+**Updated for #1452's merge-train suite** (~25 new test functions across 9
+new files, one shared helper file): this is the first addition to genuinely
+exceed the ~90s line, and honestly, not by a small margin — each merge-train
+scenario does real, repeated `git merge`/push/`git gc` work (per trial, and
+several scenarios run multiple trials), which is qualitatively heavier than
+anything else in this package. `go test -race -count=1 -run TestMergeTrain
+./tests/sim/` (this issue's scenarios alone) measures at **~90–130s**
+depending on machine load. Two mitigations were applied, both documented in
+`adrs/1452-mergetrain-sim-harness-seams.md`:
+
+- `mergeTrainEnv`'s `CIBackstopTimeout` (10s) and
+  `SetTrainCIPollIntervalForTest` (15ms) give the verdict seeder headroom
+  against contention without changing the common-case (sub-millisecond)
+  latency.
+- `mergeTrainSlots`, a package-level semaphore capping concurrent
+  merge-train real-git activity at 3 scenarios regardless of how many
+  `t.Parallel()`-marked merge-train test functions exist. Measured directly:
+  running all merge-train scenarios with unlimited concurrency (no
+  semaphore) pushed individual scenario wall-clock to 40–70s apiece under
+  `-race` and — more importantly — starved *other, unrelated* package tests
+  badly enough to fail four of them
+  (`TestCruiseFullPipeline_NonVacuous`, `TestRestartEnv_RoundTrip`,
+  `TestYoloAutoMergeLabel`, `TestSmoke_FullPipelineToDone`) via
+  `workerQuiescenceTimeout`/`AdvanceUntil` exhaustion in one full-package
+  `-race` run, and drove the whole package to **~660s**. With the semaphore,
+  `go test -race -count=1 ./tests/sim/...` (this package + `simgh` +
+  `simclaude` + `simgh/ghfault`, run concurrently) measured **~106–130s** in
+  clean runs — still a real increase over the ~84s baseline directly above,
+  now the actual bottleneck rather than `simgh`. One further run, under
+  unusually heavy external load on the measuring machine, saw a single
+  *pre-existing, unrelated* test (`TestRebaseCycleLimit`) exhaust
+  `workerQuiescenceTimeout` at ~440s total — the same environment-contention
+  risk class this file's "worker-quiescence fix" section above already
+  documents, not a new failure mode this issue introduced, but the
+  semaphore's 3-way cap is a *mitigation* of that risk, not an elimination
+  of it under genuinely adverse load.
+
+**The "no `sim` build tag" decision is revisited, not reaffirmed, by this
+issue.** ~90–130s (typical) to ~440s (adverse-load outlier) is no longer
+"comfortably under" anything — it is argued to remain acceptable rather than
+gated behind a build tag, for three reasons: (1) merge-train is exactly the
+subsystem this package exists to make safe to test at all, per this issue's
+own Problem statement — gating its only sim coverage behind an opt-in tag
+would mean it silently stops running in ordinary CI; (2) the semaphore
+already bounds the worst realistic case to roughly 2–3x the package's
+pre-existing runtime, not open-ended; (3) `tests/sim/simgh`'s own ~90–100s
+is already comparable in magnitude and already ungated. If this package's
+total continues to grow with future additions, revisiting the build-tag
+question is a reasonable future call — but not one this issue's own
+Scope (which explicitly does not include changing this package's own testing
+infrastructure beyond what its scenarios need) is positioned to make
+unilaterally.
+
 ## Settle-scan inventory and recovery-machinery coverage (#1451)
 
 #1451 added the sim layer's first coverage of the engine's recovery
@@ -468,8 +522,13 @@ it latent in prose.
 Explicitly out of R1's scope, and why (mirrors the issue's own Scope
 section):
 
-- `settleQueuedReviewFindings` (ADR-1208) — merge-train-specific, belongs to
-  sibling issue #1452.
+- `settleQueuedReviewFindings` (ADR-1208) — merge-train-specific; #1452's own
+  scope covers the *standalone-validation-failure* reroute-off-Queued cause
+  (`ejectRedSingleton`/`rerouteQueuedMemberOffHolding`, R9,
+  `mergetrain_redsingleton_test.go`), which is `settleQueuedReviewFindings`'s
+  structural sibling but not the same scan — the *PR-review-finding* cause
+  `settleQueuedReviewFindings` itself owns (`ejectQueuedMemberForReviewFindings`,
+  ADR-1208) remains untested at the sim layer, left as a follow-up.
 - `settleClaudeLimitLabelSweep` / `settleClaudeLimitClearRequests` — no
   `MaxRetries` counter, no escalation arc; covered under R5 instead (below).
 - `fabrik:awaiting-review` / `fabrik:awaiting-input` — not settle-scan-owned

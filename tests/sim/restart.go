@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"os/exec"
 	"testing"
 
 	"github.com/handarbeit/fabrik/engine"
@@ -30,6 +31,29 @@ import (
 //     under t.TempDir() — it survives constructing a second engine.Engine in
 //     the same test process without any filesystem-level restart simulation
 //     needed.
+//  3. The reused WorktreeManager's own "origin" remote must be re-pointed at
+//     the *restored* Sim's backing bare repository, not left on the
+//     pre-restart one. RestoreInstrumented's baseDir is always a fresh
+//     t.TempDir() (Snapshot's own doc comment: a stale git-worktree admin
+//     entry pointing at the old baseDir must never be copied forward), so
+//     the restored Sim's git content genuinely lives at a new filesystem
+//     path — but env.WM's own origin remote config, untouched by reuse,
+//     still points at the pre-restart path. That old directory is not
+//     deleted until the whole test ends (t.TempDir() cleanup), so a push
+//     through it does not error — it silently lands in a repository nothing
+//     reads from afterward, while any *branch that already existed at
+//     snapshot time* was copied forward and still "resolves" the moment
+//     something merely checks for its existence — repeatedly, deceptively
+//     unremarkable, since simgh's ListPRs/CreateDraftPR check existence, not
+//     staleness. This is invisible to a scenario whose stages reuse the same
+//     branch name throughout (fabrik/issue-N, present pre-restart, so its
+//     mere existence post-restart masks a misdirected push of new commits)
+//     — restart_recovery_test.go's own four kill points never happen to push
+//     a genuinely new branch after restart, which is exactly why this went
+//     undetected until #1452's merge-train restart scenarios, whose every
+//     trial branch is a brand-new name with no pre-restart existence to hide
+//     behind. Fixed here once, for every RestartEnv caller, rather than
+//     patched around in the caller that happened to notice.
 //
 // The shared Clock and simclaude.Invoker are also carried forward
 // deliberately, not rebuilt: a real process crash does not rewind wall-clock
@@ -60,6 +84,20 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 	restored, err := simgh.RestoreInstrumented(snap, baseDir, simgh.WithClock(env.Clock))
 	if err != nil {
 		t.Fatalf("RestartEnv: restore: %v", err)
+	}
+
+	// Re-point the reused WorktreeManager's own "origin" remote at the
+	// restored Sim's new backing repo location — see property 3 in this
+	// file's own doc comment above for why this is load-bearing, not
+	// cosmetic. Scoped to env.OwnerRepo only: a second-repo Env
+	// (EnvOptions.SecondRepo) has no beta WorktreeManager reachable from
+	// here at all (env.go builds and registers it locally, never storing it
+	// back on Env) — a pre-existing, separate gap this fix does not attempt
+	// to close.
+	if newBareDir, rerr := restored.Sim().RepoBareDir(env.OwnerRepo); rerr != nil {
+		t.Fatalf("RestartEnv: resolving restored bare repo dir for %s: %v", env.OwnerRepo, rerr)
+	} else if out, serr := exec.Command("git", "-C", env.WM.BaseDir(), "remote", "set-url", "origin", newBareDir).CombinedOutput(); serr != nil {
+		t.Fatalf("RestartEnv: re-pointing origin to %s: %v: %s", newBareDir, serr, out)
 	}
 
 	eng := engine.NewWithDeps(env.cfg, restored, env.Claude, env.WM)

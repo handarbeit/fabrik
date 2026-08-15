@@ -348,6 +348,22 @@ func buildWorktreeManager(t *testing.T, simModel *simgh.Sim, ownerRepo string) *
 	// reads — git clone --bare alone does not create this ref.
 	runGit(t, localBareDir, "remote", "set-head", "origin", "--auto")
 
+	// Local (not global) committer identity on the bare clone — mirrors
+	// ensureBareClone's own setCommitterIdentity step. Worktrees created
+	// from this bare clone share its .git/config, so this covers every
+	// real `git commit`/`git merge --no-ff` the engine performs against
+	// them (e.g. assembleTrialBranch's per-member merge commits). Without
+	// this, git falls back to the ambient system/global identity — present
+	// on most dev machines (~/.gitconfig) but absent on a fresh GitHub
+	// Actions runner, where any real merge commit fails outright with
+	// "fatal: empty ident name ... not allowed". That gap was invisible
+	// until #1452's merge-train scenarios became the first sim tests to
+	// exercise a genuine (non-fast-forward) merge commit through this path
+	// — caught by this PR's own CI run, not local runs, precisely because
+	// local dev machines paper over it. See #1452.
+	runGit(t, localBareDir, "config", "user.name", "fabrik-sim")
+	runGit(t, localBareDir, "config", "user.email", "fabrik-sim@example.invalid")
+
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
 	owner, repo, _ := strings.Cut(ownerRepo, "/")
 	return engine.NewWorktreeManagerForRepo(localBareDir, worktreeRoot, owner+"-"+repo)

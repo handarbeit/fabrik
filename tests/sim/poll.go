@@ -148,28 +148,137 @@ func RunPolls(t *testing.T, env *Env, n int) {
 //
 // cond is called with env so it can inspect any part of the harness's
 // state (labels, PR state, board status) it needs.
+//
+// Also checked after every poll: clonePauseDetected (below) — a genuinely
+// unsatisfiable state, not merely a slow one, and worth aborting on
+// immediately rather than burning the rest of maxPolls doing nothing but
+// reads. See its own doc comment for why this check is scoped narrowly to
+// the repo-clone-failure pause specifically, not "any paused member."
 func AdvanceUntil(t *testing.T, env *Env, cond func(*Env) bool, maxPolls int) {
 	t.Helper()
 	if cond(env) {
 		return
+	}
+	if num, reason, found := clonePauseDetected(t, env); found {
+		t.Fatalf("AdvanceUntil: #%d is paused by a failed repo clone before this wait even began — polling further cannot resolve this\n\npause reason:\n%s\n\n%s",
+			num, reason, diagnostics(env))
 	}
 	for i := 0; i < maxPolls; i++ {
 		RunPoll(t, env)
 		if cond(env) {
 			return
 		}
+		if num, reason, found := clonePauseDetected(t, env); found {
+			t.Fatalf("AdvanceUntil: #%d is paused by a failed repo clone (after %d poll(s)) — polling further cannot resolve this\n\npause reason:\n%s\n\n%s",
+				num, i+1, reason, diagnostics(env))
+		}
 	}
 	t.Fatalf("AdvanceUntil: condition not met after %d polls\n\n%s", maxPolls, diagnostics(env))
 }
 
+// clonePauseMarker is the exact comment prefix ensureRepoReady (engine/engine.go)
+// posts when a real `git clone` fails and the owning item is paused as a
+// result (fabrik:paused + fabrik:awaiting-input). It is a stable, narrow
+// signal: no scenario in this package ever scripts or expects a clone
+// failure, so its presence always means the underlying git operation was
+// genuinely interrupted — most plausibly by this package's own heavy
+// parallel real-git load (tests/sim and tests/sim/simgh both drive real git
+// hard; merge-train scenarios in particular add repeated merge/push/gc work
+// on top) contending for the same clone/filesystem resources, not an engine
+// logic defect. See #1452's review-comment finding.
+const clonePauseMarker = "🏭 **Fabrik — cannot clone repo**"
+
+// clonePauseDetected scans env's board for an item paused specifically by a
+// failed repo clone. Deliberately narrower than "any fabrik:paused member":
+// several scenarios in this package (merge-train ejection, the runaway
+// guard, the red-singleton reroute) deliberately wait through or for an
+// *ordinary* pause, each with its own distinct comment wording — those are
+// legitimate awaited states, not unsatisfiable ones, and a blanket "any
+// pause aborts the wait" check would misfire on every one of them. A
+// clone-failure pause is different in kind: nothing in the ordinary poll
+// loop ever clears it (it requires a human, or a retrying caller matching
+// the original owner, per ensureRepoReady's own retry-boundary comment), so
+// once one appears, no scenario waiting on anything else can make progress —
+// AdvanceUntil's mutation log would otherwise show 20 polls of nothing but
+// reads before timing out, exactly the confusing shape this check replaces
+// with a direct diagnosis.
+//
+// gh.ProjectItem.Comments is already populated by FetchProjectBoard in this
+// harness (unlike production's shallow board query), so this needs no
+// separate per-item FetchIssueComments round trip.
+func clonePauseDetected(t *testing.T, env *Env) (issueNumber int, reason string, found bool) {
+	t.Helper()
+	board, err := env.Sim.FetchProjectBoard(env.Owner, env.Repo, env.ProjectNum, "User")
+	if err != nil {
+		return 0, "", false // a fetch failure here is reported by diagnostics() at the actual failure site
+	}
+	for _, item := range board.Items {
+		if !hasLabel(item.Labels, "fabrik:paused") || !hasLabel(item.Labels, "fabrik:awaiting-input") {
+			continue
+		}
+		for _, c := range item.Comments {
+			if strings.Contains(c.Body, clonePauseMarker) {
+				return item.Number, c.Body, true
+			}
+		}
+	}
+	return 0, "", false
+}
+
 // diagnostics renders the harness's current state for a failing assertion —
-// the board state (every item's status and labels) and the mutation log's
-// most recent entries (via Instrumented.Log().Dump) — so a test failure is
-// diagnosable from CI output alone, without a re-run (R4/AC7).
+// the board state (every item's status and labels), the most recent pause
+// comment for every paused item (see pausedItemReasons below), and the
+// mutation log's most recent entries (via Instrumented.Log().Dump) — so a
+// test failure is diagnosable from CI output alone, without a re-run
+// (R4/AC7).
 func diagnostics(env *Env) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "=== board state ===\n%s\n", boardSummary(env))
+	if reasons := pausedItemReasons(env); reasons != "" {
+		fmt.Fprintf(&b, "=== pause reasons ===\n%s\n", reasons)
+	}
 	fmt.Fprintf(&b, "=== mutation log (most recent) ===\n%s\n", env.Sim.Log().Dump(50))
+	return b.String()
+}
+
+// pausedItemReasons renders, for every board item carrying fabrik:paused,
+// its most recent comment — whatever the pause cause. clonePauseDetected
+// above deliberately narrows its *abort* to one specific cause (a failed
+// repo clone) so it never misfires on a scenario legitimately waiting
+// through an ordinary pause; that narrowness is correct for aborting early,
+// but it left diagnostics blind to every other pause cause, which is exactly
+// what turned a known "#1/#3 paused, fabrik:awaiting-input" board dump into
+// two days of guessing rather than a direct answer (see #1452 comment
+// history). This function has no such scoping concern: it only renders
+// information for a human or the next investigation to read, never decides
+// whether to abort, so it can safely cover every paused item unconditionally.
+//
+// The most recent comment is taken by CreatedAt, not by position in
+// item.Comments — comments are expected to already arrive in creation order
+// from FetchProjectBoard, but sorting explicitly here is one line and does
+// not depend on that assumption holding.
+func pausedItemReasons(env *Env) string {
+	board, err := env.Sim.FetchProjectBoard(env.Owner, env.Repo, env.ProjectNum, "User")
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range board.Items {
+		if !hasLabel(item.Labels, "fabrik:paused") {
+			continue
+		}
+		if len(item.Comments) == 0 {
+			fmt.Fprintf(&b, "#%d: fabrik:paused with no comments at all\n", item.Number)
+			continue
+		}
+		latest := item.Comments[0]
+		for _, c := range item.Comments[1:] {
+			if c.CreatedAt.After(latest.CreatedAt) {
+				latest = c
+			}
+		}
+		fmt.Fprintf(&b, "#%d most recent comment (by %s):\n%s\n", item.Number, latest.Author, latest.Body)
+	}
 	return b.String()
 }
 
