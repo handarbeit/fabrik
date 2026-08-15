@@ -102,8 +102,27 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 	}, nil
 }
 
-// ListPRs returns every PR in the repo. Like production's list-endpoint
-// implementation, it leaves MergeableState empty.
+// ListPRs returns every PR in the repo, most-recently-updated first. Like
+// production's list-endpoint implementation, it leaves MergeableState empty.
+//
+// Ordering matters, not just content: production's ListPRs
+// (github/prs.go) requests `sort=updated&direction=desc`, and merge-train's
+// findIntegrationPR/reconstructTrainState (engine/merge_train.go) both rely
+// on that ordering — "the first PR carrying the batch marker" is meant to
+// resolve to the *current* trial's own integration PR, not a superseded
+// bisection sub-trial that also carries the marker (every trial PR does,
+// see assembleAndValidateInner's doc comment). Returning by ascending PR
+// number instead (this function's behavior before #1452) means the very
+// first trial ever opened for a batch — not the live one — always wins
+// once a batch has bisected past a single trial, since the current trial's
+// PR is always numbered higher. Confirmed against a real bisection run
+// (tests/sim's merge-train poison matrix): landMergeTrainBatch located the
+// initial 3-member trial PR instead of the final 2-survivor one and tried
+// to land a PR whose trial branch had already been deleted by an earlier
+// cleanupTrialArtifacts call, wedging every affected scenario. Sorting by
+// updatedAt descending (ties broken by number descending, mirroring "newest
+// wins" — see FetchLinkedPR's own doc comment) restores parity with what
+// the real endpoint returns.
 func (s *Sim) ListPRs(owner, repo string) ([]gh.PRDetails, error) {
 	s.mu.Lock()
 	r, err := s.lookupRepo(owner, repo)
@@ -117,6 +136,13 @@ func (s *Sim) ListPRs(owner, repo string) ([]gh.PRDetails, error) {
 		snaps = append(snaps, *r.prs[n])
 	}
 	s.mu.Unlock()
+
+	sort.Slice(snaps, func(i, j int) bool {
+		if !snaps[i].updatedAt.Equal(snaps[j].updatedAt) {
+			return snaps[i].updatedAt.After(snaps[j].updatedAt)
+		}
+		return snaps[i].number > snaps[j].number
+	})
 
 	out := make([]gh.PRDetails, 0, len(snaps))
 	for i := range snaps {

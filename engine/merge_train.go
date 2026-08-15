@@ -2714,7 +2714,7 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(30 * time.Second):
+		case <-time.After(e.trainCIPollIntervalOrDefault()):
 		}
 	}
 
@@ -3383,11 +3383,11 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			return TrainCIPending, nil
 		}
 
-		// Poll again after 30 seconds.
+		// Poll again after the (test-overridable) retry interval.
 		select {
 		case <-ctx.Done():
 			return TrainCIPending, nil
-		case <-time.After(30 * time.Second):
+		case <-time.After(e.trainCIPollIntervalOrDefault()):
 		}
 	}
 }
