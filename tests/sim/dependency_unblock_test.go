@@ -18,24 +18,67 @@ import (
 //
 //   - Path 1 (StateChanged): a blocker closes; the observer scans the store
 //     for dependents listing it and removes fabrik:blocked once every
-//     blocker is resolved. TestDependencyUnblock_OnBlockerClose (AC1).
+//     blocker is resolved.
 //   - Path 2 (BlockedByChanged): the dependent's own BlockedBy is
 //     re-populated by a deep-fetch; the observer inspects only that item.
 //     It returns early when the new list is EMPTY (observers.go:299) —
 //     deliberate, per ADR-1419: a stale-empty cache must never be trusted
-//     as "no blockers" on its own. TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver
-//     (AC2) proves this guard holds, and that recovery instead falls to the
-//     "dep-blocked" cooldown-gated pull path in checkDependencies
-//     (engine/dependencies.go) — the behaviour #1453's chain work hit in
-//     practice.
+//     as "no blockers" on its own.
 //
-// dependencyUnblockStages places the blocker on an Unmanaged column
-// (Backlog): a real board item the store does track (BootstrapFromProbe
-// seeds every board item, including Unmanaged ones — see
-// engine/terminal.go's runProbeAndDeepFetch, which keeps applying
-// ProbeBoardItemUpdated to an already-known Unmanaged item on every later
-// poll too), but one dispatch never touches, so the blocker's own pipeline
-// progress cannot interfere with either assertion below.
+// TestDependencyUnblock_OnBlockerClose (AC1) drives the close-and-unblock
+// sequence. TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver
+// (AC2) proves the empty-list guard holds, and that recovery instead falls
+// to the "dep-blocked" cooldown-gated pull path in checkDependencies
+// (engine/dependencies.go) — the behaviour #1453's chain work hit in
+// practice.
+//
+// # Why AC1's blocker is never placed on the project board
+//
+// tests/sim's Engine is built via NewWithDeps, which wires the bare
+// GitHubAdapter as readClient (deliberately — see NewWithDeps's own doc
+// comment), never boardcache.CacheImpl. Production's per-poll store refresh
+// for EVERY board item, including ones outside normal dispatch admission
+// (runProbeAndDeepFetch, engine/terminal.go), is CacheImpl-only machinery
+// tests/sim never runs. Without it, e.store's per-item IsClosed field is
+// written ONLY by itemstate.ItemDeepFetched, and ONLY for items
+// itemMayNeedWork actually admits — which excludes a closed item outright
+// unless it is either at a cleanup stage (which itself skips
+// FetchItemDetails — see selectDeepFetchCandidates) or already carries
+// stage:<itsStage>:complete for a non-cleanup stage it hasn't yet advanced
+// away from. In practice a completed, yolo-advanced item leaves that window
+// within the very same dispatch goroutine that completed it (confirmed by
+// running the scenario both ways), so there is no poll at which a
+// board-resident blocker is simultaneously closed, admitted, and freshly
+// deep-fetched.
+//
+// Anything short of that leaves the blocker's store entry either absent
+// (harmless — checkDependencies and PushUnblockObserver.allBlockersClosed
+// both fall back to the dependency edge's own State field, which
+// resolveDependenciesLocked always resolves correctly straight from the
+// repo's issue record, independent of project-board membership — see
+// tests/sim/simgh/board.go) or, worse, MATERIALIZED WRONG: the very first
+// mutation any settle scan or cleanup dispatch applies to a
+// previously-untracked item (e.g. SelfWriteObserved from
+// settleClosedItemsToDone, or a plain LabelAdded from handleCleanupStage)
+// creates a zero-value store entry via Store.getOrCreate whose IsClosed
+// defaults to false — durably wrong, since nothing later corrects a field
+// neither mutation type touches. checkDependencies's Store-preferred check
+// then trusts that wrong entry over the correct dep.State fallback,
+// re-blocking the dependent on its very next dispatch attempt. This has no
+// production consequence — CacheImpl's probe refresh always keeps every
+// board item's IsClosed current before any settle scan runs, so the race
+// this harness exposes cannot occur there — but it is very much reachable
+// here, and was hit and traced while writing this scenario.
+//
+// The clean way to route around it, matching how a blocker frequently is
+// NOT itself a Fabrik-managed item in practice (an upstream issue, a
+// human-owned issue, an issue in an unmanaged repo): file the blocker as a
+// plain repo issue via Sim.SeedIssue with no Status, so it is never added
+// to any project board at all. It never enters e.store, is never touched by
+// any settle scan, and its true open/closed state is always available to
+// the dependent's own BlockedBy resolution regardless. See
+// TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver's own doc
+// comment for why its blocker does not need this treatment.
 func dependencyUnblockStages() []*stages.Stage {
 	return []*stages.Stage{
 		{Name: "Backlog", Order: 1, Unmanaged: true},
@@ -44,26 +87,32 @@ func dependencyUnblockStages() []*stages.Stage {
 	}
 }
 
-// TestDependencyUnblock_OnBlockerClose is gap 1's first direction (AC1,
-// R2's Path 1): a blocker issue closes, PushUnblockObserver removes
-// fabrik:blocked from the dependent, and the dependent proceeds — actually
-// dispatches to Specify, not merely loses the label.
+// TestDependencyUnblock_OnBlockerClose is gap 1's first direction (AC1): a
+// blocker issue closes, PushUnblockObserver clears fabrik:blocked from the
+// dependent, and the dependent proceeds — actually dispatches to Specify,
+// not merely loses the label.
+//
+// See dependencyUnblockStages's doc comment for why the blocker is filed as
+// a board-less repo issue rather than a project item.
 //
 // Non-vacuity (R5): hasLabel(..., "stage:Specify:complete") is checked
-// false immediately after the first poll (still blocked) and the
-// Precedes assertion below requires the label removal to genuinely precede
-// the dispatch, not merely both eventually being true — an implementation
-// that dispatched Specify regardless of fabrik:blocked (dropping the gate
-// entirely, engine/item.go:542) would still pass a terminal-state-only
-// check but fails Precedes here, and fails the "still blocked" check above
-// even sooner.
+// false on the dependent immediately after the first poll (still blocked),
+// and the Precedes assertion below requires the label removal to genuinely
+// precede the dependent's own dispatch, not merely both eventually being
+// true — an implementation that dispatched Specify regardless of
+// fabrik:blocked (dropping the gate entirely, engine/item.go:542) would
+// still pass a terminal-state-only check but fails Precedes here, and fails
+// the "still blocked" check above even sooner.
 func TestDependencyUnblock_OnBlockerClose(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: dependencyUnblockStages()})
 
-	blocker := FileIssue(t, env, "blocker",
-		"This issue must close before the dependent below is allowed to proceed.",
-		"Backlog")
+	const blocker = 1000
+	env.Sim.Sim().SeedIssue(env.OwnerRepo, simgh.IssueSeed{
+		Number: blocker,
+		Title:  "blocker",
+		Body:   "This issue must close before the dependent below is allowed to proceed. Deliberately not placed on any project board — see dependencyUnblockStages's doc comment.",
+	})
 	dependent := FileIssue(t, env, "dependent",
 		"Blocked on the blocker issue; must not dispatch to Specify until it closes.",
 		"Specify", "fabrik:blocked")
@@ -72,8 +121,8 @@ func TestDependencyUnblock_OnBlockerClose(t *testing.T) {
 		t.Fatalf("seeding: %v", err)
 	}
 
-	// First poll: checkDependencies's alreadyBlocked live re-read
-	// (engine/dependencies.go) finds the blocker still open — the label
+	// First poll: the dependent's alreadyBlocked live re-read
+	// (engine/dependencies.go) finds the blocker still open — its label
 	// survives and Specify is never dispatched. Confirms the scenario
 	// actually starts blocked, not merely labelled so.
 	RunPoll(t, env)
@@ -88,10 +137,8 @@ func TestDependencyUnblock_OnBlockerClose(t *testing.T) {
 		t.Fatalf("CloseIssue: %v", err)
 	}
 
-	// Path 1: the blocker's own StateChanged fires PushUnblockObserver,
-	// which scans the store for dependents and asynchronously removes
-	// fabrik:blocked (o.Remove runs in its own goroutine — see
-	// observers.go) once allBlockersClosed holds.
+	// PushUnblockObserver removes fabrik:blocked (o.Remove runs in its own
+	// goroutine — see observers.go) once allBlockersClosed holds.
 	WaitForLabelAbsent(t, env, dependent, "fabrik:blocked", 10)
 
 	// "…and it proceeds": the dependent actually dispatches once unblocked.
@@ -112,12 +159,17 @@ func TestDependencyUnblock_OnBlockerClose(t *testing.T) {
 }
 
 // TestDependencyUnblock_EmptyEdgeListDoesNotUnblockViaObserver is gap 1's
-// companion direction (AC2, R2's Path 2): removing the LAST blockedBy edge
-// by hand must NOT unblock via PushUnblockObserver's BlockedByChanged path
-// — the empty-list guard at observers.go:299 is a deliberate ADR-1419
-// protection against a stale-empty cache falsely unblocking an issue, and a
-// test asserting only TestDependencyUnblock_OnBlockerClose's direction
-// would pass against an implementation that dropped this guard entirely.
+// companion direction (AC2, R2): removing the LAST blockedBy edge by hand
+// must NOT unblock via PushUnblockObserver's BlockedByChanged path — the
+// empty-list guard at observers.go:299 is a deliberate ADR-1419 protection
+// against a stale-empty cache falsely unblocking an issue, and a test
+// asserting only TestDependencyUnblock_OnBlockerClose's direction would
+// pass against an implementation that dropped this guard entirely.
+//
+// Unlike the companion test above, this blocker is never closed, so
+// dependencyUnblockStages's board-less-blocker concern never applies here:
+// it stays on Unmanaged Backlog for the scenario's whole lifetime, purely
+// as a real board item SeedBlockedBy/SeedRemoveBlockedBy can reference.
 //
 // The claim this test can actually make, traced against the real admission
 // gate (engine/item.go's itemMayNeedWork "dep-blocked" cooldown): while the

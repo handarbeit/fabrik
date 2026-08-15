@@ -405,71 +405,18 @@ func (e *Engine) Run() error {
 
 	// In production wiring readClient is always *CacheImpl; the cast may return
 	// (nil, false) when called from tests that use the pass-through GitHub adapter
-	// directly via NewWithDeps. Code paths that depend on cacheImpl must check nil.
+	// directly via NewWithDeps. Code paths below that depend on cacheImpl must
+	// check nil. RegisterObservers performs this identical cast internally for
+	// its own cacheImpl-gated observer.
 	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
 
-	// Register reactive observers. All returned unsubscribe funcs are collected
-	// and called when Run returns. Observers on cacheImpl are gated on cacheImpl != nil;
-	// observers on engine.store are always registered.
-	{
-		var unsubs []func()
-		defer func() {
-			for _, unsub := range unsubs {
-				unsub()
-			}
-		}()
-
-		// wakeChObserver fires on board-state changes. After store unification, the
-		// shared store receives both engine-side mutations (LockChanged) and webhook/
-		// reconcile-side mutations (Status/Labels/Comments/LinkedPR). Register once
-		// on the shared store — no cacheImpl registration needed or allowed.
-		if e.wakeCh != nil {
-			wakeObs := newWakeChObserver(e.wakeCh)
-			unsubs = append(unsubs, e.store.Subscribe(wakeObs))
-		}
-
-		// mayNeedWorkObserver populates e.mayNeedWork when items change. Register
-		// once on the shared store; all mutation types flow through it post-unification.
-		mwnObs := newMayNeedWorkObserver(&e.mayNeedWorkMu, &e.mayNeedWork)
-		unsubs = append(unsubs, e.store.Subscribe(mwnObs))
-
-		// InvocationObserver fires on InvocationRecorded mutations (engine-side).
-		invObs := &InvocationObserver{Stages: e.cfg.Stages, Emit: e.emitStructural}
-		unsubs = append(unsubs, e.store.Subscribe(invObs))
-
-		// StageChangeObserver fires on StatusChanged mutations. After store unification
-		// it registers on the shared store (not cacheImpl) so it sees all status changes.
-		stageObs := &StageChangeObserver{Emit: e.emitStructural}
-		unsubs = append(unsubs, e.store.Subscribe(stageObs))
-
-		// PushUnblockObserver fires on StateChanged (issue close) and removes
-		// fabrik:blocked from dependents whose all blockers are now resolved.
-		// StateChanged is not in wakeChFlags so this registration has no effect on
-		// poll-wake behaviour. Registered on e.store only (post store-unification).
-		pushUnblockObs := &PushUnblockObserver{
-			Store:  e.store,
-			Remove: func(owner, repo string, n int) { e.removeBlockedIfResolved(owner, repo, n) },
-			Logf:   func(format string, args ...any) { e.logf(0, "push-unblock", format, args...) },
-		}
-		unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
-
-		// CommentBreakerObserver resets the comment-processing circuit breaker on
-		// linked-PR state changes (#1089).
-		cbObs := &CommentBreakerObserver{Store: e.store}
-		unsubs = append(unsubs, e.store.Subscribe(cbObs))
-
-		if cacheImpl != nil {
-			// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
-			// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
-			unsubs = append(unsubs, cacheImpl.SubscribePause(func(paused bool) {
-				state := "healthy"
-				if paused {
-					state = "unhealthy"
-				}
-				e.emitStructural(tui.WebhookStatusEvent{State: state})
-			}))
-		}
-	}
+	// Register reactive observers (mayNeedWork fast-path population, TUI event
+	// emission, PushUnblockObserver's dependency-unblock propagation, the
+	// comment-breaker's PR-state reset, and — when cacheImpl is wired —
+	// webhook-health events). See RegisterObservers's own doc comment for why
+	// this is a separate exported method rather than inlined here.
+	unregisterObservers := e.RegisterObservers()
+	defer unregisterObservers()
 
 	// Start webhook manager when enabled. Failures are non-fatal: the engine
 	// continues in polling-only mode.
@@ -959,6 +906,95 @@ type pollResult struct {
 	ItemCount  int
 	Dispatched int
 	SeenRepos  map[string]bool // all repos observed on the board in this poll
+}
+
+// RegisterObservers subscribes the engine's steady-state reactive observers
+// on e.store (and, when the read client is a *boardcache.CacheImpl, on it as
+// well) and returns a function that unsubscribes all of them. It is a
+// verbatim extraction of the registration block Run() has always executed
+// immediately before starting its poll loop — same observers, same
+// construction, same order; Run() itself now calls this method instead of
+// inlining the block.
+//
+// This is a test seam (ADR-1592, mirroring PollOnce/ADR-1449): PollOnce
+// drives poll() directly and never runs any part of Run()'s preamble, so
+// without a way to call this separately, every observer registered here —
+// including PushUnblockObserver, the sole delivery mechanism for gap 1's
+// dependency-unblock propagation (#1592) — is unreachable from tests/sim,
+// exactly the same shape of gap PollWithBackoff/RunStartupCleanup close for
+// backoff.go/worker_liveness.go. tests/sim's NewEnv and RestartEnv call this
+// once, immediately after constructing the Engine, mirroring where Run()
+// calls it in production.
+//
+// Registering twice on the same Engine (e.g. a test that both calls this
+// directly AND later calls Run()) subscribes every observer twice, which is
+// never done in production and not a scenario this method guards against —
+// callers that also invoke Run() must not call this method themselves; Run()
+// already calls it internally.
+func (e *Engine) RegisterObservers() (unregister func()) {
+	// In production wiring readClient is always *CacheImpl; the cast may return
+	// (nil, false) when called from tests that use the pass-through GitHub adapter
+	// directly via NewWithDeps. Code paths that depend on cacheImpl must check nil.
+	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
+
+	var unsubs []func()
+
+	// wakeChObserver fires on board-state changes. After store unification, the
+	// shared store receives both engine-side mutations (LockChanged) and webhook/
+	// reconcile-side mutations (Status/Labels/Comments/LinkedPR). Register once
+	// on the shared store — no cacheImpl registration needed or allowed.
+	if e.wakeCh != nil {
+		wakeObs := newWakeChObserver(e.wakeCh)
+		unsubs = append(unsubs, e.store.Subscribe(wakeObs))
+	}
+
+	// mayNeedWorkObserver populates e.mayNeedWork when items change. Register
+	// once on the shared store; all mutation types flow through it post-unification.
+	mwnObs := newMayNeedWorkObserver(&e.mayNeedWorkMu, &e.mayNeedWork)
+	unsubs = append(unsubs, e.store.Subscribe(mwnObs))
+
+	// InvocationObserver fires on InvocationRecorded mutations (engine-side).
+	invObs := &InvocationObserver{Stages: e.cfg.Stages, Emit: e.emitStructural}
+	unsubs = append(unsubs, e.store.Subscribe(invObs))
+
+	// StageChangeObserver fires on StatusChanged mutations. After store unification
+	// it registers on the shared store (not cacheImpl) so it sees all status changes.
+	stageObs := &StageChangeObserver{Emit: e.emitStructural}
+	unsubs = append(unsubs, e.store.Subscribe(stageObs))
+
+	// PushUnblockObserver fires on StateChanged (issue close) and removes
+	// fabrik:blocked from dependents whose all blockers are now resolved.
+	// StateChanged is not in wakeChFlags so this registration has no effect on
+	// poll-wake behaviour. Registered on e.store only (post store-unification).
+	pushUnblockObs := &PushUnblockObserver{
+		Store:  e.store,
+		Remove: func(owner, repo string, n int) { e.removeBlockedIfResolved(owner, repo, n) },
+		Logf:   func(format string, args ...any) { e.logf(0, "push-unblock", format, args...) },
+	}
+	unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
+
+	// CommentBreakerObserver resets the comment-processing circuit breaker on
+	// linked-PR state changes (#1089).
+	cbObs := &CommentBreakerObserver{Store: e.store}
+	unsubs = append(unsubs, e.store.Subscribe(cbObs))
+
+	if cacheImpl != nil {
+		// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
+		// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
+		unsubs = append(unsubs, cacheImpl.SubscribePause(func(paused bool) {
+			state := "healthy"
+			if paused {
+				state = "unhealthy"
+			}
+			e.emitStructural(tui.WebhookStatusEvent{State: state})
+		}))
+	}
+
+	return func() {
+		for _, unsub := range unsubs {
+			unsub()
+		}
+	}
 }
 
 // PollOnce runs exactly one poll cycle and reports only whether it errored —

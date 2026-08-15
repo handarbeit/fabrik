@@ -102,6 +102,10 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 
 	eng := engine.NewWithDeps(env.cfg, restored, env.Claude, env.WM)
 	eng.SetClock(env.Clock)
+	// Mirrors production: a real restart re-registers observers immediately
+	// (Run() does this every time it starts) — see Engine.RegisterObservers's
+	// own doc comment (ADR-1592) and NewEnv's identical call.
+	eng.RegisterObservers()
 
 	env.issueSeqMu.Lock()
 	nextIssue := env.issueSeqNext

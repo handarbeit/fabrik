@@ -303,6 +303,11 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
+	// Mirrors what Run() does immediately after construction, in production —
+	// see Engine.RegisterObservers's own doc comment (ADR-1592). Without this,
+	// PushUnblockObserver (and every other reactive observer Run() registers)
+	// is unreachable from a scenario driven through PollOnce alone.
+	eng.RegisterObservers()
 
 	return &Env{
 		T:             t,
