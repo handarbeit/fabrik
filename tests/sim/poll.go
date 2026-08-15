@@ -226,13 +226,59 @@ func clonePauseDetected(t *testing.T, env *Env) (issueNumber int, reason string,
 }
 
 // diagnostics renders the harness's current state for a failing assertion —
-// the board state (every item's status and labels) and the mutation log's
-// most recent entries (via Instrumented.Log().Dump) — so a test failure is
-// diagnosable from CI output alone, without a re-run (R4/AC7).
+// the board state (every item's status and labels), the most recent pause
+// comment for every paused item (see pausedItemReasons below), and the
+// mutation log's most recent entries (via Instrumented.Log().Dump) — so a
+// test failure is diagnosable from CI output alone, without a re-run
+// (R4/AC7).
 func diagnostics(env *Env) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "=== board state ===\n%s\n", boardSummary(env))
+	if reasons := pausedItemReasons(env); reasons != "" {
+		fmt.Fprintf(&b, "=== pause reasons ===\n%s\n", reasons)
+	}
 	fmt.Fprintf(&b, "=== mutation log (most recent) ===\n%s\n", env.Sim.Log().Dump(50))
+	return b.String()
+}
+
+// pausedItemReasons renders, for every board item carrying fabrik:paused,
+// its most recent comment — whatever the pause cause. clonePauseDetected
+// above deliberately narrows its *abort* to one specific cause (a failed
+// repo clone) so it never misfires on a scenario legitimately waiting
+// through an ordinary pause; that narrowness is correct for aborting early,
+// but it left diagnostics blind to every other pause cause, which is exactly
+// what turned a known "#1/#3 paused, fabrik:awaiting-input" board dump into
+// two days of guessing rather than a direct answer (see #1452 comment
+// history). This function has no such scoping concern: it only renders
+// information for a human or the next investigation to read, never decides
+// whether to abort, so it can safely cover every paused item unconditionally.
+//
+// The most recent comment is taken by CreatedAt, not by position in
+// item.Comments — comments are expected to already arrive in creation order
+// from FetchProjectBoard, but sorting explicitly here is one line and does
+// not depend on that assumption holding.
+func pausedItemReasons(env *Env) string {
+	board, err := env.Sim.FetchProjectBoard(env.Owner, env.Repo, env.ProjectNum, "User")
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range board.Items {
+		if !hasLabel(item.Labels, "fabrik:paused") {
+			continue
+		}
+		if len(item.Comments) == 0 {
+			fmt.Fprintf(&b, "#%d: fabrik:paused with no comments at all\n", item.Number)
+			continue
+		}
+		latest := item.Comments[0]
+		for _, c := range item.Comments[1:] {
+			if c.CreatedAt.After(latest.CreatedAt) {
+				latest = c
+			}
+		}
+		fmt.Fprintf(&b, "#%d most recent comment (by %s):\n%s\n", item.Number, latest.Author, latest.Body)
+	}
 	return b.String()
 }
 

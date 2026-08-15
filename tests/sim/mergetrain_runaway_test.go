@@ -83,33 +83,53 @@ func TestMergeTrainRunaway_TripsAndPausesQueuedMembers(t *testing.T) {
 	if !anyPaused {
 		t.Fatal("expected the runaway guard to have paused at least one Queued member — got none; either it never tripped (MaxTrainTrialsPerWindow=4 not reached) or the pause labels/comment are broken")
 	}
+}
 
-	// Non-vacuity (AC10): with MaxTrainTrialsPerWindow effectively disabled
-	// (a very large value), the identical poison declaration would instead
-	// cascade all the way down to red singletons via the ordinary bisection
-	// ejection/reroute paths, landing nothing but never pausing via this
-	// guard specifically — proving the pause above is genuinely the guard
-	// firing, not some other disposition that happens to look similar.
-	t.Run("does not trip with a generous window", func(t *testing.T) {
-		t.Parallel()
-		env2 := mergeTrainEnv(t, mergeTrainEnvOptions{
-			ConfigureCfg: func(cfg *engine.Config) {
-				cfg.MaxTrainTrialsPerWindow = 1000
-				cfg.TrainTrialWindowDuration = 5 * time.Minute
-			},
-		})
-		numsA := make([]int, len(files))
-		for i := range files {
-			numsA[i], _ = QueueMember(t, env2, "noguard", files[i])
-		}
-		startTrialVerdictSeeder(t, env2, poisonVerdict(numsA...))
-
-		RunPoll(t, env2)
-
-		for _, n := range numsA {
-			if hasLabel(IssueLabels(t, env2, n), "fabrik:paused") && hasCommentContaining(t, env2, n, "runaway guard tripped") {
-				t.Errorf("#%d was paused by the runaway guard even though the window (1000 trials) should never be reached — the guard must not fire without cause", n)
-			}
-		}
+// TestMergeTrainRunaway_DoesNotTripWithGenerousWindow is the non-vacuity
+// (AC10) negative control for TestMergeTrainRunaway_TripsAndPausesQueuedMembers
+// above: with MaxTrainTrialsPerWindow effectively disabled (a very large
+// value), the identical poison declaration instead cascades all the way down
+// to red singletons via the ordinary bisection ejection/reroute paths,
+// landing nothing but never pausing via this guard specifically — proving
+// the positive control's pause is genuinely the guard firing, not some other
+// disposition that happens to look similar.
+//
+// This is a standalone top-level test, not a t.Run subtest of the positive
+// control, deliberately: a t.Parallel() subtest pauses until its parent test
+// function returns and then runs in the package's shared parallel wave, but
+// the parent's own mergeTrainSlots slot (acquired by its own mergeTrainEnv
+// call) is not released until every one of its subtests — including this
+// one — completes, since t.Cleanup only fires once the whole subtree is
+// done. Nesting this scenario there meant one logical test held two of the
+// package's three mergeTrainSlots concurrency-limiting slots for the
+// subtest's entire real-git-work duration, cutting the effective concurrency
+// available to every other merge-train scenario from 3 to 2 and worsening
+// exactly the contention mergeTrainSlots exists to bound (review finding on
+// this PR). Two independent top-level tests each acquire exactly one slot
+// for their own natural lifetime, with no such overlap.
+func TestMergeTrainRunaway_DoesNotTripWithGenerousWindow(t *testing.T) {
+	t.Parallel()
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{
+		ConfigureCfg: func(cfg *engine.Config) {
+			cfg.MaxTrainTrialsPerWindow = 1000
+			cfg.TrainTrialWindowDuration = 5 * time.Minute
+		},
 	})
+
+	files := []map[string]string{
+		{"a.txt": "a\n"}, {"b.txt": "b\n"}, {"c.txt": "c\n"}, {"d.txt": "d\n"}, {"e.txt": "e\n"},
+	}
+	nums := make([]int, len(files))
+	for i := range files {
+		nums[i], _ = QueueMember(t, env, "noguard", files[i])
+	}
+	startTrialVerdictSeeder(t, env, poisonVerdict(nums...))
+
+	RunPoll(t, env)
+
+	for _, n := range nums {
+		if hasLabel(IssueLabels(t, env, n), "fabrik:paused") && hasCommentContaining(t, env, n, "runaway guard tripped") {
+			t.Errorf("#%d was paused by the runaway guard even though the window (1000 trials) should never be reached — the guard must not fire without cause", n)
+		}
+	}
 }
