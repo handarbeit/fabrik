@@ -6,6 +6,12 @@
 #   scripts/cut-release.sh v0.0.67 --skip-tests       # skip race-tested suite (last-resort)
 #   scripts/cut-release.sh v0.0.67 --no-doc-issue     # skip filing the doc-update issue
 #   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the plugin/fabrik version auto-bump
+#   scripts/cut-release.sh v0.0.67 --skip-integration=<reason>
+#       # Skip the mandatory live e2e integration gate (step 5 below). This is
+#       # a LOUD, RECORDED escape hatch, not a quiet default — see step 5's own
+#       # comment and adrs/1454-sim-pre-gate-not-replacement.md for why the
+#       # live suite is mandatory by default and what this flag costs. A bare
+#       # `--skip-integration` (no reason) is refused.
 #
 # Prereqs:
 #   - On main, clean working tree, ff'd to origin/main
@@ -18,45 +24,33 @@
 # What it does:
 #   1. Pre-flight: branch, clean tree, ff-pull, release-notes heading match
 #   2. PAT identity check (must be arbeithand)
-#   3. go build + go test -race
-#   4. Commit release-notes.md (if dirty) as arbeithand
-#   4b. If plugin/fabrik's source changed since the previous tag, patch-bump
+#   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454)
+#   4. go build + go test -race (skippable with --skip-tests; the pre-gate above never is)
+#   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
+#      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454)
+#   6. Commit release-notes.md (if dirty) as arbeithand
+#   6b. If plugin/fabrik's source changed since the previous tag, patch-bump
 #       plugin/fabrik/.claude-plugin/plugin.json and commit as arbeithand
 #       (skippable with --no-plugin-bump)
-#   5. Tag, push tag with credential helpers nuked + PAT-in-URL
-#   6. Watch the release workflow run; fail loudly on non-success
-#   7. Verify the published release author and discussion author are both arbeithand
-#   8. File doc-update issue and add to project at Status=Specify
+#   7. Tag, push tag with credential helpers nuked + PAT-in-URL
+#   8. Watch the release workflow run; fail loudly on non-success
+#   9. Verify the published release author and discussion author are both arbeithand
+#   10. File doc-update issue and add to project at Status=Specify
 #
 # On failure after the tag is pushed, the script does NOT auto-clean. It prints the
 # exact cleanup commands you'd need so you can decide whether to scrub and retry.
+#
+# parse_args() and main() are split, and both sit behind the same
+# BASH_SOURCE[0]==$0 dispatch guard scripts/e2e/run.sh already uses (see that
+# script's own precedent). This lets scripts/cut_release_gate_test.sh `source`
+# this file and exercise parse_args()'s flag validation — including the
+# mandatory-by-default live suite's --skip-integration handling — directly,
+# without ever reaching main() (the real publish sequence: tag, push, watch
+# workflow, file issue). This is a pure mechanical wrap: no step's logic,
+# ordering, or behavior changed as part of the split, only where the code
+# lives.
 
 set -euo pipefail
-
-# ─── arg parsing ──────────────────────────────────────────────────────────────
-VERSION="${1:-}"
-SKIP_TESTS=0
-NO_DOC_ISSUE=0
-NO_PLUGIN_BUMP=0
-shift || true
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --skip-tests)     SKIP_TESTS=1 ;;
-    --no-doc-issue)   NO_DOC_ISSUE=1 ;;
-    --no-plugin-bump) NO_PLUGIN_BUMP=1 ;;
-    *) echo "Unknown flag: $1" >&2; exit 2 ;;
-  esac
-  shift
-done
-
-if [ -z "$VERSION" ]; then
-  echo "Usage: $0 vX.Y.Z [--skip-tests] [--no-doc-issue] [--no-plugin-bump]" >&2
-  exit 2
-fi
-if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-  echo "Version must look like v0.0.67 (got: $VERSION)" >&2
-  exit 2
-fi
 
 # ─── constants ────────────────────────────────────────────────────────────────
 REPO="handarbeit/fabrik"
@@ -73,6 +67,90 @@ ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[1;33m!\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# insert_notes_line appends $2 into $1's "## Internal" section — creating
+# that section (just before "## Upgrading", the schema's always-last
+# section) if it doesn't exist yet. Shared by the plugin-bump changelog line
+# (step 6b, pre-existing) and the --skip-integration recorded-skip line
+# (step 5, R2/#1454), so the two call sites can't drift into different
+# insertion logic.
+insert_notes_line() {
+  local file="$1"
+  local line="$2"
+  if grep -Eq '^## Internal[[:space:]]*$' "$file"; then
+    awk -v line="$line" '
+      { print }
+      /^## Internal[[:space:]]*$/ && !inserted { print line; inserted=1 }
+    ' "$file" > "${file}.tmp"
+    mv "${file}.tmp" "$file"
+  elif grep -Eq '^## Upgrading[[:space:]]*$' "$file"; then
+    # No existing Internal section: insert a new one directly before
+    # Upgrading (always the last section in the notes schema) rather than
+    # appending at the file's end, which would land after the closing
+    # ```bash fence and break the canonical section order.
+    awk -v line="$line" '
+      /^## Upgrading[[:space:]]*$/ && !inserted {
+        print "## Internal"
+        print line
+        print ""
+        inserted=1
+      }
+      { print }
+    ' "$file" > "${file}.tmp"
+    mv "${file}.tmp" "$file"
+  else
+    {
+      echo ""
+      echo "## Internal"
+      echo "$line"
+    } >> "$file"
+  fi
+}
+
+# ─── arg parsing ──────────────────────────────────────────────────────────────
+parse_args() {
+  VERSION="${1:-}"
+  SKIP_TESTS=0
+  NO_DOC_ISSUE=0
+  NO_PLUGIN_BUMP=0
+  SKIP_INTEGRATION=0
+  INTEGRATION_SKIP_REASON=""
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --skip-tests)     SKIP_TESTS=1 ;;
+      --no-doc-issue)   NO_DOC_ISSUE=1 ;;
+      --no-plugin-bump) NO_PLUGIN_BUMP=1 ;;
+      --skip-integration=*)
+        SKIP_INTEGRATION=1
+        INTEGRATION_SKIP_REASON="${1#--skip-integration=}"
+        [ -n "$INTEGRATION_SKIP_REASON" ] \
+          || { echo "--skip-integration requires a non-empty reason: --skip-integration=<reason>" >&2; exit 2; }
+        ;;
+      --skip-integration)
+        echo "--skip-integration requires a reason: --skip-integration=<reason> (a bare flag is not accepted — R2/#1454: the live suite is mandatory by default, and its one sanctioned escape hatch must be loud and self-documenting)" >&2
+        exit 2
+        ;;
+      *) echo "Unknown flag: $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+
+  if [ -z "$VERSION" ]; then
+    echo "Usage: $0 vX.Y.Z [--skip-tests] [--no-doc-issue] [--no-plugin-bump] [--skip-integration=<reason>]" >&2
+    exit 2
+  fi
+  if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "Version must look like v0.0.67 (got: $VERSION)" >&2
+    exit 2
+  fi
+}
+
+# main runs the real, side-effecting publish sequence (git commits/pushes, a
+# real tag push, watching a real workflow run, filing a real issue) — never
+# invoked on source, only from the dispatch guard at the bottom when this
+# script is executed directly. Reads the globals parse_args sets.
+main() {
+
 # ─── 1. pre-flight ────────────────────────────────────────────────────────────
 step "Pre-flight checks"
 
@@ -82,11 +160,11 @@ ok "on main"
 
 # Allow uncommitted release-notes/<version>.md, plugin/known_embedded_versions.go,
 # and plugin/fabrik/.claude-plugin/plugin.json (all three are updated by this
-# script itself, after the build step and in step 4b).
+# script itself, after the build step and in step 6b).
 #
 # Allowlist disposition (reviewed for #1070, extended for #816): all three
-# files are committed by this script's own step 4 / step 4b, *before* the tag
-# is created and pushed in step 5. By the time release.yml's CI job checks
+# files are committed by this script's own step 6 / step 6b, *before* the tag
+# is created and pushed in step 7. By the time release.yml's CI job checks
 # out the tag, it's a fresh clone — it never sees this local working tree,
 # dirty or not. So this allowlist cannot affect the CI-built artifact and
 # does not need to be tightened; the built-artifact VCS check lives in
@@ -143,7 +221,28 @@ PAT_OWNER="$(GH_TOKEN="$FABRIK_TOKEN" gh api user --jq .login)"
   || die "FABRIK_TOKEN does not belong to $BOT_LOGIN (got: $PAT_OWNER)"
 ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 
-# ─── 3. build + test ──────────────────────────────────────────────────────────
+# ─── 3. sim + wire-contract pre-gate (unconditional — R1/R2, #1454) ──────────
+# Unlike the full go test -race ./... below, this step is NEVER skippable —
+# not even by --skip-tests. It's the same free, fast pre-gate
+# scripts/e2e/run.sh runs ahead of its own live suite (see that script's
+# run_pregate), re-run here so a release cut through this script pays the
+# same "cheap layers first" ordering even if someone hand-invokes
+# scripts/e2e/run.sh separately with E2E_SKIP_PREGATE set. Cheap (~107s
+# total per tests/sim/README.md), so making it unconditional costs nothing
+# real while removing an entire class of "the live suite failed for a
+# reason the sim would have caught for free" incidents.
+step "Sim + wire-contract pre-gate"
+if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
+  die "sim suite failed — fix it before cutting a release (scripts/sim/run.sh --all to reproduce)"
+fi
+ok "sim suite passed"
+if ! go test -race -count=1 ./github/... >/tmp/cut-release-pregate-test.log 2>&1; then
+  tail -40 /tmp/cut-release-pregate-test.log >&2
+  die "github wire-contract tests failed (full log: /tmp/cut-release-pregate-test.log)"
+fi
+ok "github wire-contract tests passed"
+
+# ─── 4. build + test ──────────────────────────────────────────────────────────
 step "Build"
 go build ./... >/dev/null || die "go build failed"
 ok "go build clean"
@@ -165,7 +264,7 @@ else
 fi
 
 if [ "$SKIP_TESTS" -eq 1 ]; then
-  warn "--skip-tests was passed; race-tested suite was NOT run"
+  warn "--skip-tests was passed; go test -race ./... was NOT run (the sim + wire-contract pre-gate above still ran unconditionally)"
 else
   step "Race-tested suite"
   if ! go test -race ./... >/tmp/cut-release-test.log 2>&1; then
@@ -176,11 +275,63 @@ else
 fi
 
 # Capture the previous release tag now, before this release's tag exists,
-# for the plugin-bump change-detection diff in step 4b. Tags were already
+# for the plugin-bump change-detection diff in step 6b. Tags were already
 # fetched in pre-flight. Empty on a first-ever release (no v* tag yet).
 PREV_TAG="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
 
-# ─── 4. commit release notes as arbeithand ────────────────────────────────────
+# ─── 5. live e2e integration gate (mandatory by default — R2, #1454) ────────
+# The live suite is the only layer that exercises real Claude, real review
+# bots, and real GitHub wire behaviour — nothing else in this pipeline can
+# substitute for it, and it is never retired or reduced (see
+# adrs/1454-sim-pre-gate-not-replacement.md). So unlike --skip-tests above,
+# there is no quiet default here: either the suite runs, or a human
+# explicitly said why not, and that "why not" ships in the release notes
+# where anyone reading them can see it. A --skip-integration that silently
+# produced an unvalidated release was rejected outright (R2's option (a) vs
+# (b) decision — see the ADR).
+#
+# Positioned here — after build+test, before the release-notes commit below
+# — so (a) a live-suite failure aborts before anything is committed or
+# pushed, and (b) the skip-reason line (or nothing, on a pass) folds into
+# the SAME release-notes commit rather than needing a second push, and (c)
+# since scripts/e2e/run.sh fetches origin/main by default, this tests
+# exactly the commit about to ship, right before it ships.
+step "Live e2e integration gate"
+if [ "$SKIP_INTEGRATION" -eq 1 ]; then
+  cat >&2 <<EOF
+
+################################################################################
+## SKIPPING THE LIVE E2E INTEGRATION SUITE (--skip-integration)
+## Reason: $INTEGRATION_SKIP_REASON
+##
+## This release has NOT been validated against real GitHub, real Claude, and
+## real review bots. This is being recorded in $NOTES_FILE.
+################################################################################
+
+EOF
+  insert_notes_line "$NOTES_FILE" "- ⚠️ Live e2e integration suite SKIPPED for this release: $INTEGRATION_SKIP_REASON"
+  warn "live e2e integration suite SKIPPED — reason recorded in $NOTES_FILE"
+else
+  echo "   running scripts/e2e/run.sh against origin/main (this can take hours — see tests/e2e/README.md)"
+  E2E_RC=0
+  "$REPO_ROOT/scripts/e2e/run.sh" || E2E_RC=$?
+  case "$E2E_RC" in
+    0)
+      ok "live e2e integration suite passed"
+      ;;
+    3)
+      die "live e2e integration suite aborted: GraphQL budget exhausted mid-run (exit 3) — the verdict cannot be trusted. Wait for the budget window to reset and re-run scripts/cut-release.sh $VERSION."
+      ;;
+    5)
+      die "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected, since this script's own pre-gate step (step 3) already passed against the same tree — investigate the discrepancy (different ref? dirty tree in the bed?) before retrying."
+      ;;
+    *)
+      die "live e2e integration suite FAILED (exit $E2E_RC) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it."
+      ;;
+  esac
+fi
+
+# ─── 6. commit release notes as arbeithand ────────────────────────────────────
 step "Commit release notes"
 # Stage the per-version source-of-truth file and the updated known-versions list.
 # The workflow reads release-notes/<version>.md directly — no copy step needed.
@@ -208,7 +359,7 @@ else
   ok "release-notes commit pushed"
 fi
 
-# ─── 4b. auto-bump plugin/fabrik version if source changed ───────────────────
+# ─── 6b. auto-bump plugin/fabrik version if source changed ───────────────────
 # Claude Code's /plugin update compares plugin.json's version field against
 # marketplace.json@main; same version number means no refresh fires even if
 # the plugin's source changed. Patch-bump plugin/fabrik's manifest whenever
@@ -236,35 +387,7 @@ else
     # Release notes. release-notes/<version>.md was already committed and
     # pushed above, so this lands in a second commit alongside the manifest
     # bump rather than amending the already-pushed one.
-    CHANGELOG_LINE="- Auto-bumped fabrik plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
-    if grep -Eq '^## Internal[[:space:]]*$' "$NOTES_FILE"; then
-      awk -v line="$CHANGELOG_LINE" '
-        { print }
-        /^## Internal[[:space:]]*$/ && !inserted { print line; inserted=1 }
-      ' "$NOTES_FILE" > "${NOTES_FILE}.tmp"
-      mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
-    elif grep -Eq '^## Upgrading[[:space:]]*$' "$NOTES_FILE"; then
-      # No existing Internal section: insert a new one directly before
-      # Upgrading (always the last section in the notes schema) rather than
-      # appending at the file's end, which would land after the closing
-      # ```bash fence and break the canonical section order.
-      awk -v line="$CHANGELOG_LINE" '
-        /^## Upgrading[[:space:]]*$/ && !inserted {
-          print "## Internal"
-          print line
-          print ""
-          inserted=1
-        }
-        { print }
-      ' "$NOTES_FILE" > "${NOTES_FILE}.tmp"
-      mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
-    else
-      {
-        echo ""
-        echo "## Internal"
-        echo "$CHANGELOG_LINE"
-      } >> "$NOTES_FILE"
-    fi
+    insert_notes_line "$NOTES_FILE" "- Auto-bumped fabrik plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
 
     git add "$PLUGIN_MANIFEST" "$NOTES_FILE"
     GIT_AUTHOR_NAME="$BOT_LOGIN" \
@@ -287,7 +410,7 @@ else
   fi
 fi
 
-# ─── 5. tag + push ────────────────────────────────────────────────────────────
+# ─── 7. tag + push ────────────────────────────────────────────────────────────
 step "Tag and push as @$BOT_LOGIN"
 TAG_COMMIT="$(git rev-parse HEAD)"
 git tag "$VERSION" "$TAG_COMMIT"
@@ -301,7 +424,7 @@ git \
   || die "tag push failed — local tag $VERSION still present, remove with: git tag -d $VERSION"
 ok "tag $VERSION pushed (commit $TAG_COMMIT)"
 
-# ─── 6. watch workflow ────────────────────────────────────────────────────────
+# ─── 8. watch workflow ────────────────────────────────────────────────────────
 step "Locate release workflow run"
 RUN_ID=""
 for attempt in 1 2 3 4 5 6; do
@@ -327,7 +450,7 @@ if [ "$CONCLUSION" != "success" ]; then
 fi
 ok "workflow conclusion: success"
 
-# ─── 7. identity verification ─────────────────────────────────────────────────
+# ─── 9. identity verification ─────────────────────────────────────────────────
 step "Verify release + discussion author = @$BOT_LOGIN"
 RELEASE_AUTHOR="$(GH_TOKEN="$FABRIK_TOKEN" gh api "/repos/$REPO/releases/tags/$VERSION" --jq .author.login)"
 [ "$RELEASE_AUTHOR" = "$BOT_LOGIN" ] || die "release author is '$RELEASE_AUTHOR', expected '$BOT_LOGIN'. The repo secret PUBLIC_REPO_RELEASE_TOKEN is wrong — rotate it to an arbeithand PAT at: https://github.com/${REPO}/settings/secrets/actions/PUBLIC_REPO_RELEASE_TOKEN, then delete the release+discussion+tag (see cleanup below) and re-run."
@@ -349,7 +472,7 @@ else
   ok "discussion author: @$DISCUSSION_AUTHOR"
 fi
 
-# ─── 8. file doc-update issue ─────────────────────────────────────────────────
+# ─── 10. file doc-update issue ─────────────────────────────────────────────────
 if [ "$NO_DOC_ISSUE" -eq 1 ]; then
   warn "--no-doc-issue was passed; skipping doc-update issue + project placement"
 else
@@ -388,6 +511,20 @@ step "Release $VERSION published"
 echo "  release:    https://github.com/${REPO}/releases/tag/${VERSION}"
 echo "  workflow:   https://github.com/${REPO}/actions/runs/${RUN_ID}"
 echo "  author:     @$BOT_LOGIN (verified)"
+
+}
+
+# Guarded so scripts/cut_release_gate_test.sh can `source` this file to reach
+# parse_args() and insert_notes_line() (and every other function above)
+# without triggering an actual publish. Everything above this guard is safe
+# to execute on source — constants, cd to repo root, and pure function
+# definitions, no publish side effects. When executed directly
+# (./cut-release.sh or `bash cut-release.sh`), BASH_SOURCE[0] equals $0, so
+# this still dispatches exactly as before this guard existed.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  parse_args "$@"
+  main
+fi
 
 # ─── cleanup reference (not executed) ─────────────────────────────────────────
 # If a release goes out under the wrong identity (or you need to redo it):
