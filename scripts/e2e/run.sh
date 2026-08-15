@@ -13,6 +13,19 @@
 # --clean (if given, must be the first argument) runs scripts/e2e/reset.sh for a
 # clean-slate bed before the run. Anything else is passed to `go test`.
 #
+# Pre-gate (R1, #1454): before ANY of the above — before bed preflight, before
+# the build, before a single live GitHub/Claude call — this script runs the
+# free, fast layers first (scripts/sim/run.sh --all, then the github/
+# wire-contract tests) and aborts with a distinct exit code if either fails.
+# Spending GraphQL quota and Claude tokens to discover a bug the sim or the
+# wire-contract tests already caught for $0 is exactly the waste this ordering
+# exists to remove. See run_pregate below for the full rationale.
+#
+#   E2E_SKIP_PREGATE=1     skip the pre-gate entirely (iteration-only escape
+#                           hatch, mirroring E2E_SKIP_PREP — scripts/cut-
+#                           release.sh never sets this; the release path
+#                           always pays the pre-gate cost)
+#
 # Bed preflight (on by default — see preflight_bed below for the full rationale):
 #   Before anything runs, the bed checkout is fast-forwarded to the ref under
 #   test, its binary is rebuilt IN PLACE, stage-config drift is reported, and the
@@ -205,6 +218,57 @@ readonly BUDGET_EXHAUSTED_EXIT=3
 # Distinct exit code for a preflight failure — the suite never started, so a
 # non-zero exit here must not be read as "the engine is broken."
 readonly PREFLIGHT_FAILED_EXIT=4
+
+# Distinct exit code for a pre-gate failure (R1, #1454) — the sim suite
+# and/or the github/ wire-contract tests failed before any bed preflight,
+# build, or live GitHub/Claude call was made. Distinct from PREFLIGHT_FAILED_EXIT
+# (4, a bed-state problem) and BUDGET_EXHAUSTED_EXIT (3, a live-run problem):
+# this one means the free layers themselves caught something, so a caller
+# (e.g. cut-release.sh) can tell "cheap layer caught it, saved you the live
+# run" apart from "live e2e itself failed" or "GraphQL budget exhausted."
+readonly PREGATE_FAILED_EXIT=5
+
+# ---------------------------------------------------------------------------
+# Pre-gate (R1, #1454): refuse to spend live budget until the free, fast
+# layers pass.
+#
+# scripts/sim/run.sh --all (the sim e2e scenarios plus simgh's own model
+# tests) and the github/ wire-contract tests are BOTH already unconditional
+# inside `go test -race ./...` and already run on every PR (R7 — confirmed,
+# not built; see tests/sim/README.md's "Runtime and the `sim` tag decision"
+# and github/wire_contract_test.go). Re-running them here, scoped, is
+# deliberate rather than redundant: this script can be (and regularly is)
+# invoked standalone — E2E_SKIP_PREP=1, a manual `scripts/e2e/run.sh` — and
+# must never assume unit tests were "just run" by whoever invoked it.
+# Running the scoped subsets (./tests/sim/... and ./github/...) rather than
+# the full `go test -race ./...` keeps the pre-gate's own cost close to just
+# these two layers and matches the issue's own three-way phrasing (unit ->
+# sim e2e -> wire-contract tests as distinct layers) instead of blurring it
+# back into one broad "run everything" step.
+#
+# Ordering is load-bearing, exactly like preflight_bed below: this function
+# is called FIRST in the dispatch guard, strictly before prepare_bed_and_reset
+# — so a pre-gate failure is proven, by construction, to have made no bed
+# preflight, no build, and no live GitHub/Claude call. That ordering — not a
+# runtime check inside the suite itself — is what R1's AC1 demonstrates.
+# ---------------------------------------------------------------------------
+run_pregate() {
+  if [ -n "${E2E_SKIP_PREGATE:-}" ]; then
+    echo "== pre-gate skipped (E2E_SKIP_PREGATE set) — sim/wire-contract layers assumed already green =="
+    return 0
+  fi
+
+  echo "== pre-gate: sim suite + github wire-contract tests (R1, #1454) =="
+  if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
+    echo "pre-gate: sim suite failed — aborting before touching the live bed or making any live call." >&2
+    exit "$PREGATE_FAILED_EXIT"
+  fi
+  if ! ( cd "$REPO_ROOT" && go test -race -count=1 ./github/... ); then
+    echo "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call." >&2
+    exit "$PREGATE_FAILED_EXIT"
+  fi
+  echo "== pre-gate passed =="
+}
 
 # ---------------------------------------------------------------------------
 # Bed preflight: guarantee the bed is running the engine we mean to test.
@@ -699,18 +763,24 @@ switch_and_run() {
   fi
 }
 
-# Guarded so scripts/e2e/backoff_detection_test.sh can `source` this file to
-# reach detect_rate_limit_backoff (and the other helper functions above)
-# without triggering an actual gate run. Everything above this guard (repo
-# root resolution, TEST_BED/ENGINE_LOG/BED_TOKEN setup, function
+# Guarded so scripts/e2e/backoff_detection_test.sh and
+# scripts/e2e/pregate_test.sh can `source` this file to reach
+# detect_rate_limit_backoff / run_pregate (and the other helper functions
+# above) without triggering an actual gate run. Everything above this guard
+# (repo root resolution, TEST_BED/ENGINE_LOG/BED_TOKEN setup, function
 # definitions) is safe to execute on source — read-only or pure function
 # definitions, no gate invocation. When executed directly (./run.sh or
 # `bash run.sh`), BASH_SOURCE[0] equals $0, so this still dispatches exactly
 # as before this guard existed.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  # Pre-gate FIRST (R1, #1454) — strictly before any bed preflight, build,
+  # restart, or live GitHub/Claude call. See run_pregate's own comment for
+  # why this ordering is the mechanism, not a runtime check.
+  run_pregate
+
   # Bed preflight + optional --clean reset. Inside the guard so sourcing this
-  # file (backoff_detection_test.sh) never touches a bed — or, in CI, aborts
-  # on the absence of one.
+  # file (backoff_detection_test.sh / pregate_test.sh) never touches a bed —
+  # or, in CI, aborts on the absence of one.
   prepare_bed_and_reset "$@"
   # --clean is consumed here, not inside the function: `shift` there would only
   # affect the function's own positional parameters, leaving --clean in "$@"
