@@ -490,6 +490,34 @@ Scope (which explicitly does not include changing this package's own testing
 infrastructure beyond what its scenarios need) is positioned to make
 unilaterally.
 
+**Updated for #1454 (correcting stale figures).** The "~92s total" /
+"comfortably under the ~90s line" conclusion two sections up predates the
+merge-train suite's addition (#1452, directly above) and has been stale
+since. Current measured runtime on a dev machine, recorded here as the
+honest current numbers rather than re-derived on every future edit (per this
+issue's own R8 — these figures are inherently machine- and load-dependent,
+as this section's whole revision history demonstrates):
+
+```
+tests/sim               42.5s     the scenarios
+tests/sim/simgh        105.0s     unit tests of the model itself
+tests/sim/simclaude      1.1s
+tests/sim/simgh/ghfault  1.1s
+                        ~107s total wall clock
+```
+
+The scenario layer alone (42.5s) is the part that matters for a pre-gate —
+it's the layer that actually exercises the pipeline — and it is plenty fast
+for that purpose; `simgh`'s own 105s is the model's unit-test suite, not
+pipeline coverage, and dominates the `--all` total the same way it has
+throughout this file's history. `scripts/sim/run.sh` (repo root) is the
+frictionless on-demand entry point this issue adds (R8): with no arguments
+it runs the scenario layer only (`./tests/sim`, ~42.5s); `--all` runs the
+full tree above (~107s). It's both the manual "run the sim layer by hand
+before committing to a full live e2e run" entry point and what
+`scripts/e2e/run.sh`'s pre-gate calls — see
+`adrs/1454-sim-pre-gate-not-replacement.md` for the full layering decision.
+
 ## Settle-scan inventory and recovery-machinery coverage (#1451)
 
 #1451 added the sim layer's first coverage of the engine's recovery
@@ -608,10 +636,42 @@ see that file's own doc comment for two earlier drafts (a 7-stage and a
 landing on the shallow pipeline that actually isolates R6's target
 (dispatch/lock/worktree contention), independent of pipeline depth.
 
+## Fidelity-drift policy (R4, #1454)
+
+The sim bed's entire value as a pre-gate (see
+`adrs/1454-sim-pre-gate-not-replacement.md`) depends on one property: it must not pass
+what live e2e would fail. A sim that does is worse than no gate at all — it manufactures
+false confidence at exactly the point where confidence is being relied on to justify
+skipping (or later starting) a full live run.
+
+**Rule:** any live-e2e failure that the sim passed is a fidelity bug in the sim, and is
+fixed there as well as in the engine.
+
+**Procedure**, when this happens:
+
+1. **File a fidelity issue** describing the divergence — what live e2e caught that the
+   sim's scenarios didn't, and why the sim's model (`simgh`) let it through.
+2. **Add the scenario to `tests/sim`** so the same class of bug cannot silently pass here
+   again — the same porting discipline #1450–#1452 already established for every other
+   scenario in this package.
+3. **Update `tests/sim/simgh/FIDELITY.md`** — the permanent, deliberate ledger of every
+   place `simgh` knowingly departs from real GitHub — with the divergence found and what
+   it costs. If you are relying on a sim-backed test to cover something subtle, check
+   that file first; if you change the model, update it in the same commit.
+
+This is a release-checklist step (`.claude/skills/cut-release/SKILL.md`), not something
+that depends on someone remembering it after a bad live run. It does not retroactively
+cover every gap the sim has — `simgh/FIDELITY.md`'s "Absent"-labeled entries are known,
+accepted blind spots, not violations of this rule — it covers the specific, high-signal
+case where live e2e actually caught something in production use that the pre-gate should
+have caught first.
+
 ## Running it
 
 ```bash
-go test -race ./tests/sim/...          # the suite (this package + simgh + simclaude)
+scripts/sim/run.sh                     # on-demand entry point (R8): scenario layer only, ~42.5s
+scripts/sim/run.sh --all               # full tree (this package + simgh + simclaude + ghfault), ~107s
+go test -race ./tests/sim/...          # equivalent to --all above, invoked directly
 bash tests/sim/simgh/nonvacuity.sh     # the simgh mutation sweep (needs a clean tree)
 ```
 
