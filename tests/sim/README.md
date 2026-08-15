@@ -567,6 +567,21 @@ before committing to a full live e2e run" entry point and what
 `scripts/e2e/run.sh`'s pre-gate calls — see
 `adrs/1454-sim-pre-gate-not-replacement.md` for the full layering decision.
 
+**Updated for #1592's sequence-shaped scenarios** (8 new test functions across 4 new
+files — gap 1's two dependency-unblock scenarios, gap 2's two backoff scenarios, gap
+3's stale-worker-reap scenario, gap 4's three reinvoke-cycle-counter scenarios): all
+eight, run standalone via `-run`, measure at **~5–6s** — none of them do real git work
+beyond a single `EnsureWorktree` per scenario (`preCreateWorktree`,
+`reinvokeCycleCountersEnv`), and none loop more than a handful of polls. `go test -race
+-count=1 -skip TestMergeTrainAssembly_PoisonMatrix ./tests/sim/...` (this package +
+`simgh` + `simclaude` + `simgh/ghfault`, run concurrently) measured **~80s for this
+package, ~100s for `simgh`** — both within the ranges #1454's own entry directly above
+already established as the package's current baseline, so #1592 does not move the "no
+`sim` build tag" needle further. (`TestMergeTrainAssembly_PoisonMatrix` itself is
+excluded from that figure as a pre-existing flake unrelated to this issue — confirmed
+independently reproducible on an unmodified `main` checkout, tracked separately from
+#1592's own scope.)
+
 ## Settle-scan inventory and recovery-machinery coverage (#1451)
 
 #1451 added the sim layer's first coverage of the engine's recovery
