@@ -22,6 +22,22 @@
         "name": "Tenacious Ventures",
         "url": "https://github.com/handarbeit/fabrik"
       }
+    },
+    {
+      "name": "fabrik-project-onboarding",
+      "description": "Onboard a software project and write its feature specifications, for product managers and business owners rather than engineers. Interviews you about project goals, scope, constraints, and vocabulary, then turns feature ideas into Spec Kit specifications ready to hand to Fabrik for build.",
+      "category": "productivity",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/handarbeit/fabrik.git",
+        "path": "plugin/fabrik-project-onboarding",
+        "ref": "main"
+      },
+      "homepage": "https://fabrik.handarbeit.io",
+      "author": {
+        "name": "handarbeit.io",
+        "url": "https://handarbeit.io"
+      }
     }
   ]
 }
