@@ -659,8 +659,11 @@ fixed there as well as in the engine.
    it costs. If you are relying on a sim-backed test to cover something subtle, check
    that file first; if you change the model, update it in the same commit.
 
-This is a release-checklist step (`.claude/skills/cut-release/SKILL.md`), not something
-that depends on someone remembering it after a bad live run. It does not retroactively
+This is a release-checklist step — recorded in `scripts/cut-release.sh`'s own header
+comment and its live-gate failure message (a platform-level write restriction on
+`.claude/skills/cut-release/SKILL.md` blocks recording it there too; see
+`adrs/1454-sim-pre-gate-not-replacement.md`'s R4 section) — not something that depends
+on someone remembering it after a bad live run. It does not retroactively
 cover every gap the sim has — `simgh/FIDELITY.md`'s "Absent"-labeled entries are known,
 accepted blind spots, not violations of this rule — it covers the specific, high-signal
 case where live e2e actually caught something in production use that the pre-gate should

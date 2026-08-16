@@ -135,8 +135,14 @@ confidence exactly where confidence is being relied on to save a live run.
 fixed there as well as in the engine.
 
 **Procedure**, recorded in `tests/sim/README.md` (canonical) and referenced from
-`tests/e2e/README.md`, and made a checklist step in
-`.claude/skills/cut-release/SKILL.md` so it does not depend on someone remembering:
+`tests/e2e/README.md`, and made a checklist step in `scripts/cut-release.sh`'s own
+header comment and its live-gate failure message so it does not depend on someone
+remembering. `.claude/skills/cut-release/SKILL.md`'s Steps section is the other
+sanctioned location per the issue's "and/or" wording, but this repo's tooling refuses
+writes to that specific path (a platform-level protection on installed skill files,
+confirmed not a project `settings.json` restriction) — it still describes the
+pre-#1454 8-step flow and should be brought into sync by a human with write access,
+including the new `--skip-integration=<reason>` flag and the pre-gate/live-gate steps.
 
 1. File a fidelity issue describing the divergence — what live e2e caught that the sim
    didn't, and why the sim's model let it through.
@@ -250,5 +256,6 @@ build tag" decision it protects.
   added by this issue) and "Known limitations" (CI placement, clarified by this issue).
 - `scripts/e2e/run.sh`'s `run_pregate` and `scripts/cut-release.sh`'s pre-gate/live-gate
   steps — the implementation.
-- `.claude/skills/cut-release/SKILL.md` — the release checklist R4's procedure is wired
-  into.
+- `.claude/skills/cut-release/SKILL.md` — the other sanctioned release-checklist location
+  per R4's "and/or" wording; not updated by this issue (see R4's own note above) and
+  still describes the pre-#1454 8-step flow.
