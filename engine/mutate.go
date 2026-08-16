@@ -153,6 +153,26 @@ func (e *Engine) addLabel(item gh.ProjectItem, label string) {
 	e.applyLabelAdd(item, label, true)
 }
 
+// addLabelChecked is addLabel's error-surfacing variant, for the rare caller
+// whose *next* action depends on whether the label actually landed on GitHub
+// rather than on the best-effort "log a warning and carry on" every other call
+// site wants. Same three-beat idiom as applyLabelAdd (always echoing, like
+// addLabel), but AddLabelToIssue's error is returned instead of swallowed.
+//
+// Sole caller today is markCreditedLanding (landing_verification_settle.go),
+// where a silently-dropped fabrik:credited-pr:<N> write would let the settle
+// scan misread a merge-train member's own closed-not-merged PR as the credited
+// one — see that function's doc comment.
+func (e *Engine) addLabelChecked(item gh.ProjectItem, label string) error {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
+		return err
+	}
+	e.syncLabelAdd(item, label, true)
+	e.recordLabelAppliedAtNow(item, label)
+	return nil
+}
+
 // syncLabelRemoval mirrors a label removal into the cache and, when echo is
 // true, registers a webhook echo. It is split out from applyLabelRemove so
 // callers that must perform the GitHub mutation themselves (e.g.

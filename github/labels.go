@@ -29,6 +29,7 @@ var staticLabelDefs = []labelDef{
 	{"fabrik:paused", "Stage failed or needs intervention; remove to resume", "d73a4a"},
 	{"fabrik:blocked", "Blocked by one or more open dependency issues", "d73a4a"},
 	{"fabrik:unrestricted", "Claude runs with --dangerously-skip-permissions for this issue", "d73a4a"},
+	{"fabrik:landing-verification-failed", "Post-Done check found the credited PR was not merged; issue reopened and moved off Done", "d73a4a"},
 
 	// --- waiting labels (yellow) ---
 	{"fabrik:awaiting-input", "Stage blocked on FABRIK_BLOCKED_ON_INPUT; comment to unblock", "e4e669"},
@@ -37,6 +38,7 @@ var staticLabelDefs = []labelDef{
 	{"fabrik:rebase-needed", "Base branch advanced and PR no longer merges; engine is retrying a rebase invocation", "e4e669"},
 	{"fabrik:bot-reprompted", "Bot re-prompt sent; waiting for bot to respond (transient; removed at gate-cycle end)", "e4e669"},
 	{"fabrik:revalidate", "Force re-entry of Validate; clears gate/pause/CI labels; auto-removes; non-Validate: removed", "e4e669"},
+	{"fabrik:awaiting-landing-verification", "Just reached Done via a merge; settle scan is verifying the credited PR actually merged", "e4e669"},
 
 	// --- neutral / transient labels (grey) ---
 	{"fabrik:auto-merge-enabled", "GitHub auto-merge enabled on linked PR; engine awaiting GitHub atomic merge", "cfd3d7"},
@@ -95,6 +97,12 @@ func labelDefFor(name string) (description, color string) {
 	// fabrik:locked:<user>
 	if strings.HasPrefix(name, "fabrik:locked:") {
 		return "Another Fabrik instance is processing this issue", "cfd3d7"
+	}
+
+	// fabrik:credited-pr:<N> — the merge-train integration/singleton PR number
+	// credited for this item's Done transition; read by settleLandingVerification.
+	if strings.HasPrefix(name, "fabrik:credited-pr:") {
+		return "Records the PR credited for this item's merge-train landing", "e4e669"
 	}
 
 	return "", "6f42c1"

@@ -291,6 +291,11 @@ func (in *Instrumented) CloseIssue(owner, repo string, issueNumber int) error {
 		func() error { return in.sim.CloseIssue(owner, repo, issueNumber) })
 }
 
+func (in *Instrumented) ReopenIssue(owner, repo string, issueNumber int) error {
+	return do0(in, "ReopenIssue", true, Args{Owner: owner, Repo: repo, Number: issueNumber},
+		func() error { return in.sim.ReopenIssue(owner, repo, issueNumber) })
+}
+
 func (in *Instrumented) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {
 	return do2(in, "CreateIssue", true, Args{Owner: owner, Repo: repo, Body: body, Values: append([]string{title}, assignees...)},
 		func() (int, string, error) { return in.sim.CreateIssue(owner, repo, title, body, assignees) })
