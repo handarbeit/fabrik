@@ -84,6 +84,26 @@ jobs:
       - name: backoff-detection regression test (#1527)
         run: bash scripts/e2e/backoff_detection_test.sh
 
+      # R1's pre-gate (scripts/e2e/run.sh's run_pregate, #1454) exists so a
+      # live-gate run refuses to spend GraphQL/Claude budget on a sim/wire-
+      # contract-layer failure the free layers already caught. Regression
+      # coverage for its exit-code contract and call ordering, following the
+      # same pattern as the backoff-detection test above: sources run.sh for
+      # the function definitions only (the sourcing guard prevents an actual
+      # gate run) and drives it entirely via a PATH-shadowed fake `go`
+      # binary, so no real (multi-minute) test run and no bed/token/network
+      # dependency.
+      - name: pre-gate regression test (#1454)
+        run: bash scripts/e2e/pregate_test.sh
+
+      # cut-release.sh's flag parsing — in particular --skip-integration's
+      # validation (R2, #1454) — sourced and exercised directly via
+      # parse_args(), never reaching main() (the real publish sequence). No
+      # bed, network, git remote, or publish path touched; see that script's
+      # own dispatch-guard comment for why sourcing it here is safe.
+      - name: cut-release flag/gate regression test (#1454)
+        run: bash scripts/cut_release_gate_test.sh
+
       # ADR citation integrity. ADRs are numbered after their originating
       # issue (CLAUDE.md's "ADR numbering"), so issue and ADR numbers share
       # one namespace and "ADR-1303" vs "#1303" is a one-token, invisible
