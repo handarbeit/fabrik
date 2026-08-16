@@ -1428,6 +1428,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// itemMayNeedWork/itemNeedsWork dispatch — the item has already reached Done.
 	e.settleNonDefaultBaseCloses(board)
 
+	// Landing verification settle scan (#1616): the post-Done backstop that verifies
+	// a merge-attributable Done transition's credited PR actually merged, for any
+	// item carrying fabrik:awaiting-landing-verification. Runs unconditionally every
+	// poll, independent of itemMayNeedWork/itemNeedsWork dispatch — the item has
+	// already reached Done by the time this marker is written, sourced directly from
+	// board.Items like every other settle scan in this ADR-1270 family.
+	e.settleLandingVerification(board)
+
 	// Claude usage-limit settle scans (#1183): the operator-triggered restart-free
 	// clear runs first so a clear request and the resulting account-wide label sweep
 	// can both land in the same poll cycle. Both run unconditionally every poll,

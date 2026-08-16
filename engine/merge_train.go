@@ -1277,6 +1277,11 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+			// #1616: record the singleton landing PR credited for this Done
+			// transition and mark the item for post-Done landing verification.
+			// Best-effort — see the equivalent comment in landMergeTrainBatch.
+			e.addLabel(m.item, fmt.Sprintf("%s%d", creditedPRLabelPrefix, prNum))
+			e.addLabel(m.item, awaitingLandingVerificationLabel)
 		}
 	}
 
@@ -2834,6 +2839,12 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+			// #1616: record the integration PR credited for this Done transition and
+			// mark the item for post-Done landing verification. Best-effort — a
+			// failed write here degrades to settleLandingVerification's inconclusive
+			// (retry-then-escalate) path, never a silent pass (see Constraints).
+			e.addLabel(m.item, fmt.Sprintf("%s%d", creditedPRLabelPrefix, integrationPRNum))
+			e.addLabel(m.item, awaitingLandingVerificationLabel)
 		}
 
 		// Close member PR with a comment citing the integration PR.

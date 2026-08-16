@@ -201,13 +201,23 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 			}
 		}
 
-		if aerr := e.recordAdvanceOutcome(board, item, stage); aerr != nil {
+		aerr := e.recordAdvanceOutcome(board, item, stage)
+		if aerr != nil {
 			e.logf(item.Number, "warn", "pr-terminal: could not advance to Done: %v\n", aerr)
 		}
-		// Runs unconditionally, regardless of the advance's outcome above —
-		// see awaitingAdvanceLabel's doc comment (advance_settle.go) for why
-		// that's safe even when recordAdvanceOutcome just failed.
+		// closeIssueIfNonDefaultBase runs unconditionally, regardless of the
+		// advance's outcome above — see awaitingAdvanceLabel's doc comment
+		// (advance_settle.go) for why that's safe even when recordAdvanceOutcome
+		// just failed.
 		e.closeIssueIfNonDefaultBase(item, pr.Number)
+		// #1616: mark for post-Done landing verification — but only once the
+		// item actually reached Done (aerr == nil). See the equivalent comment
+		// in advanceConvergedPRToDone (merge_gate.go) for why this can't be
+		// unconditional the way closeIssueIfNonDefaultBase is. No
+		// fabrik:credited-pr:<N> label is needed here.
+		if aerr == nil {
+			e.addLabel(item, awaitingLandingVerificationLabel)
+		}
 		advancedItems[iKey] = true
 		return
 	}
