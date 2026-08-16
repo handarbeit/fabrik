@@ -1067,6 +1067,24 @@ graph traversal the model does not perform, and GitHub does reject them.
 rather than a refusal, which is visible as a stuck scenario rather than a green
 one; but do not use this layer to test cycle *rejection*.
 
+### `SeedRemoveBlockedBy` — **Fixture-only, no production analogue**
+
+Unlike every other Seed\* method that mirrors a real `GitHubClient` mutation
+(`SeedBlockedBy` mirrors `AddBlockedByIssue`), `SeedRemoveBlockedBy` has no
+counterpart on the interface at all: production only ever *adds* a blockedBy
+edge (`AddBlockedByIssue`, called from `spawnChildren` at spawn time); nothing
+in `engine/` ever removes one. `SeedRemoveBlockedBy` exists to model a human
+deleting the dependency link directly (GitHub UI, or the REST dependencies
+API) — the only way that edge disappears in practice.
+
+It deliberately does **not** bump the dependent issue's `updatedAt`, matching
+`#977`: real GitHub's REST dependencies API doesn't bump it either, so a
+scenario driving gap 1's companion case (the empty-`blockedBy`-list observer
+guard, ADR-1419, `engine/observers.go:299`) needs that exact staleness — the
+removal must be invisible to the probe-driven cache refresh until
+`checkDependencies`'s own cooldown-gated live re-read picks it up. See
+`tests/sim/dependency_unblock_test.go`.
+
 ### Check run IDs — **Modelled, unique across the sim**
 
 GitHub's check run IDs are unique and monotonically increasing, and production

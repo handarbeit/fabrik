@@ -125,6 +125,19 @@ type Engine struct {
 	idleCount                int                      // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart                time.Time                // when consecutive idle polls began; zero value = not idle
 	pollsUntilStalenessCheck int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
+	// backoffPrevMultiplier, backoffRateLimitLow, backoffRateLimitRatio,
+	// backoffLastRemaining, and backoffRestPaused are PollWithBackoff's
+	// persistent state (engine/poll.go) — promoted from doPollCycle closure
+	// locals to Engine fields (ADR-1592) so a test driving successive
+	// PollWithBackoff calls sees correctly-persisted backoff state, mirroring
+	// idleStart's own precedent. Unlike idleStart's zero-value ("not idle"),
+	// backoffPrevMultiplier and backoffRateLimitRatio have non-zero starting
+	// values that both New() and NewWithDeps() set explicitly.
+	backoffPrevMultiplier int
+	backoffRateLimitLow   bool
+	backoffRateLimitRatio float64
+	backoffLastRemaining  int
+	backoffRestPaused     bool
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
@@ -320,6 +333,8 @@ func New(cfg Config) (*Engine, error) {
 		mergeTrainRunawayAlerted:  make(map[string]int),
 		queuedReviewEjects:        make(map[string]map[int]int),
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
+		backoffPrevMultiplier:     1,
+		backoffRateLimitRatio:     1.0,
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -381,6 +396,8 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		mergeTrainRunawayAlerted:  make(map[string]int),
 		queuedReviewEjects:        make(map[string]map[int]int),
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
+		backoffPrevMultiplier:     1,
+		backoffRateLimitRatio:     1.0,
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf

@@ -523,6 +523,14 @@ mutate "SeedBlockedBy does not stamp the issue" \
   'TestSeedBlockedByDedupesAndStamps' \
   'seed.go::s{iss\.blockedBy = append\(iss\.blockedBy, gh\.Dependency\{Number: blockerNumber, Repo: repoField\}\)\n\tiss\.updatedAt = s\.now\(\)}{iss.blockedBy = append(iss.blockedBy, gh.Dependency\{Number: blockerNumber, Repo: repoField\})}'
 
+mutate "SeedRemoveBlockedBy does not actually remove the edge" \
+  'TestSeedRemoveBlockedByRemovesEdgeWithoutBumpingUpdatedAt' \
+  'seed.go::s{iss\.blockedBy = append\(iss\.blockedBy\[:idx\], iss\.blockedBy\[idx\+1:\]\.\.\.\)}{}'
+
+mutate "SeedRemoveBlockedBy does not fail on an unknown edge" \
+  'TestSeedRemoveBlockedByFailsOnUnknownEdge' \
+  'seed.go::s{if idx == -1 \{\n\t\ts\.fail\("simgh: %s#%d has no blockedBy edge to %s#%d", ownerRepo, issueNumber, blockerOwnerRepo, blockerNumber\)\n\t\treturn s\n\t\}}{}'
+
 # --- R2: clock-driven schedules (#1457) -------------------------------------
 #
 # The drain accessors are the whole sequencing mechanism, and each read path
