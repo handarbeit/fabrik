@@ -965,6 +965,50 @@ func (s *Sim) SeedBlockedBy(ownerRepo string, issueNumber int, blockerOwnerRepo 
 	return s
 }
 
+// SeedRemoveBlockedBy removes one blockedBy edge, modelling a human deleting
+// the dependency link directly (e.g. via the GitHub UI or the REST
+// dependencies API) rather than anything Fabrik itself does. There is no
+// GitHubClient interface counterpart — production only ever adds a blockedBy
+// edge (AddBlockedByIssue, called from spawnChildren); it never removes one.
+// See FIDELITY.md for why this is a fixture-only mutator with no production
+// analogue, and #977 for why removal does NOT bump the dependent's
+// updatedAt — real GitHub's REST dependencies API doesn't either, and a
+// scenario relying on gap 1's empty-list guard (ADR-1419,
+// engine/observers.go:299) needs that exact staleness: the removal must be
+// invisible to the probe-driven refresh until checkDependencies's own
+// cooldown-gated live re-read (engine/dependencies.go) picks it up.
+func (s *Sim) SeedRemoveBlockedBy(ownerRepo string, issueNumber int, blockerOwnerRepo string, blockerNumber int) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	iss, ok := r.issues[issueNumber]
+	if !ok {
+		s.fail("simgh: issue %s#%d not found", ownerRepo, issueNumber)
+		return s
+	}
+	idx := -1
+	for i, dep := range iss.blockedBy {
+		depRepo := dep.Repo
+		if depRepo == "" {
+			depRepo = ownerRepo
+		}
+		if dep.Number == blockerNumber && depRepo == blockerOwnerRepo {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		s.fail("simgh: %s#%d has no blockedBy edge to %s#%d", ownerRepo, issueNumber, blockerOwnerRepo, blockerNumber)
+		return s
+	}
+	iss.blockedBy = append(iss.blockedBy[:idx], iss.blockedBy[idx+1:]...)
+	// Deliberately does NOT stamp iss.updatedAt — see the doc comment above.
+	return s
+}
+
 // SeedRepoAccess overrides the repo's reported access flags.
 func (s *Sim) SeedRepoAccess(ownerRepo string, access gh.RepoAccess) *Sim {
 	r, ok := s.repoForSeed(ownerRepo)

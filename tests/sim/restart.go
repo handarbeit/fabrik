@@ -102,6 +102,10 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 
 	eng := engine.NewWithDeps(env.cfg, restored, env.Claude, env.WM)
 	eng.SetClock(env.Clock)
+	// Deliberately does NOT call Engine.RegisterObservers (ADR-1592) — see
+	// NewEnv's own doc comment for why this package leaves it uncalled by
+	// default. A scenario needing reactive-observer behavior on a restarted
+	// Engine (none currently do) must call it explicitly on the returned Env.
 
 	env.issueSeqMu.Lock()
 	nextIssue := env.issueSeqNext

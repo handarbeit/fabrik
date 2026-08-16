@@ -92,3 +92,22 @@ func PartialOutputThenKilled() Script {
 func CommentReviewCompleted() CommentScript {
 	return DefaultCommentScript
 }
+
+// NoOpCommentReview returns a CommentScript that touches nothing in workDir
+// and signals no progress: no commit (so headChanged stays false), no
+// FABRIK_ISSUE_UPDATE_BEGIN/END body update, and completed=false — the
+// exact shape processComments's own progress check (engine/comments.go:
+// `progressed := headChanged || extractUpdatedBody(output) != "" ||
+// completed`) treats as a no-op cycle, which is what both
+// checkNoOpCommentCycle (engine/comment_noop_breaker.go, #1592 gap 4b) and
+// dispatchReviewReinvoke's own no-commit refund path (engine/reviews.go,
+// #1592 gap 4a) key off. Named distinctly from DefaultCommentScript/
+// CommentReviewCompleted (both of which commit), mirroring this file's
+// existing naming convention.
+func NoOpCommentReview() CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		output := fmt.Sprintf("Reviewed the latest feedback on %s — nothing actionable, no changes made.\n", stage.Name)
+		usage := engine.TokenUsage{TurnsUsed: 2, MaxTurns: 50, CostUSD: 0.03}
+		return output, false, usage, nil
+	}
+}

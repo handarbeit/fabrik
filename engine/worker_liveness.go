@@ -167,6 +167,37 @@ func (e *Engine) forEachStaleUnworkedItem(label string, fn func(snap itemstate.S
 	}
 }
 
+// RunStartupCleanup runs the five one-shot startup recovery scans Run() has
+// always run, in order, immediately after the first successful poll cycle:
+// runStartupCleanup (stale fabrik:locked:<user>/fabrik:editing labels),
+// runStartupOrphanedInProgressScan, runStartupBareInProgressScan (both
+// engine/worker_liveness.go), runStartupTransientLabelScan
+// (engine/startup.go), and runStartupTerminalScan (engine/terminal.go).
+// Run() itself now calls this method instead of the five separate calls —
+// same functions, same order, same behavior.
+//
+// This is a test seam (ADR-1592, mirroring PollOnce/ADR-1449 and
+// PollWithBackoff/RegisterObservers above): all five scans are unexported
+// and called only from Run(), so gap 3 (#1592) — stale-worker-label reaping
+// N polls after the owning worker dies — is otherwise 100% unreachable from
+// tests/sim, the same shape of gap the other two seams close for their own
+// target code. A scenario calls this once after RestartEnv rebuilds the
+// Engine, mirroring where Run() calls it in production: immediately after
+// the store is first populated.
+//
+// Deliberately excludes the periodic runWorktreeJanitor/runLogJanitor/
+// runSessionJanitor calls Run() makes alongside these scans (gated
+// separately on cfg.JanitorIntervalHours > 0) — those are a distinct,
+// ongoing concern, not part of the one-shot startup recovery pass this
+// method names.
+func (e *Engine) RunStartupCleanup() {
+	e.runStartupCleanup()
+	e.runStartupOrphanedInProgressScan()
+	e.runStartupBareInProgressScan()
+	e.runStartupTransientLabelScan()
+	e.runStartupTerminalScan()
+}
+
 // runStartupCleanup scans the store for items that have a fabrik:locked:<user>
 // label but no active Worker (Worker == nil). This catches the restart case where
 // a prior Fabrik instance crashed, leaving stale lock labels behind.
