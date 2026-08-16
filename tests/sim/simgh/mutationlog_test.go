@@ -342,7 +342,7 @@ func TestMutationFlagMatchesTheInterfaceSemantics(t *testing.T) {
 		"DequeuePullRequest": true, "DisablePullRequestAutoMerge": true,
 		"EnablePullRequestAutoMerge": true, "EnqueuePullRequest": true,
 		"MarkPRReady": true, "MergePR": true, "RemoveLabelFromIssue": true,
-		"ResolveReviewThread": true, "SeedLabels": true, "UpdateComment": true,
+		"ReopenIssue": true, "ResolveReviewThread": true, "SeedLabels": true, "UpdateComment": true,
 		"UpdateIssueBody": true, "UpdatePRBase": true, "UpdateProjectItemStatus": true,
 	}
 

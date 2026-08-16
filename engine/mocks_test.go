@@ -42,6 +42,7 @@ type mockGitHubClient struct {
 	updatePRBaseFn                func(owner, repo string, prNumber int, newBase string) error
 	mergePRFn                     func(owner, repo string, prNumber int) error
 	closeIssueFn                  func(owner, repo string, issueNumber int) error
+	reopenIssueFn                 func(owner, repo string, issueNumber int) error
 	rateLimitStatsFn              func() (gh.RateLimitStats, gh.RateLimitStats)
 	getIssueBodyFn                func(owner, repo string, issueNumber int) (string, error)
 	markPRReadyFn                 func(owner, repo string, prNumber int) error
@@ -99,6 +100,7 @@ type mockGitHubClient struct {
 	updateStatusCalls                []updateStatusCall
 	mergePRCalls                     []mergePRCall
 	closeIssueCalls                  []closeIssueCall
+	reopenIssueCalls                 []reopenIssueCall
 	markPRReadyCalls                 []markPRReadyCall
 	createDraftPRCalls               []createDraftPRCall
 	resolveReviewThreadCalls         []string
@@ -188,6 +190,11 @@ type mergePRCall struct {
 }
 
 type closeIssueCall struct {
+	owner, repo string
+	issueNumber int
+}
+
+type reopenIssueCall struct {
 	owner, repo string
 	issueNumber int
 }
@@ -494,6 +501,17 @@ func (m *mockGitHubClient) CloseIssue(owner, repo string, issueNumber int) error
 	m.mu.Lock()
 	m.closeIssueCalls = append(m.closeIssueCalls, closeIssueCall{owner, repo, issueNumber})
 	fn := m.closeIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) ReopenIssue(owner, repo string, issueNumber int) error {
+	m.mu.Lock()
+	m.reopenIssueCalls = append(m.reopenIssueCalls, reopenIssueCall{owner, repo, issueNumber})
+	fn := m.reopenIssueFn
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, issueNumber)
