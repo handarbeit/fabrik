@@ -2536,12 +2536,20 @@ func (e *Engine) findIntegrationPR(owner, repo, trialBranch string) (*gh.PRDetai
 // reTrainMember matches "#N" issue references in a train PR body.
 var reTrainMember = regexp.MustCompile(`#(\d+)`)
 
-// isTrainPR reports whether pr is a Fabrik merge-train PR — either a landing
-// integration PR (body carries the batch marker) or a draft CI PR (identified
-// only by its fabrik/merge-train/* head branch, which carries no marker).
+// isTrainPR reports whether pr is a Fabrik merge-train PR, identified
+// structurally by its fabrik/merge-train/* head branch (R7, #1615) — every
+// genuine trial PR, draft CI PR or promoted landing PR alike, is Fabrik-created
+// on that branch (trainBranchPrefix, engine/worktree.go). The shared batch
+// marker is never sufficient on its own: a PR body may legitimately quote the
+// marker literal in prose for reasons that have nothing to do with being a
+// trial PR — this fix's own PR description did exactly that, and the
+// marker-OR-branch version of this check let the reconstruct sweep (below)
+// close that live, unrelated PR on the strength of the quote alone (#1615's
+// own incident, reported by @verveguy). Callers wanting the marker as a
+// secondary corroboration signal check pr.Body themselves, as
+// reconstructTrainState does; it is never treated as identity here.
 func isTrainPR(pr gh.PRDetails) bool {
-	return strings.Contains(pr.Body, mergeTrainBatchMarker) ||
-		strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
+	return strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
 }
 
 // trialNameFromBranch strips the fabrik/merge-train/ prefix from a trial branch
@@ -3201,11 +3209,28 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 		if !isTrainPR(prs[i]) {
 			continue
 		}
+		if !strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
+			// Expected for a draft CI PR not yet promoted to landing PR — the marker
+			// is corroboration only (R7, #1615), never required; branch identity above
+			// is what makes this a train PR.
+			e.logf(0, "merge-train", "reconstruct: PR #%d matches train branch %s but its body lacks the batch marker — branch identity is authoritative, continuing\n", prs[i].Number, prs[i].HeadRefName)
+		}
 		if len(filterBatchByNumbers(batch, parseTrainMembers(prs[i].Body))) > 0 {
 			trainPR = &prs[i]
 			break
 		}
 		if prs[i].State == "open" {
+			// R8 (#1615): a destructive action — closing this PR — requires positive
+			// structural identity re-confirmed at the point of the action itself, not
+			// just inherited from the isTrainPR filter above. This is intentionally
+			// redundant with that filter today; it exists so a future change to the
+			// filter (or to this loop) cannot silently re-open the #1615 incident by
+			// letting an unrecognized PR reach the close call. Ambiguity fails closed:
+			// skip and log, never close.
+			if !strings.HasPrefix(prs[i].HeadRefName, trainBranchPrefix) {
+				e.logf(0, "merge-train", "reconstruct: skipping PR #%d (state=open, no members still Queued) — head ref %q is not a train branch, not closing\n", prs[i].Number, prs[i].HeadRefName)
+				continue
+			}
 			e.logf(0, "merge-train", "reconstruct: closing stale open train PR #%d (no members still Queued) for %s\n", prs[i].Number, repoKey)
 			if cerr := e.client.CloseIssue(p.owner, p.repo, prs[i].Number); cerr != nil {
 				e.logf(0, "merge-train", "warn: could not close stale train PR #%d: %v\n", prs[i].Number, cerr)

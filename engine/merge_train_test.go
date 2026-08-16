@@ -4603,18 +4603,24 @@ func TestEffectiveMaxTrainRebaseCycles(t *testing.T) {
 	}
 }
 
-// TestIsTrainPR verifies a PR is recognised as a merge-train PR by either the batch
-// marker in its body (landing integration PR) or the fabrik/merge-train/ head-branch
-// prefix (draft CI PR, which carries no marker) — FR-1/FR-4.
+// TestIsTrainPR verifies a PR is recognised as a merge-train PR only by the
+// fabrik/merge-train/ head-branch prefix — structural identity, not the batch
+// marker (R7, #1615). A body that merely quotes the marker literal (e.g. this
+// fix's own PR description, discussing the marker in prose) must NOT be
+// recognised as a train PR: that was the #1615-reported incident where the
+// reconstruct sweep closed a live, unrelated PR on the strength of the quote
+// alone. The marker is corroboration only, checked separately by callers
+// (reconstructTrainState), never sufficient here on its own.
 func TestIsTrainPR(t *testing.T) {
 	cases := []struct {
 		name string
 		pr   gh.PRDetails
 		want bool
 	}{
-		{"marker in body", gh.PRDetails{Body: "before " + mergeTrainBatchMarker + " after"}, true},
-		{"train head branch", gh.PRDetails{HeadRefName: "fabrik/merge-train/merge-train-main-1"}, true},
-		{"both", gh.PRDetails{Body: mergeTrainBatchMarker, HeadRefName: "fabrik/merge-train/x"}, true},
+		{"marker in body alone, non-train branch — must NOT match (R7/AC6)", gh.PRDetails{Body: "before " + mergeTrainBatchMarker + " after", HeadRefName: "fabrik/issue-1615"}, false},
+		{"marker in body alone, empty head ref — must NOT match", gh.PRDetails{Body: mergeTrainBatchMarker}, false},
+		{"train head branch, no marker (draft CI PR)", gh.PRDetails{HeadRefName: "fabrik/merge-train/merge-train-main-1"}, true},
+		{"train head branch with marker (landing PR)", gh.PRDetails{Body: mergeTrainBatchMarker, HeadRefName: "fabrik/merge-train/x"}, true},
 		{"neither", gh.PRDetails{Body: "just a normal PR", HeadRefName: "fabrik/issue-42"}, false},
 		{"empty", gh.PRDetails{}, false},
 	}
@@ -5226,6 +5232,51 @@ func TestReconstructTrainState_StaleOpenPR_ClosedAndProceedsFresh(t *testing.T) 
 	}
 	if dissolveComments != 0 {
 		t.Errorf("stale open PR must not post dissolve comments on unrelated members, got %d", dissolveComments)
+	}
+}
+
+// TestReconstructTrainState_MarkerOnlyNonTrainBranchPR_NeverClosed is a regression
+// test reproducing #1615's own reported incident (R7/R8, AC6) exactly: an open PR on
+// a non-train branch (fabrik/issue-N, i.e. an ordinary Fabrik issue PR) whose body
+// happens to quote the batch marker literal in prose — this fix's own PR description
+// discussing the marker is a real example — must never be closed by the reconstruct
+// sweep, no matter how the marker got into its body. Before R7, isTrainPR's
+// marker-OR-branch check treated the quote alone as train-PR identity, and — finding
+// no members of *this* unrelated PR still Queued in *today's* batch — the sweep closed
+// it outright. Non-vacuous: R7 and R8 are deliberately redundant (belt and suspenders —
+// R8's own doc comment explains why), so reverting either alone no longer reproduces
+// the incident; reverting *both* (restoring the marker-OR-branch isTrainPR check AND
+// removing the close-site's own re-check) makes this test fail by closing PR #1617,
+// exactly as happened live.
+func TestReconstructTrainState_MarkerOnlyNonTrainBranchPR_NeverClosed(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	unrelatedPR := gh.PRDetails{
+		Number:      1617,
+		State:       "open",
+		Merged:      false,
+		HeadRefName: "fabrik/issue-1615",
+		Body:        "This PR fixes findIntegrationPR to require branch identity instead of matching any PR carrying " + mergeTrainBatchMarker + " alone.",
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{unrelatedPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
+	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
+
+	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), batch) {
+		t.Fatal("an unrelated non-train-branch PR must not be handled — reconstruct should return false (fresh)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("PR #1617 must never be closed by the reconstruct sweep — it is not a train PR (non-train head ref), got closes: %v", client.closeIssueCalls)
+	}
+	if len(client.mergePRCalls) != 0 || rv.count() != 0 || len(client.updateStatusCalls) != 0 {
+		t.Errorf("unrelated PR must not resume/land: merges=%d validations=%d advances=%d", len(client.mergePRCalls), rv.count(), len(client.updateStatusCalls))
 	}
 }
 
