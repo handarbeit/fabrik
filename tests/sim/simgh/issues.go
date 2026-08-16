@@ -84,6 +84,24 @@ func (s *Sim) CloseIssue(owner, repo string, issueNumber int) error {
 	return nil
 }
 
+// ReopenIssue reopens a closed issue. Mirrors CloseIssue's shape but only
+// operates on the issue map — the engine only ever reopens a credited
+// *issue*, never a PR, so there is no PR fallback to mirror here.
+func (s *Sim) ReopenIssue(owner, repo string, issueNumber int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	iss, err := s.issueLocked(owner, repo, issueNumber)
+	if err != nil {
+		return err
+	}
+	if iss.state == "OPEN" {
+		return nil
+	}
+	iss.state = "OPEN"
+	iss.updatedAt = s.now()
+	return nil
+}
+
 // CreateIssue creates an issue and returns its number and node ID. Used by the
 // engine's child-spawn path, which then feeds the node ID to
 // AddProjectV2ItemById and AddBlockedByIssue.

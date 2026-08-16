@@ -104,7 +104,8 @@ func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base, 
 }
 func (m *testGitHubUpgradeClient) MarkPRReady(owner, repo string, prNumber int) error   { return nil }
 func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) error       { return nil }
-func (m *testGitHubUpgradeClient) CloseIssue(owner, repo string, issueNumber int) error { return nil }
+func (m *testGitHubUpgradeClient) CloseIssue(owner, repo string, issueNumber int) error  { return nil }
+func (m *testGitHubUpgradeClient) ReopenIssue(owner, repo string, issueNumber int) error { return nil }
 func (m *testGitHubUpgradeClient) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {
 	return 0, "", nil
 }
