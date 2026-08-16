@@ -51,8 +51,6 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # auto_upgrade: false           # Self-upgrade from origin/main when idle (self-evolving workflow).
 # git_ssh: false                # Use SSH clone URLs (git@github.com) instead of HTTPS. Also: --ssh flag or FABRIK_GIT_SSH env var.
 # tui: false                    # Disable the interactive TUI dashboard (enabled by default when a real terminal is detected).
-# terminal: ""                  # Terminal for TUI log viewer: terminal, iterm2, ghostty, kitty, alacritty, warp.
-#                               # Auto-detected from TERM_PROGRAM if not set; set explicitly for kitty.
 # debug_output: false           # Save raw Claude output to .fabrik/debug/ for diagnosing prompt issues.
 # version: ""                   # Project version shown in TUI footer. Auto-inferred from package.json/go.mod if not set.
 `

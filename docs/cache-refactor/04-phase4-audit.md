@@ -223,6 +223,14 @@ Some subjects that came up during the audit but turned out fine:
 
 ## §6 Recommendation for re-enabling cache + webhooks
 
+> **Correction (2026-08-14):** `board_cache_mode` was never a real configuration key —
+> no `ProjectConfig` field, no CLI flag, no environment variable, no reader anywhere in the
+> code. Setting it did nothing; only `webhooks: true` had any effect. It sat in
+> `.fabrik/config.yaml` being silently discarded until #1544 added unknown-key warnings at
+> startup, which surfaced it on the first run after that shipped. The key has since been
+> removed from the config. The recommendation below is preserved as written for the
+> historical record — read it as `webhooks: true` alone.
+
 The architecture is in good enough shape that `webhooks: true` + `board_cache_mode: in-memory` can be re-enabled in dev with low risk. F1-F5 are improvements, not blockers.
 
 Suggested re-enable test plan:

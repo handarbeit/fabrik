@@ -26,9 +26,7 @@ auto_upgrade: true
 # Re-enabled 2026-05-05 after the cache-coherency cluster landed (Phase 3-A through 3-H,
 # plus #537 single-Store unification). Verification per docs/cache-refactor/04-phase4-audit.md §6.
 webhooks: true
-board_cache_mode: in-memory
 tui: true
-terminal: ghostty
 
 # Merge train (ADR-059): yolo items completing Validate advance to the Queued
 # holding stage instead of auto-merging individually, then land as one batched
