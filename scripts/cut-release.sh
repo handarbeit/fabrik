@@ -27,7 +27,12 @@
 #   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454)
 #   4. go build + go test -race (skippable with --skip-tests; the pre-gate above never is)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
-#      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454)
+#      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454).
+#      FIDELITY-DRIFT CHECK (R4, #1454): if this step fails on something step 3's
+#      pre-gate passed, that's a fidelity bug in the sim, not just a live regression —
+#      file it and fix it in tests/sim too (procedure: tests/sim/README.md's
+#      "Fidelity-drift policy" section). This is a release-checklist step, not
+#      something left to memory.
 #   6. Commit release-notes.md (if dirty) as arbeithand
 #   6b. If plugin/fabrik's source changed since the previous tag, patch-bump
 #       plugin/fabrik/.claude-plugin/plugin.json and commit as arbeithand
@@ -326,7 +331,7 @@ else
       die "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected, since this script's own pre-gate step (step 3) already passed against the same tree — investigate the discrepancy (different ref? dirty tree in the bed?) before retrying."
       ;;
     *)
-      die "live e2e integration suite FAILED (exit $E2E_RC) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it."
+      die "live e2e integration suite FAILED (exit $E2E_RC) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
       ;;
   esac
 fi
