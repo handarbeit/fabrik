@@ -2562,6 +2562,23 @@ func isTrainPR(pr gh.PRDetails) bool {
 	return strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
 }
 
+// shouldCloseStaleTrainPR reports whether pr's head ref is a genuine
+// fabrik/merge-train/* branch, and therefore safe for reconstructTrainState's
+// stale-PR sweep to close (R8, #1615/#1622). It is deliberately *not*
+// implemented in terms of isTrainPR, even though the two bodies are
+// textually identical: R8 exists to be an independent, directly-testable
+// re-confirmation of structural identity immediately before the destructive
+// CloseIssue call, not merely inherited from the isTrainPR filter earlier in
+// the same loop. Today that filter already guarantees this is unreachable
+// with a false result — the value here is that a future change to isTrainPR,
+// or to the loop above it, cannot silently re-open the #1615 incident by
+// letting an unrecognized PR reach the close call, because this check would
+// still catch it independently. Delegating to isTrainPR would collapse the
+// two into one check and defeat that purpose.
+func shouldCloseStaleTrainPR(pr gh.PRDetails) bool {
+	return strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
+}
+
 // trialNameFromBranch strips the fabrik/merge-train/ prefix from a trial branch
 // head ref, returning the bare trial name (e.g. "merge-train-main-123"). Returns
 // "" when headRef is not a merge-train branch.
@@ -3253,7 +3270,7 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 			// filter (or to this loop) cannot silently re-open the #1615 incident by
 			// letting an unrecognized PR reach the close call. Ambiguity fails closed:
 			// skip and log, never close.
-			if !strings.HasPrefix(prs[i].HeadRefName, trainBranchPrefix) {
+			if !shouldCloseStaleTrainPR(prs[i]) {
 				e.logf(0, "merge-train", "reconstruct: skipping PR #%d (state=open, no members still Queued) — head ref %q is not a train branch, not closing\n", prs[i].Number, prs[i].HeadRefName)
 				continue
 			}
