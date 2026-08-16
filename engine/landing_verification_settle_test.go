@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -481,6 +482,138 @@ func TestSettleLandingVerification_EscalationClearsCreditedPRLabel(t *testing.T)
 	}
 	if !containsLabel(removed, awaitingLandingVerificationLabel) {
 		t.Errorf("expected %s cleared on escalation, got %v", awaitingLandingVerificationLabel, removed)
+	}
+}
+
+// makeDoneMember returns a trainMember already sitting in the Done column —
+// the shape a prior run leaves behind when it advanced the member and then
+// died before the landing-verification markers were written.
+func makeDoneMember(number, prNum int, title string) trainMember {
+	m := makeQueuedMember(number, prNum, title)
+	m.item.Status = "Done"
+	return m
+}
+
+// creditedLandingLabelsFor reports whether both feature-owned labels were
+// applied to issueNumber, and which credited-PR label was seen.
+func creditedLandingLabelsFor(calls []addLabelCall, issueNumber int) (marker bool, creditedLabel string) {
+	for _, c := range calls {
+		if c.issueNumber != issueNumber {
+			continue
+		}
+		if c.labelName == awaitingLandingVerificationLabel {
+			marker = true
+		}
+		if strings.HasPrefix(c.labelName, creditedPRLabelPrefix) {
+			creditedLabel = c.labelName
+		}
+	}
+	return marker, creditedLabel
+}
+
+// TestLandMergeTrainBatch_AlreadyDoneMember_StillMarkedForVerification covers
+// the restart-safety gap Pruefer flagged: advanceToNextStage and the marker
+// writes are separate, non-atomic API calls, so a run that dies between them
+// leaves the member in Done with no marker. On the next run the member is
+// found already in Done and the loop skips it — permanently, since nothing
+// ever revisits a Done item. The backstop would then be silently absent for
+// exactly the merge-train restart shape #1614 came from.
+func TestLandMergeTrainBatch_AlreadyDoneMember_StillMarkedForVerification(t *testing.T) {
+	survivors := []trainMember{makeDoneMember(1, 10, "Issue One")}
+
+	client := &mockGitHubClient{
+		listPRsFn:  func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 100, nil },
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	marker, credited := creditedLandingLabelsFor(client.addLabelCalls, 1)
+	if !marker {
+		t.Errorf("an already-Done member must still be marked for landing verification — "+
+			"otherwise a run that died between the Done advance and the marker write leaves it unverified forever; got %v", client.addLabelCalls)
+	}
+	if credited != creditedPRLabelPrefix+"100" {
+		t.Errorf("expected the integration PR to be recorded as %s100, got %q", creditedPRLabelPrefix, credited)
+	}
+}
+
+// TestLandSingleton_AlreadyDoneMember_StillMarkedForVerification is the
+// singleton-landing counterpart to the batch case above — identical hazard,
+// identical guard (`if m.item.Status != "Done"`).
+func TestLandSingleton_AlreadyDoneMember_StillMarkedForVerification(t *testing.T) {
+	m := makeDoneMember(7, 70, "Issue Seven")
+	client := &mockGitHubClient{
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 900, nil },
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, holdingStg: holdingStage(eng.cfg)}
+
+	eng.landSingleton(context.Background(), state, p, m, "merge-train-singleton-1")
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	marker, credited := creditedLandingLabelsFor(client.addLabelCalls, m.item.Number)
+	if !marker {
+		t.Errorf("an already-Done singleton member must still be marked for landing verification, got %v", client.addLabelCalls)
+	}
+	if credited != creditedPRLabelPrefix+"900" {
+		t.Errorf("expected the singleton landing PR to be recorded as %s900, got %q", creditedPRLabelPrefix, credited)
+	}
+}
+
+// TestFailLandingVerification_CommentNamesRevalidate covers the second gap
+// Pruefer flagged: moving the board Status back to Validate does not by itself
+// re-dispatch the stage, because stage:Validate:complete is deliberately left
+// in place (the posture R2 asks for is human-gated, not self-healing). The
+// failure comment must therefore say so and name the label that does re-run it.
+func TestFailLandingVerification_CommentNamesRevalidate(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+	}
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1614, ItemID: "PVTI_1614", Repo: "owner/repo", Status: "Done", IsClosed: true,
+		Labels: []string{awaitingLandingVerificationLabel, creditedPRLabelPrefix + "99"},
+	}
+
+	eng.settleLandingVerificationItem(board, item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly one comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "fabrik:revalidate") {
+		t.Errorf("expected the failure comment to name fabrik:revalidate — the board move alone does not re-dispatch Validate; got %q", body)
+	}
+	if !strings.Contains(body, "stage:Validate:complete") {
+		t.Errorf("expected the failure comment to explain why Validate won't re-run on its own, got %q", body)
 	}
 }
 

@@ -172,6 +172,18 @@ sibling in the family, keeps the two-regime logic in exactly one place.
   against a correctly-landed issue — the exact false positive AC2 forbids. Not verifying is a coverage
   gap; falsely reversing a good landing is a regression, so the gap is the safer failure mode. The gap
   is logged loudly at the landing call site.
+- The confirmed-failure remediation is **human-gated, not self-healing**: the board Status moves back
+  to `Validate` but `stage:Validate:complete` is deliberately left in place, so Validate does not
+  re-dispatch on its own. That is the posture R2 asks for, but a board move that doesn't re-dispatch is
+  the same hazard `docs/state-machine.md` §6.16/#1545 R4 documents elsewhere, so the failure comment
+  states it explicitly and names `fabrik:revalidate` as the way to actually re-run the stage.
+- `advanceToNextStage` and the marker writes are separate, non-atomic calls, so a run can advance a
+  merge-train member to Done and die before `markCreditedLanding` executes. Both merge-train landing
+  paths therefore also call `markCreditedLanding` on their pre-existing "member already in Done column"
+  restart-safety fast path, instead of skipping past it — otherwise that item would be permanently
+  unverified (nothing ever revisits a Done item), leaving the backstop silently absent for exactly the
+  merge-train restart scenario #1614 came from. The writes are idempotent, so re-marking an
+  already-verified item costs at most one redundant `FetchPRMerged` that clears the markers again.
 - `resolveLandingVerificationBranchInfo`'s base-branch resolution for the failure comment depends on
   a `WorktreeManager` being registered for the item's repo; if none is (e.g., a repo whose only
   activity this process lifetime was a merge-train landing, after a restart), the comment names no

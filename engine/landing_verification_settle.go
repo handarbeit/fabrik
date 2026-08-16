@@ -279,8 +279,8 @@ func (e *Engine) failLandingVerification(board *gh.ProjectBoard, item gh.Project
 		baseClause = fmt.Sprintf("base branch `%s`", base)
 	}
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — landing verification failed**\n\nThis issue reached Done crediting PR #%d for the merge, but PR #%d was checked and found **not merged**. %s does not appear to be landed on %s.\n\nThe issue has been reopened, moved back to Validate, and labeled `%s` so it isn't silently treated as shipped. This is a backstop, not a diagnosis — investigate what happened to PR #%d (closed without merging? never actually created the trial branch it was supposed to?) before re-attempting the merge.",
-		creditedPR, creditedPR, branchClause, baseClause, landingVerificationFailedLabel, creditedPR,
+		"🏭 **Fabrik — landing verification failed**\n\nThis issue reached Done crediting PR #%d for the merge, but PR #%d was checked and found **not merged**. %s does not appear to be landed on %s.\n\nThe issue has been reopened, moved back to Validate, and labeled `%s` so it isn't silently treated as shipped. This is a backstop, not a diagnosis — investigate what happened to PR #%d (closed without merging? never actually created the trial branch it was supposed to?) before re-attempting the merge.\n\n**This is human-gated: Validate will not re-run on its own.** `stage:Validate:complete` is deliberately left in place, so the board move alone does not re-dispatch the stage. Once you've established what went wrong, apply `fabrik:revalidate` to send the issue back through Validate, and remove `%s` when it has re-landed and re-verified.",
+		creditedPR, creditedPR, branchClause, baseClause, landingVerificationFailedLabel, creditedPR, landingVerificationFailedLabel,
 	)
 	e.postItemComment(item, comment, true)
 
