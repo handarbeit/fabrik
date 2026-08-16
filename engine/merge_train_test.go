@@ -2762,7 +2762,7 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 	client := &mockGitHubClient{
 		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
 			return []gh.PRDetails{
-				{Number: 200, State: "open", Merged: false, Body: "text " + mergeTrainBatchMarker + " more"},
+				{Number: 200, State: "open", Merged: false, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: "text " + mergeTrainBatchMarker + " more #1"},
 			}, nil
 		},
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
@@ -2817,7 +2817,7 @@ func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
 	client := &mockGitHubClient{
 		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
 			return []gh.PRDetails{
-				{Number: 200, State: "open", Merged: false, Draft: true, Body: "draft CI PR " + mergeTrainBatchMarker},
+				{Number: 200, State: "open", Merged: false, Draft: true, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: "draft CI PR " + mergeTrainBatchMarker + " #1"},
 			}, nil
 		},
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
@@ -2881,7 +2881,7 @@ func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
 	client := &mockGitHubClient{
 		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
 			return []gh.PRDetails{
-				{Number: 300, State: "closed", Merged: true, Body: mergeTrainBatchMarker},
+				{Number: 300, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #1"},
 			}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {

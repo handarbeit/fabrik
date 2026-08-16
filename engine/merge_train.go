@@ -2743,6 +2743,14 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		}
 	}
 
+	// Note (#1615, deliberately out of scope): if the PR was open when found by
+	// findIntegrationPR but closes (unmerged) mid-poll, this loop never observes
+	// pr.State and just times out here like any other non-green result — it does
+	// not route to the R5 escalation path, since #1615's R5 is anchored on a PR
+	// already closed-unmerged when findIntegrationPR returns it, not one that
+	// transitions during this poll. A narrower, related gap for a future issue if
+	// ever observed in production; unlike the fixed bug, it can't misattribute a
+	// landing — it only leaves members in Queued for a fresh retry.
 	e.logf(0, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
 	if len(survivors) > 0 {
 		msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing timeout**\n\n"+
@@ -2839,19 +2847,33 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 
 	trialBranch := "fabrik/merge-train/" + trialName
 
-	// FR-1 / FR-5: find or create the landing integration PR.
-	integrationPR, err := e.findIntegrationPR(owner, repo)
+	// FR-1 / FR-5: find or create the landing integration PR. findIntegrationPR now
+	// gates on trialBranch identity (R1) — the returned PR, if any, is guaranteed to
+	// be THIS trial's own, never a different batch's.
+	integrationPR, err := e.findIntegrationPR(owner, repo, trialBranch)
 	if err != nil {
 		e.logf(0, "merge-train", "cannot search for existing integration PR for %s: %v\n", repoKey, err)
 		return
 	}
 
+	// R2/R5: a PR found on this trial's own branch that is closed and unmerged is a
+	// failed trial, not a reusable integration PR — it must never be treated as
+	// "already landed." Escalate every survivor (fail loud) and stop before any of
+	// the draft/merge/advance logic below runs.
+	if integrationPR != nil && integrationPR.State == "closed" && !integrationPR.Merged {
+		e.logf(0, "merge-train", "integration PR #%d for %s is closed and unmerged — trial failed to land, escalating %d survivor(s)\n", integrationPR.Number, repoKey, len(survivors))
+		e.escalateClosedUnmergedTrial(state.projectID, owner, repo, integrationPR.Number, survivors)
+		return
+	}
+
 	var integrationPRNum int
 	var alreadyMerged bool
+	var prBody string
 
 	if integrationPR != nil {
 		integrationPRNum = integrationPR.Number
 		alreadyMerged = integrationPR.Merged
+		prBody = integrationPR.Body
 		e.logf(0, "merge-train", "found existing integration PR #%d (merged=%v, draft=%v) for %s\n", integrationPRNum, alreadyMerged, integrationPR.Draft, repoKey)
 		// The reused PR is the trial's draft CI PR — promote it to ready-for-review
 		// so it can be merged (GitHub refuses to merge a draft).
@@ -2866,6 +2888,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// FR-1: open the landing integration PR (not a draft).
 		title := buildIntegrationPRTitle(survivors)
 		body := buildIntegrationPRBody(survivors)
+		prBody = body
 		integrationPRNum, err = e.client.CreatePR(owner, repo, title, trialBranch, baseBranch, body)
 		if err != nil {
 			e.logf(0, "merge-train", "cannot create integration PR for %s: %v\n", repoKey, err)
@@ -2905,12 +2928,36 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	}
 	board := &gh.ProjectBoard{ProjectID: state.projectID}
 
+	// R4: before attributing a landing to integrationPRNum, verify each member is
+	// actually claimed by its body — a batch that dropped a member during assembly
+	// must not be able to claim it. Computed once, outside the loop.
+	claimed := parseTrainMembers(prBody)
+	claimedSet := make(map[int]bool, len(claimed))
+	for _, n := range claimed {
+		claimedSet[n] = true
+	}
+
 	for _, m := range survivors {
 		// Skip members already in Done column (restart safety).
 		if m.item.Status == "Done" {
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
 			// Still reset the ejection counter: this member landed successfully.
 			e.resetEjectionCount(owner, repo, m.item.Number)
+			continue
+		}
+
+		// R4: the integration PR's body doesn't list this member — never attribute
+		// a landing to a batch that dropped it. Escalate (fail loud) instead of
+		// silently skipping, since a batch losing a member during assembly should
+		// never happen and is worth a human look.
+		if !claimedSet[m.item.Number] {
+			e.logf(m.item.Number, "merge-train", "#%d not referenced in integration PR #%d's body — batch dropped this member, escalating\n", m.item.Number, integrationPRNum)
+			reason := fmt.Sprintf(
+				"Integration PR #%d landed, but its body doesn't reference this issue. This batch dropped this member — "+
+					"nothing was landed on its behalf, and this issue's own PR and branch are untouched.",
+				integrationPRNum,
+			)
+			e.escalateStrandedTrainMember(state.projectID, owner, repo, m.item, reason)
 			continue
 		}
 
