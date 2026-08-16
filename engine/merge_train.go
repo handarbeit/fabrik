@@ -1277,7 +1277,17 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+			// #1616: record the singleton landing PR credited for this Done
+			// transition and mark the item for post-Done landing verification.
+			// See markCreditedLanding for why the marker is applied only when
+			// the credited-PR record itself landed.
+			e.markCreditedLanding(m.item, prNum)
 		}
+	} else {
+		// #1616: already Done from a prior partial run — still record the
+		// markers, for the same restart-safety reason as landMergeTrainBatch's
+		// equivalent path (see the comment there).
+		e.markCreditedLanding(m.item, prNum)
 	}
 
 	// Close the member's linked PR with a landing comment.
@@ -2951,6 +2961,17 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
 			// Still reset the ejection counter: this member landed successfully.
 			e.resetEjectionCount(owner, repo, m.item.Number)
+			// #1616: still record the landing-verification markers. A prior run
+			// can have advanced this member to Done and then died before
+			// markCreditedLanding ran — advanceToNextStage and the label writes
+			// are separate, non-atomic API calls. Skipping the marker here would
+			// leave that item permanently unverified, the backstop silently
+			// absent for exactly the merge-train restart shape #1614 came from,
+			// and nothing would ever revisit a Done item to notice. Both writes
+			// are idempotent, so re-marking an item whose verification already
+			// completed costs at most one redundant FetchPRMerged that confirms
+			// merged and clears the markers again.
+			e.markCreditedLanding(m.item, integrationPRNum)
 			continue
 		}
 
@@ -2976,6 +2997,11 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+			// #1616: record the integration PR credited for this Done transition and
+			// mark the item for post-Done landing verification. See
+			// markCreditedLanding for why a failed credited-PR write skips the
+			// marker outright rather than leaving it to the scan's fallback.
+			e.markCreditedLanding(m.item, integrationPRNum)
 		}
 
 		// Close member PR with a comment citing the integration PR.
