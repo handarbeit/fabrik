@@ -20,25 +20,63 @@ Every such regression that escapes a release earns a new scenario here.
 
 ## Where this lives in the release flow
 
+Four layers, not two (#1454 — see `adrs/1454-sim-pre-gate-not-replacement.md` for the
+full layering decision). **The sim bed is a fast, free pre-gate. It is never a
+replacement for this suite** — real Claude, real review bots, real GitHub wire
+behaviour, and real merge-queue semantics have no substitute, and this suite runs in
+full, before every release, permanently.
+
 ```
 [ go test ./... ]               unit tests; fast; run on every PR
         |
         v
-[ tests/e2e/... ]               integration tests; slow; run before release
-        |
+[ sim e2e (tests/sim) ]         fast sanity check: full pipelines, failure/timeout/
+        |                       restart/merge-train paths — seconds, $0 tokens, -race;
+        |                       already part of `go test -race ./...`, so also every PR
+        v
+[ github wire-contract tests ]  wire-format truth: schema + recorded fixtures (github/);
+        |                       also already part of `go test -race ./...`, every PR
+        v
+[ tests/e2e/... ]                integration truth: real Claude, real bots, real
+        |                       GitHub — slow, costs real tokens, runs before release
         v
 [ scripts/cut-release.sh ]      cuts a release
 ```
 
-Suggested integration with `cut-release.sh` (not yet wired):
+Each layer's blind spot, most important first:
+
+- **sim e2e is permanently blind to GraphQL/REST wire correctness** — `tests/sim`'s
+  GitHub client (`simgh`) is a hand-modeled fake; see `tests/sim/README.md`'s "What this
+  layer is permanently blind to" and `tests/sim/simgh/FIDELITY.md` for the maintained
+  ledger of every known divergence from real GitHub. Closed only by the wire-contract
+  tests below and by this suite.
+- **The wire-contract tests validate shape, not runtime behavior** — a query can be
+  schema-valid and still be logically wrong. They prove "this is a query GitHub's schema
+  accepts," not "this is the query that produces the right result." That's what sim e2e
+  and this suite are for.
+- **This suite (`tests/e2e`) has no structural blind spot** — it's the only layer that
+  exercises real Claude, real review bots, and real GitHub wire behaviour together. That
+  is exactly why it is never reduced or retired, no matter how much sim coverage grows.
+
+Wired into `scripts/cut-release.sh` (R2, #1454): the sim suite and wire-contract tests
+run as an unconditional, never-skippable pre-gate step; the live suite (this directory)
+runs as a mandatory-by-default step immediately after build+test. The one sanctioned
+escape hatch is loud and recorded, never silent:
 
 ```bash
-scripts/cut-release.sh v0.0.67                       # default — does NOT run e2e
-scripts/cut-release.sh v0.0.67 --integration-check   # run e2e before tagging
-scripts/cut-release.sh v0.0.67 --skip-integration    # explicit skip when iterating
+scripts/cut-release.sh v0.0.67                              # default — runs the full live suite
+scripts/cut-release.sh v0.0.67 --skip-integration=<reason>  # loud, recorded escape hatch —
+                                                              # the reason ships in the release notes
 ```
 
-We'll flip the default to `--integration-check` once the suite is stable.
+A bare `--skip-integration` (no reason) is a hard usage error, by design — see
+`adrs/1454-sim-pre-gate-not-replacement.md`'s R2 section for why "no flag at all" was
+rejected in favor of this loudly-labelled one.
+
+`scripts/e2e/run.sh` itself also runs the sim + wire-contract pre-gate first (R1,
+#1454) — before any bed preflight, build, or live call — whether invoked standalone or
+via `cut-release.sh`, so a live-gate run never spends live budget on a bug the free
+layers would have caught for $0.
 
 ## Test bed prerequisites
 
@@ -1249,9 +1287,17 @@ Every escape-from-release regression earns a new scenario in this table.
 
 - **Cost per run is non-trivial.** A full cross-repo scenario costs $1–3 in
   Claude tokens. The suite is not for casual local iteration.
-- **CI integration is not wired yet.** Initially the suite is operator-only —
-  run before cutting a release. Future work: a GitHub Actions runner that
-  exercises the suite on a schedule.
+- **This suite deliberately never runs in CI** — it drives a real Fabrik bed
+  against real repos with real Claude and real review bots, which cannot run
+  unattended in a PR job (cost, time, and blast radius). CI only compiles it
+  (`go test -tags e2e -run '^$' ./tests/e2e/...`, catching signature breaks
+  without executing a scenario or making a network call). It is operator-run
+  before cutting a release, via `scripts/cut-release.sh` (R2, #1454) or
+  standalone via `scripts/e2e/run.sh`. This is a permanent, deliberate
+  design choice, not a "not wired yet" gap — contrast with the sim e2e and
+  github wire-contract layers above (R7, #1454), which already run on every
+  PR unconditionally (confirmed, not built — see `tests/sim/README.md`'s
+  "Runtime and the `sim` tag decision").
 - **GitHub rate-limit pressure.** Shared with `~/dev/fabrik/` (the dev
   instance) under the `@arbeithand` token. Stop the dev instance if running
   the full suite.

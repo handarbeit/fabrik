@@ -13,6 +13,29 @@ go test -race ./...      # Run with race detector
 go vet ./...             # Lint
 ```
 
+### Four test layers (unit → sim e2e → wire-contract → live e2e)
+
+The sim bed is a fast, free **pre-gate** — it is never a replacement for the live
+integration suite, which has no substitute and is never reduced. See
+`adrs/1454-sim-pre-gate-not-replacement.md` for the full decision.
+
+| Layer | Where | Runs |
+|---|---|---|
+| `go test ./...` (unit) | repo-wide | every PR |
+| sim e2e (`tests/sim`) | scenario-driven, deterministic, `-race`-clean, $0 tokens | every PR — no build tag, already inside `go test -race ./...`; also `scripts/sim/run.sh` for on-demand runs |
+| github wire-contract tests (`github/wire_contract_test.go` + `github/testdata/`) | schema validation + recorded fixtures | every PR — no build tag, already inside `go test -race ./...` |
+| live e2e (`tests/e2e`, `-tags e2e`) | real Claude, real review bots, real GitHub, real merge-queue semantics | release-gate only — CI compiles it but never runs it; `scripts/e2e/run.sh` (standalone, or invoked from `scripts/cut-release.sh`) is the only thing that executes it, before every release |
+
+`scripts/e2e/run.sh` refuses to spend live budget (bed preflight, build, or any live
+GitHub/Claude call) until the sim suite and the wire-contract tests pass first —
+see its `run_pregate`. `scripts/cut-release.sh` mirrors that ordering and makes the
+live suite mandatory by default; `--skip-integration=<reason>` is a loud,
+release-notes-recorded escape hatch, never a silent skip. See `tests/sim/README.md`
+and `tests/e2e/README.md` for the full detail, including each layer's blind spots
+(the sim's inability to see GitHub wire correctness, most prominently) and the
+fidelity-drift policy: any live-e2e failure the sim passed is a fidelity bug in the
+sim, fixed there as well as in the engine.
+
 ## Documentation bundle (docs/llms-full.txt)
 
 When you modify any of the canonical doc pages — `docs/USER_GUIDE.md`, `docs/state-machine.md`, `docs/stage-lifecycle.md`, or `docs/positioning.md` — you MUST regenerate `docs/llms-full.txt` in the same commit:
