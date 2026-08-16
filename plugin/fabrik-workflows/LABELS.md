@@ -106,6 +106,33 @@ part of the normal happy path, not an error condition.
   (`fabrik:paused` remains either way) — if the fallback also fails, the
   marker stays and retries continue indefinitely, rather than silently
   losing the only signal that the member was never actually alerted.
+- **`fabrik:awaiting-landing-verification`** — Applied immediately after a
+  Done transition attributable to a merge (merge-train batch/singleton
+  landing, or the ordinary auto-merge path) actually succeeds. The
+  post-Done backstop (#1614/#1615): the per-poll settle scan verifies the
+  *credited PR's merge state* (never the item's own branch — literal
+  branch-tip ancestry false-positives on a branch rebased onto a later base
+  after landing, and is structurally never an ancestor at all under
+  `SQUASH`/`REBASE` merge strategies). A confirmed non-merge fires
+  immediately (not gated by the retry budget): the issue is reopened, moved
+  back to Validate, labeled `fabrik:landing-verification-failed`, and
+  commented on. An inconclusive result (API error, or no crediting
+  reference found at all) retries and escalates to `fabrik:paused` like
+  every other settle-scan sibling — never reopens on ambiguity. Cleared on
+  a confirmed merge. See ADR-1616.
+- **`fabrik:credited-pr:<N>`** — Companion to
+  `fabrik:awaiting-landing-verification`, applied only by the two
+  merge-train landing paths: records the integration/singleton PR actually
+  credited for the Done transition (distinct from the member's own PR,
+  which stays closed-not-merged and would give the wrong answer if used
+  instead). Absent for the ordinary auto-merge path, whose credited PR is
+  always its own linked PR. Removed whenever the awaiting-verification
+  marker is cleared.
+- **`fabrik:landing-verification-failed`** — Set only on a confirmed
+  landing-verification failure (see above). A distinguishing, human-gated
+  label — not self-clearing — so a false `COMPLETED` reads differently from
+  an ordinary stage failure at a glance. Remove manually once the work is
+  re-landed and re-verified.
 - **`fabrik:awaiting-placement`** — A spawned child issue's initial
   project-board column placement failed at spawn time. Retried every poll
   until placement succeeds or the child is observed closed; escalates to
