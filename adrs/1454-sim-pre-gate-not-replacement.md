@@ -118,11 +118,15 @@ exactly the commit about to ship.
 
 `scripts/e2e/run.sh`'s exit codes are branched on explicitly rather than treated as a
 single pass/fail: `3` (GraphQL budget exhausted — the verdict cannot be trusted, rerun
-later) and `5` (the live script's *own* pre-gate failed, which is unexpected since
-`cut-release.sh`'s own pre-gate step already passed against the same tree — investigate
-the discrepancy) both produce a distinct, actionable message; anything else is treated as
-a real regression, with an explicit instruction not to retry with `--skip-integration` to
-work around it.
+later), `4` (bed preflight failed — an infrastructure problem, e.g. a stuck lock or
+unreachable SSH remote; the suite never actually ran), and `5` (the live script's *own*
+pre-gate failed, which is unexpected since `cut-release.sh`'s own pre-gate step already
+passed against the same tree — investigate the discrepancy) each produce a distinct,
+actionable message; anything else is treated as a real regression, with an explicit
+instruction not to retry with `--skip-integration` to work around it. `4` in particular
+must not be conflated with a fidelity-drift case — an infrastructure failure means the
+live suite never exercised the code at all, so there is nothing for the sim to have
+missed.
 
 ### R4 — the fidelity-drift policy
 

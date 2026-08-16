@@ -99,6 +99,51 @@ assert_exits "malformed version exits 2" "2" not-a-version
 # --- unknown flag is a hard usage error (pre-existing behavior) ---
 assert_exits "unknown flag exits 2" "2" v0.0.99 --not-a-real-flag
 
+# --- interpret_e2e_exit_code: each known scripts/e2e/run.sh exit code gets
+# its own distinct, non-misleading message and success/failure classification
+# — in particular exit 4 (PREFLIGHT_FAILED_EXIT, a bed/infrastructure
+# problem) must NOT be conflated with a fidelity-drift regression, which is
+# what a prior version of this script did by falling through to the generic
+# "*)" branch for it. ---
+VERSION="v0.0.99" # interpret_e2e_exit_code's exit-3/4/5 messages interpolate $VERSION
+
+msg="$(interpret_e2e_exit_code 0)"; rc=$?
+assert_eq "exit 0 message" "live e2e integration suite passed" "$msg"
+assert_eq "exit 0 classified as success" "0" "$rc"
+
+msg="$(interpret_e2e_exit_code 3)"; rc=$?
+case "$msg" in
+  *"budget exhausted"*) echo "PASS: exit 3 message mentions budget exhaustion" ;;
+  *) echo "FAIL: exit 3 message does not mention budget exhaustion: $msg"; FAILED=1 ;;
+esac
+assert_eq "exit 3 classified as failure" "1" "$rc"
+
+msg="$(interpret_e2e_exit_code 4)"; rc=$?
+case "$msg" in
+  *"infrastructure problem"*"NOT a regression"*"NOT a fidelity-drift case"*)
+    echo "PASS: exit 4 message is distinct and explicitly disclaims fidelity-drift" ;;
+  *) echo "FAIL: exit 4 message does not distinctly disclaim fidelity-drift: $msg"; FAILED=1 ;;
+esac
+case "$msg" in
+  *"FIDELITY-DRIFT"*) echo "FAIL: exit 4 message wrongly mentions the fidelity-drift procedure"; FAILED=1 ;;
+  *) echo "PASS: exit 4 message does not mention the fidelity-drift procedure" ;;
+esac
+assert_eq "exit 4 classified as failure" "1" "$rc"
+
+msg="$(interpret_e2e_exit_code 5)"; rc=$?
+case "$msg" in
+  *"own sim/wire-contract pre-gate failed"*) echo "PASS: exit 5 message mentions the live script's own pre-gate" ;;
+  *) echo "FAIL: exit 5 message does not mention the live script's own pre-gate: $msg"; FAILED=1 ;;
+esac
+assert_eq "exit 5 classified as failure" "1" "$rc"
+
+msg="$(interpret_e2e_exit_code 1)"; rc=$?
+case "$msg" in
+  *"FIDELITY-DRIFT"*) echo "PASS: exit 1 (real regression) message mentions the fidelity-drift procedure" ;;
+  *) echo "FAIL: exit 1 message does not mention the fidelity-drift procedure: $msg"; FAILED=1 ;;
+esac
+assert_eq "exit 1 classified as failure" "1" "$rc"
+
 # --- insert_notes_line: exercised directly against a scratch file, proving
 # the helper both call sites (plugin-bump changelog, --skip-integration
 # recorded-skip line) now share behaves identically to the pre-refactor

@@ -111,6 +111,40 @@ insert_notes_line() {
   fi
 }
 
+# interpret_e2e_exit_code prints the operator-facing message for a given
+# scripts/e2e/run.sh exit code ($1) and returns 0 if that code means success,
+# 1 otherwise — main() calls `ok`/`die` with the result accordingly. Extracted
+# into its own function (R2, #1454) so scripts/cut_release_gate_test.sh can
+# assert on the message for each known exit code — in particular that `4`
+# (PREFLIGHT_FAILED_EXIT, a bed/infrastructure problem where the suite never
+# actually ran) gets its own distinct, non-misleading message rather than
+# falling through to the generic "real regression, check fidelity-drift"
+# branch, which would wrongly send an operator investigating a stuck lock or
+# an unreachable SSH remote down the fidelity-drift procedure instead.
+# Mirrors scripts/e2e/run.sh's own exit-code convention (3/4/5) exactly — see
+# that script's header comment for where each code originates.
+interpret_e2e_exit_code() {
+  local rc="$1"
+  case "$rc" in
+    0)
+      echo "live e2e integration suite passed"
+      ;;
+    3)
+      echo "live e2e integration suite aborted: GraphQL budget exhausted mid-run (exit 3) — the verdict cannot be trusted. Wait for the budget window to reset and re-run scripts/cut-release.sh $VERSION."
+      ;;
+    4)
+      echo "live e2e integration suite aborted: bed preflight failed (exit 4) inside scripts/e2e/run.sh — the suite never ran. This is an infrastructure problem (stuck lock, unreachable SSH remote, dirty tracked files in the bed checkout, etc.), NOT a regression and NOT a fidelity-drift case — see scripts/e2e/run.sh's own preflight_bed output above for the specific cause, fix it, and re-run scripts/cut-release.sh $VERSION."
+      ;;
+    5)
+      echo "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected, since this script's own pre-gate step (step 3) already passed against the same tree — investigate the discrepancy (different ref? dirty tree in the bed?) before retrying."
+      ;;
+    *)
+      echo "live e2e integration suite FAILED (exit $rc) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
+      ;;
+  esac
+  [ "$rc" -eq 0 ]
+}
+
 # ─── arg parsing ──────────────────────────────────────────────────────────────
 parse_args() {
   VERSION="${1:-}"
@@ -320,20 +354,12 @@ else
   echo "   running scripts/e2e/run.sh against origin/main (this can take hours — see tests/e2e/README.md)"
   E2E_RC=0
   "$REPO_ROOT/scripts/e2e/run.sh" || E2E_RC=$?
-  case "$E2E_RC" in
-    0)
-      ok "live e2e integration suite passed"
-      ;;
-    3)
-      die "live e2e integration suite aborted: GraphQL budget exhausted mid-run (exit 3) — the verdict cannot be trusted. Wait for the budget window to reset and re-run scripts/cut-release.sh $VERSION."
-      ;;
-    5)
-      die "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected, since this script's own pre-gate step (step 3) already passed against the same tree — investigate the discrepancy (different ref? dirty tree in the bed?) before retrying."
-      ;;
-    *)
-      die "live e2e integration suite FAILED (exit $E2E_RC) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
-      ;;
-  esac
+  E2E_MSG="$(interpret_e2e_exit_code "$E2E_RC")"
+  if [ "$E2E_RC" -eq 0 ]; then
+    ok "$E2E_MSG"
+  else
+    die "$E2E_MSG"
+  fi
 fi
 
 # ─── 6. commit release notes as arbeithand ────────────────────────────────────
