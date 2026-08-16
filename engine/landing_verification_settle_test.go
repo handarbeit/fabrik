@@ -394,6 +394,96 @@ func TestSettleLandingVerification_SkipsItemsWithoutMarker(t *testing.T) {
 	}
 }
 
+// TestMarkCreditedLanding_Success verifies the merge-train write site applies
+// both feature-owned labels, with the credited-PR record first — so a board
+// snapshot taken between the two writes can only ever see the credited-PR
+// label without the marker (which the scan ignores), never the reverse.
+func TestMarkCreditedLanding_Success(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	eng.markCreditedLanding(gh.ProjectItem{Number: 5, Repo: "owner/repo"}, 77)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	added := addedLabelNames(client.addLabelCalls)
+	if len(added) != 2 {
+		t.Fatalf("expected exactly two labels applied, got %v", added)
+	}
+	if added[0] != creditedPRLabelPrefix+"77" {
+		t.Errorf("expected the credited-PR record to be written first, got %v", added)
+	}
+	if added[1] != awaitingLandingVerificationLabel {
+		t.Errorf("expected the marker to be written second, got %v", added)
+	}
+}
+
+// TestMarkCreditedLanding_CreditedWriteFails_SkipsMarker is the regression
+// test for the false-positive path this feature exists to avoid.
+//
+// The two labels are separate GitHub calls, so the credited-PR write can fail
+// on its own. If the marker were applied regardless, settleLandingVerification
+// would find no fabrik:credited-pr:<N> label, fall back to FetchLinkedPR, and
+// resolve the merge-train member's *own* PR — closed and deliberately never
+// merged — as the credited one, firing its immediate confirmed-failure path
+// against a correctly-landed issue.
+//
+// So a failed credited-PR write must leave the item unmarked (unverified, the
+// pre-#1616 status quo) rather than marked-and-unresolvable.
+func TestMarkCreditedLanding_CreditedWriteFails_SkipsMarker(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, label string) error {
+			if strings.HasPrefix(label, creditedPRLabelPrefix) {
+				return fmt.Errorf("github: rate limit exceeded")
+			}
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	eng.markCreditedLanding(gh.ProjectItem{Number: 5, Repo: "owner/repo"}, 77)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	added := addedLabelNames(client.addLabelCalls)
+	if containsLabel(added, awaitingLandingVerificationLabel) {
+		t.Errorf("the marker must not be applied when the credited-PR record failed to land — "+
+			"the scan would fall back to the member's own closed-not-merged PR and falsely reopen a landed issue; got %v", added)
+	}
+}
+
+// TestSettleLandingVerification_EscalationClearsCreditedPRLabel verifies the
+// inconclusive-regime escalation leaves no feature-owned state behind: a
+// stale fabrik:credited-pr:<N> outliving the gate cycle would suggest to an
+// operator that verification is still pending when nothing will re-trigger it.
+func TestSettleLandingVerification_EscalationClearsCreditedPRLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			return false, fmt.Errorf("GitHub API returned 503: service unavailable")
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.MaxRetries = 1
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 11, ItemID: "PVTI_11", Repo: "owner/repo", Status: "Done", IsClosed: true,
+		Labels: []string{awaitingLandingVerificationLabel, creditedPRLabelPrefix + "88"},
+	}
+
+	eng.settleLandingVerificationItem(board, item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	removed := removedLabelNames(client.removeLabelCalls)
+	if !containsLabel(removed, creditedPRLabelPrefix+"88") {
+		t.Errorf("expected %s cleared on escalation, got %v", creditedPRLabelPrefix+"88", removed)
+	}
+	if !containsLabel(removed, awaitingLandingVerificationLabel) {
+		t.Errorf("expected %s cleared on escalation, got %v", awaitingLandingVerificationLabel, removed)
+	}
+}
+
 // TestMoveItemToValidate_MissingOption_ReturnsError covers moveItemToValidate's
 // own error path directly — a board with no "Validate" status option.
 func TestMoveItemToValidate_MissingOption_ReturnsError(t *testing.T) {

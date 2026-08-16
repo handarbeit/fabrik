@@ -163,11 +163,15 @@ sibling in the family, keeps the two-regime logic in exactly one place.
 
 **Negative / Trade-offs:**
 - A merge-train `fabrik:credited-pr:<N>` label write that fails outright (after its landing call
-  site's `advanceToNextStage` already succeeded) degrades to the inconclusive regime rather than a
-  confirmed pass — the item sits as `fabrik:awaiting-landing-verification` until it escalates to
-  `fabrik:paused`, requiring manual clearing even though the landing itself was fine. Accepted per
-  R5/AC4's "never reopen on ambiguity" framing; the escalation comment is deliberately worded to make
-  this ambiguity explicit, not a confirmed loss.
+  site's `advanceToNextStage` already succeeded) leaves that landing **unverified** — the item is not
+  marked at all, so the backstop simply does not run for it, reverting to the pre-#1616 status quo for
+  that one landing. This is deliberate: `markCreditedLanding` checks the credited-PR write's error and
+  applies `fabrik:awaiting-landing-verification` only on success, because a marker without a credited-PR
+  record would send the scan to its `FetchLinkedPR` fallback, which for a merge-train member resolves
+  to the member's own closed-not-merged PR and would fire an **immediate false confirmed-failure**
+  against a correctly-landed issue — the exact false positive AC2 forbids. Not verifying is a coverage
+  gap; falsely reversing a good landing is a regression, so the gap is the safer failure mode. The gap
+  is logged loudly at the landing call site.
 - `resolveLandingVerificationBranchInfo`'s base-branch resolution for the failure comment depends on
   a `WorktreeManager` being registered for the item's repo; if none is (e.g., a repo whose only
   activity this process lifetime was a merge-train landing, after a restart), the comment names no

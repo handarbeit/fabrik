@@ -126,8 +126,12 @@ part of the normal happy path, not an error condition.
   credited for the Done transition (distinct from the member's own PR,
   which stays closed-not-merged and would give the wrong answer if used
   instead). Absent for the ordinary auto-merge path, whose credited PR is
-  always its own linked PR. Removed whenever the awaiting-verification
-  marker is cleared.
+  always its own linked PR. Written *before* the awaiting-verification
+  marker and with its error checked — if this label fails to apply, the
+  marker is skipped entirely, leaving the landing unverified rather than
+  letting the scan fall back to the member's own closed-not-merged PR and
+  falsely reverse a good landing. Removed whenever the awaiting-verification
+  marker is cleared, including on escalation.
 - **`fabrik:landing-verification-failed`** — Set only on a confirmed
   landing-verification failure (see above). A distinguishing, human-gated
   label — not self-clearing — so a false `COMPLETED` reads differently from

@@ -79,6 +79,39 @@ func creditedPRFromLabel(item gh.ProjectItem) (int, bool) {
 	return 0, false
 }
 
+// markCreditedLanding records the PR credited for a *merge-train* Done
+// transition (the batch integration PR or the singleton landing PR) and, only
+// if that record actually landed on GitHub, applies the landing-verification
+// marker. Used by landMergeTrainBatch and landSingleton; the ordinary
+// auto-merge path applies the marker directly, since its credited PR is always
+// its own linked PR.
+//
+// The ordering — and the error check — are load-bearing, not defensive
+// habit. The two labels are separate GitHub calls, so a transient failure of
+// the credited-PR write alone (rate limit, momentary 5xx) is entirely
+// possible. If the marker were applied anyway, settleLandingVerificationItem
+// would find no fabrik:credited-pr:<N> label and fall back to FetchLinkedPR —
+// which for a merge-train member resolves to the member's *own* PR, closed
+// and deliberately never merged. FetchPRMerged would report false, and the
+// scan would fire its immediate confirmed-failure path, reopening a
+// correctly-landed issue: precisely the false positive AC2 forbids and the
+// whole feature exists to avoid.
+//
+// So a lost credited-PR write degrades to "this landing is not verified"
+// (logged loudly, and the pre-#1616 status quo) rather than "this landing
+// failed". Not verifying is a gap; falsely reversing a good landing is a
+// regression, and between the two the gap is strictly safer.
+func (e *Engine) markCreditedLanding(item gh.ProjectItem, creditedPR int) {
+	label := fmt.Sprintf("%s%d", creditedPRLabelPrefix, creditedPR)
+	if err := e.addLabelChecked(item, label); err != nil {
+		e.logf(item.Number, "warn",
+			"landing-verification: could not record credited PR #%d (%v) — skipping the %s marker, since without the credited-PR record the settle scan would mistake this item's own closed-not-merged PR for the credited one\n",
+			creditedPR, err, awaitingLandingVerificationLabel)
+		return
+	}
+	e.addLabel(item, awaitingLandingVerificationLabel)
+}
+
 // settleLandingVerification is the per-poll settle scan for #1616's post-Done
 // landing-verification backstop (R5, AC1-AC4). Runs unconditionally every
 // poll over the raw board snapshot (not deepFetchCandidates), mirroring every
@@ -165,8 +198,13 @@ func (e *Engine) recordLandingVerificationRetry(item gh.ProjectItem) {
 func (e *Engine) escalateLandingVerificationFailure(item gh.ProjectItem) {
 	e.logf(item.Number, "escalate", "landing verification inconclusive %d time(s) — pausing issue\n", e.cfg.MaxRetries)
 	e.escalateSettle(item, awaitingLandingVerificationLabel, landingVerificationRetryStage, func(item gh.ProjectItem) {
+		// escalateSettle removes the awaiting marker but knows nothing about
+		// this feature's second label, so clear it here — otherwise a stale
+		// fabrik:credited-pr:<N> outlives the gate cycle that owned it and
+		// misleads an operator into thinking verification is still pending.
+		e.removeCreditedPRLabels(item)
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — landing verification inconclusive**\n\nFabrik could not determine whether this issue's credited PR actually merged, after %d attempt(s). This is **not** a confirmed failure — it means the check itself could not complete (e.g. a transient API error, or no crediting PR reference could be found at all). The issue has **not** been reopened or moved off Done.\n\nManually confirm the credited PR's merge state, then remove the `fabrik:paused` label to resume — or, if you're confident the landing was fine, just remove `%s` and `fabrik:paused`.",
+			"🏭 **Fabrik — landing verification inconclusive**\n\nFabrik could not determine whether this issue's credited PR actually merged, after %d attempt(s). This is **not** a confirmed failure — it means the check itself could not complete (e.g. a transient API error, or no crediting PR reference could be found at all). The issue has **not** been reopened or moved off Done, and its work may well have landed normally.\n\nVerification will **not** resume on its own: the `%s` marker has been removed, so nothing will re-trigger the check. Confirm the credited PR's merge state by hand, then remove `fabrik:paused`. If the landing really did fail, apply `fabrik:revalidate` to send the issue back through Validate.",
 			e.cfg.MaxRetries, awaitingLandingVerificationLabel,
 		)
 		e.postItemComment(item, comment, true)

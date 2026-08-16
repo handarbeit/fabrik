@@ -1279,9 +1279,9 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
 			// #1616: record the singleton landing PR credited for this Done
 			// transition and mark the item for post-Done landing verification.
-			// Best-effort — see the equivalent comment in landMergeTrainBatch.
-			e.addLabel(m.item, fmt.Sprintf("%s%d", creditedPRLabelPrefix, prNum))
-			e.addLabel(m.item, awaitingLandingVerificationLabel)
+			// See markCreditedLanding for why the marker is applied only when
+			// the credited-PR record itself landed.
+			e.markCreditedLanding(m.item, prNum)
 		}
 	}
 
@@ -2840,11 +2840,10 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
 			// #1616: record the integration PR credited for this Done transition and
-			// mark the item for post-Done landing verification. Best-effort — a
-			// failed write here degrades to settleLandingVerification's inconclusive
-			// (retry-then-escalate) path, never a silent pass (see Constraints).
-			e.addLabel(m.item, fmt.Sprintf("%s%d", creditedPRLabelPrefix, integrationPRNum))
-			e.addLabel(m.item, awaitingLandingVerificationLabel)
+			// mark the item for post-Done landing verification. See
+			// markCreditedLanding for why a failed credited-PR write skips the
+			// marker outright rather than leaving it to the scan's fallback.
+			e.markCreditedLanding(m.item, integrationPRNum)
 		}
 
 		// Close member PR with a comment citing the integration PR.
