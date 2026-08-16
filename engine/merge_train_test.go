@@ -3218,6 +3218,266 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 	}
 }
 
+// ── #1615 R1-R5 regression tests ──────────────────────────────────────────────
+
+// TestFindIntegrationPR_BranchIdentityRequired is the load-bearing regression test
+// for the bug's exact mechanism (#1615 R1): a marker-carrying PR on a DIFFERENT
+// branch than this trial's own must never be returned, even though pre-fix code
+// (marker-only matching) would have matched it immediately.
+func TestFindIntegrationPR_BranchIdentityRequired(t *testing.T) {
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				{Number: 27, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-99999", Body: mergeTrainBatchMarker + " #16"},
+			}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+
+	got, err := eng.findIntegrationPR("owner", "repo", trainBranchPrefix+"merge-train-main-12345")
+	if err != nil {
+		t.Fatalf("findIntegrationPR: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected no match for a different trial's branch (even though it carries the marker), got PR #%d", got.Number)
+	}
+}
+
+// TestLandMergeTrainBatch_ClosedUnmergedTrialPR_EscalatesInsteadOfLanding covers
+// #1615 AC1/AC3: this is the exact reproduction of the #1614 report. ListPRs
+// returns two PRs — an older, different-branch, ALREADY-MERGED PR that also
+// carries the marker (proving non-vacuously that pre-fix marker-only matching
+// would have matched and "landed" via it, exactly as #1614 describes), and this
+// trial's own branch, closed without merging. The fix must land on neither:
+// MergePR must never be called, no member may advance to Done, no PR/issue may be
+// closed, and no "Landed via" comment may be posted. Every survivor must instead
+// be rerouted off Queued, paused, and told why via a landing-failure comment
+// naming the closed PR.
+func TestLandMergeTrainBatch_ClosedUnmergedTrialPR_EscalatesInsteadOfLanding(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(18, 28, "Issue Eighteen"),
+		makeQueuedMember(19, 29, "Issue Nineteen"),
+	}
+
+	mergeCalled := false
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				// A different batch's already-merged PR — pre-fix, marker-only
+				// matching would return this one first (ListPRs is sort=updated
+				// desc, but order doesn't matter here: branch identity must
+				// reject it regardless of position).
+				{Number: 27, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-11111", Body: mergeTrainBatchMarker + " #16"},
+				// This trial's own PR: closed without merging (the reported failure mode).
+				{Number: 28, State: "closed", Merged: false, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #18 #19"},
+			}, nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			mergeCalled = true
+			return nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	if mergeCalled {
+		t.Error("MergePR must never be called for a closed-unmerged trial PR (R2/R5)")
+	}
+
+	client.mu.Lock()
+	updateStatus := append([]updateStatusCall(nil), client.updateStatusCalls...)
+	closed := append([]closeIssueCall(nil), client.closeIssueCalls...)
+	comments := append([]addCommentCall(nil), client.addCommentCalls...)
+	labels := append([]addLabelCall(nil), client.addLabelCalls...)
+	client.mu.Unlock()
+
+	if len(closed) != 0 {
+		t.Errorf("expected no PR/issue closes, got %v", closed)
+	}
+	for _, c := range updateStatus {
+		if c.optionID == "opt-done" {
+			t.Errorf("expected no member advanced to Done, got status update %+v", c)
+		}
+	}
+	for _, c := range comments {
+		if strings.Contains(c.body, "Landed via") {
+			t.Errorf("expected no 'Landed via' comment, got: %s", c.body)
+		}
+	}
+
+	// Both survivors must be rerouted off Queued (to Implement, per trainTestEngine's
+	// stage set), paused, and told why.
+	for _, num := range []int{18, 19} {
+		rerouted := false
+		for _, c := range updateStatus {
+			if c.optionID == "opt-implement" {
+				rerouted = true
+			}
+		}
+		if !rerouted {
+			t.Errorf("expected #%d to be rerouted off Queued to Implement, got status updates %+v", num, updateStatus)
+		}
+
+		var sawPaused, sawAwaitingInput bool
+		var sawFailureComment bool
+		for _, c := range labels {
+			if c.issueNumber != num {
+				continue
+			}
+			switch c.labelName {
+			case "fabrik:paused":
+				sawPaused = true
+			case "fabrik:awaiting-input":
+				sawAwaitingInput = true
+			}
+		}
+		for _, c := range comments {
+			if c.issueNumber == num && strings.Contains(c.body, "landing failed") && strings.Contains(c.body, "#28") {
+				sawFailureComment = true
+			}
+		}
+		if !sawPaused || !sawAwaitingInput {
+			t.Errorf("expected #%d paused (fabrik:paused + fabrik:awaiting-input), got labels %+v", num, labels)
+		}
+		if !sawFailureComment {
+			t.Errorf("expected #%d to get a landing-failed comment naming PR #28, got comments %+v", num, comments)
+		}
+	}
+}
+
+// TestLandMergeTrainBatch_DroppedMemberNotInBatchBody_EscalatesThatMemberOnly covers
+// #1615 R4/AC4: the matched, merged integration PR's body lists only #1 — #2 rode
+// along as a survivor but was dropped from the batch during assembly. #1 must land
+// normally; #2 must not be advanced, closed, or told "Landed via" — instead it gets
+// the same reroute+pause+comment escalation as R5, without disturbing #1's landing.
+func TestLandMergeTrainBatch_DroppedMemberNotInBatchBody_EscalatesThatMemberOnly(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(1, 10, "Issue One"),
+		makeQueuedMember(2, 11, "Issue Two"),
+	}
+
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				// Found open, on this trial's own branch, but the body only
+				// references #1 — #2 was dropped from the batch during assembly.
+				{Number: 500, State: "open", Merged: false, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #1"},
+			}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	client.mu.Lock()
+	updateStatus := append([]updateStatusCall(nil), client.updateStatusCalls...)
+	closed := append([]closeIssueCall(nil), client.closeIssueCalls...)
+	comments := append([]addCommentCall(nil), client.addCommentCalls...)
+	labels := append([]addLabelCall(nil), client.addLabelCalls...)
+	client.mu.Unlock()
+
+	// #1 landed normally: advanced to Done, both its PR and issue closed, and a
+	// "Landed via" comment naming integration PR #500.
+	advancedMember1 := false
+	for _, c := range updateStatus {
+		if c.optionID == "opt-done" {
+			advancedMember1 = true
+		}
+	}
+	if !advancedMember1 {
+		t.Errorf("expected #1 advanced to Done, got status updates %+v", updateStatus)
+	}
+	closedWant := map[int]bool{10: false, 1: false}
+	for _, c := range closed {
+		if _, ok := closedWant[c.issueNumber]; ok {
+			closedWant[c.issueNumber] = true
+		}
+		if c.issueNumber == 11 || c.issueNumber == 2 {
+			t.Errorf("expected #2 (issue/PR) not to be closed, got close of #%d", c.issueNumber)
+		}
+	}
+	for n, seen := range closedWant {
+		if !seen {
+			t.Errorf("expected #%d closed (member #1's PR or issue)", n)
+		}
+	}
+	landedComment := false
+	for _, c := range comments {
+		// The landed comment is posted on the member's own PR (#10), not its issue.
+		if c.issueNumber == 10 && strings.Contains(c.body, "Landed via") && strings.Contains(c.body, "#500") {
+			landedComment = true
+		}
+	}
+	if !landedComment {
+		t.Errorf("expected #1's PR #10 to get a 'Landed via' comment naming PR #500, got comments %+v", comments)
+	}
+
+	// #2 was dropped: rerouted off Queued, paused, and told why — never a "Landed via".
+	rerouted2 := false
+	for _, c := range updateStatus {
+		if c.optionID == "opt-implement" {
+			rerouted2 = true
+		}
+	}
+	if !rerouted2 {
+		t.Errorf("expected #2 rerouted off Queued to Implement, got status updates %+v", updateStatus)
+	}
+	var sawPaused2, sawAwaitingInput2, sawFailureComment2, sawLandedComment2 bool
+	for _, c := range labels {
+		if c.issueNumber != 2 {
+			continue
+		}
+		switch c.labelName {
+		case "fabrik:paused":
+			sawPaused2 = true
+		case "fabrik:awaiting-input":
+			sawAwaitingInput2 = true
+		}
+	}
+	for _, c := range comments {
+		if c.issueNumber != 2 {
+			continue
+		}
+		if strings.Contains(c.body, "landing failed") && strings.Contains(c.body, "#500") {
+			sawFailureComment2 = true
+		}
+		if strings.Contains(c.body, "Landed via") {
+			sawLandedComment2 = true
+		}
+	}
+	if !sawPaused2 || !sawAwaitingInput2 {
+		t.Errorf("expected #2 paused (fabrik:paused + fabrik:awaiting-input), got labels %+v", labels)
+	}
+	if !sawFailureComment2 {
+		t.Errorf("expected #2 to get a landing-failed comment naming PR #500, got comments %+v", comments)
+	}
+	if sawLandedComment2 {
+		t.Errorf("expected #2 NOT to get a 'Landed via' comment (it was dropped from the batch), got comments %+v", comments)
+	}
+}
+
 // ── bisection AC tests: mock combined-Validate keyed on batch membership (Tasks 10-11) ──
 
 // recordingValidator is a membership-keyed combined-Validate stub for the trainValidateFn
