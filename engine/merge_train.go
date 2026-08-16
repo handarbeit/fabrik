@@ -1944,35 +1944,7 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 	if block := renderDiagnosticBlock(diag); block != "" {
 		sections = append(sections, block)
 	}
-	// handleRevalidateLabel (engine/item.go) clears stage:Validate:complete/failed
-	// specifically — it is hardcoded to the literal name "Validate", not generic over
-	// stageBeforeHolding's result. targetName, by contrast, is resolved structurally by
-	// Order (see stageBeforeHolding's doc comment) and can differ from "Validate" in a
-	// custom stage config — trainTestEngine's own test fixture resolves it to "Implement"
-	// for exactly this reason. Pointing at fabrik:revalidate when targetName isn't
-	// literally "Validate" would recommend a mechanism that silently no-ops against this
-	// item's actual completion label, reproducing the same class of stranding this issue
-	// fixes. Only recommend it when the names actually match; otherwise name the real
-	// blocking labels directly.
-	if targetName == "Validate" {
-		sections = append(sections, fmt.Sprintf(
-			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
-				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then apply "+
-				"`fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this item, so removing "+
-				"just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes again, this issue will "+
-				"re-queue and rejoin the train.",
-			targetName, targetName, targetName,
-		))
-	} else {
-		sections = append(sections, fmt.Sprintf(
-			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
-				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove "+
-				"`stage:%s:complete` and `fabrik:paused` (`fabrik:revalidate` only forces re-entry of a stage literally named "+
-				"Validate, so it will not help here) to re-enter %s. Once it completes again, this issue will re-queue and "+
-				"rejoin the train.",
-			targetName, targetName, targetName,
-		))
-	}
+	sections = append(sections, reentryInstruction(targetName, "This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR"))
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
 
 	if _, err := e.client.AddComment(owner, repo, m.item.Number, msg); err != nil {
@@ -1981,6 +1953,42 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 
 	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — rerouted to %s and pausing without bisection\n", m.item.Number, targetName)
 	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+}
+
+// reentryInstruction returns the closing guidance sentence for a merge-train
+// escalation comment, explaining how a member that has been rerouted off Queued to
+// targetName can re-enter the pipeline. fixDescription is the escalation-specific
+// instruction for what to actually go fix before re-entering.
+//
+// Shared by ejectRedSingleton and the #1615 R4/R5 escalation helpers below — all
+// three route a member off Queued to the same stageBeforeHolding target and face the
+// same fabrik:revalidate name-literal caveat: handleRevalidateLabel (engine/item.go)
+// clears stage:Validate:complete/failed specifically — it is hardcoded to the literal
+// name "Validate", not generic over stageBeforeHolding's (Order-derived) result.
+// targetName can differ from "Validate" in a custom stage config (trainTestEngine's
+// own test fixture resolves it to "Implement" for exactly this reason). Pointing at
+// fabrik:revalidate when targetName isn't literally "Validate" would recommend a
+// mechanism that silently no-ops against the item's actual completion label,
+// reproducing the same class of stranding this issue fixes — so it's only
+// recommended when the names actually match; otherwise the real blocking labels are
+// named directly.
+func reentryInstruction(targetName, fixDescription string) string {
+	if targetName == "Validate" {
+		return fmt.Sprintf(
+			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+				"%s, then apply `fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this "+
+				"item, so removing just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes "+
+				"again, this issue will re-queue and rejoin the train.",
+			targetName, fixDescription, targetName, targetName,
+		)
+	}
+	return fmt.Sprintf(
+		"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+			"%s, then remove `stage:%s:complete` and `fabrik:paused` (`fabrik:revalidate` only forces re-entry of a stage "+
+			"literally named Validate, so it will not help here) to re-enter %s. Once it completes again, this issue will "+
+			"re-queue and rejoin the train.",
+		targetName, fixDescription, targetName, targetName,
+	)
 }
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
@@ -2492,18 +2500,35 @@ func buildIntegrationPRBody(survivors []trainMember) string {
 		strings.Join(lines, "\n"), strings.Join(closesLines, "\n"), mergeTrainBatchMarker)
 }
 
-// findIntegrationPR searches recent PRs for an existing landing integration PR
-// for this batch (idempotency check for restarts). Returns the first PR whose
-// body contains the batch marker, or nil if none is found.
-func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
+// findIntegrationPR searches recent PRs for an existing landing integration PR for
+// THIS trial (idempotency check for restarts). trialBranch (fabrik/merge-train/<trialName>)
+// is the sole, mandatory identity gate — matching HeadRefName == trialBranch is what
+// distinguishes this trial's own draft-CI-PR-turned-integration-PR from every other
+// merge-train PR in the repo, live or historical (#1615, R1). ListPRs still requests
+// state=all (needed so an already-merged match can still short-circuit FR-2, and so a
+// closed-unmerged match can be recognized as a failed trial rather than silently
+// invisible), so State/Merged on the returned PR must be inspected by the caller — this
+// function only narrows the search to this trial's branch.
+//
+// mergeTrainBatchMarker is checked too, but only as non-fatal corroboration: a branch
+// match is returned regardless of whether the marker is present, with a warning logged
+// if it's missing. Requiring the marker as an additional AND-condition would make an
+// otherwise-correct branch match invisible in a hypothetical marker-less body — worse,
+// not better, for idempotency — so the marker must never be sufficient on its own (R1),
+// but it is also never necessary once branch identity has already gated the match.
+func (e *Engine) findIntegrationPR(owner, repo, trialBranch string) (*gh.PRDetails, error) {
 	prs, err := e.client.ListPRs(owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("listing PRs for integration PR search: %w", err)
 	}
 	for i := range prs {
-		if strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
-			return &prs[i], nil
+		if prs[i].HeadRefName != trialBranch {
+			continue
 		}
+		if !strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
+			e.logf(0, "merge-train", "warn: PR #%d matches trial branch %s but its body lacks the batch marker — reusing anyway (branch identity is authoritative)\n", prs[i].Number, trialBranch)
+		}
+		return &prs[i], nil
 	}
 	return nil, nil
 }
@@ -2511,12 +2536,20 @@ func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
 // reTrainMember matches "#N" issue references in a train PR body.
 var reTrainMember = regexp.MustCompile(`#(\d+)`)
 
-// isTrainPR reports whether pr is a Fabrik merge-train PR — either a landing
-// integration PR (body carries the batch marker) or a draft CI PR (identified
-// only by its fabrik/merge-train/* head branch, which carries no marker).
+// isTrainPR reports whether pr is a Fabrik merge-train PR, identified
+// structurally by its fabrik/merge-train/* head branch (R7, #1615) — every
+// genuine trial PR, draft CI PR or promoted landing PR alike, is Fabrik-created
+// on that branch (trainBranchPrefix, engine/worktree.go). The shared batch
+// marker is never sufficient on its own: a PR body may legitimately quote the
+// marker literal in prose for reasons that have nothing to do with being a
+// trial PR — this fix's own PR description did exactly that, and the
+// marker-OR-branch version of this check let the reconstruct sweep (below)
+// close that live, unrelated PR on the strength of the quote alone (#1615's
+// own incident, reported by @verveguy). Callers wanting the marker as a
+// secondary corroboration signal check pr.Body themselves, as
+// reconstructTrainState does; it is never treated as identity here.
 func isTrainPR(pr gh.PRDetails) bool {
-	return strings.Contains(pr.Body, mergeTrainBatchMarker) ||
-		strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
+	return strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
 }
 
 // trialNameFromBranch strips the fabrik/merge-train/ prefix from a trial branch
@@ -2718,6 +2751,14 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		}
 	}
 
+	// Note (#1615, deliberately out of scope): if the PR was open when found by
+	// findIntegrationPR but closes (unmerged) mid-poll, this loop never observes
+	// pr.State and just times out here like any other non-green result — it does
+	// not route to the R5 escalation path, since #1615's R5 is anchored on a PR
+	// already closed-unmerged when findIntegrationPR returns it, not one that
+	// transitions during this poll. A narrower, related gap for a future issue if
+	// ever observed in production; unlike the fixed bug, it can't misattribute a
+	// landing — it only leaves members in Queued for a fresh retry.
 	e.logf(0, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
 	if len(survivors) > 0 {
 		msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing timeout**\n\n"+
@@ -2731,6 +2772,68 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		}
 	}
 	return false
+}
+
+// escalateStrandedTrainMember reroutes a single merge-train member off Queued back to
+// its prior stage, posts an explanatory comment naming reason, and pauses it
+// (fabrik:paused + fabrik:awaiting-input) — the fail-loud escalation #1615's R4/R5
+// require for a landing that this member cannot ride to Done: either the trial's own
+// integration PR closed unmerged (R5), or a matched integration PR's body doesn't
+// actually list this member (R4). Mirrors ejectRedSingleton's reroute+comment+pause
+// shape exactly (#1545): this is an infra-level landing failure, not a retryable
+// member-level defect, so it bypasses ejectMember's counter/stay-in-Queued semantics
+// entirely.
+//
+// If the reroute itself fails (no preceding stage, missing status option, API error),
+// nothing is posted and nothing is paused: a failed reroute must look like nothing
+// happened, so the very next poll's train re-forms this member and retries the whole
+// disposition from scratch (mirrors ejectRedSingleton's identical failure behavior).
+func (e *Engine) escalateStrandedTrainMember(projectID, owner, repo string, item gh.ProjectItem, reason string) {
+	if !e.rerouteQueuedMemberOffHolding(projectID, item) {
+		e.logf(item.Number, "merge-train", "#%d could not be rerouted off Queued for landing-failure escalation — leaving untouched for retry on the next poll\n", item.Number)
+		return
+	}
+
+	targetName := "the preceding stage"
+	if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil {
+		targetName = target.Name
+	}
+
+	sections := []string{
+		reason,
+		reentryInstruction(targetName, "No action is needed on this issue's own code — the merge-train landing step itself failed"),
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing failed**\n\n%s", strings.Join(sections, "\n\n"))
+
+	if _, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "merge-train", "warn: could not post landing-failure comment: %v\n", err)
+	}
+
+	e.logf(item.Number, "merge-train", "#%d rerouted off Queued to %s and paused after a landing failure: %s\n", item.Number, targetName, reason)
+	e.pauseMergeTrainMember(owner, repo, item.Number)
+}
+
+// escalateClosedUnmergedTrial handles the R5 case: findIntegrationPR matched THIS
+// trial's own PR (branch identity confirmed) but it is closed and unmerged — a failed
+// trial, never a reusable integration PR (R2). Every survivor is escalated via
+// escalateStrandedTrainMember; none of the FR-3 advance/close/"Landed via" sequence
+// ever runs for any of them (R5 — no Done advance, no landed comment, no PR/issue
+// close). Members already in Done are skipped (restart safety, mirrors FR-3's own
+// Done-skip) — they landed in an earlier pass and this trial's later failure doesn't
+// retroactively strand them.
+func (e *Engine) escalateClosedUnmergedTrial(projectID, owner, repo string, prNum int, survivors []trainMember) {
+	reason := fmt.Sprintf(
+		"This trial's own integration PR #%d closed without merging. The batch never landed — "+
+			"nothing was merged, and this issue's own PR and branch are untouched.",
+		prNum,
+	)
+	for _, m := range survivors {
+		if m.item.Status == "Done" {
+			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping closed-unmerged-trial escalation\n", m.item.Number)
+			continue
+		}
+		e.escalateStrandedTrainMember(projectID, owner, repo, m.item, reason)
+	}
 }
 
 // landMergeTrainBatch executes FR-1 through FR-5 after a green CI result:
@@ -2752,19 +2855,33 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 
 	trialBranch := "fabrik/merge-train/" + trialName
 
-	// FR-1 / FR-5: find or create the landing integration PR.
-	integrationPR, err := e.findIntegrationPR(owner, repo)
+	// FR-1 / FR-5: find or create the landing integration PR. findIntegrationPR now
+	// gates on trialBranch identity (R1) — the returned PR, if any, is guaranteed to
+	// be THIS trial's own, never a different batch's.
+	integrationPR, err := e.findIntegrationPR(owner, repo, trialBranch)
 	if err != nil {
 		e.logf(0, "merge-train", "cannot search for existing integration PR for %s: %v\n", repoKey, err)
 		return
 	}
 
+	// R2/R5: a PR found on this trial's own branch that is closed and unmerged is a
+	// failed trial, not a reusable integration PR — it must never be treated as
+	// "already landed." Escalate every survivor (fail loud) and stop before any of
+	// the draft/merge/advance logic below runs.
+	if integrationPR != nil && integrationPR.State == "closed" && !integrationPR.Merged {
+		e.logf(0, "merge-train", "integration PR #%d for %s is closed and unmerged — trial failed to land, escalating %d survivor(s)\n", integrationPR.Number, repoKey, len(survivors))
+		e.escalateClosedUnmergedTrial(state.projectID, owner, repo, integrationPR.Number, survivors)
+		return
+	}
+
 	var integrationPRNum int
 	var alreadyMerged bool
+	var prBody string
 
 	if integrationPR != nil {
 		integrationPRNum = integrationPR.Number
 		alreadyMerged = integrationPR.Merged
+		prBody = integrationPR.Body
 		e.logf(0, "merge-train", "found existing integration PR #%d (merged=%v, draft=%v) for %s\n", integrationPRNum, alreadyMerged, integrationPR.Draft, repoKey)
 		// The reused PR is the trial's draft CI PR — promote it to ready-for-review
 		// so it can be merged (GitHub refuses to merge a draft).
@@ -2779,6 +2896,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// FR-1: open the landing integration PR (not a draft).
 		title := buildIntegrationPRTitle(survivors)
 		body := buildIntegrationPRBody(survivors)
+		prBody = body
 		integrationPRNum, err = e.client.CreatePR(owner, repo, title, trialBranch, baseBranch, body)
 		if err != nil {
 			e.logf(0, "merge-train", "cannot create integration PR for %s: %v\n", repoKey, err)
@@ -2818,12 +2936,36 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	}
 	board := &gh.ProjectBoard{ProjectID: state.projectID}
 
+	// R4: before attributing a landing to integrationPRNum, verify each member is
+	// actually claimed by its body — a batch that dropped a member during assembly
+	// must not be able to claim it. Computed once, outside the loop.
+	claimed := parseTrainMembers(prBody)
+	claimedSet := make(map[int]bool, len(claimed))
+	for _, n := range claimed {
+		claimedSet[n] = true
+	}
+
 	for _, m := range survivors {
 		// Skip members already in Done column (restart safety).
 		if m.item.Status == "Done" {
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
 			// Still reset the ejection counter: this member landed successfully.
 			e.resetEjectionCount(owner, repo, m.item.Number)
+			continue
+		}
+
+		// R4: the integration PR's body doesn't list this member — never attribute
+		// a landing to a batch that dropped it. Escalate (fail loud) instead of
+		// silently skipping, since a batch losing a member during assembly should
+		// never happen and is worth a human look.
+		if !claimedSet[m.item.Number] {
+			e.logf(m.item.Number, "merge-train", "#%d not referenced in integration PR #%d's body — batch dropped this member, escalating\n", m.item.Number, integrationPRNum)
+			reason := fmt.Sprintf(
+				"Integration PR #%d landed, but its body doesn't reference this issue. This batch dropped this member — "+
+					"nothing was landed on its behalf, and this issue's own PR and branch are untouched.",
+				integrationPRNum,
+			)
+			e.escalateStrandedTrainMember(state.projectID, owner, repo, m.item, reason)
 			continue
 		}
 
@@ -3067,11 +3209,28 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 		if !isTrainPR(prs[i]) {
 			continue
 		}
+		if !strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
+			// Expected for a draft CI PR not yet promoted to landing PR — the marker
+			// is corroboration only (R7, #1615), never required; branch identity above
+			// is what makes this a train PR.
+			e.logf(0, "merge-train", "reconstruct: PR #%d matches train branch %s but its body lacks the batch marker — branch identity is authoritative, continuing\n", prs[i].Number, prs[i].HeadRefName)
+		}
 		if len(filterBatchByNumbers(batch, parseTrainMembers(prs[i].Body))) > 0 {
 			trainPR = &prs[i]
 			break
 		}
 		if prs[i].State == "open" {
+			// R8 (#1615): a destructive action — closing this PR — requires positive
+			// structural identity re-confirmed at the point of the action itself, not
+			// just inherited from the isTrainPR filter above. This is intentionally
+			// redundant with that filter today; it exists so a future change to the
+			// filter (or to this loop) cannot silently re-open the #1615 incident by
+			// letting an unrecognized PR reach the close call. Ambiguity fails closed:
+			// skip and log, never close.
+			if !strings.HasPrefix(prs[i].HeadRefName, trainBranchPrefix) {
+				e.logf(0, "merge-train", "reconstruct: skipping PR #%d (state=open, no members still Queued) — head ref %q is not a train branch, not closing\n", prs[i].Number, prs[i].HeadRefName)
+				continue
+			}
 			e.logf(0, "merge-train", "reconstruct: closing stale open train PR #%d (no members still Queued) for %s\n", prs[i].Number, repoKey)
 			if cerr := e.client.CloseIssue(p.owner, p.repo, prs[i].Number); cerr != nil {
 				e.logf(0, "merge-train", "warn: could not close stale train PR #%d: %v\n", prs[i].Number, cerr)
