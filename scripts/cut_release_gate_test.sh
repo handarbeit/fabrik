@@ -144,6 +144,20 @@ case "$msg" in
 esac
 assert_eq "exit 1 classified as failure" "1" "$rc"
 
+# --- export_pregate_verified_sha (R5, #1624): sets and exports
+# FABRIK_PREGATE_VERIFIED_SHA to the current repo's `git rev-parse HEAD`,
+# which is what scripts/e2e/run.sh's run_pregate compares against its own
+# freshly-resolved HEAD before deciding whether to re-run the pre-gate. ---
+unset FABRIK_PREGATE_VERIFIED_SHA
+export_pregate_verified_sha
+EXPECTED_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+assert_eq "export_pregate_verified_sha sets FABRIK_PREGATE_VERIFIED_SHA to HEAD" "$EXPECTED_SHA" "$FABRIK_PREGATE_VERIFIED_SHA"
+# Confirm it's actually exported (visible to a child process), not just a
+# local shell variable — that's what makes it reach scripts/e2e/run.sh, a
+# direct child process of cut-release.sh, in the real invocation.
+CHILD_VISIBLE="$(bash -c 'echo "$FABRIK_PREGATE_VERIFIED_SHA"')"
+assert_eq "export_pregate_verified_sha's value is visible to a child process" "$EXPECTED_SHA" "$CHILD_VISIBLE"
+
 # --- insert_notes_line: exercised directly against a scratch file, proving
 # the helper both call sites (plugin-bump changelog, --skip-integration
 # recorded-skip line) now share behaves identically to the pre-refactor

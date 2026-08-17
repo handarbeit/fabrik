@@ -96,6 +96,26 @@ rc=$?
 assert_eq "sim-layer failure exits PREGATE_FAILED_EXIT (5)" "5" "$rc"
 assert_eq "sim-layer failure stops after exactly one go call (github tests never run)" "1" "$(marker_count)"
 
+# --- Case 4 (R5, #1624): FABRIK_PREGATE_VERIFIED_SHA matching the current
+# HEAD skips the pre-gate entirely — zero go calls, exit 0 — even though the
+# fake go is scripted to fail, proving the skip really does short-circuit
+# before either layer runs rather than merely tolerating a pass. ---
+reset_marker
+CURRENT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+( FAKE_GO_EXIT=1 FABRIK_PREGATE_VERIFIED_SHA="$CURRENT_SHA" run_pregate ) >/dev/null 2>&1
+rc=$?
+assert_eq "matching FABRIK_PREGATE_VERIFIED_SHA exits 0" "0" "$rc"
+assert_eq "matching FABRIK_PREGATE_VERIFIED_SHA makes no go call" "0" "$(marker_count)"
+
+# --- Case 5 (R5, #1624): a stale/mismatched FABRIK_PREGATE_VERIFIED_SHA falls
+# through to the full pre-gate, same as if it had never been set — never a
+# silent false skip. ---
+reset_marker
+( FAKE_GO_EXIT=0 FABRIK_PREGATE_VERIFIED_SHA="0000000000000000000000000000000000000dead" run_pregate ) >/dev/null 2>&1
+rc=$?
+assert_eq "mismatched FABRIK_PREGATE_VERIFIED_SHA exits 0 (full pre-gate ran and passed)" "0" "$rc"
+assert_eq "mismatched FABRIK_PREGATE_VERIFIED_SHA runs the full pre-gate (2 go calls)" "2" "$(marker_count)"
+
 # --- Structural check: run_pregate must precede prepare_bed_and_reset inside
 # the dispatch guard, textually — this is what makes "no live call is made"
 # true by construction rather than by accident of today's implementation.

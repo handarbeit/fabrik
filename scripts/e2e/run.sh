@@ -26,6 +26,24 @@
 #                           release.sh never sets this; the release path
 #                           always pays the pre-gate cost)
 #
+#   FABRIK_PREGATE_VERIFIED_SHA=<sha>   tree-scoped dedup signal (R5, #1624):
+#                           if set and equal to a freshly-resolved `git
+#                           rev-parse HEAD`, the pre-gate is skipped because
+#                           it was already run, in full, against this exact
+#                           tree earlier in the same invocation.
+#                           scripts/cut-release.sh exports this itself, right
+#                           after its own step 3 pre-gate passes, so its step
+#                           5 call into this script doesn't pay for the
+#                           identical sim + wire-contract checks a second
+#                           time. Unlike E2E_SKIP_PREGATE (a blanket,
+#                           deliberately-never-set-by-cut-release.sh opt-out),
+#                           this is narrow: a mismatched or unset value
+#                           always falls through to the full pre-gate, so a
+#                           standalone `scripts/e2e/run.sh` invocation (which
+#                           never sees this var) still pays full price,
+#                           exactly as before this existed. See
+#                           export_pregate_verified_sha in cut-release.sh.
+#
 # Bed preflight (on by default — see preflight_bed below for the full rationale):
 #   Before anything runs, the bed checkout is fast-forwarded to the ref under
 #   test, its binary is rebuilt IN PLACE, stage-config drift is reported, and the
@@ -306,6 +324,20 @@ run_pregate() {
   if [ -n "${E2E_SKIP_PREGATE:-}" ]; then
     echo "== pre-gate skipped (E2E_SKIP_PREGATE set) — sim/wire-contract layers assumed already green =="
     return 0
+  fi
+
+  # R5, #1624: a tree-scoped dedup signal, not a blanket opt-out. Re-resolve
+  # HEAD ourselves rather than trusting the caller's claim — a stale or
+  # mismatched value (wrong ref, dirty tree since the caller's own pre-gate
+  # ran) always falls through to the full pre-gate below, never a silent
+  # false skip. See the header comment for the full rationale.
+  if [ -n "${FABRIK_PREGATE_VERIFIED_SHA:-}" ]; then
+    current_sha="$(git rev-parse HEAD)"
+    if [ "$FABRIK_PREGATE_VERIFIED_SHA" = "$current_sha" ]; then
+      echo "== pre-gate skipped (already verified for $current_sha in this invocation, R5 #1624) =="
+      return 0
+    fi
+    echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA ($FABRIK_PREGATE_VERIFIED_SHA) does not match HEAD ($current_sha) — running the full pre-gate =="
   fi
 
   echo "== pre-gate: sim suite + github wire-contract tests (R1, #1454) =="
