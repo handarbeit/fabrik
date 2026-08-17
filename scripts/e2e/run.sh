@@ -779,9 +779,10 @@ detect_rate_limit_backoff() {
 # `mkfifo` + `exec 3> "$fifo"` is also what makes the consumer job's `$!`
 # capturable *before* go test starts writing to fd 3 — the `exec 3> "$fifo"`
 # open blocks until the backgrounded reader has already opened its end (FIFO
-# open rendezvous), so it is safe to `rm -f "$fifo"` immediately afterward:
-# both ends are already connected by then, and unlinking only removes the
-# now-unneeded directory entry, not the open file descriptors.
+# open rendezvous), so it is safe to `rm -rf "$fifo_dir"` (the directory
+# $fifo lives in — see below) immediately afterward: both ends are already
+# connected by then, and removing it only removes the now-unneeded directory
+# entry, not the open file descriptors.
 #
 # The consumer's own PID is captured (rather than relying on `wait
 # "$suite_pid"` alone) specifically so it can be `wait`ed on too:
@@ -856,22 +857,32 @@ switch_and_run() {
   # trap's command string is re-expanded at signal-delivery time, not at
   # install time, referencing `$suite_pid` here is safe even before it's
   # assigned below — `kill -TERM -""` is a harmless no-op under `|| true`.
-  # The trap also unlinks $fifo (found during Review): $fifo is already set
-  # by this point, so it's safe to reference immediately, and without this a
-  # signal landing between `mkfifo` and the unconditional `rm -f "$fifo"`
-  # below (normal-path cleanup, after the writer end opens) would leave a
-  # stray named pipe behind in $TMPDIR — a minor leak, not a process orphan,
-  # but avoidable the same way.
-  local fifo
-  fifo="$(mktemp -u)"
+  # The trap also removes $fifo_dir (found during Review): $fifo is already
+  # set by this point, so it's safe to reference immediately, and without
+  # this a signal landing between `mkfifo` and the unconditional `rm -f
+  # "$fifo"` below (normal-path cleanup, after the writer end opens) would
+  # leave a stray named pipe behind in $TMPDIR — a minor leak, not a process
+  # orphan, but avoidable the same way.
+  #
+  # $fifo lives inside its own `mktemp -d` directory rather than being named
+  # directly by `mktemp -u` (found during Review): `-u` only reserves a
+  # name, it doesn't create anything, so another process (or a pre-existing
+  # file) could occupy that path between the reservation and `mkfifo`,
+  # aborting the script under `set -euo pipefail`. `mktemp -d` creates the
+  # directory atomically, so a path inside it cannot collide with anything
+  # else — `mkfifo` there is race-free. Cleanup removes the whole directory
+  # (`rm -rf`, not just the fifo) so nothing is left behind either way.
+  local fifo_dir fifo
+  fifo_dir="$(mktemp -d)"
+  fifo="$fifo_dir/fifo"
   mkfifo "$fifo"
   local suite_pid=""
   { tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }; } < "$fifo" &
   local consumer_pid=$!
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -f "$fifo" 2>/dev/null || true; exit 130' INT
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -f "$fifo" 2>/dev/null || true; exit 143' TERM
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 143' TERM
   exec 3> "$fifo"
-  rm -f "$fifo"
+  rm -rf "$fifo_dir"
 
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
       ./tests/e2e/... "$@" >&3 2>&1 &
