@@ -102,6 +102,16 @@ func newGitCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
+	// WaitDelay bounds how long Wait spends waiting for git's I/O pipes to
+	// close after the context is done (or the process exits) -- without it,
+	// an orphaned grandchild that inherited git's stdout/stderr (unusual for
+	// real git, but exactly the shape git_timeout_test.go's stub exercises,
+	// and not something this package can rule out for a genuinely wedged
+	// invocation) would keep the read end open indefinitely even after the
+	// timed-out process itself has been killed, defeating the timeout above.
+	// A fraction of gitCommandTimeout, not a fixed value, so shrinking
+	// gitCommandTimeout for a test shrinks this bound too.
+	cmd.WaitDelay = gitCommandTimeout / 6
 	return cmd
 }
 
