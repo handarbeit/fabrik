@@ -172,6 +172,19 @@ passes, carrying the exact `git rev-parse HEAD` that was just verified. `run.sh`
 match skips the pre-gate, anything else (unset, or a mismatch) falls through to the full
 run.
 
+**HEAD alone is not sufficient — found during Review.** "HEAD is provably unchanged between
+the two steps" is true of the git *commit*, but Step 4 (Build), which runs in between, can
+rewrite `plugin/known_embedded_versions.go` on disk without committing it — whenever the
+embedded plugin content changed since the last release, which is the common case. `git
+rev-parse HEAD` cannot see that: a SHA match would silently vouch for a tree that no longer
+matched what Step 3 actually checked, even though the mechanism's whole premise is "the
+exact tree that was checked." `run_pregate` therefore also requires `git status --porcelain`
+to be empty before honoring a SHA match; any uncommitted change (tracked or untracked) falls
+through to the full pre-gate exactly like a SHA mismatch already did. `run_pregate`'s own
+comment had already claimed this case "always falls through to the full pre-gate" before the
+fix landed — it just wasn't actually implemented, which is exactly the kind of gap a
+prose-only claim (unverified by anything that runs) tends to hide.
+
 This was chosen over two alternatives:
 
 - **Reusing `E2E_SKIP_PREGATE`** — the existing, deliberately blanket escape hatch that
