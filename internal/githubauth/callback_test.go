@@ -382,6 +382,62 @@ func TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly(t
 	}
 }
 
+// TestRunManifestCallbackServer_DuplicateHitAfterFailureReflectsFailure is
+// the regression test for a review finding: the duplicate-hit branch above
+// always said "already completed," even when the first state-matching hit
+// actually delivered a *failure* (e.g. a missing code parameter) — telling
+// the same user their setup succeeded when the log/CLI was reporting it
+// failed.
+func TestRunManifestCallbackServer_DuplicateHitAfterFailureReflectsFailure(t *testing.T) {
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	if err != nil {
+		t.Fatalf("runManifestCallbackServer: %v", err)
+	}
+	defer shutdown()
+
+	state := fetchStartAndExtractState(t, startURL)
+	// No &code= — a state-matching hit missing the code parameter, the
+	// missing-code failure path.
+	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state
+
+	resp1, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback (first): %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusBadRequest {
+		t.Errorf("first callback status = %d, want 400", resp1.StatusCode)
+	}
+
+	select {
+	case res := <-results:
+		if res.err == nil {
+			t.Fatal("expected first delivery to be an error (missing code)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first callback result")
+	}
+
+	resp2, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback (duplicate): %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Errorf("duplicate callback status = %d, want 400 (matching the first delivery's actual outcome)", resp2.StatusCode)
+	}
+	body, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("reading duplicate callback body: %v", err)
+	}
+	if strings.Contains(string(body), "already completed") {
+		t.Errorf("duplicate callback body = %q, must not claim success when the first delivery failed", body)
+	}
+	if !strings.Contains(string(body), "already failed") {
+		t.Errorf("duplicate callback body = %q, want it to say the flow already failed", body)
+	}
+}
+
 // TestRunManifestCallbackServer_ShutdownForceClosesAfterGraceTimeout is the
 // regression test for a review finding: shutdownFn discarded
 // http.Server.Shutdown's error with no fallback, so a connection that

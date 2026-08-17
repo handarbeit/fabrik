@@ -118,6 +118,14 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 
 	resultCh := make(chan callbackResult, 1)
 	var once sync.Once
+	// firstDeliveryErr records whether the one result actually delivered on
+	// resultCh (see once.Do below) was a success or a failure, so a later
+	// state-matching hit (see the !delivered branch below) can report the
+	// truth instead of unconditionally claiming success — sync.Once's Do
+	// guarantees this write, made inside the first call's f, happens-before
+	// any later call to Do returns, so reading it after once.Do here is
+	// race-free without its own lock.
+	var firstDeliveryErr error
 	mux := http.NewServeMux()
 	// /start (and therefore state, embedded in formHTML's form-action URL)
 	// is served to any requester that can reach this loopback port, not just
@@ -187,6 +195,7 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 		once.Do(func() {
 			delivered = true
 			if cbErr != nil {
+				firstDeliveryErr = cbErr
 				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprintln(w, "Pruefer setup failed: "+cbErr.Error())
 				resultCh <- callbackResult{err: cbErr}
@@ -201,8 +210,16 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 			// single-buffered resultCh has already been filled, so there's
 			// nothing left to deliver. Respond explicitly rather than
 			// falling through to an unadorned empty 200, so this doesn't
-			// look like a hang to whoever's driving the browser.
-			fmt.Fprintln(w, "Pruefer setup already completed — you can close this tab.")
+			// look like a hang to whoever's driving the browser — but say
+			// what actually happened: the first delivery may have been a
+			// failure (e.g. missing code), and "already completed" would
+			// contradict that outcome for the same user.
+			if firstDeliveryErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintln(w, "Pruefer setup already failed: "+firstDeliveryErr.Error())
+			} else {
+				fmt.Fprintln(w, "Pruefer setup already completed — you can close this tab.")
+			}
 		}
 	})
 
