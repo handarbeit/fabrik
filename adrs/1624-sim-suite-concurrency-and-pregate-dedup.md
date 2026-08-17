@@ -123,12 +123,24 @@ children it forks inherit that group — without an external dependency, on both
 needs a different shape: it is a multi-stage pipe (`go test -json | tee | jq`) whose exit
 code capture already depends on `pipefail`, and naively backgrounding only the pipe's last
 stage would make `$!` resolve to `jq`'s PID, not `go test`'s — silently breaking both the
-reap and the exit-code capture. It uses process substitution (`> >(tee ... | jq ...) 2>&1 &`)
-instead, so `$!` is `go test`'s own PID, preserving the existing log-capture and
-`wait ... || rc=$?` exit-code discipline unchanged. (This exact file has a prior incident
-from getting a similar restructuring wrong — see #1547 — which is why this shape was chosen
-deliberately rather than by the more obvious but fragile "just background the pipeline"
-route.)
+reap and the exit-code capture. It uses process substitution (`exec 3> >(tee ... | jq ...)`,
+`go test ... >&3 2>&1 &`) instead, so `$!` (captured right after backgrounding `go test`) is
+`go test`'s own PID, preserving the existing log-capture and `wait ... || rc=$?` exit-code
+discipline unchanged. (This exact file has a prior incident from getting a similar
+restructuring wrong — see #1547 — which is why this shape was chosen deliberately rather
+than by the more obvious but fragile "just background the pipeline" route.)
+
+The process substitution is opened on an explicit fd (3) rather than inline on the `go test`
+command specifically so its own PID can be captured and `wait`ed on separately from `go
+test`'s: `wait "$suite_pid"` only blocks until `go test` exits, not until the `tee`/`jq`
+consumer reading its now-closed pipe has finished flushing `$jsonlog` to disk. During review,
+the first version of this fix backgrounded `go test` with the process substitution written
+inline (`go test ... > >(tee ... | jq ...) 2>&1 &`) and captured only `go test`'s PID — this
+reproducibly raced `report_test_timings`/`report_test_outcomes`/the `E2E_TIMEOUT` grep
+against a still-writing consumer (confirmed with a deliberately slow consumer: the log file
+was empty or truncated immediately after `wait` returned, and only complete after an
+additional, unbounded delay). Opening the substitution on fd 3 and `wait`ing on its PID too,
+after `wait "$suite_pid"`, closes that gap.
 
 ### R5 — a tree-scoped pre-gate dedup signal, not a blanket opt-out
 
