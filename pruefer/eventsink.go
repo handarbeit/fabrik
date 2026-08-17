@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/handarbeit/fabrik/pruefer/events"
 )
@@ -49,7 +50,14 @@ import (
 // is always invoked in its own goroutine there) or it would stall acking
 // the current webhook and reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
-	client, ok := d.Clients[owner]
+	// d.Clients is keyed by strings.ToLower(owner) everywhere it's built
+	// or read elsewhere (poll(), rate-limit reporting in daemon.go) — GitHub
+	// delivers each account's canonical-case login in webhook payloads
+	// (hookdeck/normalize.go), which need not match the casing an operator
+	// wrote in watched_repos/config. Folding here too avoids every
+	// real-time event for a case-mismatched owner being silently dropped
+	// and degrading to poll-only latency.
+	client, ok := d.Clients[strings.ToLower(owner)]
 	if !ok {
 		logf(prNumber, "warn", "event for %s/%s#%d: no client for owner %q — dropping\n", owner, repo, prNumber, owner)
 		return

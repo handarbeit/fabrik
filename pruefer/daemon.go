@@ -619,9 +619,18 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 // so a webhook event for an unwatched repo under a watched owner is a
 // plausible real delivery, not just a hypothetical one.
 func (d *Daemon) isWatchedRepo(owner, repo string) bool {
-	target := owner + "/" + repo
+	// Case-folded, like every other owner/repo comparison in this file
+	// (see the strings.ToLower lookups above and distinctOwners' doc
+	// comment): GitHub delivers each account's canonical-case login in
+	// webhook payloads, which need not match the casing an operator wrote
+	// in watched_repos. An exact-case comparison here would report a
+	// legitimately watched repo as unwatched whenever the two disagree.
 	for _, spec := range d.Config.WatchedRepos {
-		if spec == target {
+		specOwner, specRepo, ok := splitOwnerRepo(spec)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(specOwner, owner) && strings.EqualFold(specRepo, repo) {
 			return true
 		}
 	}
