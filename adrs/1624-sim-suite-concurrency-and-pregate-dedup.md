@@ -157,6 +157,20 @@ the time it returns) and background it as a genuine job (`{ tee ... | jq ...; } 
 own process group under `set -m`, confirmed during review to be fully, cleanly reapable via
 the same `kill -TERM -"$consumer_pid"` idiom already used for `$suite_pid`.
 
+A third review pass caught one more gap in that same fix: the INT/TERM trap covering both
+PIDs was installed only after *both* the consumer and `go test` had already been
+backgrounded, leaving a narrow startup window (between capturing `consumer_pid` and the trap
+statements executing) with no signal handler at all — a kill landing there would hit bash's
+default disposition and orphan whatever had already started, the same failure class one
+level up. Fixed by declaring `suite_pid` empty and installing the trap immediately after
+`consumer_pid` is captured, before `go test` is even started; because a trap's command
+string is re-expanded at signal-delivery time rather than at install time, referencing
+`$suite_pid` before it's assigned is safe (`kill -TERM -""` is a harmless no-op under
+`|| true`), and the same trap text protects `go test` once `suite_pid` is set below it.
+Confirmed during review, with a deliberately widened window, that a kill landing anywhere
+from immediately after `consumer_pid` is captured through mid-`go test` reaps both processes
+cleanly.
+
 ### R5 — a tree-scoped pre-gate dedup signal, not a blanket opt-out
 
 `scripts/cut-release.sh` already runs the sim + wire-contract pre-gate unconditionally as

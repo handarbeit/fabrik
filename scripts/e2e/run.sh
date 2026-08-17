@@ -836,20 +836,31 @@ switch_and_run() {
   # substitution can't do this safely. mkfifo's rendezvous means the
   # `rm -f "$fifo"` right after `exec 3>` is race-free: that `exec` blocks
   # until the backgrounded reader below has already opened its end.
+  #
+  # $suite_pid is declared (empty) and the INT/TERM trap installed
+  # immediately after the consumer is backgrounded — before go test is even
+  # started — rather than after both are launched: a signal landing in that
+  # gap would hit bash's default disposition (immediate termination, no
+  # handler run) and orphan whatever had already started, exactly the class
+  # of leak this whole fix exists to close (found during Review). Since a
+  # trap's command string is re-expanded at signal-delivery time, not at
+  # install time, referencing `$suite_pid` here is safe even before it's
+  # assigned below — `kill -TERM -""` is a harmless no-op under `|| true`.
   local fifo
   fifo="$(mktemp -u)"
   mkfifo "$fifo"
+  local suite_pid=""
   { tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }; } < "$fifo" &
   local consumer_pid=$!
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 143' TERM
   exec 3> "$fifo"
   rm -f "$fifo"
 
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
       ./tests/e2e/... "$@" >&3 2>&1 &
-  local suite_pid=$!
+  suite_pid=$!
   exec 3>&-
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 130' INT
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 143' TERM
   wait "$suite_pid" || rc=$?
   # Wait for the consumer to drain and finish writing $jsonlog before any of
   # it is read below — see the comment above. Still under the INT/TERM trap
