@@ -27,21 +27,31 @@
 #                           always pays the pre-gate cost)
 #
 #   FABRIK_PREGATE_VERIFIED_SHA=<sha>   tree-scoped dedup signal (R5, #1624):
-#                           if set and equal to a freshly-resolved `git
-#                           rev-parse HEAD`, the pre-gate is skipped because
-#                           it was already run, in full, against this exact
-#                           tree earlier in the same invocation.
+#                           if set, equal to a freshly-resolved `git
+#                           rev-parse HEAD`, AND the working tree is clean
+#                           (`git status --porcelain` empty), the pre-gate is
+#                           skipped because it was already run, in full,
+#                           against this exact tree earlier in the same
+#                           invocation. The clean-tree check matters because
+#                           HEAD alone only identifies the committed tree —
+#                           a step running between the SHA being captured and
+#                           this check that rewrites a tracked file on disk
+#                           without committing it (cut-release.sh's own
+#                           step 4 does this to plugin/known_embedded_versions.go)
+#                           would otherwise leave a HEAD match vouching for a
+#                           tree that no longer matches what was actually
+#                           checked (found during Review, #1624).
 #                           scripts/cut-release.sh exports this itself, right
 #                           after its own step 3 pre-gate passes, so its step
 #                           5 call into this script doesn't pay for the
 #                           identical sim + wire-contract checks a second
 #                           time. Unlike E2E_SKIP_PREGATE (a blanket,
 #                           deliberately-never-set-by-cut-release.sh opt-out),
-#                           this is narrow: a mismatched or unset value
-#                           always falls through to the full pre-gate, so a
-#                           standalone `scripts/e2e/run.sh` invocation (which
-#                           never sees this var) still pays full price,
-#                           exactly as before this existed. See
+#                           this is narrow: a mismatched or unset SHA, or a
+#                           dirty tree, always falls through to the full
+#                           pre-gate, so a standalone `scripts/e2e/run.sh`
+#                           invocation (which never sees this var) still pays
+#                           full price, exactly as before this existed. See
 #                           export_pregate_verified_sha in cut-release.sh.
 #
 # Bed preflight (on by default — see preflight_bed below for the full rationale):
@@ -331,13 +341,28 @@ run_pregate() {
   # mismatched value (wrong ref, dirty tree since the caller's own pre-gate
   # ran) always falls through to the full pre-gate below, never a silent
   # false skip. See the header comment for the full rationale.
+  #
+  # The SHA match alone is not sufficient: `git rev-parse HEAD` only
+  # identifies the committed tree, and cut-release.sh's own step 4 (Build,
+  # between the SHA being captured and this check) can rewrite
+  # plugin/known_embedded_versions.go on disk without committing it —
+  # a HEAD match would then be silently vouching for a tree that no longer
+  # matches what was actually checked (found during Review, #1624). So this
+  # also requires a clean working tree (`git status --porcelain` empty) —
+  # any uncommitted change, tracked or untracked, falls through to the full
+  # pre-gate exactly like a SHA mismatch does.
   if [ -n "${FABRIK_PREGATE_VERIFIED_SHA:-}" ]; then
     current_sha="$(git rev-parse HEAD)"
-    if [ "$FABRIK_PREGATE_VERIFIED_SHA" = "$current_sha" ]; then
+    dirty="$(git status --porcelain)"
+    if [ "$FABRIK_PREGATE_VERIFIED_SHA" = "$current_sha" ] && [ -z "$dirty" ]; then
       echo "== pre-gate skipped (already verified for $current_sha in this invocation, R5 #1624) =="
       return 0
     fi
-    echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA ($FABRIK_PREGATE_VERIFIED_SHA) does not match HEAD ($current_sha) — running the full pre-gate =="
+    if [ "$FABRIK_PREGATE_VERIFIED_SHA" != "$current_sha" ]; then
+      echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA ($FABRIK_PREGATE_VERIFIED_SHA) does not match HEAD ($current_sha) — running the full pre-gate =="
+    else
+      echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA matches HEAD ($current_sha) but the working tree has uncommitted changes since it was verified — running the full pre-gate =="
+    fi
   fi
 
   echo "== pre-gate: sim suite + github wire-contract tests (R1, #1454) =="
