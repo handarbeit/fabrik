@@ -362,6 +362,7 @@ run_pregate() {
   # any uncommitted change, tracked or untracked, falls through to the full
   # pre-gate exactly like a SHA mismatch does.
   if [ -n "${FABRIK_PREGATE_VERIFIED_SHA:-}" ]; then
+    local current_sha dirty
     current_sha="$(git rev-parse HEAD)"
     dirty="$(git status --porcelain)"
     if [ "$FABRIK_PREGATE_VERIFIED_SHA" = "$current_sha" ] && [ -z "$dirty" ]; then
