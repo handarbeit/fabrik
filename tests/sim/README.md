@@ -421,9 +421,17 @@ the scenarios in "What this layer is permanently blind to" above) measures at
 **~21–23s** on a development machine, dominated by the real-time costs
 documented above (`lockVerifyDelay`, the stage retry cooldown, `workerYield`
 pacing) rather than by CPU work — every scenario in this package uses
-`t.Parallel()` for exactly this reason, since none of them contend on CPU or
-shared state and the dominant cost is wall-clock waiting, which parallelizes
-almost for free. `tests/sim/simclaude` alone is ~2–3s.
+`t.Parallel()` for exactly this reason, since the dominant cost is wall-clock
+waiting, which parallelizes almost for free **on a modest core count**.
+`tests/sim/simclaude` alone is ~2–3s.
+[Qualified by #1624](#parallelism-cap-r1-1624): "none of them contend on CPU
+or shared state" turned out to be false at high host core counts — every
+scenario's `NewEnv` seeds a real bare git repository via a real `git init
+--bare` subprocess (`SeedRepo`), so `t.Parallel()`'s default `-parallel`
+(`GOMAXPROCS`) turns into dozens of concurrent `fork/exec` calls on a
+many-core machine, which is exactly what produced #1624's wedged-`gitMu`
+hang, killed-child SIGSEGVs, and `-race` runtime aborts. See that section for
+the fix.
 
 **Updated for #1450's port** (R1's 12 target scenarios, ~30 new test
 functions across 8 new files): `go test -race -count=1 ./tests/sim/` now
@@ -450,6 +458,43 @@ starved. Now a dispatched poll pays exactly as long as the worker actually
 took, no more and no less, so the total is close to the same on an
 unloaded machine and — the actual point of the fix — no longer prone to
 exhausting a poll-count bound (`AdvanceUntil`'s `maxPolls`) on a loaded one.
+
+### Parallelism cap (R1, #1624)
+
+`go test`'s default `-parallel` is `GOMAXPROCS` — every core the host has.
+On the 28-core machine that produced #1624, that meant dozens of concurrent
+`t.Parallel()` scenarios each spawning real `git` children at once:
+high-concurrency `fork/exec` from a heavily multi-threaded Go process, which
+manifested three ways — a wedged `fork/exec` that stranded a scenario's
+`gitMu` until the suite-wide test timeout, a child `git` process killed
+outright (SIGSEGV), and even a `-race` (ThreadSanitizer) runtime abort. None
+of that is proportional to how much real work the suite is doing; it's
+purely a function of host core count, which made the gate's reliability
+depend on which machine happened to run it — a bigger machine made the same
+suite *less* reliable, backwards from the intended relationship.
+
+`scripts/sim/run.sh` (the sole entry point both manual runs and
+`scripts/e2e/run.sh`'s pre-gate go through — see that script's own header
+comment) now passes an explicit `-parallel "$SIM_PARALLEL"` (default **8**,
+overridable via the environment) instead of leaving `go test` to inherit
+`GOMAXPROCS`. This does not apply to a bare `go test -race ./...` invoked
+directly (CI's own gate, or a developer running the whole tree by hand) —
+only to invocations that go through `scripts/sim/run.sh`. CI's own runners
+are 2–4 cores, well below where this class of contention appears, which is
+part of why the flake was essentially unreproducible there.
+
+Measured before/after on the 28-core machine that produced #1624 (`scripts/sim/run.sh --all`, `-race`):
+
+| | wall clock |
+|---|---|
+| before (no `-parallel` cap, i.e. `GOMAXPROCS`=28) | ~107s (prior baseline, see above) / occasionally hangs to the 10m suite timeout per #1624's evidence |
+| after (`-parallel 8`) | ~107–116s |
+
+No material regression — comfortably within run-to-run variance for this
+suite — while removing the unbounded-parallelism condition #1624 traces the
+hang/SIGSEGV/TSan-abort trio to. `scripts/sim/run.sh` also reaps `go test`'s
+process group on exit/interrupt (R3, #1624) so an aborted run can't leave
+orphaned `sim.test` processes running; see that script's own header comment.
 
 Comfortably under the ~90s line R8 sets, so **no `sim` build tag** — this
 package is part of the default `go test ./...` (and CI's `go test -race
