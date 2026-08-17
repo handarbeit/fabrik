@@ -387,6 +387,13 @@ fabrik --auto-upgrade</pre>
           A Claude Code plugin for your own session — ask "what's on the board?" or "why is #42 stuck?" and steer Fabrik from inside interactive Claude Code. No binary install needed.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#fabrik-project-onboarding-plugin" aria-label="Project Onboarding Plugin — open documentation">
+        <span class="feature-icon">📝</span>
+        <div class="feature-title">Project Onboarding Plugin</div>
+        <div class="feature-desc">
+          A Claude Code plugin for non-engineers — interviews you about a project and its features, then writes standard Spec Kit specs ready to hand to Fabrik. No binary, terminal, or git needed.
+        </div>
+      </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#git-repositories-and-worktrees" aria-label="Isolated Git Worktrees — open documentation">
         <span class="feature-icon">🌿</span>
         <div class="feature-title">Isolated Git Worktrees</div>

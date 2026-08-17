@@ -2256,6 +2256,35 @@ Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces 
 
 ---
 
+### Fabrik Project Onboarding Plugin
+
+The **Fabrik Project Onboarding plugin** (`fabrik-project-onboarding`) is a separate, optional Claude Code plugin aimed at a product manager or business owner, not the engineer — no terminal, git, or technical background needed. It interviews you about a project and its features, then writes the result as a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
+
+#### Skills
+
+| Skill | Purpose |
+|-------|---------|
+| `onboard` | A 30–45 minute interview about the project as a whole — the problem it solves, who it serves, what's in and out of scope, hard constraints, and domain vocabulary. Writes `.specify/memory/constitution.md`, the ground rules every later spec inherits. Run once at the start of a project. |
+| `write-spec` | Turns a feature described in plain language into a structured spec — user stories, requirements, success criteria, and a graded quality checklist — under `specs/NNN-feature-name/`. |
+| `clarify` | Reads an existing spec, finds what's vague or missing, and asks up to five targeted questions one at a time, writing each answer straight into the document. |
+
+#### Install
+
+In an interactive Claude Code session:
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik-project-onboarding@fabrik
+```
+
+The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Fabrik Project Onboarding**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/fabrik-project-onboarding/GETTING-STARTED.md) for the full non-technical walkthrough.
+
+#### Attribution
+
+The `write-spec` and `clarify` skills are adapted from [github/spec-kit](https://github.com/github/spec-kit) (MIT licensed); `onboard` is a Fabrik-original interview skill mapped onto Spec Kit's constitution output shape. See the plugin's own `NOTICE.md` for the full license text and a detailed account of what was kept, removed, and changed from upstream.
+
+---
+
 ### How Skills Work
 
 Each stage references a **skill** -- a markdown file that contains detailed methodology
@@ -2556,6 +2585,9 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal). |
 | `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field. Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
 | `fabrik:awaiting-runaway-alert` | Set when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input` applied unconditionally) but its `AddComment` alert call fails. Retried every poll by a settle scan, independent of `fabrik:paused`'s presence, until the alert succeeds or a fallback comment lands. Cleared only once some explanation is confirmed delivered — a persistent comment-post outage leaves the marker in place indefinitely rather than erasing the last diagnostic signal. See [§6.18 Runaway Guard Alert Retry](state-machine.md#618-runaway-guard-alert-retry-adr-1533) (ADR-1533). |
+| `fabrik:awaiting-landing-verification` | Set immediately after a Done transition attributable to a merge (merge-train batch/singleton landing, or the ordinary auto-merge path) succeeds. The post-Done settle scan confirms the credited PR actually reached `MERGED`. Clears automatically once confirmed. See [§6.19 Post-Done Landing Verification](state-machine.md#619-post-done-landing-verification-adr-1616) (ADR-1616). |
+| `fabrik:credited-pr:<N>` | Set alongside `fabrik:awaiting-landing-verification`, but only by the two merge-train landing paths, recording which PR (the integration/singleton PR, distinct from the member's own closed-not-merged PR) was credited for the Done transition. Clears whenever `fabrik:awaiting-landing-verification` clears. See §6.19. |
+| `fabrik:landing-verification-failed` | Set only on a **confirmed** non-merge of the credited PR — the issue is simultaneously reopened and moved back to `Validate`. **Not self-clearing** — remove manually once the credited PR is re-landed and re-verified. See §6.19. |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
