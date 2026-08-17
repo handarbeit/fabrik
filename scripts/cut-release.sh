@@ -24,7 +24,9 @@
 # What it does:
 #   1. Pre-flight: branch, clean tree, ff-pull, release-notes heading match
 #   2. PAT identity check (must be arbeithand)
-#   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454)
+#   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454).
+#      Exports FABRIK_PREGATE_VERIFIED_SHA on success so step 5 doesn't pay for the
+#      identical pre-gate a second time (R5, #1624) — see export_pregate_verified_sha.
 #   4. go build + go test -race (skippable with --skip-tests; the pre-gate above never is)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
 #      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454).
@@ -111,6 +113,29 @@ insert_notes_line() {
   fi
 }
 
+# export_pregate_verified_sha exports FABRIK_PREGATE_VERIFIED_SHA as the
+# exact commit this invocation's own sim + wire-contract pre-gate (step 3,
+# below) just verified. Called right after that step passes, while HEAD is
+# still guaranteed unchanged (this script commits nothing until step 6, well
+# after step 5's live e2e gate runs) — so the value names the exact tree
+# that was checked, not merely "some release."
+#
+# scripts/e2e/run.sh's own pre-gate (run_pregate) checks this against a
+# freshly-resolved `git rev-parse HEAD` of its own before deciding whether
+# to re-run the identical sim + wire-contract checks (R5, #1624) — see that
+# function's own comment. An exported env var, not a file marker: run.sh is
+# invoked as this script's direct child process (step 5), so there is no
+# on-disk staleness/cleanup concern, and the value is naturally scoped to
+# exactly this invocation (env vars do not outlive the child process) —
+# unlike E2E_SKIP_PREGATE, a blanket opt-out this script deliberately never
+# sets (see step 5's own comment), this is a narrow, tree-scoped signal that
+# a standalone `scripts/e2e/run.sh` invocation never sees and so still pays
+# the full pre-gate price, exactly as before this existed.
+export_pregate_verified_sha() {
+  FABRIK_PREGATE_VERIFIED_SHA="$(git rev-parse HEAD)"
+  export FABRIK_PREGATE_VERIFIED_SHA
+}
+
 # interpret_e2e_exit_code prints the operator-facing message for a given
 # scripts/e2e/run.sh exit code ($1) and returns 0 if that code means success,
 # 1 otherwise — main() calls `ok`/`die` with the result accordingly. Extracted
@@ -136,7 +161,7 @@ interpret_e2e_exit_code() {
       echo "live e2e integration suite aborted: bed preflight failed (exit 4) inside scripts/e2e/run.sh — the suite never ran. This is an infrastructure problem (stuck lock, unreachable SSH remote, dirty tracked files in the bed checkout, etc.), NOT a regression and NOT a fidelity-drift case — see scripts/e2e/run.sh's own preflight_bed output above for the specific cause, fix it, and re-run scripts/cut-release.sh $VERSION."
       ;;
     5)
-      echo "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected, since this script's own pre-gate step (step 3) already passed against the same tree — investigate the discrepancy (different ref? dirty tree in the bed?) before retrying."
+      echo "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected: this script's own pre-gate step (step 3) already passed against the same tree, and R5's FABRIK_PREGATE_VERIFIED_SHA (#1624) should have made run.sh skip re-running it rather than fail it a second time — investigate the discrepancy (different ref? dirty tree in the bed? the SHA guard itself misfiring) before retrying."
       ;;
     *)
       echo "live e2e integration suite FAILED (exit $rc) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
@@ -270,6 +295,12 @@ ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 # total per tests/sim/README.md), so making it unconditional costs nothing
 # real while removing an entire class of "the live suite failed for a
 # reason the sim would have caught for free" incidents.
+#
+# Once this passes, export_pregate_verified_sha (R5, #1624) records HEAD so
+# step 5's invocation of scripts/e2e/run.sh can skip re-running the
+# identical checks against the same, unchanged tree — see that function's
+# own comment. This does NOT weaken the check: it still runs here, in full,
+# exactly as before; it only stops step 5 from paying for it a second time.
 step "Sim + wire-contract pre-gate"
 if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
   die "sim suite failed — fix it before cutting a release (scripts/sim/run.sh --all to reproduce)"
@@ -280,6 +311,7 @@ if ! go test -race -count=1 ./github/... >/tmp/cut-release-pregate-test.log 2>&1
   die "github wire-contract tests failed (full log: /tmp/cut-release-pregate-test.log)"
 fi
 ok "github wire-contract tests passed"
+export_pregate_verified_sha
 
 # ─── 4. build + test ──────────────────────────────────────────────────────────
 step "Build"
