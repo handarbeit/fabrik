@@ -186,8 +186,17 @@
 #   - handarbeit/projects/2 ("Fabrik Test") exists with stage columns
 #   - Fabrik instance running at ~/dev/fabrik-test/ (typically with --auto-upgrade)
 # See tests/e2e/README.md for setup details.
+#
+# Process-group reap (R3, #1624): every `go test` invocation below runs via
+# run_reaped (or an inline equivalent for the one call site with more complex
+# redirection — see switch_and_run), so killing this script reaps that
+# invocation's process group instead of leaving its own children (most
+# concretely, a compiled `*.test` binary) running headless. See run_reaped's
+# own doc comment for the mechanism and why it traps INT/TERM only, never
+# EXIT.
 
 set -euo pipefail
+set -m
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -229,6 +238,47 @@ readonly PREFLIGHT_FAILED_EXIT=4
 readonly PREGATE_FAILED_EXIT=5
 
 # ---------------------------------------------------------------------------
+# run_reaped (R3, #1624): run "$@" as a backgrounded job in its own process
+# group and reap that whole group if this script is killed while it's in
+# flight, instead of leaving its children (most concretely, a compiled
+# `*.test` binary) running headless after the runner that spawned them is
+# gone. `set -m` (top of file) is what gives every backgrounded job its own
+# process group, led by the job itself — any further children it forks
+# inherit that same group, so `kill -TERM -"$pid"` (a negative PID targets
+# the whole process group, not just that one process) reaches all of them.
+#
+# Deliberately traps only INT/TERM, never EXIT: scripts/e2e/pregate_test.sh
+# and scripts/e2e/backoff_detection_test.sh `source` this file for its
+# function definitions and install their OWN EXIT trap for fixture cleanup
+# in that same shell (traps are shell-wide, not per-function) — an EXIT trap
+# set and cleared here would clobber theirs. On a caught signal the trap
+# kills the job's process group and re-exits with the shell-conventional
+# 128+signum code (130 for INT, 143 for TERM) rather than letting the script
+# continue past an interrupt it was told to stop for.
+#
+# `setsid`, the usual Linux idiom for giving a child its own process group,
+# is not shipped on macOS by default, so this uses portable bash job control
+# instead — the same approach scripts/sim/run.sh's own R3 fix uses.
+#
+# Not used for switch_and_run's main suite invocation below, which needs its
+# own inline variant: that call is a multi-stage pipe (go test | tee | jq)
+# whose exit code capture already depends on `pipefail`
+# (see switch_and_run's own comment), and backgrounding only the pipe's last
+# stage would silently lose that — see switch_and_run for the process-
+# substitution restructuring that avoids the problem instead.
+# ---------------------------------------------------------------------------
+run_reaped() {
+  "$@" &
+  local pid=$!
+  trap 'kill -TERM -"$pid" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$pid" 2>/dev/null || true; exit 143' TERM
+  local rc=0
+  wait "$pid" || rc=$?
+  trap - INT TERM
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # Pre-gate (R1, #1454): refuse to spend live budget until the free, fast
 # layers pass.
 #
@@ -263,7 +313,7 @@ run_pregate() {
     echo "pre-gate: sim suite failed — aborting before touching the live bed or making any live call." >&2
     exit "$PREGATE_FAILED_EXIT"
   fi
-  if ! ( cd "$REPO_ROOT" && go test -race -count=1 ./github/... ); then
+  if ! run_reaped go test -race -count=1 ./github/...; then
     echo "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call." >&2
     exit "$PREGATE_FAILED_EXIT"
   fi
@@ -624,17 +674,26 @@ detect_rate_limit_backoff() {
 # The suite invocation runs under `go test -json`, teed to a per-leg log, so
 # a non-zero exit can be classified (report_test_outcomes) and, if it was
 # specifically an E2E_TIMEOUT kill, followed by best-effort teardown — see
-# the header comment. `|| rc=$?` (rather than toggling set -e/+e) is what
-# lets this function inspect the pipeline's exit status without the script
-# aborting first: it's not the last element of an AND/OR list, so `set -e`
-# does not trigger on it, and `pipefail` ensures $? reflects go test's own
-# exit code even though it isn't the last command in the pipeline. The
-# report_test_outcomes call below is guarded with `|| echo warning...` for
-# the same reason: it's a standalone statement under `set -e`, so an
+# the header comment. The report_test_outcomes call below is guarded with
+# `|| echo warning...`: it's a standalone statement under `set -e`, so an
 # unguarded jq failure there (e.g. an unexpected future `go test -json`
 # schema change) would abort the script before ever reaching the
 # timeout-panic check and auto-teardown that follow it — silently
 # defeating the hardening this function exists to provide.
+#
+# Process-group reap (R3, #1624): go test itself is backgrounded (not the
+# whole `tee | jq` pipe) and its stdout+stderr are routed to them via output
+# process substitution (`> >(tee ... | jq ...) 2>&1`) instead — this is NOT
+# run_reaped, which backgrounds a plain command and waits for its own exit
+# status directly. A pipe's last stage is what `$!`/`wait` would report if
+# the whole `cmd1 | cmd2 | cmd3` were backgrounded as one job, and jq is
+# wrapped in `|| true` precisely so a jq hiccup can't fail the leg — meaning
+# `wait`ing on that PID would silently always see 0, discarding go test's
+# real exit code the same `pipefail` trick below exists to preserve for a
+# *foreground* pipeline. Backgrounding go test alone sidesteps this: `$!` is
+# go test's own PID, its own exit status is what `wait` reports directly (no
+# pipefail needed), and it still gets a process group of its own (`set -m`,
+# top of file) that the INT/TERM traps below can kill.
 #
 # After the suite invocation, regardless of $rc, this function also checks
 # fabrik.log in full (not from a captured byte offset — see below) for the
@@ -662,8 +721,10 @@ switch_and_run() {
   # bed-restart check, not a scenario run, so it's a much smaller exposure
   # window than the suite invocation below, and extending it the same
   # machinery would mean auto-tearing-down a bed that may just be mid-restart
-  # rather than actually stuck.
-  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -count=1 -timeout 3m \
+  # rather than actually stuck. It is, however, still run via run_reaped
+  # (R3, #1624) so a kill of this script during the restart doesn't leave its
+  # own test binary running behind it.
+  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" run_reaped go test -tags=e2e -v -count=1 -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
   echo "== running suite with E2E_TRAIN_MODE=${mode}, -parallel=${parallel} =="
   local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
@@ -683,10 +744,13 @@ switch_and_run() {
   fi
 
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
-      ./tests/e2e/... "$@" 2>&1 \
-    | tee "$jsonlog" \
-    | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
-    || rc=$?
+      ./tests/e2e/... "$@" \
+    > >(tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }) 2>&1 &
+  local suite_pid=$!
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; exit 143' TERM
+  wait "$suite_pid" || rc=$?
+  trap - INT TERM
 
   budget_after=""
   if [ -n "$BED_TOKEN" ]; then
