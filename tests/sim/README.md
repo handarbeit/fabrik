@@ -483,16 +483,17 @@ only to invocations that go through `scripts/sim/run.sh`. CI's own runners
 are 2–4 cores, well below where this class of contention appears, which is
 part of why the flake was essentially unreproducible there.
 
-Measured before/after on the 28-core machine that produced #1624 (`scripts/sim/run.sh --all`, `-race`):
-
-| | wall clock |
-|---|---|
-| before (no `-parallel` cap, i.e. `GOMAXPROCS`=28) | ~107s (prior baseline, see above) / occasionally hangs to the 10m suite timeout per #1624's evidence |
-| after (`-parallel 8`) | ~107–116s |
-
-No material regression — comfortably within run-to-run variance for this
-suite — while removing the unbounded-parallelism condition #1624 traces the
-hang/SIGSEGV/TSan-abort trio to. `scripts/sim/run.sh` also reaps `go test`'s
+Measured before/after on the 28-core machine that produced #1624
+(`scripts/sim/run.sh --all`, `-race`): capping `-parallel` at 8 (from an
+unbounded `GOMAXPROCS`=28) showed no material regression, comfortably within
+this suite's normal run-to-run variance, while removing the
+unbounded-parallelism condition #1624 traces the hang/SIGSEGV/TSan-abort
+trio to — the uncapped case's real cost is not a fixed number anyway, since
+it also *occasionally hangs to the 10-minute suite timeout* per #1624's own
+evidence. Per R6 (#1624 — see "Updated for #1454... then removed by #1624
+(R6)" below), the specific before/after wall-clock figures are deliberately
+not recorded here — run `scripts/sim/run.sh --all` to see this run's own
+total. `scripts/sim/run.sh` also reaps `go test`'s
 process group on exit/interrupt (R3, #1624) so an aborted run can't leave
 orphaned `sim.test` processes running; see that script's own header comment.
 
@@ -584,32 +585,28 @@ Scope (which explicitly does not include changing this package's own testing
 infrastructure beyond what its scenarios need) is positioned to make
 unilaterally.
 
-**Updated for #1454 (correcting stale figures).** The "~92s total" /
-"comfortably under the ~90s line" conclusion two sections up predates the
-merge-train suite's addition (#1452, directly above) and has been stale
-since. Current measured runtime on a dev machine, recorded here as the
-honest current numbers rather than re-derived on every future edit (per this
-issue's own R8 — these figures are inherently machine- and load-dependent,
-as this section's whole revision history demonstrates):
+**Updated for #1454 (correcting stale figures), then removed by #1624 (R6).**
+The "~92s total" / "comfortably under the ~90s line" conclusion two sections
+up predates the merge-train suite's addition (#1452, directly above) and had
+gone stale by the time #1454 recorded a fresh set of numbers here. Those
+numbers then went stale too — by #1624, `tests/sim` alone measured 106.6s
+against this section's own documented 42.5s, a ~2.5× gap, because scenarios
+kept being added underneath a figure nobody was re-measuring. This is not a
+one-off: this section's revision history is three rounds of "correct the
+stale number," each one going stale again.
 
-```
-tests/sim               42.5s     the scenarios
-tests/sim/simgh        105.0s     unit tests of the model itself
-tests/sim/simclaude      1.1s
-tests/sim/simgh/ghfault  1.1s
-                        ~107s total wall clock
-```
-
-The scenario layer alone (42.5s) is the part that matters for a pre-gate —
-it's the layer that actually exercises the pipeline — and it is plenty fast
-for that purpose; `simgh`'s own 105s is the model's unit-test suite, not
-pipeline coverage, and dominates the `--all` total the same way it has
-throughout this file's history. `scripts/sim/run.sh` (repo root) is the
-frictionless on-demand entry point this issue adds (R8): with no arguments
-it runs the scenario layer only (`./tests/sim`, ~42.5s); `--all` runs the
-full tree above (~107s). It's both the manual "run the sim layer by hand
-before committing to a full live e2e run" entry point and what
-`scripts/e2e/run.sh`'s pre-gate calls — see
+So as of #1624 (R6), this file stops asserting a specific current runtime.
+`go test`'s own per-package "ok"/"FAIL" lines already report real elapsed
+time for every run, and `scripts/sim/run.sh` (repo root — the frictionless
+on-demand entry point R8 adds) prints its own total wall-clock time after
+every run — run it to find out how long the suite currently takes; a number
+written in this file cannot stay true. With no arguments it runs the
+scenario layer only (`./tests/sim`) — the part that matters for a pre-gate,
+since it's the layer that actually exercises the pipeline; `--all` runs the
+full tree, where `tests/sim/simgh`'s own unit-test suite dominates the total
+the same way it has throughout this file's history. It's both the manual
+"run the sim layer by hand before committing to a full live e2e run" entry
+point and what `scripts/e2e/run.sh`'s pre-gate calls — see
 `adrs/1454-sim-pre-gate-not-replacement.md` for the full layering decision.
 
 **Updated for #1592's sequence-shaped scenarios** (8 new test functions across 4 new
@@ -959,11 +956,15 @@ first, not a defect in the refund mechanism itself.
 ## Running it
 
 ```bash
-scripts/sim/run.sh                     # on-demand entry point (R8): scenario layer only, ~42.5s
-scripts/sim/run.sh --all               # full tree (this package + simgh + simclaude + ghfault), ~107s
+scripts/sim/run.sh                     # on-demand entry point (R8): scenario layer only
+scripts/sim/run.sh --all               # full tree (this package + simgh + simclaude + ghfault)
 go test -race ./tests/sim/...          # equivalent to --all above, invoked directly
 bash tests/sim/simgh/nonvacuity.sh     # the simgh mutation sweep (needs a clean tree)
 ```
+
+`scripts/sim/run.sh` prints its own total wall-clock time after every run
+(R6, #1624) — see "Runtime and the `sim` tag decision" above for why this
+file no longer commits a specific number to prose.
 
 The tests use the real `git` binary and skip when it is unavailable, following
 the repo-wide `skipIfNoGit` convention.

@@ -2,8 +2,8 @@
 # scripts/sim/run.sh — on-demand entry point for the sim e2e layer (R8, #1454).
 #
 # Usage:
-#   scripts/sim/run.sh                # fast scenario layer only (tests/sim), ~42.5s
-#   scripts/sim/run.sh --all          # full tree (tests/sim/... incl. simgh/simclaude/ghfault), ~107s
+#   scripts/sim/run.sh                # fast scenario layer only (tests/sim)
+#   scripts/sim/run.sh --all          # full tree (tests/sim/... incl. simgh/simclaude/ghfault)
 #   scripts/sim/run.sh -run TestFoo    # forwarded to `go test`, e.g. one scenario
 #   scripts/sim/run.sh --all -run Foo  # forwarded, against the full tree
 #
@@ -25,13 +25,15 @@
 # tests/sim/simgh (the model's own unit tests), tests/sim/simclaude, and
 # tests/sim/simgh/ghfault.
 #
-# Current measured runtime on a dev machine (tests/sim/README.md, #1454 —
-# inherently machine- and load-dependent; see that file for the caveat):
-#   tests/sim                42.5s   the scenarios (this script's default)
-#   tests/sim/simgh          105.0s  unit tests of the model itself (--all)
-#   tests/sim/simclaude        1.1s  (--all)
-#   tests/sim/simgh/ghfault    1.1s  (--all)
-#                            ~107s total wall clock (--all)
+# Runtime (R6, #1624): deliberately not documented here as a number. A prior
+# version of this comment carried specific per-package figures ("tests/sim
+# 42.5s ... ~107s total"); they went stale twice, once to the point of being
+# self-contradictory within days of being written (tests/sim/README.md's own
+# "~92s total / comfortably under the ~90s line" claim), because the suite
+# grows scenarios underneath a number nobody re-measures. `go test`'s own
+# per-package "ok"/"FAIL" lines already report real elapsed time for every
+# run, and this script also prints its own total wall-clock time below — ask
+# the runner, not a comment, if you want to know how long it currently takes.
 #
 # Parallelism cap (R1, #1624): `go test`'s default `-parallel` is
 # `GOMAXPROCS`, i.e. every core the host has. On a high-core-count machine
@@ -81,6 +83,7 @@ fi
 
 echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL $TARGET $* =="
 
+START_TS=$(date +%s)
 go test -race -count=1 -parallel "$SIM_PARALLEL" "$TARGET" "$@" &
 GO_TEST_PID=$!
 trap 'kill -TERM -"$GO_TEST_PID" 2>/dev/null || true' EXIT INT TERM
@@ -90,4 +93,10 @@ wait "$GO_TEST_PID"
 RC=$?
 set -e
 trap - EXIT INT TERM
+
+# R6, #1624: print the real elapsed time for this run instead of trusting a
+# comment — see the header comment above. go test's own "ok"/"FAIL" lines
+# above already gave the per-package breakdown; this is the total.
+ELAPSED=$(( $(date +%s) - START_TS ))
+echo "== sim suite finished in ${ELAPSED}s (exit $RC) =="
 exit "$RC"
