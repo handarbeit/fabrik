@@ -856,14 +856,20 @@ switch_and_run() {
   # trap's command string is re-expanded at signal-delivery time, not at
   # install time, referencing `$suite_pid` here is safe even before it's
   # assigned below — `kill -TERM -""` is a harmless no-op under `|| true`.
+  # The trap also unlinks $fifo (found during Review): $fifo is already set
+  # by this point, so it's safe to reference immediately, and without this a
+  # signal landing between `mkfifo` and the unconditional `rm -f "$fifo"`
+  # below (normal-path cleanup, after the writer end opens) would leave a
+  # stray named pipe behind in $TMPDIR — a minor leak, not a process orphan,
+  # but avoidable the same way.
   local fifo
   fifo="$(mktemp -u)"
   mkfifo "$fifo"
   local suite_pid=""
   { tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }; } < "$fifo" &
   local consumer_pid=$!
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 130' INT
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 143' TERM
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -f "$fifo" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -f "$fifo" 2>/dev/null || true; exit 143' TERM
   exec 3> "$fifo"
   rm -f "$fifo"
 

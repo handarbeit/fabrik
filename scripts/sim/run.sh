@@ -48,11 +48,18 @@
 # so leaving `-parallel` at its default makes the gate's reliability depend
 # on which machine happens to run it, which is backwards: a bigger machine
 # should never make the same suite *less* reliable. SIM_PARALLEL therefore
-# pins an explicit, host-core-count-independent cap rather than inheriting
-# GOMAXPROCS; override via the environment for experimentation, but the
-# pre-gate (scripts/e2e/run.sh's run_pregate, and scripts/cut-release.sh
-# transitively) always goes through this one script, so there is exactly one
-# place this number lives.
+# pins an explicit cap rather than inheriting GOMAXPROCS uncapped — but the
+# default is `min(8, host cores)`, not a flat 8 (found during Review,
+# #1624): a flat 8 would *increase* concurrent git-spawning, versus the
+# previous GOMAXPROCS-derived default, on any host with fewer than 8 cores
+# (a modest laptop or CI runner) — the exact mechanism this cap exists to
+# guard against, just at smaller absolute scale. Capping at the host's own
+# core count when that's lower than 8 preserves the "never worse than
+# before" property while still bounding every host at 8 regardless of how
+# many cores it has above that. Override via the environment for
+# experimentation, but the pre-gate (scripts/e2e/run.sh's run_pregate, and
+# scripts/cut-release.sh transitively) always goes through this one script,
+# so there is exactly one place this number lives.
 #
 # Process-group reap (R3, #1624): `go test` is launched as a backgrounded job
 # (not via `exec`, which would replace this shell and leave nothing able to
@@ -73,7 +80,24 @@ set -m
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-SIM_PARALLEL="${SIM_PARALLEL:-8}"
+# Default is min(8, host cores) — see the "Parallelism cap" comment above
+# for why a flat 8 is wrong on a sub-8-core host. getconf _NPROCESSORS_ONLN
+# is POSIX and portable across macOS and Linux; nproc is a GNU-coreutils
+# fallback for the rare shell where getconf lacks that variable, and 8
+# itself is the last-resort fallback if neither reports a usable count.
+sim_default_parallel() {
+  local cores
+  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  if ! [ "${cores:-}" -gt 0 ] 2>/dev/null; then
+    cores="$(nproc 2>/dev/null || true)"
+  fi
+  if [ "${cores:-}" -gt 0 ] 2>/dev/null && [ "$cores" -lt 8 ]; then
+    echo "$cores"
+  else
+    echo 8
+  fi
+}
+SIM_PARALLEL="${SIM_PARALLEL:-$(sim_default_parallel)}"
 
 TARGET="./tests/sim"
 if [ "${1:-}" = "--all" ]; then
