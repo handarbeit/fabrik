@@ -1484,6 +1484,58 @@ func TestSeedBlockedByDedupesAndStamps(t *testing.T) {
 	}
 }
 
+// TestSeedRemoveBlockedByRemovesEdgeWithoutBumpingUpdatedAt pins
+// SeedRemoveBlockedBy's two load-bearing properties for gap 1's companion
+// scenario (#1592): the edge is actually gone from the next read, and —
+// unlike SeedBlockedBy's own add path — updated-at does NOT move, mirroring
+// #977's real-API staleness gap that the empty-blockedBy-list observer guard
+// (ADR-1419, engine/observers.go:299) exists to protect against.
+func TestSeedRemoveBlockedByRemovesEdgeWithoutBumpingUpdatedAt(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+	s.SeedIssue("acme/widgets", IssueSeed{Number: 8, Title: "blocker", Status: "Implement"})
+	s.SeedBlockedBy("acme/widgets", 7, "acme/widgets", 8)
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	before := issueUpdatedAt(t, s, 7)
+	clk.Advance(time.Hour)
+
+	s.SeedRemoveBlockedBy("acme/widgets", 7, "acme/widgets", 8)
+	if err := s.Err(); err != nil {
+		t.Fatalf("SeedRemoveBlockedBy: %v", err)
+	}
+
+	item, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if len(item.BlockedBy) != 0 {
+		t.Fatalf("blockedBy = %+v, want empty after SeedRemoveBlockedBy", item.BlockedBy)
+	}
+	if got := issueUpdatedAt(t, s, 7); !got.Equal(before) {
+		t.Fatalf("SeedRemoveBlockedBy bumped updated-at from %v to %v; it must not, mirroring #977", before, got)
+	}
+}
+
+// TestSeedRemoveBlockedByFailsOnUnknownEdge pins that removing an edge that
+// was never added is reported as a sticky error (a scenario bug), not a
+// silent no-op — asymmetric with SeedBlockedBy's own duplicate-add no-op,
+// since there is no real "GitHub already agrees" case a removal could be
+// idempotent about here.
+func TestSeedRemoveBlockedByFailsOnUnknownEdge(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	s.SeedIssue("acme/widgets", IssueSeed{Number: 8, Title: "blocker", Status: "Implement"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	s.SeedRemoveBlockedBy("acme/widgets", 7, "acme/widgets", 8)
+	if err := s.Err(); err == nil {
+		t.Fatal("SeedRemoveBlockedBy: expected an error removing a never-added edge, got nil")
+	}
+}
+
 // issueUpdatedAt reads an issue's updated-at from the model.
 func issueUpdatedAt(t *testing.T, s *Sim, issueNumber int) time.Time {
 	t.Helper()

@@ -45,12 +45,31 @@ type Env struct {
 	Clock  *Clock
 	Claude *simclaude.Invoker
 
-	// Owner/Repo/OwnerRepo identify the single repo this Env manages —
-	// mirrors tests/e2e's Env.RepoAlpha in spirit, singular here because a
-	// smoke-scale scenario needs exactly one.
+	// Owner/Repo/OwnerRepo identify the primary repo this Env manages —
+	// mirrors tests/e2e's Env.RepoAlpha in spirit, singular by default
+	// because a smoke-scale scenario needs exactly one.
 	Owner     string
 	Repo      string
 	OwnerRepo string
+
+	// OwnerRepoBeta is a second, opt-in repo (mirrors tests/e2e's
+	// Env.RepoBeta) — empty unless EnvOptions.SecondRepo was set. Only
+	// TestCrossRepoSpawn's port uses it; every other scenario leaves this
+	// zero-valued and unused.
+	OwnerRepoBeta string
+
+	// WM is the primary repo's WorktreeManager — the same one registered with
+	// Engine (via NewWithDeps for a single-repo Env, or
+	// RegisterWorktreeManagerForTest under OwnerRepo for a multi-repo Env).
+	// Exposed so RestartEnv (restart.go, R3) can rebuild a fresh Engine that
+	// reuses this exact, already-populated worktree tree instead of
+	// re-cloning — re-cloning would silently produce a fresh worktree with
+	// nothing to recover, making a "restart recovery" scenario pass by
+	// accident rather than by proving recovery. For a multi-repo Env, WM is
+	// OwnerRepo's manager specifically ("primary", mirroring OwnerRepo's own
+	// singular-by-default role) — OwnerRepoBeta's manager is not exposed here
+	// since no restart scenario currently needs it.
+	WM *engine.WorktreeManager
 
 	// ProjectNum identifies the project board, always under Owner — unlike
 	// tests/e2e's Env, there is no independent ProjectOwner: engine.Config
@@ -77,6 +96,12 @@ type Env struct {
 	// filed without a round-trip to discover it.
 	issueSeqMu   sync.Mutex
 	issueSeqNext int
+
+	// cfg is the exact engine.Config NewEnv built (after EnvOptions.ConfigureCfg
+	// ran) — retained so RestartEnv (restart.go, R3) can hand an identical
+	// Config to a freshly-constructed engine.Engine. Not exposed: a scenario
+	// wanting to inspect its own config already has EnvOptions.
+	cfg engine.Config
 }
 
 // EnvOptions configures NewEnv. Every field has a working default; a
@@ -122,6 +147,23 @@ type EnvOptions struct {
 	// (e.g. ReviewWaitTimeout, CIWaitTimeout) without growing this struct
 	// for every engine.Config field a future scenario might need.
 	ConfigureCfg func(*engine.Config)
+
+	// SecondRepo, when non-nil, seeds a second repo in simgh (Env.OwnerRepoBeta)
+	// and forces cfg.Repo = "" so the one Env-managed engine legitimately
+	// serves both repos — mirroring production's actual multi-repo-instance
+	// topology (spawnTargetServedByThisInstance's cfg.Repo == "" branch),
+	// not a repo:-scoped instance guessing at a second board. Additive and
+	// opt-in: nil (the default) changes nothing about any existing
+	// single-repo scenario. Only TestCrossRepoSpawn sets this.
+	SecondRepo *SecondRepoOptions
+}
+
+// SecondRepoOptions names the second repo EnvOptions.SecondRepo seeds.
+type SecondRepoOptions struct {
+	// Owner/Repo identify the second repo. Default "acme"/"gadgets" (paired
+	// with the primary Env's default "acme"/"widgets").
+	Owner string
+	Repo  string
 }
 
 // stageColumns returns one column name per non-holding, non-unmanaged stage
@@ -149,6 +191,25 @@ func stageColumns(stgs []*stages.Stage) []string {
 // — see ADR-1449), reproduces production's git topology by cloning simgh's
 // backing repo as a local "origin" (R6), and boots a real engine.Engine via
 // NewWithDeps with the shared Clock wired to both simgh and the engine.
+//
+// Deliberately does NOT call Engine.RegisterObservers (ADR-1592/#1592). It
+// is tempting to register it unconditionally here, mirroring where Run()
+// calls it in production — and an earlier revision of this function did
+// exactly that — but it changes dispatch *timing* for every scenario in
+// this package, not just the ones that need it: mayNeedWorkObserver
+// populates the cycleSet fast-path that bypasses itemMayNeedWork's
+// cooldown-based admission gate, so once active, previously-cooldown-paced
+// items are re-admitted for deep-fetch immediately on any relevant Store
+// change instead of waiting out the cooldown. Wiring it in here made four
+// pre-existing, unrelated scenarios fail — some by racing an item through
+// multiple stages before an intermediate WaitForProjectStatus checkpoint
+// could observe it, one by hanging the whole package past its 10-minute
+// timeout — none of which is a mayNeedWorkObserver defect; those scenarios'
+// own timing assumptions simply predate this observer ever being reachable
+// from tests/sim at all. A scenario that specifically needs a reactive
+// itemstate.Store observer (currently only PushUnblockObserver, gap 1 —
+// dependency_unblock_test.go) calls env.Engine.RegisterObservers() itself,
+// scoping the timing change to exactly the scenario that requires it.
 func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	t.Helper()
 	skipIfNoGit(t)
@@ -188,6 +249,23 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	if err := simModel.Err(); err != nil {
 		t.Fatalf("sim.NewEnv: seeding: %v", err)
 	}
+	var ownerRepoBeta string
+	if opts.SecondRepo != nil {
+		betaOwner := opts.SecondRepo.Owner
+		if betaOwner == "" {
+			betaOwner = owner
+		}
+		betaRepo := opts.SecondRepo.Repo
+		if betaRepo == "" {
+			betaRepo = "gadgets"
+		}
+		ownerRepoBeta = betaOwner + "/" + betaRepo
+		simModel.SeedRepo(ownerRepoBeta)
+		if err := simModel.Err(); err != nil {
+			t.Fatalf("sim.NewEnv: seeding second repo: %v", err)
+		}
+	}
+
 	inst := simgh.Instrument(simModel)
 
 	wm := buildWorktreeManager(t, simModel, ownerRepo)
@@ -206,9 +284,14 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		yolo = *opts.Yolo
 	}
 
+	cfgRepo := repo
+	if opts.SecondRepo != nil {
+		// Multi-repo instance topology — see SecondRepoOptions' doc comment.
+		cfgRepo = ""
+	}
 	cfg := engine.Config{
 		Owner:         owner,
-		Repo:          repo,
+		Repo:          cfgRepo,
 		ProjectNum:    projectNum,
 		OwnerType:     "User",
 		User:          "fabrik-sim-bot",
@@ -223,20 +306,37 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		opts.ConfigureCfg(&cfg)
 	}
 
-	eng := engine.NewWithDeps(cfg, inst, claude, wm)
+	// Multi-repo Envs (SecondRepo set, cfg.Repo == "") register a
+	// WorktreeManager per repo directly via the RegisterWorktreeManagerForTest
+	// seam, rather than through NewWithDeps's single-repo `worktrees` param —
+	// see that method's doc comment for why the single-key registration
+	// NewWithDeps does on its own is a no-op (registered under a key no real
+	// repo matches) once cfg.Repo is "".
+	var eng *engine.Engine
+	if opts.SecondRepo != nil {
+		eng = engine.NewWithDeps(cfg, inst, claude, nil)
+		eng.RegisterWorktreeManagerForTest(ownerRepo, wm)
+		wmBeta := buildWorktreeManager(t, simModel, ownerRepoBeta)
+		eng.RegisterWorktreeManagerForTest(ownerRepoBeta, wmBeta)
+	} else {
+		eng = engine.NewWithDeps(cfg, inst, claude, wm)
+	}
 	eng.SetClock(clk)
 
 	return &Env{
-		T:            t,
-		Engine:       eng,
-		Sim:          inst,
-		Clock:        clk,
-		Claude:       claude,
-		Owner:        owner,
-		Repo:         repo,
-		OwnerRepo:    ownerRepo,
-		ProjectNum:   projectNum,
-		PollInterval: time.Duration(cfg.PollSeconds) * time.Second,
+		T:             t,
+		Engine:        eng,
+		Sim:           inst,
+		Clock:         clk,
+		Claude:        claude,
+		Owner:         owner,
+		Repo:          repo,
+		OwnerRepo:     ownerRepo,
+		OwnerRepoBeta: ownerRepoBeta,
+		WM:            wm,
+		ProjectNum:    projectNum,
+		PollInterval:  time.Duration(cfg.PollSeconds) * time.Second,
+		cfg:           cfg,
 	}
 }
 
@@ -266,6 +366,22 @@ func buildWorktreeManager(t *testing.T, simModel *simgh.Sim, ownerRepo string) *
 	// Populates refs/remotes/origin/HEAD, which DefaultBaseBranch's step 1
 	// reads — git clone --bare alone does not create this ref.
 	runGit(t, localBareDir, "remote", "set-head", "origin", "--auto")
+
+	// Local (not global) committer identity on the bare clone — mirrors
+	// ensureBareClone's own setCommitterIdentity step. Worktrees created
+	// from this bare clone share its .git/config, so this covers every
+	// real `git commit`/`git merge --no-ff` the engine performs against
+	// them (e.g. assembleTrialBranch's per-member merge commits). Without
+	// this, git falls back to the ambient system/global identity — present
+	// on most dev machines (~/.gitconfig) but absent on a fresh GitHub
+	// Actions runner, where any real merge commit fails outright with
+	// "fatal: empty ident name ... not allowed". That gap was invisible
+	// until #1452's merge-train scenarios became the first sim tests to
+	// exercise a genuine (non-fast-forward) merge commit through this path
+	// — caught by this PR's own CI run, not local runs, precisely because
+	// local dev machines paper over it. See #1452.
+	runGit(t, localBareDir, "config", "user.name", "fabrik-sim")
+	runGit(t, localBareDir, "config", "user.email", "fabrik-sim@example.invalid")
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
 	owner, repo, _ := strings.Cut(ownerRepo, "/")

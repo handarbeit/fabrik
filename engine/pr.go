@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -409,7 +410,14 @@ func buildThreadEntries(comments []gh.Comment) []reviewThreadEntry {
 //   - Claude's cleaned output (truncated at 60k)
 //   - a per-thread footer listing each addressed thread by path:line
 //   - a summary line with thread and comment counts
-func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, totalComments int) string {
+//   - when addressedReviewIDs is non-empty, a trailing machine-readable
+//     <!-- fabrik:review-ids-addressed: N,N --> marker (R3, #1555) — a
+//     durable, GitHub-sourced idempotency signal for the review-body
+//     synthetic-comment path, which has no reaction-endpoint backstop and
+//     otherwise depends entirely on itemstate.Store's in-memory
+//     ProcessedComments (wiped by every self-upgrade restart). See
+//     durablyAddressedReviewIDs/parseReviewIDsAddressedMarker.
+func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, totalComments int, addressedReviewIDs []int) string {
 	output = neutralizeBotMentions(output)
 	const maxLen = 60000
 	if len(output) > maxLen {
@@ -432,5 +440,12 @@ func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, tim
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\nResolved %d review thread(s) across %d comment(s).", len(threads), totalComments))
+	if len(addressedReviewIDs) > 0 {
+		ids := make([]string, len(addressedReviewIDs))
+		for i, id := range addressedReviewIDs {
+			ids[i] = strconv.Itoa(id)
+		}
+		sb.WriteString(fmt.Sprintf("\n\n<!-- fabrik:review-ids-addressed: %s -->", strings.Join(ids, ",")))
+	}
 	return sb.String()
 }

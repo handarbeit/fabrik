@@ -598,6 +598,22 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 
 	// --- SHA-tracking path (opened, closed, synchronize, reopened) ---
+	//
+	// Both PRHeadSHAUpdated calls below (the normal path, for an issue already
+	// known to the Store, and the auto-heal path, for one discovered via
+	// fallback lookup) deliberately do NOT stamp CacheImpl.linkedPRFetchedAt,
+	// even though synchronize is precisely the force-push/rebase event whose
+	// staleness linkedPRCacheTTL exists to bound.
+	// This is load-bearing, not an omission — do not "fix" it by adding a
+	// stamp here. linkedPRFetchedAt records live GitHub confirmation only, by
+	// design (see its doc comment in boardcache.go); a delta-path stamp would
+	// make FetchLinkedPR's freshness trust a function of webhook delivery,
+	// which this event-sourced cache's own design (ADR-034) admits can miss
+	// events until the next reconciliation (up to 60 min) — precisely the
+	// unconfirmed channel that TTL exists not to trust, and precisely the
+	// change #1378 proposed and ADR-1551 records the rejection of. See
+	// ADR-1551 for the full rationale.
+	//
 	// Echo-match for opened and closed PR mutations (synchronize/reopened are not tracked).
 	if c.matchEchoFn != nil && (p.Action == "opened" || p.Action == "closed") {
 		c.matchEchoFn("pull_request", p.Action, prKey(repo, prNum))
@@ -660,6 +676,8 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		Merged:   p.PullRequest.Merged,
 		Draft:    p.PullRequest.Draft,
 	})
+	// Same non-stamping of linkedPRFetchedAt, and the same reason, as the
+	// normal-path PRHeadSHAUpdated call above — see that comment.
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,
@@ -742,6 +760,9 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		return
 	}
 
+	// Deliberately does not stamp linkedPRFetchedAt — see the substantive
+	// comment on applyPullRequestDelta's SHA-tracking path (boardcache.go's
+	// linkedPRFetchedAt/linkedPRCacheTTL doc comments, and ADR-1551).
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,
@@ -844,6 +865,9 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 		return
 	}
 
+	// Deliberately does not stamp linkedPRFetchedAt — see the substantive
+	// comment on applyPullRequestDelta's SHA-tracking path (boardcache.go's
+	// linkedPRFetchedAt/linkedPRCacheTTL doc comments, and ADR-1551).
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,
@@ -951,6 +975,10 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	// Update Store: set LinkedPRNum + SHA (updates shaToKey index). PRHeadSHAUpdated
 	// drains any pendingCheckRuns[sha] into the item's LinkedPR.CheckRuns automatically
 	// — no explicit CheckRunCompleted replay needed.
+	//
+	// Deliberately does not stamp linkedPRFetchedAt — see the substantive
+	// comment on applyPullRequestDelta's SHA-tracking path (boardcache.go's
+	// linkedPRFetchedAt/linkedPRCacheTTL doc comments, and ADR-1551).
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,

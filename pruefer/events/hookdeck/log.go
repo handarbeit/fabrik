@@ -21,8 +21,18 @@ import (
 var logfHook atomic.Pointer[func(format string, args ...any)]
 
 // SetLogf installs the package-level logger hook. Safe to call at any time,
-// concurrently with logf's reads.
+// concurrently with logf's reads. SetLogf(nil) clears the hook, restoring the
+// stderr fallback.
+//
+// The nil case must store a nil pointer rather than &fn: &fn is always a
+// non-nil *T even when fn itself is nil, so storing it would make logf's
+// `p != nil` check pass and then call a nil func value — a panic on the next
+// log line, from a function documented as safe to call at any time.
 func SetLogf(fn func(format string, args ...any)) {
+	if fn == nil {
+		logfHook.Store(nil)
+		return
+	}
 	logfHook.Store(&fn)
 }
 

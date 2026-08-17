@@ -78,6 +78,17 @@ The PM plugin is independent of the engine — install it on its own to chat abo
 
 > **Distinct from `fabrik-workflows`**: the engine's stage skills are embedded in the binary and deployed automatically to `.fabrik/plugin/` by `fabrik init`. You do not — and should not — install `fabrik-workflows` manually.
 
+## Fabrik Project Onboarding Plugin
+
+Another optional Claude Code plugin, aimed at a product manager or business owner rather than an engineer — no terminal, git, or technical background needed. It interviews you about your project's goals, users, scope, constraints, and vocabulary, then turns individual feature ideas into a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder, ready to hand to Fabrik for build.
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik-project-onboarding@fabrik
+```
+
+It is not installed by `fabrik init`. See [Fabrik Project Onboarding Plugin](docs/USER_GUIDE.md#fabrik-project-onboarding-plugin) in the User Guide for the full skill list, installation options, and attribution.
+
 ## How It Works
 
 ```
@@ -324,6 +335,8 @@ GITHUB_TOKEN=ghp_...    # Fallback
 
 **Safety:** When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories without `.git/` — containers, CI workspaces, or bare directories — this check is skipped and `.env` is loaded normally.
 
+**Unrecognized `config.yaml` keys:** At startup, Fabrik now reports any `.fabrik/config.yaml` key that doesn't match a real config field — a typo, a stale key, or an entry for a knob that's actually CLI/env-only — instead of silently discarding it, and names the corresponding `--flag`/`FABRIK_ENV_VAR` to use when one exists. See [Unrecognized `config.yaml` Key Warnings](docs/USER_GUIDE.md#unrecognized-configyaml-key-warnings) in the User Guide for details.
+
 ## Flags
 
 | Flag | Description | Default |
@@ -342,6 +355,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--max-tools-denied-retries` | Maximum number of consecutive tool-permission-denial exits per stage before pausing (0 = default 3; also `FABRIK_MAX_TOOLS_DENIED_RETRIES`). Independent of `--max-retries` — a permission misconfiguration is not a stage failure. | `0` (3 denials) |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output when grandchild processes hold stdout pipe open (0 = use built-in default of 30 sec; env: `FABRIK_CLAUDE_WAIT_DELAY`). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool. | `0` (30 sec) |
 | `--review-wait-timeout` | Minutes to wait per reviewer-gate cycle before pausing. Explicitly passing `0` uses the built-in default of `15` and bypasses `FABRIK_REVIEW_WAIT_TIMEOUT`. When absent, `FABRIK_REVIEW_WAIT_TIMEOUT` is consulted first; falls back to `15` if unset. | `0` |
 | `--max-review-cycles` | Max re-invocation cycles per reviewer-gate session. Explicitly passing `0` uses the built-in default of `5` and bypasses `FABRIK_MAX_REVIEW_CYCLES`. When absent, `FABRIK_MAX_REVIEW_CYCLES` is consulted first; falls back to `5` if unset. | `0` |
@@ -416,7 +430,9 @@ Fabrik uses labels to track state:
 | `fabrik:awaiting-review` | Applied optimistically by the engine whenever a `wait_for_reviews: true` stage completes (reviewer request data may still be stale at that moment); removed when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`), at which point the issue is paused with `fabrik:awaiting-input` |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is deferred until CI passes (conjunctive gate). Triggers cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses, at which point the issue is paused with `fabrik:awaiting-input` |
 | `fabrik:rebase-needed` | Applied when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage (usually triggered by another PR merging into the base branch while this branch sits in the CI-await window); the engine dispatches a rebase re-invocation for Claude to resolve the conflict, and the label is cleared when the rebase lands and the PR becomes mergeable again |
+| `fabrik:awaiting-runaway-alert` | Applied when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input`) but its alert comment fails to post; retried every poll by a settle scan until the alert succeeds or a fallback comment lands. See [Runaway Guard Alert Retry](docs/state-machine.md#618-runaway-guard-alert-retry-adr-1533) in the State Machine spec. |
 | `fabrik:api-key-helper-detected` | Applied when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper`; does not count against `max_retries`. Clears automatically once `apiKeyHelper` is removed and a later invocation reaches Claude successfully. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](docs/USER_GUIDE.md#anthropic-auth-namespace-scrub--apikeyhelper-refusal) in the User Guide. |
+| `fabrik:tools-denied` | Applied when Claude's own permission layer denies one or more tool calls during an invocation; does not count against `max_retries`, bounded instead by its own `--max-tools-denied-retries` counter (default 3). Clears automatically on the next invocation that isn't itself denied. See [Retry and Escalation](docs/USER_GUIDE.md#retry-and-escalation) in the User Guide for the "Troubleshooting: an issue carries `fabrik:tools-denied`" note. |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |

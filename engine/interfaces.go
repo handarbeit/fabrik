@@ -18,6 +18,16 @@ type GitHubClient interface {
 	AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error
 	RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error
 	AddComment(owner, repo string, issueNumber int, body string) (int, error)
+	// FetchIssueComments fetches the comments on an issue (or PR, since PRs
+	// are issues on the REST API). Used by durablyAddressedReviewIDs (#1555,
+	// R3) as a lazy, GitHub-sourced idempotency fallback for the review-body
+	// synthetic-comment path, which otherwise depends entirely on
+	// itemstate.Store's in-memory ProcessedComments (wiped by every
+	// self-upgrade restart — see reviewBodyIDPrefix's doc comment, R7). Not
+	// part of boardcache.ReadClient: this is a one-shot, lazily-triggered
+	// lookup keyed on a rare event (restart + outstanding review body), not a
+	// per-poll cache-worthy read.
+	FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error)
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
 	AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error
 	ResolveReviewThread(threadID string) error
@@ -52,6 +62,7 @@ type GitHubClient interface {
 	DisablePullRequestAutoMerge(owner, repo string, prNumber int) error
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	CloseIssue(owner, repo string, issueNumber int) error
+	ReopenIssue(owner, repo string, issueNumber int) error
 	CreateIssue(owner, repo, title, body string, assignees []string) (number int, nodeID string, err error)
 	AddProjectV2ItemById(projectID, contentNodeID string) (string, error)
 	AddBlockedByIssue(issueNodeID, blockerNodeID string) error

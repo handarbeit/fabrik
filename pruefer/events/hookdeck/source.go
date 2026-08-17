@@ -128,11 +128,31 @@ type Config struct {
 	// writeWait bounds every WebSocket write (ack, ping). Defaults (10s)
 	// when zero; unexported — only tests need to shrink this for speed.
 	writeWait time.Duration
+
+	// OnDrop, when non-nil, receives every drop-reason classification from
+	// handleFrame/processAttempt — see events.DropReason and ADR-1563. This
+	// is the sole way a drop originating in this package (which cannot
+	// import pruefer) reaches a caller for accounting/display; it carries
+	// no other context (no delivery ID, no timestamp) — callers needing
+	// more already have their own logf output to consult.
+	OnDrop func(events.DropReason)
+
+	// OnSignatureDrift, when non-nil, is called with true the moment
+	// consecutive signature-verification failures reach
+	// SignatureDriftThreshold with no interleaved success, and with false
+	// the next time a signature verifies successfully after such a streak
+	// (recovery). See consecutiveSigFailures/sigDriftActive below and
+	// ADR-1563 — a sustained 100% signature-failure rate is either a
+	// misconfigured webhook secret or a Hookdeck wire-format change, never
+	// a transient blip, and callers should escalate accordingly rather than
+	// treating it as just another rate-limited log line.
+	OnSignatureDrift func(active bool)
 }
 
 // Source implements events.EventSource against Hookdeck's CLI-session
-// protocol (see protocol.go for the verified wire shapes). Construct via
-// NewSource; the zero value is not usable.
+// protocol (see protocol.go for the wire shapes, traced from hookdeck-cli's
+// source — not verified against a live session or a published spec).
+// Construct via NewSource; the zero value is not usable.
 type Source struct {
 	cfg    Config
 	dedupe *events.Dedupe
@@ -149,7 +169,30 @@ type Source struct {
 	// one failure class can't suppress the other's log — same
 	// single-threaded guarantee as lastSigWarnAt.
 	lastFrameWarnAt time.Time
+
+	// consecutiveSigFailures counts signature-verification failures with no
+	// interleaved success — reset to 0 on every successful verification.
+	// Same single-threaded guarantee as lastSigWarnAt: only processAttempt,
+	// off Source's own read loop, ever touches it.
+	consecutiveSigFailures int
+	// sigDriftActive tracks whether OnSignatureDrift(true) has fired for
+	// the current streak, so recovery (OnSignatureDrift(false)) fires
+	// exactly once per streak rather than on every success.
+	sigDriftActive bool
 }
+
+// SignatureDriftThreshold is the number of consecutive signature-check
+// failures (with zero interleaved successes) that trigger
+// Config.OnSignatureDrift(true) — see ADR-1563. Chosen as a plain count
+// rather than a time-based rolling rate: deterministic to test (a count
+// crosses its threshold on exactly one delivery, unlike a rate that
+// depends on timing), and it makes "a healthy mix does not trigger"
+// unconditionally true for any interleaving, not just ones that happen to
+// fall under a tuned ratio. Exported for documentation/test visibility, not
+// because any caller currently needs it — Daemon's own escalation
+// messaging (see daemon.go's SignatureDriftHandler) is deliberately
+// transport-agnostic and does not import this package to quote the number.
+const SignatureDriftThreshold = 20
 
 // NewSource returns a Source ready to Run, applying defaults for any unset
 // Config field.
@@ -199,6 +242,44 @@ func (s *Source) emitHealth(state events.HealthState, err error) {
 		ev.Err = err.Error()
 	}
 	s.cfg.OnHealth(ev)
+}
+
+// emitDrop reports reason via Config.OnDrop, if set. See events.DropReason.
+func (s *Source) emitDrop(reason events.DropReason) {
+	if s.cfg.OnDrop == nil {
+		return
+	}
+	s.cfg.OnDrop(reason)
+}
+
+// emitSignatureDrift reports a signature-drift transition via
+// Config.OnSignatureDrift, if set. See OnSignatureDrift.
+func (s *Source) emitSignatureDrift(active bool) {
+	if s.cfg.OnSignatureDrift == nil {
+		return
+	}
+	s.cfg.OnSignatureDrift(active)
+}
+
+// recordSigFailure tracks a signature-verification failure toward
+// SignatureDriftThreshold, firing OnSignatureDrift(true) exactly once when
+// the streak first reaches it. See consecutiveSigFailures/sigDriftActive.
+func (s *Source) recordSigFailure() {
+	s.consecutiveSigFailures++
+	if s.consecutiveSigFailures >= SignatureDriftThreshold && !s.sigDriftActive {
+		s.sigDriftActive = true
+		s.emitSignatureDrift(true)
+	}
+}
+
+// recordSigSuccess resets the consecutive-failure streak and, if a drift
+// escalation was active, fires the one-time recovery signal.
+func (s *Source) recordSigSuccess() {
+	s.consecutiveSigFailures = 0
+	if s.sigDriftActive {
+		s.sigDriftActive = false
+		s.emitSignatureDrift(false)
+	}
 }
 
 // Run connects to Hookdeck and dispatches received events to sink until ctx
@@ -404,6 +485,7 @@ func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *w
 			s.lastFrameWarnAt = time.Now()
 			logf("dropping malformed hookdeck frame envelope: %v\n", err)
 		}
+		s.emitDrop(events.DropMalformedEnvelope)
 		return
 	}
 	if frame.Event != wsEventAttempt {
@@ -412,6 +494,7 @@ func (s *Source) handleFrame(ctx context.Context, sink events.EventSink, conn *w
 	var attempt attemptBody
 	if err := json.Unmarshal(frame.Body, &attempt); err != nil {
 		logf("dropping malformed hookdeck attempt frame: %v\n", err)
+		s.emitDrop(events.DropMalformedAttempt)
 		return
 	}
 
@@ -440,20 +523,27 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	headers := attempt.Request.Headers
 	sig := lookupHeader(headers, "X-Hub-Signature-256")
 	if !events.VerifySignature([]byte(attempt.Request.DataString), sig, s.cfg.WebhookSecret) {
+		reason := events.DropSignatureInvalid
+		if sig == "" {
+			// Distinct from "signature present but wrong" below — this
+			// points at Hookdeck's forwarded headers (a missing or
+			// renamed X-Hub-Signature-256), not at a misconfigured
+			// secret, and the two have different fixes.
+			reason = events.DropSignatureMissing
+		}
 		if time.Since(s.lastSigWarnAt) >= sigFailureLogInterval {
 			s.lastSigWarnAt = time.Now()
 			if sig == "" {
-				// Distinct from "signature present but wrong" below — this
-				// points at Hookdeck's forwarded headers (a missing or
-				// renamed X-Hub-Signature-256), not at a misconfigured
-				// secret, and the two have different fixes.
 				logf("dropping event: no X-Hub-Signature-256 header in forwarded request (check Hookdeck source config)\n")
 			} else {
 				logf("dropping event: invalid GitHub webhook signature (check hookdeck.webhook_secret_env)\n")
 			}
 		}
+		s.emitDrop(reason)
+		s.recordSigFailure()
 		return
 	}
+	s.recordSigSuccess()
 
 	deliveryID := lookupHeader(headers, "X-GitHub-Delivery")
 	eventType := lookupHeader(headers, "X-GitHub-Event")
@@ -463,6 +553,7 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 			s.lastNormWarnAt = time.Now()
 			logf("dropping event: normalizing webhook payload: %v (malformed body, or an unexpected content-type)\n", err)
 		}
+		s.emitDrop(events.DropMalformedPayload)
 		return
 	}
 
@@ -471,6 +562,7 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	// future retry of that same delivery, even ones that would otherwise
 	// parse fine (Hookdeck retries resend the identical delivery ID).
 	if s.dedupe.SeenBefore(deliveryID) {
+		s.emitDrop(events.DropDedupe)
 		return
 	}
 

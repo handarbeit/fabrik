@@ -249,6 +249,11 @@ func (in *Instrumented) AddComment(owner, repo string, issueNumber int, body str
 		func() (int, error) { return in.sim.AddComment(owner, repo, issueNumber, body) })
 }
 
+func (in *Instrumented) FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error) {
+	return do1(in, "FetchIssueComments", false, Args{Owner: owner, Repo: repo, Number: issueNumber},
+		func() ([]gh.Comment, error) { return in.sim.FetchIssueComments(owner, repo, issueNumber) })
+}
+
 func (in *Instrumented) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
 	return do0(in, "AddCommentReaction", true, Args{Owner: owner, Repo: repo, Number: commentDatabaseID, Values: []string{content}},
 		func() error { return in.sim.AddCommentReaction(owner, repo, commentDatabaseID, content) })
@@ -284,6 +289,11 @@ func (in *Instrumented) UpdateIssueBody(owner, repo string, issueNumber int, bod
 func (in *Instrumented) CloseIssue(owner, repo string, issueNumber int) error {
 	return do0(in, "CloseIssue", true, Args{Owner: owner, Repo: repo, Number: issueNumber},
 		func() error { return in.sim.CloseIssue(owner, repo, issueNumber) })
+}
+
+func (in *Instrumented) ReopenIssue(owner, repo string, issueNumber int) error {
+	return do0(in, "ReopenIssue", true, Args{Owner: owner, Repo: repo, Number: issueNumber},
+		func() error { return in.sim.ReopenIssue(owner, repo, issueNumber) })
 }
 
 func (in *Instrumented) CreateIssue(owner, repo, title, body string, assignees []string) (int, string, error) {

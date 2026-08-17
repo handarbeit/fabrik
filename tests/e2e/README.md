@@ -20,25 +20,63 @@ Every such regression that escapes a release earns a new scenario here.
 
 ## Where this lives in the release flow
 
+Four layers, not two (#1454 — see `adrs/1454-sim-pre-gate-not-replacement.md` for the
+full layering decision). **The sim bed is a fast, free pre-gate. It is never a
+replacement for this suite** — real Claude, real review bots, real GitHub wire
+behaviour, and real merge-queue semantics have no substitute, and this suite runs in
+full, before every release, permanently.
+
 ```
 [ go test ./... ]               unit tests; fast; run on every PR
         |
         v
-[ tests/e2e/... ]               integration tests; slow; run before release
-        |
+[ sim e2e (tests/sim) ]         fast sanity check: full pipelines, failure/timeout/
+        |                       restart/merge-train paths — seconds, $0 tokens, -race;
+        |                       already part of `go test -race ./...`, so also every PR
+        v
+[ github wire-contract tests ]  wire-format truth: schema + recorded fixtures (github/);
+        |                       also already part of `go test -race ./...`, every PR
+        v
+[ tests/e2e/... ]                integration truth: real Claude, real bots, real
+        |                       GitHub — slow, costs real tokens, runs before release
         v
 [ scripts/cut-release.sh ]      cuts a release
 ```
 
-Suggested integration with `cut-release.sh` (not yet wired):
+Each layer's blind spot, most important first:
+
+- **sim e2e is permanently blind to GraphQL/REST wire correctness** — `tests/sim`'s
+  GitHub client (`simgh`) is a hand-modeled fake; see `tests/sim/README.md`'s "What this
+  layer is permanently blind to" and `tests/sim/simgh/FIDELITY.md` for the maintained
+  ledger of every known divergence from real GitHub. Closed only by the wire-contract
+  tests below and by this suite.
+- **The wire-contract tests validate shape, not runtime behavior** — a query can be
+  schema-valid and still be logically wrong. They prove "this is a query GitHub's schema
+  accepts," not "this is the query that produces the right result." That's what sim e2e
+  and this suite are for.
+- **This suite (`tests/e2e`) has no structural blind spot** — it's the only layer that
+  exercises real Claude, real review bots, and real GitHub wire behaviour together. That
+  is exactly why it is never reduced or retired, no matter how much sim coverage grows.
+
+Wired into `scripts/cut-release.sh` (R2, #1454): the sim suite and wire-contract tests
+run as an unconditional, never-skippable pre-gate step; the live suite (this directory)
+runs as a mandatory-by-default step immediately after build+test. The one sanctioned
+escape hatch is loud and recorded, never silent:
 
 ```bash
-scripts/cut-release.sh v0.0.67                       # default — does NOT run e2e
-scripts/cut-release.sh v0.0.67 --integration-check   # run e2e before tagging
-scripts/cut-release.sh v0.0.67 --skip-integration    # explicit skip when iterating
+scripts/cut-release.sh v0.0.67                              # default — runs the full live suite
+scripts/cut-release.sh v0.0.67 --skip-integration=<reason>  # loud, recorded escape hatch —
+                                                              # the reason ships in the release notes
 ```
 
-We'll flip the default to `--integration-check` once the suite is stable.
+A bare `--skip-integration` (no reason) is a hard usage error, by design — see
+`adrs/1454-sim-pre-gate-not-replacement.md`'s R2 section for why "no flag at all" was
+rejected in favor of this loudly-labelled one.
+
+`scripts/e2e/run.sh` itself also runs the sim + wire-contract pre-gate first (R1,
+#1454) — before any bed preflight, build, or live call — whether invoked standalone or
+via `cut-release.sh`, so a live-gate run never spends live budget on a bug the free
+layers would have caught for $0.
 
 ## Test bed prerequisites
 
@@ -605,11 +643,13 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     seed issue.
 23. **Why the bed's real reviewer (Pruefer, as of #1396 — see "Reviewer topology"
     below) is not used for verdict assertions here**: this is narrower than it
-    once was. Before #1396, the bed's incidental reviewer was `claude-review.yml`,
-    which submits `gh pr review --comment` in both its agent path and its fallback
-    path — it could never produce `APPROVE` or `CHANGES_REQUESTED`, so it could not
-    exercise authoritative mode's blocking or clearing paths at all. #1396 disabled
-    that workflow and made Pruefer the bed's real reviewer, and Pruefer *can* submit
+    once was. Until 2026-08-13 the bed's incidental reviewer was
+    `claude-review.yml`, which submits `gh pr review --comment` in both its agent
+    path and its fallback path — it could never produce `APPROVE` or
+    `CHANGES_REQUESTED`, so it could not exercise authoritative mode's blocking or
+    clearing paths at all. #1396 intended to retire it in favour of Pruefer, but
+    the handover was only completed on 2026-08-13 (see "Reviewer topology"); the
+    workflow ran until then. Pruefer *can* submit
     APPROVE/REQUEST_CHANGES verdicts — but using it as the deterministic verdict
     source for `TestReviewAuthority*`'s assertions was explicitly rejected for issue
     #1258, and #1396 does not reopen that rejection: non-determinism (verdict
@@ -740,8 +780,8 @@ is a documented, accepted e2e gap.
     `RequestPRReviewer`, so unlike `TestReviewAuthority*` these scenarios can't
     win the race deterministically that way. Opening the member
     PR as a draft instead removes the race altogether: Pruefer (the bed's real
-    reviewer as of #1396 — see "Reviewer topology" below; formerly
-    `claude-review.yml`, disabled) only lists "open, non-draft PRs" each poll
+    reviewer — see "Reviewer topology" below; `claude-review.yml` was
+    deleted 2026-08-13) only lists "open, non-draft PRs" each poll
     (`cmd/pruefer/README.md`), so a draft PR that is never marked ready is
     permanently invisible to it — there is no incidental bot review to land
     before the engine's first gate evaluation, or before these scenarios' own
@@ -770,13 +810,26 @@ reviewer topology is:
   (`engine/reviews.go:523`) — used by scenarios that need a declared-but-
   never-responding reviewer (`TestExpectedReviewersDeclaredWaitsAndReprompts`
   and friends), independent of Pruefer's own presence or health.
-- **`claude-review.yml` is disabled, not deleted, on both test repos**
-  (`gh workflow disable`, the same mechanism used to retire it on
-  `handarbeit/fabrik` when Pruefer took over there). The file itself is
-  untouched — its trigger set (`opened`/`ready_for_review`, deliberately
-  excluding `synchronize` per #1078) is preserved for the record, but the
-  workflow no longer runs and no longer participates in the bed's reviewer
-  topology.
+- **`claude-review.yml` is deleted from both test repos** (2026-08-13), along
+  with the copy on `handarbeit/fabrik`. Pruefer is the only reviewer bot in
+  this topology.
+
+  This section previously claimed the workflow was "disabled, not deleted"
+  via `gh workflow disable`, and that #1396 had disabled it when Pruefer took
+  over. **Neither was true.** The workflow was enabled and reviewed every bed
+  PR right up to its deletion, and Pruefer's `watched_repos` never included
+  the test repos, so the reviewer the bed's stage configs declared
+  (`expected_reviewers: [handarbeit-pruefer]`) could not reach it — #1396
+  Defect 1, on a closed issue. The prose described the intended end state as
+  if it had been reached; nothing re-checked it, so it read as settled fact
+  for weeks.
+
+  What actually made the handover real: adding both repos to Pruefer's
+  `watched_repos`, then confirming empirically that it posts reviews
+  (`fabrik-test-alpha#4731`, 2026-08-13T12:56:11Z) before deleting anything.
+  If you are reading this because reviews stopped arriving, check Pruefer's
+  TUI row for the repo — and note that its "polled N ago" counter climbing
+  means the PR count beside it is *stale*, not that the repo is empty.
 - **Gemini does not participate in this topology at all.** It was considered
   as the deliberately-absent reviewer and rejected: Gemini is *usually*
   silent on the bed but not reliably so, which would make a scenario's
@@ -1234,9 +1287,17 @@ Every escape-from-release regression earns a new scenario in this table.
 
 - **Cost per run is non-trivial.** A full cross-repo scenario costs $1–3 in
   Claude tokens. The suite is not for casual local iteration.
-- **CI integration is not wired yet.** Initially the suite is operator-only —
-  run before cutting a release. Future work: a GitHub Actions runner that
-  exercises the suite on a schedule.
+- **This suite deliberately never runs in CI** — it drives a real Fabrik bed
+  against real repos with real Claude and real review bots, which cannot run
+  unattended in a PR job (cost, time, and blast radius). CI only compiles it
+  (`go test -tags e2e -run '^$' ./tests/e2e/...`, catching signature breaks
+  without executing a scenario or making a network call). It is operator-run
+  before cutting a release, via `scripts/cut-release.sh` (R2, #1454) or
+  standalone via `scripts/e2e/run.sh`. This is a permanent, deliberate
+  design choice, not a "not wired yet" gap — contrast with the sim e2e and
+  github wire-contract layers above (R7, #1454), which already run on every
+  PR unconditionally (confirmed, not built — see `tests/sim/README.md`'s
+  "Runtime and the `sim` tag decision").
 - **GitHub rate-limit pressure.** Shared with `~/dev/fabrik/` (the dev
   instance) under the `@arbeithand` token. Stop the dev instance if running
   the full suite.

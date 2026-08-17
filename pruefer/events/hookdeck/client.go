@@ -10,7 +10,8 @@ import (
 )
 
 // DefaultAPIBaseURL is Hookdeck's production REST API base URL, versioned
-// per the verified upstream protocol (see protocol.go).
+// per the protocol traced from hookdeck-cli's source (see protocol.go) —
+// not verified against a live session or a published spec.
 const DefaultAPIBaseURL = "https://api.hookdeck.com/2025-07-01"
 
 // DefaultWSBaseURL is Hookdeck's production WebSocket endpoint for CLI

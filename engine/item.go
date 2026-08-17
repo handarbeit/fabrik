@@ -2166,6 +2166,19 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+
+	// Also clear the cycle counters (ReviewCycles, ReviewBlockedCycles,
+	// CIFixCycles, RebaseCycles, EnqueueCycles, NoOpCommentCycles) and the
+	// #1089 comment-processing breaker, exactly as clearFailedStage does for
+	// its own pause family. This resume path is reached whenever a stage is
+	// paused specifically via fabrik:paused + fabrik:awaiting-input (e.g.
+	// tripNoOpCommentCycleBreaker, tripCommentBreaker, pauseForReviewCycleLimit) —
+	// without this, a never-time-pruned counter like NoOpCommentCycles
+	// survives the unpause at its tripped value and can re-trip the breaker
+	// on the very next cycle even when the human's reply is exactly the
+	// forward progress the pause was waiting for (#1555 review finding).
+	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.resetCommentBreaker(item)
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.

@@ -103,8 +103,8 @@ type PRReview struct {
 // MergeQueueEntry holds the merge-queue position and state for a pull request.
 // The pointer on ProjectItem and PRDetails is nil when no merge queue entry exists.
 type MergeQueueEntry struct {
-	State        string // e.g. "QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE"
-	Position     int    // 1-indexed position in the queue; 0 when not yet positioned
+	State         string // e.g. "QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE"
+	Position      int    // 1-indexed position in the queue; 0 when not yet positioned
 	EnqueuerLogin string // GitHub login of the user who enqueued the PR
 }
 

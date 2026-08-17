@@ -90,7 +90,7 @@ func CreateMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 
 // CreateMemberPRDraft is CreateMemberPR, but opens the PR as a draft. The bed's
 // real reviewer (Pruefer, as of #1396 — see tests/e2e/README.md's "Reviewer
-// topology"; formerly claude-review.yml, now disabled) only lists open,
+// topology"; claude-review.yml was deleted 2026-08-13) only lists open,
 // non-draft PRs each poll (cmd/pruefer/README.md) — a draft PR that is never
 // marked ready is therefore permanently invisible to it. Scenarios whose
 // property under test is "nothing has reviewed this PR yet" (e.g.

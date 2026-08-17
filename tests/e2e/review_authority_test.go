@@ -13,7 +13,7 @@ import (
 // This file covers ADR-1250's review_authority: authoritative mode
 // end-to-end (issue #1258), using deterministic harness-posted verdicts
 // (SubmitPRReview + FABRIK_REVIEWER_TOKEN) — never the bed's real reviewer
-// (Pruefer, as of #1396; formerly claude-review.yml, now disabled) — for
+// (Pruefer; claude-review.yml was deleted 2026-08-13) — for
 // every verdict assertion.
 //
 // Mechanism: all scenarios seed a member PR directly via the GitHub API
@@ -63,8 +63,8 @@ import (
 // ADR-1258's original "no RequestPRReviewer call is needed" rationale — that
 // reasoning covered checkReviewGate's outer clearing condition
 // (len(outstanding)==0 && hasReviews) in isolation, but didn't account for
-// the bed's own incidental reviewer (formerly claude-review.yml, now
-// Pruefer as of #1396) satisfying that same condition with an incidental
+// the bed's own incidental reviewer (claude-review.yml until 2026-08-13,
+// Pruefer since) satisfying that same condition with an incidental
 // review before the engine's first gate evaluation, which is exactly what
 // #1312 reports. YoloDoesNotBypassBlock's two fabrik:awaiting-review waits
 // need no such fix: both occur after this test's own genuine
@@ -174,8 +174,8 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 	t.Logf("fabrik:awaiting-review confirmed on %s#%d before any review submitted — gate is genuinely engaged", env.RepoAlpha, num)
 
 	logOffset := LogOffset(t, env)
-	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
-	t.Logf("submitted REQUEST_CHANGES review on %s PR #%d (body-only, zero inline comments — AC6's target shape)", env.RepoAlpha, prNum)
+	submittedReviewID := SubmitPRReviewID(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
+	t.Logf("submitted REQUEST_CHANGES review %d on %s PR #%d (body-only, zero inline comments — AC6's target shape)", submittedReviewID, env.RepoAlpha, prNum)
 
 	// AC1/AC6: the reinvoke must fire — assert the engine log line unique to
 	// dispatchReinvoke's goroutine ("re-invoking stage ... via comment
@@ -187,20 +187,26 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 	firstReinvokeLine := WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), logOffset, 10*time.Minute)
 	t.Logf("review-reinvoke dispatched for %s#%d — authoritative CHANGES_REQUESTED body alone triggered a reinvoke", env.RepoAlpha, num)
 
-	// Extract the original review's synthetic comment ID so AC7 below can key
-	// its check off the review's own identity. AC6's premise guarantees this
-	// scenario is a body-only REQUEST_CHANGES review (no inline comments), which
-	// always produces exactly one review-body: ID — if extraction ever comes up
-	// empty or with more than one ID, something upstream broke (the log
-	// enrichment, or AC6's shape assumption), and failing loudly here is
-	// preferable to AC7 silently no-op'ing or picking an arbitrary ID.
-	originalReviewIDs := reviewBodyIDPattern.FindAllString(firstReinvokeLine, -1)
-	if len(originalReviewIDs) != 1 {
-		t.Fatalf("expected exactly one review-body: ID in the first review-reinvoke log line %q, got %d (%v) — "+
-			"expected commentIDsForLog (engine/reinvoke.go) to have enriched it with exactly the dispatched review's synthetic ID", firstReinvokeLine, len(originalReviewIDs), originalReviewIDs)
+	// Key AC7 off the identity of the review THIS scenario submitted, taken
+	// from the submit call's own response — not off "the only review-body: ID
+	// in the log line."
+	//
+	// The reinvoke line legitimately enumerates every unaddressed review body,
+	// and a bed PR can carry more than this scenario's own: the bed has a real
+	// reviewer (Pruefer, #1396 — see the note above on why it forces the
+	// explicit RequestPRReviewer call), and since #1045 every non-DISMISSED
+	// review body is actionable. Observed here: the engine dispatched
+	// "review-body:4923009567|review-body:4923009678" for one submitted review,
+	// which is correct engine behaviour and only broke the old
+	// exactly-one assumption. Same shape as #1519.
+	originalReviewID := fmt.Sprintf("review-body:%d", submittedReviewID)
+	dispatchedIDs := reviewBodyIDPattern.FindAllString(firstReinvokeLine, -1)
+	if !slices.Contains(dispatchedIDs, originalReviewID) {
+		t.Fatalf("first review-reinvoke log line %q does not name this scenario's own review %s (dispatched: %v) — "+
+			"expected commentIDsForLog (engine/reinvoke.go) to have enriched it with the submitted review's synthetic ID",
+			firstReinvokeLine, originalReviewID, dispatchedIDs)
 	}
-	originalReviewID := originalReviewIDs[0]
-	t.Logf("original review's synthetic comment ID: %s", originalReviewID)
+	t.Logf("original review's synthetic comment ID: %s (dispatched alongside %d review body/bodies total)", originalReviewID, len(dispatchedIDs))
 
 	// The reinvoke, not a pause, is the primary response — fabrik:paused must
 	// not have fired from this alone.
@@ -255,9 +261,14 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 // TestReviewAuthorityReinvokesOnChangesRequested above.
 //
 // Requires a small bed-configured FABRIK_MAX_REVIEW_CYCLES for a bounded
-// wall-clock: each cycle requires a full reinvoke (a real Claude invocation)
-// before the next distinct REQUEST_CHANGES review can be submitted. Skips if
-// the bed's configured value is too large to run in a reasonable e2e window.
+// wall-clock: the engine dispatches one reinvoke (a real Claude invocation)
+// per poll for as long as the gate blocks, so the run costs roughly that many
+// invocations. Skips if the bed's configured value is too large to run in a
+// reasonable e2e window.
+//
+// Note the test drives this with a SINGLE unresolved review, not one per
+// cycle — see the comment at the submission below for why the previous
+// one-review-per-cycle shape was racy against the poll loop.
 func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -269,7 +280,7 @@ func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 	}
 	maxCycles := readEnvFileMaxReviewCycles(t, env)
 	if maxCycles > 5 {
-		t.Skipf("FABRIK_MAX_REVIEW_CYCLES=%d is too large for a bounded e2e run (each cycle requires a full reinvoke) — "+
+		t.Skipf("FABRIK_MAX_REVIEW_CYCLES=%d is too large for a bounded e2e run (the engine dispatches one reinvoke per poll while the gate blocks) — "+
 			"set a small bed value (e.g. 2) for this test, see README", maxCycles)
 	}
 
@@ -286,25 +297,108 @@ func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 10*time.Minute)
 	t.Logf("fabrik:awaiting-review confirmed on %s#%d — gate is genuinely engaged", env.RepoAlpha, num)
 
-	for i := 0; i < maxCycles; i++ {
-		offset := LogOffset(t, env)
+	// Drive fresh CHANGES_REQUESTED reviews until the engine pauses, rather
+	// than assuming a fixed review-to-reinvoke mapping in either direction.
+	//
+	// What the engine actually does: it dispatches a reinvoke when there is
+	// NEW unaddressed review feedback, batching every unaddressed review body
+	// into one dispatch, and each dispatch increments ReviewBlockedCycles —
+	// the counter ADR-1518 never refunds, so a non-converging gate cannot loop
+	// forever behind #1045's ReviewCycles refund. It does NOT reinvoke merely
+	// because the gate is blocking: with no new review, #4723 sat on
+	// "authoritative gate still blocking" for 14 minutes with zero dispatches
+	// and then paused via the review-WAIT timeout, which is a different
+	// terminal state than the one AC4 is about.
+	//
+	// Two earlier shapes both failed, for opposite reasons:
+	//   - one review per cycle, waiting for a reinvoke after each: assumes a
+	//     strict 1:1 ordering. The bed's own bot reviewer lands incidental
+	//     reviews, so the engine's dispatch count runs ahead of the test's
+	//     submissions; cycle 5 captured its scan offset at 21233 while the
+	//     reinvoke it was waiting for had already been written at 19615, and
+	//     the budget was spent before the wait began.
+	//   - a single review, expecting the engine to self-drive: no further
+	//     dispatches ever come, so the cycle limit is never reached.
+	//
+	// Driving until the terminal state, with the submission count merely
+	// bounded, is robust to both: extra bot-driven dispatches only make the
+	// limit arrive sooner, and a quiet engine gets another review to consume.
+	offset := LogOffset(t, env)
+	const submitBudget = 12 // generous headroom over maxCycles; bot reviews can spend it faster
+	submissions := 0
+	paused := false
+
+	for i := 0; i < submitBudget && !paused; i++ {
+		if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && slices.Contains(labels, "fabrik:paused") {
+			paused = true
+			break
+		}
+
+		before := CountLogLines(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset)
 		SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
-		t.Logf("cycle %d/%d: submitted a fresh REQUEST_CHANGES review on %s PR #%d", i+1, maxCycles, env.RepoAlpha, prNum)
-		WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset, 15*time.Minute)
-		WaitForLogLine(t, env, fmt.Sprintf("[#%d done] comment processing complete", num), offset, 20*time.Minute)
-		t.Logf("cycle %d/%d: reinvoke completed for %s#%d", i+1, maxCycles, env.RepoAlpha, num)
+		submissions++
+		t.Logf("submission %d: fresh REQUEST_CHANGES review on %s PR #%d (dispatches so far: %d)", submissions, env.RepoAlpha, prNum, before)
+
+		// Wait for the engine to consume it — either another dispatch, or the
+		// pause that ends the loop. Submitting again before the previous review
+		// is consumed would let the engine batch them into one dispatch and
+		// spend fewer cycles than reviews.
+		deadline := time.Now().Add(8 * time.Minute)
+		for time.Now().Before(deadline) {
+			if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && slices.Contains(labels, "fabrik:paused") {
+				paused = true
+				break
+			}
+			if CountLogLines(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset) > before {
+				break
+			}
+			time.Sleep(10 * time.Second)
+		}
 	}
 
-	// One more distinct CHANGES_REQUESTED review at the cycle limit must
-	// route to pauseForReviewCycleLimit, not another reinvoke.
-	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "REQUEST_CHANGES")
-	t.Logf("submitted the (maxCycles+1)th REQUEST_CHANGES review on %s PR #%d — expecting the cycle-limit pause", env.RepoAlpha, prNum)
+	if !paused && submissions >= submitBudget {
+		t.Fatalf("submitted %d CHANGES_REQUESTED reviews on %s#%d without reaching the cycle-limit pause — "+
+			"the reinvoke loop is not bounded by MaxReviewCycles=%d, which is exactly what AC4 exists to rule out",
+			submissions, env.RepoAlpha, num, maxCycles)
+	}
+	t.Logf("engine paused after %d submitted review(s)", submissions)
 
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", 15*time.Minute)
+	// The terminal assertion (AC4): bounded, and terminating in the cycle-limit
+	// pause rather than an unbounded loop.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", 20*time.Minute)
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-input", 5*time.Minute)
 	WaitForPRCommentContainingAny(t, env, env.RepoAlpha, num,
 		[]string{"review cycle limit", "maximum configured limit"}, 5*time.Minute)
-	t.Logf("AC4 verified: %s#%d paused via the review cycle limit after %d reinvoke cycle(s), not an unbounded loop", env.RepoAlpha, num, maxCycles)
+
+	// Assert the bound itself, not merely that a pause eventually happened:
+	// exactly maxCycles reinvokes may be dispatched before the pause. Counting
+	// the log lines is what distinguishes "bounded at the configured limit"
+	// from "paused for some other reason after an arbitrary number of
+	// reinvokes" — the latter would satisfy the labels above while still being
+	// the unbounded loop AC4 exists to rule out.
+	// An UPPER bound, not equality. The engine's budget counts every dispatch
+	// since the item existed, while this count starts at the offset captured
+	// above — so a dispatch between the item being seeded and the offset being
+	// taken spends budget invisibly here. That is not hypothetical: the bed's
+	// reviewer (Pruefer) reviews the PR moments after creation, and its review
+	// body triggers exactly such a dispatch. Observed on #4732 — the engine
+	// emitted 5 dispatches and paused at the configured limit of 5, while this
+	// count legitimately saw 4.
+	//
+	// Equality would therefore fail on correct engine behaviour whenever the
+	// bed's reviewer happens to land first. The property AC4 actually needs is
+	// that the loop is BOUNDED: never more dispatches than the configured
+	// limit, and terminating in the cycle-limit pause (asserted above via the
+	// label and the comment).
+	reinvokes := CountLogLines(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), offset)
+	if reinvokes > maxCycles {
+		t.Errorf("observed %d review-reinvoke dispatch(es) before the cycle-limit pause on %s#%d, more than MaxReviewCycles=%d — "+
+			"the bound leaked: the gate dispatched past its own configured limit",
+			reinvokes, env.RepoAlpha, num, maxCycles)
+		return
+	}
+	t.Logf("AC4 verified: %s#%d paused via the review cycle limit after %d observed reinvoke dispatch(es) (limit %d), not an unbounded loop",
+		env.RepoAlpha, num, reinvokes, maxCycles)
 }
 
 // TestReviewAuthorityClearsOnApproval covers scenario 2: authoritative +

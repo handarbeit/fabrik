@@ -36,6 +36,17 @@ func (c *Client) CloseIssue(owner, repo string, issueNumber int) error {
 	return c.restPatch(apiURL, payload)
 }
 
+// ReopenIssue reopens a closed GitHub issue via the REST API. Mirrors
+// CloseIssue's shape exactly, but sets state back to "open" — no state_reason
+// is sent, since GitHub only accepts one on close.
+func (c *Client) ReopenIssue(owner, repo string, issueNumber int) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)
+	payload := map[string]interface{}{
+		"state": "open",
+	}
+	return c.restPatch(apiURL, payload)
+}
+
 // IssueData holds the fields from a GitHub issue needed by fabrik watch.
 type IssueData struct {
 	Number   int

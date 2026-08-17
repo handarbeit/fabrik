@@ -495,12 +495,13 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// Use batch[0] as the repo anchor for ensureRepoReady.
 	if err := e.ensureRepoReady(ctx, batch[0]); err != nil {
 		if errors.Is(err, ErrSkipItem) {
-			e.logf(0, "merge-train", "repo %s not ready, aborting train\n", repoKey)
+			e.recordMergeTrainCloneSkip(repoKey, batch[0])
 		} else {
 			e.logf(0, "merge-train", "ensureRepoReady failed for %s: %v\n", repoKey, err)
 		}
 		return trialParams{}, nil, false
 	}
+	e.resetMergeTrainCloneSkip(repoKey)
 
 	wm := e.worktreesFor(repoKey)
 	baseBranch, err := wm.DefaultBaseBranch()
@@ -582,6 +583,116 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	e.logf(0, "merge-train", "assembled %d train member(s) for %s\n", len(current), repoKey)
 
 	return p, current, true
+}
+
+// recordMergeTrainCloneSkip tracks consecutive ensureRepoReady ErrSkipItem outcomes for
+// prepareTrainWorker's batch[0] repo anchor (#1543 follow-up). batch[0] is an arbitrary
+// Queued-column representative that can differ across polls whenever Queued membership
+// churns — plausible and normal. ADR-1543's identity-gated retry boundary only reopens
+// for the exact item pinned as cloneInFlight's ownerKey at the moment of the original
+// failure, so once a later poll selects a different batch[0], that item's identity can
+// never match and the gate stays shut — the repo would otherwise skip silently forever,
+// recoverable only by the original anchor being reselected or an engine restart.
+//
+// This escalates instead, exactly once when the streak first reaches e.cfg.MaxRetries,
+// by posting a comment on the current anchor naming the pinned owner and the remedy. It
+// deliberately does NOT pause the anchor: an earlier revision called pauseIssue here,
+// but batch[0] is an arbitrary, otherwise-healthy Queued member — pausing it removes it
+// from dispatch eligibility, and since fixing the pinned owner's clone issue never
+// un-pauses this anchor, every MaxRetries-poll streak would permanently exile a
+// *different* innocent member as Queued membership rotates, without doing anything to
+// actually resolve the wedge (review feedback on this PR). A comment-only notice keeps
+// the escalation observable — which is the actual goal — without that collateral
+// damage; the real remedy (clearing fabrik:paused on the pinned owner) is unaffected
+// either way, since that item was already paused with its own explanatory comment at
+// the moment its clone attempt failed (see ensureRepoReady).
+//
+// Unlike this file's own mergeTrainEjectionCounts/ejectMember (which resets its counter
+// after pausing, because fabrik:paused itself is the idempotency guard that stops the
+// pause path repeating), this counter is NOT reset after escalating: since the anchor
+// is deliberately never paused, there is no label to gate a repeat, so a reset here
+// would turn one escalation into a comment fired every MaxRetries skips for as long as
+// the wedge persists (review feedback on this PR — see the "escalate exactly once"
+// comment below). Escalating on count == MaxRetries (not >=, no reset) and leaving the
+// count to climb past it unremarked is what actually delivers "escalate once per
+// episode": a genuinely new episode only starts once resetMergeTrainCloneSkip deletes
+// the counter on the next ensureRepoReady success. This is otherwise keyed per repo
+// ("owner/repo"), not per member like mergeTrainEjectionCounts — the wedge is a
+// property of the repo's cloneInFlight entry, not of whichever item happens to be
+// batch[0] this poll.
+//
+// The anchor is not necessarily a bystander, though: on the very first ErrSkipItem for
+// a repo (MaxRetries: 1 is trivially reachable; the default MaxRetries: 3 is reachable
+// too, if the same anchor recurs across polls before its own fabrik:paused takes
+// visible effect), anchor IS the pinned owner. The message branches on
+// issueKey(anchor, ...) == ownerKey so it never claims a self-owning anchor's "own
+// clone was never attempted" or that it "has NOT been paused" when both are false
+// (review feedback on this PR).
+func (e *Engine) recordMergeTrainCloneSkip(repoKey string, anchor gh.ProjectItem) {
+	e.mergeTrainCloneSkipMu.Lock()
+	e.mergeTrainCloneSkipCounts[repoKey]++
+	count := e.mergeTrainCloneSkipCounts[repoKey]
+	e.mergeTrainCloneSkipMu.Unlock()
+
+	// Best-effort: name the pinned owner in the log/comment when known. Absent only if
+	// the entry was cleared between ensureRepoReady's read and this one (e.g. a
+	// concurrent successful retry elsewhere) — never treated as an error.
+	ownerKey := ""
+	if v, ok := e.cloneInFlight.Load(repoKey); ok {
+		if call, ok := v.(*cloneCall); ok {
+			ownerKey = call.ownerKey
+		}
+	}
+	e.logf(0, "merge-train", "repo %s not ready (skip %d, pinned owner %q) — aborting train\n", repoKey, count, ownerKey)
+
+	// Escalate exactly once per streak, at the moment count first reaches MaxRetries —
+	// not "count >= MaxRetries" and not followed by a reset. A persistent wedge (the
+	// only kind this exists for: it stays wedged until an operator clears the pin or
+	// the engine restarts) means count keeps climbing past MaxRetries on every
+	// subsequent skip; count != MaxRetries then falls through silently to the log line
+	// above for every one of those, so the comment fires exactly once (review feedback
+	// on this PR — a reset-after-escalate here turned "escalate once" into "escalate on
+	// a timer," reposting every MaxRetries skips indefinitely, sprayed across whichever
+	// item is anchor that poll). A genuinely new episode after recovery starts its own
+	// fresh count from resetMergeTrainCloneSkip's delete (see below) and gets its own
+	// single escalation when it reaches MaxRetries in turn.
+	if e.cfg.MaxRetries <= 0 || count != e.cfg.MaxRetries {
+		return
+	}
+
+	// The anchor is not always a bystander: on the very first ErrSkipItem for a repo
+	// (or any later recurrence before the anchor's own fabrik:paused has taken visible
+	// effect), anchor IS the pinned owner — its own clone attempt is what failed. The
+	// message must not claim otherwise (review feedback on this PR).
+	anchorIsOwner := ownerKey != "" && ownerKey == issueKey(anchor, e.defaultRepo())
+
+	var msg string
+	if anchorIsOwner {
+		msg = fmt.Sprintf(
+			"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is both the current train anchor and the issue whose own clone attempt failed and is pinning the retry gate — it already carries `fabrik:paused` and an explanatory \"cannot clone repo\" comment from that failure.\n\nFix the underlying clone issue and remove `fabrik:paused` here to retry.",
+			repoKey, count, anchor.Number,
+		)
+	} else {
+		ownerClause := "an earlier failed clone attempt"
+		if ownerKey != "" {
+			ownerClause = fmt.Sprintf("issue %s's failed clone attempt", ownerKey)
+		}
+		msg = fmt.Sprintf(
+			"🏭 **Fabrik merge-train — repo clone wedged**\n\nThe merge train for `%s` has been unable to proceed for %d consecutive attempts. This item (#%d) is the current train anchor, but its own clone was never attempted — the retry is pinned to %s, which must have its `fabrik:paused` label removed (after the underlying clone issue is fixed) before any anchor, including this one, can retry.\n\nThis item itself is otherwise healthy and has NOT been paused — it remains eligible for the next merge-train batch. No action is needed here; resolve the wedge by clearing `fabrik:paused` on the pinned issue above.",
+			repoKey, count, anchor.Number, ownerClause,
+		)
+	}
+	e.logf(anchor.Number, "escalate", "merge-train repo %s clone wedged after %d skips (anchor is pinned owner: %v)\n", repoKey, count, anchorIsOwner)
+	e.postItemComment(anchor, msg, true)
+}
+
+// resetMergeTrainCloneSkip clears the consecutive-skip counter for repoKey once
+// ensureRepoReady succeeds for the merge-train anchor, so a stale streak from a
+// previously-wedged repo doesn't count toward a future skip's escalation threshold.
+func (e *Engine) resetMergeTrainCloneSkip(repoKey string) {
+	e.mergeTrainCloneSkipMu.Lock()
+	delete(e.mergeTrainCloneSkipCounts, repoKey)
+	e.mergeTrainCloneSkipMu.Unlock()
 }
 
 // runMergeTrainWorker is the main body of the merge-train goroutine (ADR-059 D3/D4).
@@ -1166,7 +1277,17 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+			// #1616: record the singleton landing PR credited for this Done
+			// transition and mark the item for post-Done landing verification.
+			// See markCreditedLanding for why the marker is applied only when
+			// the credited-PR record itself landed.
+			e.markCreditedLanding(m.item, prNum)
 		}
+	} else {
+		// #1616: already Done from a prior partial run — still record the
+		// markers, for the same restart-safety reason as landMergeTrainBatch's
+		// equivalent path (see the comment there).
+		e.markCreditedLanding(m.item, prNum)
 	}
 
 	// Close the member's linked PR with a landing comment.
@@ -1833,35 +1954,7 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 	if block := renderDiagnosticBlock(diag); block != "" {
 		sections = append(sections, block)
 	}
-	// handleRevalidateLabel (engine/item.go) clears stage:Validate:complete/failed
-	// specifically — it is hardcoded to the literal name "Validate", not generic over
-	// stageBeforeHolding's result. targetName, by contrast, is resolved structurally by
-	// Order (see stageBeforeHolding's doc comment) and can differ from "Validate" in a
-	// custom stage config — trainTestEngine's own test fixture resolves it to "Implement"
-	// for exactly this reason. Pointing at fabrik:revalidate when targetName isn't
-	// literally "Validate" would recommend a mechanism that silently no-ops against this
-	// item's actual completion label, reproducing the same class of stranding this issue
-	// fixes. Only recommend it when the names actually match; otherwise name the real
-	// blocking labels directly.
-	if targetName == "Validate" {
-		sections = append(sections, fmt.Sprintf(
-			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
-				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then apply "+
-				"`fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this item, so removing "+
-				"just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes again, this issue will "+
-				"re-queue and rejoin the train.",
-			targetName, targetName, targetName,
-		))
-	} else {
-		sections = append(sections, fmt.Sprintf(
-			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
-				"This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR, then remove "+
-				"`stage:%s:complete` and `fabrik:paused` (`fabrik:revalidate` only forces re-entry of a stage literally named "+
-				"Validate, so it will not help here) to re-enter %s. Once it completes again, this issue will re-queue and "+
-				"rejoin the train.",
-			targetName, targetName, targetName,
-		))
-	}
+	sections = append(sections, reentryInstruction(targetName, "This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR"))
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
 
 	if _, err := e.client.AddComment(owner, repo, m.item.Number, msg); err != nil {
@@ -1870,6 +1963,42 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 
 	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — rerouted to %s and pausing without bisection\n", m.item.Number, targetName)
 	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+}
+
+// reentryInstruction returns the closing guidance sentence for a merge-train
+// escalation comment, explaining how a member that has been rerouted off Queued to
+// targetName can re-enter the pipeline. fixDescription is the escalation-specific
+// instruction for what to actually go fix before re-entering.
+//
+// Shared by ejectRedSingleton and the #1615 R4/R5 escalation helpers below — all
+// three route a member off Queued to the same stageBeforeHolding target and face the
+// same fabrik:revalidate name-literal caveat: handleRevalidateLabel (engine/item.go)
+// clears stage:Validate:complete/failed specifically — it is hardcoded to the literal
+// name "Validate", not generic over stageBeforeHolding's (Order-derived) result.
+// targetName can differ from "Validate" in a custom stage config (trainTestEngine's
+// own test fixture resolves it to "Implement" for exactly this reason). Pointing at
+// fabrik:revalidate when targetName isn't literally "Validate" would recommend a
+// mechanism that silently no-ops against the item's actual completion label,
+// reproducing the same class of stranding this issue fixes — so it's only
+// recommended when the names actually match; otherwise the real blocking labels are
+// named directly.
+func reentryInstruction(targetName, fixDescription string) string {
+	if targetName == "Validate" {
+		return fmt.Sprintf(
+			"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+				"%s, then apply `fabrik:revalidate` (not a bare `fabrik:paused` removal — %s already completed once for this "+
+				"item, so removing just `fabrik:paused` would not by itself re-trigger it) to re-enter %s. Once it completes "+
+				"again, this issue will re-queue and rejoin the train.",
+			targetName, fixDescription, targetName, targetName,
+		)
+	}
+	return fmt.Sprintf(
+		"This issue has left the Queued column for %s, so this pause sits somewhere the pipeline can actually act on it. "+
+			"%s, then remove `stage:%s:complete` and `fabrik:paused` (`fabrik:revalidate` only forces re-entry of a stage "+
+			"literally named Validate, so it will not help here) to re-enter %s. Once it completes again, this issue will "+
+			"re-queue and rejoin the train.",
+		targetName, fixDescription, targetName, targetName,
+	)
 }
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
@@ -2216,53 +2345,137 @@ func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
 
 // resetTrialCounter clears the trial counter for repoKey after a successful landing,
 // so normal poison bisection (where survivors do land) never accumulates toward the cap.
+// This is also the runaway guard's own "episode ends" signal: a successful land can only
+// happen once the guard is no longer tripped, so it doubles as the boundary at which
+// mergeTrainRunawayAlerted's per-member idempotency entries for repoKey are cleared —
+// the next trip starts a fresh episode where every member is eligible for a fresh alert
+// (#1533).
 func (e *Engine) resetTrialCounter(repoKey string) {
 	e.mergeTrainTrialsMu.Lock()
 	delete(e.mergeTrainTrials, repoKey)
 	e.mergeTrainTrialsMu.Unlock()
+
+	prefix := repoKey + "#"
+	e.mergeTrainRunawayMu.Lock()
+	for key := range e.mergeTrainRunawayAlerted {
+		if strings.HasPrefix(key, prefix) {
+			delete(e.mergeTrainRunawayAlerted, key)
+		}
+	}
+	e.mergeTrainRunawayMu.Unlock()
 }
 
-// fireRunawayGuard pauses all Queued members for the repo, posts an alert comment on each,
-// and logs the event. Called when the trial counter reaches the runaway threshold (ADR-059 D8).
+// runawayGuardAlertMessage builds the explanatory alert comment posted (or retried) for a
+// single runaway-guard-paused member. Extracted from fireRunawayGuard so
+// settleRunawayGuardAlertScan's retry and escalateRunawayAlertFailure's fallback comment can
+// share the identical wording (#1533).
+func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) string {
+	return fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
+		"The merge-train has run **%d trial(s)** for `%s` within the last %s "+
+		"with **zero successful landings**. This indicates a persistent infra failure "+
+		"(e.g. billing-blocked CI, broken base branch, or all required checks erroring) "+
+		"rather than a code-composition issue.\n\n"+
+		"**Actions taken:** `fabrik:paused` and `fabrik:awaiting-input` applied to all Queued members.\n\n"+
+		"**What to do:**\n"+
+		"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
+		"2. Resolve the underlying issue.\n"+
+		"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
+		count, repoKey, window)
+}
+
+// fireRunawayGuard pauses every member in items and posts an alert comment on each, once per
+// member per guard episode. Called from three independent sites — twice inside
+// runMergeTrainWorker (Hook 1, the worker goroutine) and once from routeQueuedGroup (Hook 2,
+// the poll goroutine) — whenever the trial counter reaches the runaway threshold (ADR-059
+// D8). Each call site constructs its own, possibly-overlapping items slice from whatever
+// local state it holds, and nothing prevents Hook 1 and Hook 2 from running concurrently for
+// the same repoKey once the shared counter trips (the poll loop does not check whether a
+// worker is mid-firing).
+//
+// The whole pause+alert sequence is therefore a single critical section, serialized by
+// mergeTrainRunawayMu, so two concurrent calls can never interleave their loops. Within that
+// section, mergeTrainRunawayAlerted (keyed "owner/repo#N") makes re-encountering a member
+// already alerted this episode a no-op — the pause labels were applied then too — so a
+// member appearing in two racing calls' items slices is never double-alerted (R2/A3).
+// mergeTrainRunawayAlerted is cleared per-repo by resetTrialCounter, the guard's own "episode
+// ends" signal (a successful land) — the next trip starts a fresh episode.
+//
+// Episode-scoping also has to survive the *other* documented "episode ends" path: the alert
+// text itself instructs operators to manually remove fabrik:paused/fabrik:awaiting-input to
+// resume the train, and that path never calls resetTrialCounter (#1533 review, finding 2). A
+// resumed member can trip the guard again while old trial timestamps are still inside the
+// rolling window — the count keeps climbing (it can only climb because new trials actually
+// ran, which requires the member to have been un-paused first) — and that second trip must
+// still produce a fresh alert. mergeTrainRunawayAlerted therefore records the trial count in
+// effect at the time of alerting, not just a boolean: a later call only treats a member as
+// already-alerted while its own count is <= the recorded one. Trials cannot accumulate while
+// every Queued member stays paused, so within one continuous, un-resumed episode the count
+// can only hold steady or fall (as old trials age out of the window) — confirmed by the
+// original bug report's own log, where all three log lines of one episode show the identical
+// "6 trial(s)". An increase is only possible after an operator-driven resume let new trials
+// run, at which point it is exactly the "genuinely new information" the settle-scan family
+// exists to surface, not a duplicate of the earlier alert.
+//
+// A member whose AddComment call fails is NOT marked alerted: it is left with the durable
+// fabrik:awaiting-runaway-alert marker instead, which settleRunawayGuardAlertScan retries
+// every poll independent of any fireRunawayGuard call ever reaching that member again. This
+// closes the residual gap a mutex alone cannot: once fabrik:paused lands, groupQueuedByRepo
+// permanently excludes the member from every future items snapshot Hook 2 could construct,
+// and Hook 1 only ever knows the members it started with — so a transient comment failure
+// here would otherwise strand the member paused with no explanation forever, exactly the
+// defect this function exists to close (#1533, R1).
+//
+// mergeTrainRunawayMu is a single engine-wide mutex, not sharded per repo, and it is held
+// across each member's AddComment network call — so a slow or repeatedly-failing comment
+// post for one repo's firing does serialize fireRunawayGuard (and settleRunawayGuardAlert's
+// retry, which shares this same critical section) for every other repo, and blocks the poll
+// goroutine's progress through the rest of that cycle's repo groups. This is a deliberate
+// trade-off, not an oversight (flagged in PR review — Pruefer, #1533): the guard fires only
+// during genuine runaway incidents (rare, exceptional), so cross-repo contention costs at
+// most a few seconds in the worst case, versus the real complexity of a keyed-mutex-with-
+// cleanup scheme a per-repo/sync.Map-of-mutexes approach would require. See ADR-1533's
+// "Rejected alternatives" section.
 func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items []gh.ProjectItem, count int) {
-	_, m := e.effectiveTrialWindow()
+	_, window := e.effectiveTrialWindow()
 	repoKey := owner + "/" + repo
 	e.logf(0, "merge-train", "runaway guard fired for %s: %d trial(s) with zero successful lands within %s — pausing %d Queued member(s)\n",
-		repoKey, count, m, len(items))
+		repoKey, count, window, len(items))
+
+	e.mergeTrainRunawayMu.Lock()
+	defer e.mergeTrainRunawayMu.Unlock()
+
 	for _, item := range items {
-		msg := fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
-			"The merge-train has run **%d trial(s)** for `%s` within the last %s "+
-			"with **zero successful landings**. This indicates a persistent infra failure "+
-			"(e.g. billing-blocked CI, broken base branch, or all required checks erroring) "+
-			"rather than a code-composition issue.\n\n"+
-			"**Actions taken:** `fabrik:paused` and `fabrik:awaiting-input` applied to all Queued members.\n\n"+
-			"**What to do:**\n"+
-			"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
-			"2. Resolve the underlying issue.\n"+
-			"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
-			count, repoKey, m)
-		if _, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v\n", commentErr)
+		alertKey := repoKey + "#" + strconv.Itoa(item.Number)
+		if recordedCount, ok := e.mergeTrainRunawayAlerted[alertKey]; ok && count <= recordedCount {
+			// Already paused and alerted this episode by an earlier call (Hook 1 or
+			// Hook 2, racing for the same member) at this or a higher trial count —
+			// skip entirely to avoid a duplicate comment and redundant (though
+			// individually idempotent) label calls. A strictly higher count here
+			// would mean genuinely new trials ran since the last alert (only
+			// possible after an operator resume), which falls through below.
+			continue
 		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:paused (runaway guard): %v\n", err)
+
+		// Pause labels are applied before the comment attempt (and thus before
+		// markRunawayAlertOutstanding, below): runaway_alert_settle.go's whole
+		// design assumes a member carrying fabrik:awaiting-runaway-alert also
+		// already carries fabrik:paused (see settleRunawayGuardAlertScan's doc
+		// comment) — a crash between the two label writes must not leave the
+		// marker applied to a member that was never actually paused (#1533 review).
+		e.addLabel(item, "fabrik:paused")
+		e.addLabel(item, "fabrik:awaiting-input")
+
+		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, repoKey, window), false, true); commentErr != nil {
+			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
+			e.markRunawayAlertOutstanding(item, owner, repo)
 		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-			}
-		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input (runaway guard): %v\n", err)
-		} else {
-			if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-			}
+			e.mergeTrainRunawayAlerted[alertKey] = count
+			// Best-effort: clears a marker left by an earlier failed attempt for
+			// this same member within this episode, if any. Unconditional rather
+			// than gated on item.Labels (a snapshot that can be stale relative to
+			// a marker a racing call just applied) — RemoveLabelFromIssue is a
+			// harmless no-op when the marker isn't actually present.
+			e.clearRunawayAlertMarker(item, owner, repo)
 		}
 	}
 }
@@ -2297,18 +2510,35 @@ func buildIntegrationPRBody(survivors []trainMember) string {
 		strings.Join(lines, "\n"), strings.Join(closesLines, "\n"), mergeTrainBatchMarker)
 }
 
-// findIntegrationPR searches recent PRs for an existing landing integration PR
-// for this batch (idempotency check for restarts). Returns the first PR whose
-// body contains the batch marker, or nil if none is found.
-func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
+// findIntegrationPR searches recent PRs for an existing landing integration PR for
+// THIS trial (idempotency check for restarts). trialBranch (fabrik/merge-train/<trialName>)
+// is the sole, mandatory identity gate — matching HeadRefName == trialBranch is what
+// distinguishes this trial's own draft-CI-PR-turned-integration-PR from every other
+// merge-train PR in the repo, live or historical (#1615, R1). ListPRs still requests
+// state=all (needed so an already-merged match can still short-circuit FR-2, and so a
+// closed-unmerged match can be recognized as a failed trial rather than silently
+// invisible), so State/Merged on the returned PR must be inspected by the caller — this
+// function only narrows the search to this trial's branch.
+//
+// mergeTrainBatchMarker is checked too, but only as non-fatal corroboration: a branch
+// match is returned regardless of whether the marker is present, with a warning logged
+// if it's missing. Requiring the marker as an additional AND-condition would make an
+// otherwise-correct branch match invisible in a hypothetical marker-less body — worse,
+// not better, for idempotency — so the marker must never be sufficient on its own (R1),
+// but it is also never necessary once branch identity has already gated the match.
+func (e *Engine) findIntegrationPR(owner, repo, trialBranch string) (*gh.PRDetails, error) {
 	prs, err := e.client.ListPRs(owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("listing PRs for integration PR search: %w", err)
 	}
 	for i := range prs {
-		if strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
-			return &prs[i], nil
+		if prs[i].HeadRefName != trialBranch {
+			continue
 		}
+		if !strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
+			e.logf(0, "merge-train", "warn: PR #%d matches trial branch %s but its body lacks the batch marker — reusing anyway (branch identity is authoritative)\n", prs[i].Number, trialBranch)
+		}
+		return &prs[i], nil
 	}
 	return nil, nil
 }
@@ -2316,12 +2546,20 @@ func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
 // reTrainMember matches "#N" issue references in a train PR body.
 var reTrainMember = regexp.MustCompile(`#(\d+)`)
 
-// isTrainPR reports whether pr is a Fabrik merge-train PR — either a landing
-// integration PR (body carries the batch marker) or a draft CI PR (identified
-// only by its fabrik/merge-train/* head branch, which carries no marker).
+// isTrainPR reports whether pr is a Fabrik merge-train PR, identified
+// structurally by its fabrik/merge-train/* head branch (R7, #1615) — every
+// genuine trial PR, draft CI PR or promoted landing PR alike, is Fabrik-created
+// on that branch (trainBranchPrefix, engine/worktree.go). The shared batch
+// marker is never sufficient on its own: a PR body may legitimately quote the
+// marker literal in prose for reasons that have nothing to do with being a
+// trial PR — this fix's own PR description did exactly that, and the
+// marker-OR-branch version of this check let the reconstruct sweep (below)
+// close that live, unrelated PR on the strength of the quote alone (#1615's
+// own incident, reported by @verveguy). Callers wanting the marker as a
+// secondary corroboration signal check pr.Body themselves, as
+// reconstructTrainState does; it is never treated as identity here.
 func isTrainPR(pr gh.PRDetails) bool {
-	return strings.Contains(pr.Body, mergeTrainBatchMarker) ||
-		strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
+	return strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
 }
 
 // trialNameFromBranch strips the fabrik/merge-train/ prefix from a trial branch
@@ -2519,10 +2757,18 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(30 * time.Second):
+		case <-time.After(e.trainCIPollIntervalOrDefault()):
 		}
 	}
 
+	// Note (#1615, deliberately out of scope): if the PR was open when found by
+	// findIntegrationPR but closes (unmerged) mid-poll, this loop never observes
+	// pr.State and just times out here like any other non-green result — it does
+	// not route to the R5 escalation path, since #1615's R5 is anchored on a PR
+	// already closed-unmerged when findIntegrationPR returns it, not one that
+	// transitions during this poll. A narrower, related gap for a future issue if
+	// ever observed in production; unlike the fixed bug, it can't misattribute a
+	// landing — it only leaves members in Queued for a fresh retry.
 	e.logf(0, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
 	if len(survivors) > 0 {
 		msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing timeout**\n\n"+
@@ -2536,6 +2782,68 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		}
 	}
 	return false
+}
+
+// escalateStrandedTrainMember reroutes a single merge-train member off Queued back to
+// its prior stage, posts an explanatory comment naming reason, and pauses it
+// (fabrik:paused + fabrik:awaiting-input) — the fail-loud escalation #1615's R4/R5
+// require for a landing that this member cannot ride to Done: either the trial's own
+// integration PR closed unmerged (R5), or a matched integration PR's body doesn't
+// actually list this member (R4). Mirrors ejectRedSingleton's reroute+comment+pause
+// shape exactly (#1545): this is an infra-level landing failure, not a retryable
+// member-level defect, so it bypasses ejectMember's counter/stay-in-Queued semantics
+// entirely.
+//
+// If the reroute itself fails (no preceding stage, missing status option, API error),
+// nothing is posted and nothing is paused: a failed reroute must look like nothing
+// happened, so the very next poll's train re-forms this member and retries the whole
+// disposition from scratch (mirrors ejectRedSingleton's identical failure behavior).
+func (e *Engine) escalateStrandedTrainMember(projectID, owner, repo string, item gh.ProjectItem, reason string) {
+	if !e.rerouteQueuedMemberOffHolding(projectID, item) {
+		e.logf(item.Number, "merge-train", "#%d could not be rerouted off Queued for landing-failure escalation — leaving untouched for retry on the next poll\n", item.Number)
+		return
+	}
+
+	targetName := "the preceding stage"
+	if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil {
+		targetName = target.Name
+	}
+
+	sections := []string{
+		reason,
+		reentryInstruction(targetName, "No action is needed on this issue's own code — the merge-train landing step itself failed"),
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing failed**\n\n%s", strings.Join(sections, "\n\n"))
+
+	if _, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "merge-train", "warn: could not post landing-failure comment: %v\n", err)
+	}
+
+	e.logf(item.Number, "merge-train", "#%d rerouted off Queued to %s and paused after a landing failure: %s\n", item.Number, targetName, reason)
+	e.pauseMergeTrainMember(owner, repo, item.Number)
+}
+
+// escalateClosedUnmergedTrial handles the R5 case: findIntegrationPR matched THIS
+// trial's own PR (branch identity confirmed) but it is closed and unmerged — a failed
+// trial, never a reusable integration PR (R2). Every survivor is escalated via
+// escalateStrandedTrainMember; none of the FR-3 advance/close/"Landed via" sequence
+// ever runs for any of them (R5 — no Done advance, no landed comment, no PR/issue
+// close). Members already in Done are skipped (restart safety, mirrors FR-3's own
+// Done-skip) — they landed in an earlier pass and this trial's later failure doesn't
+// retroactively strand them.
+func (e *Engine) escalateClosedUnmergedTrial(projectID, owner, repo string, prNum int, survivors []trainMember) {
+	reason := fmt.Sprintf(
+		"This trial's own integration PR #%d closed without merging. The batch never landed — "+
+			"nothing was merged, and this issue's own PR and branch are untouched.",
+		prNum,
+	)
+	for _, m := range survivors {
+		if m.item.Status == "Done" {
+			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping closed-unmerged-trial escalation\n", m.item.Number)
+			continue
+		}
+		e.escalateStrandedTrainMember(projectID, owner, repo, m.item, reason)
+	}
 }
 
 // landMergeTrainBatch executes FR-1 through FR-5 after a green CI result:
@@ -2557,19 +2865,33 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 
 	trialBranch := "fabrik/merge-train/" + trialName
 
-	// FR-1 / FR-5: find or create the landing integration PR.
-	integrationPR, err := e.findIntegrationPR(owner, repo)
+	// FR-1 / FR-5: find or create the landing integration PR. findIntegrationPR now
+	// gates on trialBranch identity (R1) — the returned PR, if any, is guaranteed to
+	// be THIS trial's own, never a different batch's.
+	integrationPR, err := e.findIntegrationPR(owner, repo, trialBranch)
 	if err != nil {
 		e.logf(0, "merge-train", "cannot search for existing integration PR for %s: %v\n", repoKey, err)
 		return
 	}
 
+	// R2/R5: a PR found on this trial's own branch that is closed and unmerged is a
+	// failed trial, not a reusable integration PR — it must never be treated as
+	// "already landed." Escalate every survivor (fail loud) and stop before any of
+	// the draft/merge/advance logic below runs.
+	if integrationPR != nil && integrationPR.State == "closed" && !integrationPR.Merged {
+		e.logf(0, "merge-train", "integration PR #%d for %s is closed and unmerged — trial failed to land, escalating %d survivor(s)\n", integrationPR.Number, repoKey, len(survivors))
+		e.escalateClosedUnmergedTrial(state.projectID, owner, repo, integrationPR.Number, survivors)
+		return
+	}
+
 	var integrationPRNum int
 	var alreadyMerged bool
+	var prBody string
 
 	if integrationPR != nil {
 		integrationPRNum = integrationPR.Number
 		alreadyMerged = integrationPR.Merged
+		prBody = integrationPR.Body
 		e.logf(0, "merge-train", "found existing integration PR #%d (merged=%v, draft=%v) for %s\n", integrationPRNum, alreadyMerged, integrationPR.Draft, repoKey)
 		// The reused PR is the trial's draft CI PR — promote it to ready-for-review
 		// so it can be merged (GitHub refuses to merge a draft).
@@ -2584,6 +2906,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// FR-1: open the landing integration PR (not a draft).
 		title := buildIntegrationPRTitle(survivors)
 		body := buildIntegrationPRBody(survivors)
+		prBody = body
 		integrationPRNum, err = e.client.CreatePR(owner, repo, title, trialBranch, baseBranch, body)
 		if err != nil {
 			e.logf(0, "merge-train", "cannot create integration PR for %s: %v\n", repoKey, err)
@@ -2623,12 +2946,47 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	}
 	board := &gh.ProjectBoard{ProjectID: state.projectID}
 
+	// R4: before attributing a landing to integrationPRNum, verify each member is
+	// actually claimed by its body — a batch that dropped a member during assembly
+	// must not be able to claim it. Computed once, outside the loop.
+	claimed := parseTrainMembers(prBody)
+	claimedSet := make(map[int]bool, len(claimed))
+	for _, n := range claimed {
+		claimedSet[n] = true
+	}
+
 	for _, m := range survivors {
 		// Skip members already in Done column (restart safety).
 		if m.item.Status == "Done" {
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
 			// Still reset the ejection counter: this member landed successfully.
 			e.resetEjectionCount(owner, repo, m.item.Number)
+			// #1616: still record the landing-verification markers. A prior run
+			// can have advanced this member to Done and then died before
+			// markCreditedLanding ran — advanceToNextStage and the label writes
+			// are separate, non-atomic API calls. Skipping the marker here would
+			// leave that item permanently unverified, the backstop silently
+			// absent for exactly the merge-train restart shape #1614 came from,
+			// and nothing would ever revisit a Done item to notice. Both writes
+			// are idempotent, so re-marking an item whose verification already
+			// completed costs at most one redundant FetchPRMerged that confirms
+			// merged and clears the markers again.
+			e.markCreditedLanding(m.item, integrationPRNum)
+			continue
+		}
+
+		// R4: the integration PR's body doesn't list this member — never attribute
+		// a landing to a batch that dropped it. Escalate (fail loud) instead of
+		// silently skipping, since a batch losing a member during assembly should
+		// never happen and is worth a human look.
+		if !claimedSet[m.item.Number] {
+			e.logf(m.item.Number, "merge-train", "#%d not referenced in integration PR #%d's body — batch dropped this member, escalating\n", m.item.Number, integrationPRNum)
+			reason := fmt.Sprintf(
+				"Integration PR #%d landed, but its body doesn't reference this issue. This batch dropped this member — "+
+					"nothing was landed on its behalf, and this issue's own PR and branch are untouched.",
+				integrationPRNum,
+			)
+			e.escalateStrandedTrainMember(state.projectID, owner, repo, m.item, reason)
 			continue
 		}
 
@@ -2639,6 +2997,11 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
 		} else {
 			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+			// #1616: record the integration PR credited for this Done transition and
+			// mark the item for post-Done landing verification. See
+			// markCreditedLanding for why a failed credited-PR write skips the
+			// marker outright rather than leaving it to the scan's fallback.
+			e.markCreditedLanding(m.item, integrationPRNum)
 		}
 
 		// Close member PR with a comment citing the integration PR.
@@ -2872,11 +3235,28 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 		if !isTrainPR(prs[i]) {
 			continue
 		}
+		if !strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
+			// Expected for a draft CI PR not yet promoted to landing PR — the marker
+			// is corroboration only (R7, #1615), never required; branch identity above
+			// is what makes this a train PR.
+			e.logf(0, "merge-train", "reconstruct: PR #%d matches train branch %s but its body lacks the batch marker — branch identity is authoritative, continuing\n", prs[i].Number, prs[i].HeadRefName)
+		}
 		if len(filterBatchByNumbers(batch, parseTrainMembers(prs[i].Body))) > 0 {
 			trainPR = &prs[i]
 			break
 		}
 		if prs[i].State == "open" {
+			// R8 (#1615): a destructive action — closing this PR — requires positive
+			// structural identity re-confirmed at the point of the action itself, not
+			// just inherited from the isTrainPR filter above. This is intentionally
+			// redundant with that filter today; it exists so a future change to the
+			// filter (or to this loop) cannot silently re-open the #1615 incident by
+			// letting an unrecognized PR reach the close call. Ambiguity fails closed:
+			// skip and log, never close.
+			if !strings.HasPrefix(prs[i].HeadRefName, trainBranchPrefix) {
+				e.logf(0, "merge-train", "reconstruct: skipping PR #%d (state=open, no members still Queued) — head ref %q is not a train branch, not closing\n", prs[i].Number, prs[i].HeadRefName)
+				continue
+			}
 			e.logf(0, "merge-train", "reconstruct: closing stale open train PR #%d (no members still Queued) for %s\n", prs[i].Number, repoKey)
 			if cerr := e.client.CloseIssue(p.owner, p.repo, prs[i].Number); cerr != nil {
 				e.logf(0, "merge-train", "warn: could not close stale train PR #%d: %v\n", prs[i].Number, cerr)
@@ -3188,11 +3568,11 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			return TrainCIPending, nil
 		}
 
-		// Poll again after 30 seconds.
+		// Poll again after the (test-overridable) retry interval.
 		select {
 		case <-ctx.Done():
 			return TrainCIPending, nil
-		case <-time.After(30 * time.Second):
+		case <-time.After(e.trainCIPollIntervalOrDefault()):
 		}
 	}
 }

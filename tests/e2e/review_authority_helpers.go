@@ -36,7 +36,7 @@ import (
 //
 // The member PR is opened ready (non-draft), so the bed's real reviewer
 // (Pruefer, as of #1396 — see tests/e2e/README.md's "Reviewer topology";
-// formerly claude-review.yml, now disabled) will typically review it within
+// claude-review.yml was deleted 2026-08-13) will typically review it within
 // its poll cadence. Scenarios that submit their own deliberate verdict must
 // not treat the bot's incidental review as proof the gate engaged — see the
 // file-level "Determinism" note below and #1312.

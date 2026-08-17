@@ -202,7 +202,7 @@ This is not a new instance of the "dedicated `board.Items`-sourced settle scan" 
 (ADR-060/061/062/1097/1270/1387) — `settleAwaitingCIScan` already is that scan for
 `fabrik:awaiting-ci`. This issue is instead a correctness fix *within* that scan's own escalation
 path: the scan's admission was already correct (ADR-1270); its downstream handler-chain reachability
-was already correct (ADR-1303, §6.14.1); this fix corrects a divergent-outcome bug in the escalation
+was already correct (#1303, §6.14.1); this fix corrects a divergent-outcome bug in the escalation
 call itself, matching the "zero remaining owners" shape [ADR-1387](1387-closed-items-never-dispatched.md)
 names for a structurally different mechanism (closed-item dispatch), applied here to a resumed item's
 pause/re-escalation call instead.

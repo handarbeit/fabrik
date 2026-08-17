@@ -734,3 +734,80 @@ func TestExecute_CommentCycleWindowEnvBeatsConfig(t *testing.T) {
 		t.Errorf("cfg.CommentCycleWindowMinutes = %d, want 20 (env var should beat config.yaml)", cfg.CommentCycleWindowMinutes)
 	}
 }
+
+// ---- Success-agnostic comment-processing circuit breaker (#1555) ----
+
+func TestExecute_MaxNoOpCommentCyclesConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_no_op_comment_cycles: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxNoOpCommentCycles != 8 {
+		t.Errorf("cfg.MaxNoOpCommentCycles = %d, want 8 from config.yaml", cfg.MaxNoOpCommentCycles)
+	}
+}
+
+func TestExecute_MaxNoOpCommentCyclesEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_no_op_comment_cycles: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_NO_OP_COMMENT_CYCLES", "15")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxNoOpCommentCycles != 15 {
+		t.Errorf("cfg.MaxNoOpCommentCycles = %d, want 15 (env var should beat config.yaml)", cfg.MaxNoOpCommentCycles)
+	}
+}
+
+func TestExecute_MaxNoOpCommentCyclesFlagBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_no_op_comment_cycles: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--max-no-op-comment-cycles", "3"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxNoOpCommentCycles != 3 {
+		t.Errorf("cfg.MaxNoOpCommentCycles = %d, want 3 (explicit flag should beat config.yaml)", cfg.MaxNoOpCommentCycles)
+	}
+}
+
+func TestExecute_MaxNoOpCommentCyclesInvalidConfigValue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_no_op_comment_cycles: 0\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxNoOpCommentCycles != 0 {
+		t.Errorf("cfg.MaxNoOpCommentCycles = %d, want 0 (invalid config.yaml value falls back to default)", cfg.MaxNoOpCommentCycles)
+	}
+}
+
+func TestExecute_MaxNoOpCommentCyclesEnvInvalidValue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_NO_OP_COMMENT_CYCLES", "bad")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxNoOpCommentCycles != 0 {
+		t.Errorf("cfg.MaxNoOpCommentCycles = %d, want 0 (invalid env value falls back to default)", cfg.MaxNoOpCommentCycles)
+	}
+}

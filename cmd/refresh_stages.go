@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mattn/go-isatty"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/mattn/go-isatty"
 	"gopkg.in/yaml.v3"
 )
 

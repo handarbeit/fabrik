@@ -3,7 +3,6 @@ package pruefer
 import (
 	"context"
 	"strconv"
-	"strings"
 
 	"github.com/handarbeit/fabrik/pruefer/events"
 )
@@ -50,20 +49,15 @@ import (
 // is always invoked in its own goroutine there) or it would stall acking
 // the current webhook and reading the next one off the same connection.
 func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumber int) {
-	// d.Clients is keyed by strings.ToLower(owner) everywhere it's built
-	// or read elsewhere (poll(), rate-limit reporting in daemon.go) — GitHub
-	// delivers each account's canonical-case login in webhook payloads
-	// (hookdeck/normalize.go), which need not match the casing an operator
-	// wrote in watched_repos/config. Folding here too avoids every
-	// real-time event for a case-mismatched owner being silently dropped
-	// and degrading to poll-only latency.
-	client, ok := d.Clients[strings.ToLower(owner)]
+	client, ok := d.clientForOwner(owner)
 	if !ok {
 		logf(prNumber, "warn", "event for %s/%s#%d: no client for owner %q — dropping\n", owner, repo, prNumber, owner)
+		d.recordDrop(events.DropUnwatchedOwner)
 		return
 	}
 	if !d.isWatchedRepo(owner, repo) {
 		logf(prNumber, "warn", "event for %s/%s#%d: repo is not in watched_repos — dropping\n", owner, repo, prNumber)
+		d.recordDrop(events.DropUnwatchedRepo)
 		return
 	}
 
@@ -75,12 +69,15 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 	}
 	defer func() { <-sem }()
 
-	mu := d.prLock(owner, repo, prNumber)
-	if !mu.TryLock() {
+	g, release := d.acquirePRGate(owner, repo, prNumber)
+	if !g.mu.TryLock() {
+		release()
 		logf(prNumber, "info", "event for %s/%s#%d: a review is already in flight for this PR — dropping\n", owner, repo, prNumber)
+		d.recordDrop(events.DropReviewInFlight)
 		return
 	}
-	defer mu.Unlock()
+	defer release()
+	defer g.mu.Unlock()
 
 	pr, err := client.FetchPRDetails(owner, repo, prNumber)
 	if err != nil {
@@ -96,6 +93,7 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 	// and submitting a formal review against a closed/merged PR.
 	if pr.State != "open" || pr.Merged {
 		logf(prNumber, "info", "event for %s/%s#%d: PR is no longer open (state=%s merged=%v) — dropping\n", owner, repo, prNumber, pr.State, pr.Merged)
+		d.recordDrop(events.DropPRNotOpen)
 		return
 	}
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -977,6 +978,262 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}
 	if !awaitingEcho {
 		t.Error("expected fabrik:awaiting-input webhook echo to be registered")
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_EscalatesAfterMaxRetries is the deterministic regression
+// test for #1543's follow-up: prepareTrainWorker's batch[0] repo anchor can be a
+// different item on every poll, so ADR-1543's identity-gated retry boundary can wedge
+// silently forever once it can never match. This proves recordMergeTrainCloneSkip
+// escalates (posts a comment on the current anchor) once the skip streak reaches
+// e.cfg.MaxRetries, and stays silent below it — sequential, non-racing calls, mirroring
+// TestEjectMember_PausesAfterMaxEjections's shape for the sibling counter.
+//
+// It also asserts the anchor is NOT paused: an earlier revision called pauseIssue on
+// the (arbitrary, rotating) anchor, which permanently exiled a healthy Queued member
+// from dispatch eligibility every time the streak fired against a new anchor — review
+// feedback on this PR. The fix is comment-only; the anchor's dispatch eligibility must
+// be unaffected.
+func TestRecordMergeTrainCloneSkip_EscalatesAfterMaxRetries(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 3
+
+	anchor := makeTrainItem(42, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	// First two skips: below threshold, no pause/comment.
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	client.mu.Lock()
+	commentsBefore := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if commentsBefore != 0 {
+		t.Fatalf("expected no comment before threshold, got %d", commentsBefore)
+	}
+
+	// Third skip reaches MaxRetries: escalate.
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	var pausedAdded, awaitingAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber != 42 {
+			continue
+		}
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+		if c.labelName == "fabrik:awaiting-input" {
+			awaitingAdded = true
+		}
+	}
+	client.mu.Unlock()
+	if comments != 1 {
+		t.Fatalf("expected exactly 1 comment on escalation, got %d", comments)
+	}
+	if pausedAdded {
+		t.Error("expected the anchor NOT to receive fabrik:paused after escalation (would exile a healthy, rotating item)")
+	}
+	if awaitingAdded {
+		t.Error("expected the anchor NOT to receive fabrik:awaiting-input after escalation")
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner verifies the escalation comment
+// identifies the specific issue whose failed clone attempt pinned cloneInFlight's
+// ownerKey — the operator needs to know which issue's fabrik:paused to clear, since the
+// escalation comment lands on the anchor item, which is never itself paused (see
+// #1543's follow-up discussion).
+func TestRecordMergeTrainCloneSkip_MessageNamesPinnedOwner(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 1
+
+	anchor := makeTrainItem(50, "Anchor Issue")
+	repoKey := "owner/repo"
+	eng.cloneInFlight.Store(repoKey, &cloneCall{done: make(chan struct{}), ownerKey: "owner/repo#99"})
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "owner/repo#99") {
+		t.Errorf("expected comment to name the pinned owner owner/repo#99, got: %s", body)
+	}
+	if !strings.Contains(body, "#50") {
+		t.Errorf("expected comment to reference the anchor issue #50, got: %s", body)
+	}
+	if !strings.Contains(body, "has NOT been paused") {
+		t.Errorf("anchor != owner: expected the 'has NOT been paused' bystander framing, got: %s", body)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner verifies the escalation
+// message does not misdirect an operator when the anchor itself is the pinned owner —
+// reachable on the very first ErrSkipItem for a repo (trivially with MaxRetries: 1, and
+// also at the default MaxRetries with a recurring same anchor). An earlier revision
+// unconditionally claimed "its own clone was never attempted" and "has NOT been
+// paused," both false in this case since ensureRepoReady already paused this exact
+// item with its own "cannot clone repo" comment (review feedback on this PR).
+func TestRecordMergeTrainCloneSkip_MessageWhenAnchorIsOwner(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 1
+
+	anchor := makeTrainItem(50, "Anchor Issue")
+	repoKey := "owner/repo"
+	// The anchor's own issueKey ("owner/repo#50") is the pinned owner.
+	eng.cloneInFlight.Store(repoKey, &cloneCall{done: make(chan struct{}), ownerKey: "owner/repo#50"})
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if strings.Contains(body, "own clone was never attempted") {
+		t.Errorf("anchor IS the owner: message must not claim its own clone was never attempted, got: %s", body)
+	}
+	if strings.Contains(body, "has NOT been paused") {
+		t.Errorf("anchor IS the owner: message must not claim it has NOT been paused (it already has fabrik:paused from its own failure), got: %s", body)
+	}
+	if !strings.Contains(body, "#50") {
+		t.Errorf("expected comment to reference the anchor/owner issue #50, got: %s", body)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge verifies escalation
+// fires exactly once per streak, not on a repeating MaxRetries-poll cadence. An earlier
+// revision reset the counter to zero immediately after escalating, which (since the
+// anchor is deliberately never paused — no label exists to gate a repeat) turned one
+// escalation into a comment fired every MaxRetries skips for as long as the wedge
+// persisted, sprayed across whichever item happened to be anchor each time (review
+// feedback on this PR). A persistent wedge is simulated by many consecutive skips with
+// no intervening resetMergeTrainCloneSkip (success) call — the only way a real wedge
+// ends short of an engine restart.
+func TestRecordMergeTrainCloneSkip_NoRepeatEscalationOnPersistentWedge(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(7, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	// Simulate a persistent wedge: 10 consecutive skips, well past MaxRetries, with no
+	// success in between.
+	for i := 0; i < 10; i++ {
+		eng.recordMergeTrainCloneSkip(repoKey, anchor)
+	}
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 1 {
+		t.Errorf("expected exactly 1 escalation comment across the entire persistent wedge, got %d", comments)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain verifies that a
+// genuinely new wedge episode — one that starts only after resetMergeTrainCloneSkip has
+// cleared the counter on an intervening ensureRepoReady success — gets its own,
+// independent escalation. This is the fresh-budget-per-episode behavior
+// recordMergeTrainCloneSkip's doc comment promises, now delivered by
+// resetMergeTrainCloneSkip's delete rather than a reset-after-escalate inside this
+// function (review feedback on this PR).
+func TestRecordMergeTrainCloneSkip_NewEpisodeAfterRecoveryEscalatesAgain(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(7, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates (comment 1)
+
+	eng.resetMergeTrainCloneSkip(repoKey) // operator fixed it; ensureRepoReady succeeded
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // new episode, count=1
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=2, escalates again (comment 2)
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 2 {
+		t.Errorf("expected exactly 2 escalation comments (one per episode), got %d", comments)
+	}
+}
+
+// TestResetMergeTrainCloneSkip_ClearsStreakOnSuccess verifies that a successful
+// ensureRepoReady call (resetMergeTrainCloneSkip) clears an in-progress streak, so a
+// later unrelated skip doesn't inherit credit toward escalation from before the repo
+// last became ready — matching resetEjectionCount's post-landing-clear precedent.
+func TestResetMergeTrainCloneSkip_ClearsStreakOnSuccess(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 2
+
+	anchor := makeTrainItem(9, "Anchor Issue")
+	repoKey := "owner/repo"
+
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1
+	eng.resetMergeTrainCloneSkip(repoKey)          // clears the streak
+	eng.recordMergeTrainCloneSkip(repoKey, anchor) // count=1 again, not 2
+
+	client.mu.Lock()
+	comments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if comments != 0 {
+		t.Errorf("expected no escalation (streak was reset), got %d comment(s)", comments)
+	}
+}
+
+// TestRecordMergeTrainCloneSkip_CounterIsPerRepo verifies the skip streak is tracked
+// independently per repo, mirroring TestEjectMember_EjectionCountIsPerMember's
+// per-member independence for the sibling counter.
+func TestRecordMergeTrainCloneSkip_CounterIsPerRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxRetries = 3
+
+	anchorA := makeTrainItem(1, "Repo A Anchor")
+	anchorB := makeTrainItem(2, "Repo B Anchor")
+
+	eng.recordMergeTrainCloneSkip("owner/repoA", anchorA)
+	eng.recordMergeTrainCloneSkip("owner/repoA", anchorA)
+	eng.recordMergeTrainCloneSkip("owner/repoA", anchorA) // escalates for repoA
+	eng.recordMergeTrainCloneSkip("owner/repoB", anchorB) // should NOT escalate for repoB
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	commentedIssues := make(map[int]bool)
+	for _, c := range client.addCommentCalls {
+		commentedIssues[c.issueNumber] = true
+	}
+	if !commentedIssues[1] {
+		t.Error("expected anchor #1 (repoA) to receive the escalation comment after 3 skips")
+	}
+	if commentedIssues[2] {
+		t.Error("expected anchor #2 (repoB) NOT to receive the escalation comment after only 1 skip")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("expected no fabrik:paused label anywhere (escalation is comment-only), got it on #%d", c.issueNumber)
+		}
 	}
 }
 
@@ -2505,7 +2762,7 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 	client := &mockGitHubClient{
 		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
 			return []gh.PRDetails{
-				{Number: 200, State: "open", Merged: false, Body: "text " + mergeTrainBatchMarker + " more"},
+				{Number: 200, State: "open", Merged: false, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: "text " + mergeTrainBatchMarker + " more #1"},
 			}, nil
 		},
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
@@ -2560,7 +2817,7 @@ func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
 	client := &mockGitHubClient{
 		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
 			return []gh.PRDetails{
-				{Number: 200, State: "open", Merged: false, Draft: true, Body: "draft CI PR " + mergeTrainBatchMarker},
+				{Number: 200, State: "open", Merged: false, Draft: true, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: "draft CI PR " + mergeTrainBatchMarker + " #1"},
 			}, nil
 		},
 		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
@@ -2624,7 +2881,7 @@ func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
 	client := &mockGitHubClient{
 		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
 			return []gh.PRDetails{
-				{Number: 300, State: "closed", Merged: true, Body: mergeTrainBatchMarker},
+				{Number: 300, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #1"},
 			}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
@@ -2958,6 +3215,266 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 	}
 	if count2 != 0 {
 		t.Errorf("expected ejection counter for member #2 to be 0 after landing, got %d", count2)
+	}
+}
+
+// ── #1615 R1-R5 regression tests ──────────────────────────────────────────────
+
+// TestFindIntegrationPR_BranchIdentityRequired is the load-bearing regression test
+// for the bug's exact mechanism (#1615 R1): a marker-carrying PR on a DIFFERENT
+// branch than this trial's own must never be returned, even though pre-fix code
+// (marker-only matching) would have matched it immediately.
+func TestFindIntegrationPR_BranchIdentityRequired(t *testing.T) {
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				{Number: 27, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-99999", Body: mergeTrainBatchMarker + " #16"},
+			}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+
+	got, err := eng.findIntegrationPR("owner", "repo", trainBranchPrefix+"merge-train-main-12345")
+	if err != nil {
+		t.Fatalf("findIntegrationPR: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected no match for a different trial's branch (even though it carries the marker), got PR #%d", got.Number)
+	}
+}
+
+// TestLandMergeTrainBatch_ClosedUnmergedTrialPR_EscalatesInsteadOfLanding covers
+// #1615 AC1/AC3: this is the exact reproduction of the #1614 report. ListPRs
+// returns two PRs — an older, different-branch, ALREADY-MERGED PR that also
+// carries the marker (proving non-vacuously that pre-fix marker-only matching
+// would have matched and "landed" via it, exactly as #1614 describes), and this
+// trial's own branch, closed without merging. The fix must land on neither:
+// MergePR must never be called, no member may advance to Done, no PR/issue may be
+// closed, and no "Landed via" comment may be posted. Every survivor must instead
+// be rerouted off Queued, paused, and told why via a landing-failure comment
+// naming the closed PR.
+func TestLandMergeTrainBatch_ClosedUnmergedTrialPR_EscalatesInsteadOfLanding(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(18, 28, "Issue Eighteen"),
+		makeQueuedMember(19, 29, "Issue Nineteen"),
+	}
+
+	mergeCalled := false
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				// A different batch's already-merged PR — pre-fix, marker-only
+				// matching would return this one first (ListPRs is sort=updated
+				// desc, but order doesn't matter here: branch identity must
+				// reject it regardless of position).
+				{Number: 27, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-11111", Body: mergeTrainBatchMarker + " #16"},
+				// This trial's own PR: closed without merging (the reported failure mode).
+				{Number: 28, State: "closed", Merged: false, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #18 #19"},
+			}, nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			mergeCalled = true
+			return nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	if mergeCalled {
+		t.Error("MergePR must never be called for a closed-unmerged trial PR (R2/R5)")
+	}
+
+	client.mu.Lock()
+	updateStatus := append([]updateStatusCall(nil), client.updateStatusCalls...)
+	closed := append([]closeIssueCall(nil), client.closeIssueCalls...)
+	comments := append([]addCommentCall(nil), client.addCommentCalls...)
+	labels := append([]addLabelCall(nil), client.addLabelCalls...)
+	client.mu.Unlock()
+
+	if len(closed) != 0 {
+		t.Errorf("expected no PR/issue closes, got %v", closed)
+	}
+	for _, c := range updateStatus {
+		if c.optionID == "opt-done" {
+			t.Errorf("expected no member advanced to Done, got status update %+v", c)
+		}
+	}
+	for _, c := range comments {
+		if strings.Contains(c.body, "Landed via") {
+			t.Errorf("expected no 'Landed via' comment, got: %s", c.body)
+		}
+	}
+
+	// Both survivors must be rerouted off Queued (to Implement, per trainTestEngine's
+	// stage set), paused, and told why.
+	for _, num := range []int{18, 19} {
+		rerouted := false
+		for _, c := range updateStatus {
+			if c.optionID == "opt-implement" {
+				rerouted = true
+			}
+		}
+		if !rerouted {
+			t.Errorf("expected #%d to be rerouted off Queued to Implement, got status updates %+v", num, updateStatus)
+		}
+
+		var sawPaused, sawAwaitingInput bool
+		var sawFailureComment bool
+		for _, c := range labels {
+			if c.issueNumber != num {
+				continue
+			}
+			switch c.labelName {
+			case "fabrik:paused":
+				sawPaused = true
+			case "fabrik:awaiting-input":
+				sawAwaitingInput = true
+			}
+		}
+		for _, c := range comments {
+			if c.issueNumber == num && strings.Contains(c.body, "landing failed") && strings.Contains(c.body, "#28") {
+				sawFailureComment = true
+			}
+		}
+		if !sawPaused || !sawAwaitingInput {
+			t.Errorf("expected #%d paused (fabrik:paused + fabrik:awaiting-input), got labels %+v", num, labels)
+		}
+		if !sawFailureComment {
+			t.Errorf("expected #%d to get a landing-failed comment naming PR #28, got comments %+v", num, comments)
+		}
+	}
+}
+
+// TestLandMergeTrainBatch_DroppedMemberNotInBatchBody_EscalatesThatMemberOnly covers
+// #1615 R4/AC4: the matched, merged integration PR's body lists only #1 — #2 rode
+// along as a survivor but was dropped from the batch during assembly. #1 must land
+// normally; #2 must not be advanced, closed, or told "Landed via" — instead it gets
+// the same reroute+pause+comment escalation as R5, without disturbing #1's landing.
+func TestLandMergeTrainBatch_DroppedMemberNotInBatchBody_EscalatesThatMemberOnly(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(1, 10, "Issue One"),
+		makeQueuedMember(2, 11, "Issue Two"),
+	}
+
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				// Found open, on this trial's own branch, but the body only
+				// references #1 — #2 was dropped from the batch during assembly.
+				{Number: 500, State: "open", Merged: false, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #1"},
+			}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	client.mu.Lock()
+	updateStatus := append([]updateStatusCall(nil), client.updateStatusCalls...)
+	closed := append([]closeIssueCall(nil), client.closeIssueCalls...)
+	comments := append([]addCommentCall(nil), client.addCommentCalls...)
+	labels := append([]addLabelCall(nil), client.addLabelCalls...)
+	client.mu.Unlock()
+
+	// #1 landed normally: advanced to Done, both its PR and issue closed, and a
+	// "Landed via" comment naming integration PR #500.
+	advancedMember1 := false
+	for _, c := range updateStatus {
+		if c.optionID == "opt-done" {
+			advancedMember1 = true
+		}
+	}
+	if !advancedMember1 {
+		t.Errorf("expected #1 advanced to Done, got status updates %+v", updateStatus)
+	}
+	closedWant := map[int]bool{10: false, 1: false}
+	for _, c := range closed {
+		if _, ok := closedWant[c.issueNumber]; ok {
+			closedWant[c.issueNumber] = true
+		}
+		if c.issueNumber == 11 || c.issueNumber == 2 {
+			t.Errorf("expected #2 (issue/PR) not to be closed, got close of #%d", c.issueNumber)
+		}
+	}
+	for n, seen := range closedWant {
+		if !seen {
+			t.Errorf("expected #%d closed (member #1's PR or issue)", n)
+		}
+	}
+	landedComment := false
+	for _, c := range comments {
+		// The landed comment is posted on the member's own PR (#10), not its issue.
+		if c.issueNumber == 10 && strings.Contains(c.body, "Landed via") && strings.Contains(c.body, "#500") {
+			landedComment = true
+		}
+	}
+	if !landedComment {
+		t.Errorf("expected #1's PR #10 to get a 'Landed via' comment naming PR #500, got comments %+v", comments)
+	}
+
+	// #2 was dropped: rerouted off Queued, paused, and told why — never a "Landed via".
+	rerouted2 := false
+	for _, c := range updateStatus {
+		if c.optionID == "opt-implement" {
+			rerouted2 = true
+		}
+	}
+	if !rerouted2 {
+		t.Errorf("expected #2 rerouted off Queued to Implement, got status updates %+v", updateStatus)
+	}
+	var sawPaused2, sawAwaitingInput2, sawFailureComment2, sawLandedComment2 bool
+	for _, c := range labels {
+		if c.issueNumber != 2 {
+			continue
+		}
+		switch c.labelName {
+		case "fabrik:paused":
+			sawPaused2 = true
+		case "fabrik:awaiting-input":
+			sawAwaitingInput2 = true
+		}
+	}
+	for _, c := range comments {
+		if c.issueNumber != 2 {
+			continue
+		}
+		if strings.Contains(c.body, "landing failed") && strings.Contains(c.body, "#500") {
+			sawFailureComment2 = true
+		}
+		if strings.Contains(c.body, "Landed via") {
+			sawLandedComment2 = true
+		}
+	}
+	if !sawPaused2 || !sawAwaitingInput2 {
+		t.Errorf("expected #2 paused (fabrik:paused + fabrik:awaiting-input), got labels %+v", labels)
+	}
+	if !sawFailureComment2 {
+		t.Errorf("expected #2 to get a landing-failed comment naming PR #500, got comments %+v", comments)
+	}
+	if sawLandedComment2 {
+		t.Errorf("expected #2 NOT to get a 'Landed via' comment (it was dropped from the batch), got comments %+v", comments)
 	}
 }
 
@@ -4086,18 +4603,24 @@ func TestEffectiveMaxTrainRebaseCycles(t *testing.T) {
 	}
 }
 
-// TestIsTrainPR verifies a PR is recognised as a merge-train PR by either the batch
-// marker in its body (landing integration PR) or the fabrik/merge-train/ head-branch
-// prefix (draft CI PR, which carries no marker) — FR-1/FR-4.
+// TestIsTrainPR verifies a PR is recognised as a merge-train PR only by the
+// fabrik/merge-train/ head-branch prefix — structural identity, not the batch
+// marker (R7, #1615). A body that merely quotes the marker literal (e.g. this
+// fix's own PR description, discussing the marker in prose) must NOT be
+// recognised as a train PR: that was the #1615-reported incident where the
+// reconstruct sweep closed a live, unrelated PR on the strength of the quote
+// alone. The marker is corroboration only, checked separately by callers
+// (reconstructTrainState), never sufficient here on its own.
 func TestIsTrainPR(t *testing.T) {
 	cases := []struct {
 		name string
 		pr   gh.PRDetails
 		want bool
 	}{
-		{"marker in body", gh.PRDetails{Body: "before " + mergeTrainBatchMarker + " after"}, true},
-		{"train head branch", gh.PRDetails{HeadRefName: "fabrik/merge-train/merge-train-main-1"}, true},
-		{"both", gh.PRDetails{Body: mergeTrainBatchMarker, HeadRefName: "fabrik/merge-train/x"}, true},
+		{"marker in body alone, non-train branch — must NOT match (R7/AC6)", gh.PRDetails{Body: "before " + mergeTrainBatchMarker + " after", HeadRefName: "fabrik/issue-1615"}, false},
+		{"marker in body alone, empty head ref — must NOT match", gh.PRDetails{Body: mergeTrainBatchMarker}, false},
+		{"train head branch, no marker (draft CI PR)", gh.PRDetails{HeadRefName: "fabrik/merge-train/merge-train-main-1"}, true},
+		{"train head branch with marker (landing PR)", gh.PRDetails{Body: mergeTrainBatchMarker, HeadRefName: "fabrik/merge-train/x"}, true},
 		{"neither", gh.PRDetails{Body: "just a normal PR", HeadRefName: "fabrik/issue-42"}, false},
 		{"empty", gh.PRDetails{}, false},
 	}
@@ -4712,6 +5235,51 @@ func TestReconstructTrainState_StaleOpenPR_ClosedAndProceedsFresh(t *testing.T) 
 	}
 }
 
+// TestReconstructTrainState_MarkerOnlyNonTrainBranchPR_NeverClosed is a regression
+// test reproducing #1615's own reported incident (R7/R8, AC6) exactly: an open PR on
+// a non-train branch (fabrik/issue-N, i.e. an ordinary Fabrik issue PR) whose body
+// happens to quote the batch marker literal in prose — this fix's own PR description
+// discussing the marker is a real example — must never be closed by the reconstruct
+// sweep, no matter how the marker got into its body. Before R7, isTrainPR's
+// marker-OR-branch check treated the quote alone as train-PR identity, and — finding
+// no members of *this* unrelated PR still Queued in *today's* batch — the sweep closed
+// it outright. Non-vacuous: R7 and R8 are deliberately redundant (belt and suspenders —
+// R8's own doc comment explains why), so reverting either alone no longer reproduces
+// the incident; reverting *both* (restoring the marker-OR-branch isTrainPR check AND
+// removing the close-site's own re-check) makes this test fail by closing PR #1617,
+// exactly as happened live.
+func TestReconstructTrainState_MarkerOnlyNonTrainBranchPR_NeverClosed(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	unrelatedPR := gh.PRDetails{
+		Number:      1617,
+		State:       "open",
+		Merged:      false,
+		HeadRefName: "fabrik/issue-1615",
+		Body:        "This PR fixes findIntegrationPR to require branch identity instead of matching any PR carrying " + mergeTrainBatchMarker + " alone.",
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{unrelatedPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
+	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
+
+	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), batch) {
+		t.Fatal("an unrelated non-train-branch PR must not be handled — reconstruct should return false (fresh)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("PR #1617 must never be closed by the reconstruct sweep — it is not a train PR (non-train head ref), got closes: %v", client.closeIssueCalls)
+	}
+	if len(client.mergePRCalls) != 0 || rv.count() != 0 || len(client.updateStatusCalls) != 0 {
+		t.Errorf("unrelated PR must not resume/land: merges=%d validations=%d advances=%d", len(client.mergePRCalls), rv.count(), len(client.updateStatusCalls))
+	}
+}
+
 // TestReconstructTrainState_OrphanedBranchNoPR_ProceedsFresh is a regression test: an
 // orphaned fabrik/merge-train/* branch on origin (a crash remnant) with no relevant
 // train PR must be cleaned up SILENTLY and reconstruction must proceed fresh (return
@@ -5139,6 +5707,287 @@ func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
 	// #1 and #2 must land (exactly one integration-PR merge).
 	if merges := len(client.mergePRCalls); merges != 1 {
 		t.Errorf("expected survivors #1 and #2 to land (1 merge), got %d merges", merges)
+	}
+}
+
+// ── #1533 fireRunawayGuard atomicity/idempotency ────────────────────────────
+
+// TestFireRunawayGuard_IdempotentAcrossTwoFirings covers R2/A3: a member appearing in two
+// separate fireRunawayGuard calls' items slices within the same guard episode (the shape
+// Hook 1's two call sites, or a racing Hook 1/Hook 2 pair, can produce) must receive the
+// alert comment exactly once, not once per call.
+func TestFireRunawayGuard_IdempotentAcrossTwoFirings(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	memberA := makeTrainItem(1, "Member One") // present in both firings
+	memberB := makeTrainItem(2, "Member Two") // only in the second firing
+
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA, memberB}, 6)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	alertCount := func(issueNum int) int {
+		n := 0
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				n++
+			}
+		}
+		return n
+	}
+	if got := alertCount(1); got != 1 {
+		t.Errorf("member #1 (in both firings): expected exactly 1 alert comment, got %d", got)
+	}
+	if got := alertCount(2); got != 1 {
+		t.Errorf("member #2 (only in the second firing): expected exactly 1 alert comment, got %d", got)
+	}
+}
+
+// TestFireRunawayGuard_ReAlertsAfterOperatorResumeRaisesCount verifies #1533 review finding
+// 2: the alert text itself instructs operators to manually remove fabrik:paused/
+// fabrik:awaiting-input to resume the train, and that recovery path never calls
+// resetTrialCounter (which only fires on a successful land). If the same member trips again
+// afterward, it does so at a strictly HIGHER trial count than before — trials cannot
+// accumulate while every Queued member stays paused, so a higher count is only possible once
+// an operator resume let new trials actually run. That must produce a fresh alert, not be
+// silently skipped as "already alerted this episode" the way TestFireRunawayGuard_
+// IdempotentAcrossTwoFirings correctly does for two firings at the SAME count.
+func TestFireRunawayGuard_ReAlertsAfterOperatorResumeRaisesCount(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(3, "Resumed Member")
+
+	// First trip: fires at count 6, alerts and pauses the member.
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	// A second, genuinely new trip: count is now 8, not 6 — only possible if new trials ran
+	// after an operator resumed the member (no resetTrialCounter call in between here, exactly
+	// mirroring the recovery path's own behavior).
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 8)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	alerts := 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 3 && strings.Contains(c.body, "runaway guard") {
+			alerts++
+		}
+	}
+	if alerts != 2 {
+		t.Errorf("expected 2 alerts across two genuinely new trips (counts 6 then 8, no resetTrialCounter in between), got %d", alerts)
+	}
+}
+
+// TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable covers R1's residual case: an
+// AddComment failure must not silently strand the (already-paused) member. It should be left
+// with the durable fabrik:awaiting-runaway-alert marker instead, and must NOT be recorded as
+// already-alerted — a later fireRunawayGuard call (or the settle scan) must still retry it.
+func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
+	client := &mockGitHubClient{}
+	client.addCommentFn = func(owner, repo string, issueNumber int, body string) (int, error) {
+		return 0, fmt.Errorf("simulated transient failure")
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(9, "Flaky Member")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+
+	client.mu.Lock()
+	paused, marker, commentAttempts := false, false, 0
+	pausedIdx, markerIdx := -1, -1
+	for i, c := range client.addLabelCalls {
+		if c.issueNumber == 9 && c.labelName == "fabrik:paused" {
+			paused = true
+			if pausedIdx == -1 {
+				pausedIdx = i
+			}
+		}
+		if c.issueNumber == 9 && c.labelName == runawayAlertMarkerLabel {
+			marker = true
+			if markerIdx == -1 {
+				markerIdx = i
+			}
+		}
+	}
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 9 {
+			commentAttempts++
+		}
+	}
+	client.mu.Unlock()
+
+	if !paused {
+		t.Error("expected fabrik:paused applied even though the alert comment failed — pause is not gated on the comment")
+	}
+	if !marker {
+		t.Errorf("expected %s marker applied so the settle scan retries the failed alert", runawayAlertMarkerLabel)
+	}
+	if commentAttempts != 1 {
+		t.Errorf("expected exactly 1 comment attempt, got %d", commentAttempts)
+	}
+	// #1533 review: fabrik:paused must land before the awaiting-runaway-alert marker, so a
+	// crash between the two label writes can never leave a member carrying the marker
+	// without actually being paused — the invariant runaway_alert_settle.go's settle scan
+	// depends on (it does not gate on fabrik:paused's absence, unlike its sibling scans).
+	if pausedIdx == -1 || markerIdx == -1 || pausedIdx > markerIdx {
+		t.Errorf("expected fabrik:paused applied before %s (paused at call %d, marker at call %d)", runawayAlertMarkerLabel, pausedIdx, markerIdx)
+	}
+
+	// Not marked alerted: a second firing for the same member within the same episode
+	// must retry the comment, not skip it as already-delivered.
+	client.addCommentFn = nil // succeeds this time
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	commentAttempts = 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 9 {
+			commentAttempts++
+		}
+	}
+	if commentAttempts != 2 {
+		t.Errorf("expected the second firing to retry the comment (2 total attempts), got %d", commentAttempts)
+	}
+}
+
+// TestResetTrialCounter_ClearsRunawayAlertedIdempotency verifies that resetTrialCounter (the
+// guard's own "episode ends" signal) clears mergeTrainRunawayAlerted for the repo, so a member
+// alerted in one episode is eligible for a fresh alert in the next.
+func TestResetTrialCounter_ClearsRunawayAlertedIdempotency(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	member := makeTrainItem(4, "Repeat Offender")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.resetTrialCounter("owner/repo")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	alerts := 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 4 && strings.Contains(c.body, "runaway guard") {
+			alerts++
+		}
+	}
+	if alerts != 2 {
+		t.Errorf("expected 2 alerts across two separate episodes (separated by resetTrialCounter), got %d", alerts)
+	}
+}
+
+// TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember is the A2 test: it covers Hook 2
+// (routeQueuedGroup's "already tripped — pausing before dispatch" path) specifically, and
+// asserts every member in the passed items slice receives the alert comment. Before #1533,
+// only fireRunawayGuard's Hook 1 call sites had direct unit coverage.
+func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxTrainTrialsPerWindow = 1
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	repoKey := "owner/repo"
+	eng.recordTrial(repoKey) // trips the counter (threshold 1)
+
+	items := []gh.ProjectItem{
+		makeTrainItem(1, "Member One"),
+		makeTrainItem(2, "Member Two"),
+	}
+
+	eng.routeQueuedGroup(context.Background(), repoKey, items, "PVT_test")
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, issueNum := range []int{1, 2} {
+		hasAlert := false
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				hasAlert = true
+			}
+		}
+		if !hasAlert {
+			t.Errorf("member #%d: expected a runaway guard alert comment from Hook 2 (routeQueuedGroup)", issueNum)
+		}
+		paused := false
+		for _, c := range client.addLabelCalls {
+			if c.issueNumber == issueNum && c.labelName == "fabrik:paused" {
+				paused = true
+			}
+		}
+		if !paused {
+			t.Errorf("member #%d: expected fabrik:paused from Hook 2", issueNum)
+		}
+	}
+
+	// routeQueuedGroup must return immediately after firing the guard — no worker dispatched.
+	if _, ok := eng.mergeTrainInFlight.Load(repoKey); ok {
+		t.Error("expected no worker dispatched when the runaway guard is already tripped")
+	}
+}
+
+// TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert covers the residual race
+// between fireRunawayGuard and settleRunawayGuardAlert for the same member (#1533 R2/A3): a
+// member that already picked up the fabrik:awaiting-runaway-alert marker earlier in the same
+// episode (an earlier AddComment attempt failed) can still appear in a later Hook 1 call's
+// own current/survivors list (the worker's own in-flight member set, not a fresh board read
+// that would exclude an already-fabrik:paused item — unlike Hook 2's groupQueuedByRepo). If
+// that later fireRunawayGuard call races a concurrent settleRunawayGuardAlertScan retry for
+// the same member, both must not independently succeed in posting the alert — exactly one
+// comment must land, never two, regardless of which one wins the race.
+func TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert(t *testing.T) {
+	var commentCount int32
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			atomic.AddInt32(&commentCount, 1)
+			// Widen the race window so both goroutines are genuinely in-flight
+			// concurrently rather than incidentally serialized by scheduling luck.
+			time.Sleep(5 * time.Millisecond)
+			return 1, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxTrainTrialsPerWindow = 1
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	// Simulates the state left behind by an earlier fireRunawayGuard call within this
+	// same episode whose AddComment failed: paused, marker applied, not yet alerted.
+	member := makeTrainItem(20, "Stale Marker Member")
+	member.Labels = append(member.Labels, runawayAlertMarkerLabel, "fabrik:paused", "fabrik:awaiting-input")
+
+	// Seed a real trial so isRunawayTripped's count matches across both goroutines:
+	// settleRunawayGuardAlert always re-derives its own count live (#1533 review, finding
+	// 2), so fireRunawayGuard must be given the same live count here rather than an
+	// arbitrary literal — otherwise the two calls would (correctly, but irrelevantly to
+	// this test) disagree on whether the other's alert is fresh enough to skip.
+	eng.recordTrial("owner/repo")
+	count, tripped := eng.isRunawayTripped("owner/repo")
+	if !tripped {
+		t.Fatalf("expected the seeded trial to trip the guard (count=%d)", count)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, count)
+	}()
+	go func() {
+		defer wg.Done()
+		eng.settleRunawayGuardAlert(member)
+	}()
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&commentCount); got != 1 {
+		t.Errorf("expected exactly 1 alert comment posted across the racing calls, got %d", got)
 	}
 }
 

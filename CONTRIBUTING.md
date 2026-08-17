@@ -21,7 +21,7 @@ go vet ./...
 gofmt -s -d .         # fix with: gofmt -s -w .
 ```
 
-CI runs `go test -race`, `go vet`, and the docs-drift check on every PR.
+CI runs `go test -race`, `go vet`, `gofmt -s -l`, and the docs-drift check on every PR.
 
 ## Documentation bundle
 

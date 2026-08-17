@@ -405,71 +405,18 @@ func (e *Engine) Run() error {
 
 	// In production wiring readClient is always *CacheImpl; the cast may return
 	// (nil, false) when called from tests that use the pass-through GitHub adapter
-	// directly via NewWithDeps. Code paths that depend on cacheImpl must check nil.
+	// directly via NewWithDeps. Code paths below that depend on cacheImpl must
+	// check nil. RegisterObservers performs this identical cast internally for
+	// its own cacheImpl-gated observer.
 	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
 
-	// Register reactive observers. All returned unsubscribe funcs are collected
-	// and called when Run returns. Observers on cacheImpl are gated on cacheImpl != nil;
-	// observers on engine.store are always registered.
-	{
-		var unsubs []func()
-		defer func() {
-			for _, unsub := range unsubs {
-				unsub()
-			}
-		}()
-
-		// wakeChObserver fires on board-state changes. After store unification, the
-		// shared store receives both engine-side mutations (LockChanged) and webhook/
-		// reconcile-side mutations (Status/Labels/Comments/LinkedPR). Register once
-		// on the shared store — no cacheImpl registration needed or allowed.
-		if e.wakeCh != nil {
-			wakeObs := newWakeChObserver(e.wakeCh)
-			unsubs = append(unsubs, e.store.Subscribe(wakeObs))
-		}
-
-		// mayNeedWorkObserver populates e.mayNeedWork when items change. Register
-		// once on the shared store; all mutation types flow through it post-unification.
-		mwnObs := newMayNeedWorkObserver(&e.mayNeedWorkMu, &e.mayNeedWork)
-		unsubs = append(unsubs, e.store.Subscribe(mwnObs))
-
-		// InvocationObserver fires on InvocationRecorded mutations (engine-side).
-		invObs := &InvocationObserver{Stages: e.cfg.Stages, Emit: e.emitStructural}
-		unsubs = append(unsubs, e.store.Subscribe(invObs))
-
-		// StageChangeObserver fires on StatusChanged mutations. After store unification
-		// it registers on the shared store (not cacheImpl) so it sees all status changes.
-		stageObs := &StageChangeObserver{Emit: e.emitStructural}
-		unsubs = append(unsubs, e.store.Subscribe(stageObs))
-
-		// PushUnblockObserver fires on StateChanged (issue close) and removes
-		// fabrik:blocked from dependents whose all blockers are now resolved.
-		// StateChanged is not in wakeChFlags so this registration has no effect on
-		// poll-wake behaviour. Registered on e.store only (post store-unification).
-		pushUnblockObs := &PushUnblockObserver{
-			Store:  e.store,
-			Remove: func(owner, repo string, n int) { e.removeBlockedIfResolved(owner, repo, n) },
-			Logf:   func(format string, args ...any) { e.logf(0, "push-unblock", format, args...) },
-		}
-		unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
-
-		// CommentBreakerObserver resets the comment-processing circuit breaker on
-		// linked-PR state changes (#1089).
-		cbObs := &CommentBreakerObserver{Store: e.store}
-		unsubs = append(unsubs, e.store.Subscribe(cbObs))
-
-		if cacheImpl != nil {
-			// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
-			// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
-			unsubs = append(unsubs, cacheImpl.SubscribePause(func(paused bool) {
-				state := "healthy"
-				if paused {
-					state = "unhealthy"
-				}
-				e.emitStructural(tui.WebhookStatusEvent{State: state})
-			}))
-		}
-	}
+	// Register reactive observers (mayNeedWork fast-path population, TUI event
+	// emission, PushUnblockObserver's dependency-unblock propagation, the
+	// comment-breaker's PR-state reset, and — when cacheImpl is wired —
+	// webhook-health events). See RegisterObservers's own doc comment for why
+	// this is a separate exported method rather than inlined here.
+	unregisterObservers := e.RegisterObservers()
+	defer unregisterObservers()
 
 	// Start webhook manager when enabled. Failures are non-fatal: the engine
 	// continues in polling-only mode.
@@ -565,126 +512,17 @@ func (e *Engine) Run() error {
 	ticker := time.NewTicker(configuredInterval)
 	defer ticker.Stop()
 
-	prevMultiplier := 1
-	rateLimitLow := false
-	rateLimitRatio := 1.0
-	lastRemainingCount := 0
-	restRateLimitPaused := false
-
-	// doPollCycle runs poll(), updates idle/backoff state, emits PollCompletedEvent,
-	// and resets the ticker to the effective interval. Returns the error from poll().
+	// doPollCycle runs PollWithBackoff (REST hard gate, poll(), idle/backoff
+	// bookkeeping, PollCompletedEvent) and resets the ticker to the returned
+	// effective interval. Returns the error from poll(). See
+	// Engine.PollWithBackoff's own doc comment for why the backoff state
+	// itself lives on Engine, not as closure locals here.
 	doPollCycle := func() error {
-		// REST/core rate-limit hard gate. The GraphQL-driven interval backoff below
-		// conserves the GraphQL budget (spent by the poll read) but does nothing for
-		// the REST/core budget, which is spent by per-item mutations (reactions,
-		// labels, comments, merges) and janitor fetches. When REST is exhausted,
-		// skip the ENTIRE work phase — fetch, dispatch, and mutations — until
-		// GitHub's hourly reset, rather than hammering 403s in a retry storm.
-		// restStats are refreshed from the headers of every REST response (including
-		// 403s), so Reset is authoritative even once the budget is at zero.
-		restStats, _ := e.client.RateLimitStats()
-		if shouldPauseForRESTRateLimit(restStats.Remaining, restStats.Limit, restStats.Reset, time.Now()) {
-			if !restRateLimitPaused {
-				e.logf(0, "warn", "REST rate limit exhausted (%d/%d remaining) — pausing all work until reset at %s\n",
-					restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
-				e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
-				restRateLimitPaused = true
-			}
-			ticker.Reset(time.Until(restStats.Reset) + rateLimitResetBuffer)
-			return nil
-		}
-		if restRateLimitPaused {
-			e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
-				restStats.Remaining, restStats.Limit)
-			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
-			restRateLimitPaused = false
-		}
-
-		result, err := e.poll(ctx)
+		result, err := e.PollWithBackoff(ctx, configuredInterval)
 		if err != nil {
 			return err
 		}
-
-		// Update idle timer.
-		if result.Active {
-			if !e.idleStart.IsZero() {
-				e.logf(0, "poll", "activity detected — idle backoff reset\n")
-			}
-			e.idleStart = time.Time{}
-		} else if e.idleStart.IsZero() {
-			e.idleStart = time.Now()
-		}
-
-		// Update rate-limit state using two-threshold hysteresis:
-		// activate when ratio drops below 20%; clear only when ratio rises above 50%.
-		// Activity detection does NOT reset rate-limit backoff — it is a separate concern.
-		_, graphqlStats := e.client.RateLimitStats()
-		if graphqlStats.Limit > 0 {
-			ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
-			newRateLimitLow := nextRateLimitLow(rateLimitLow, ratio)
-			if newRateLimitLow && !rateLimitLow {
-				e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
-			} else if !newRateLimitLow && rateLimitLow {
-				if isRateLimitNearZero(lastRemainingCount, graphqlStats.Limit) {
-					e.logf(0, "info", "GraphQL rate limit recovered (%d/%d remaining) — triggering immediate probe\n", graphqlStats.Remaining, graphqlStats.Limit)
-					if e.wakeCh != nil {
-						select {
-						case e.wakeCh <- struct{}{}:
-						default:
-						}
-					}
-				} else {
-					e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
-				}
-				e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketGraphQL, Exhausted: false})
-			}
-			rateLimitLow = newRateLimitLow
-			if rateLimitLow {
-				rateLimitRatio = ratio
-			} else {
-				rateLimitRatio = 1.0
-			}
-			lastRemainingCount = graphqlStats.Remaining
-		}
-
-		// Compute and apply effective interval.
-		var idleDuration time.Duration
-		if !e.idleStart.IsZero() {
-			idleDuration = time.Since(e.idleStart)
-		}
-		webhookHealthy := e.webhookMgr != nil && e.webhookMgr.IsHealthyOrStartingUp()
-		if e.webhookMgr != nil && e.webhookMgr.IsDisabled() {
-			e.logf(0, "webhook", "poll-only mode active — webhook subscription disabled; restart Fabrik to retry\n")
-		}
-		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitRatio, webhookHealthy)
-
-		// Notify webhook manager of any new repos discovered during this poll.
-		if e.webhookMgr != nil && result.SeenRepos != nil {
-			e.webhookMgr.UpdateRepos(result.SeenRepos)
-		}
-
-		// Log backoff level transitions.
-		mult := idleBackoffMultiplier(idleDuration)
-		if mult != prevMultiplier && !e.idleStart.IsZero() {
-			if mult == 0 {
-				e.logf(0, "poll", "idle backoff: max (%v)\n", effectiveInterval)
-			} else if mult > 1 {
-				e.logf(0, "poll", "idle backoff: %dx (%v)\n", mult, effectiveInterval)
-			}
-			prevMultiplier = mult
-		}
-		if result.Active {
-			prevMultiplier = 1
-		}
-
-		ticker.Reset(effectiveInterval)
-
-		e.emitStructural(tui.PollCompletedEvent{
-			ItemCount:         result.ItemCount,
-			Dispatched:        result.Dispatched,
-			GraphQLStats:      tui.RateLimitStats{Limit: graphqlStats.Limit, Remaining: graphqlStats.Remaining, Reset: graphqlStats.Reset},
-			EffectiveInterval: effectiveInterval,
-		})
+		ticker.Reset(result.NextInterval)
 		return nil
 	}
 
@@ -709,11 +547,7 @@ func (e *Engine) Run() error {
 	// Only runs after a successful first poll cycle so the store is populated.
 	// Skipped on poll failure to avoid scanning an empty/partial store.
 	if firstPollErr == nil {
-		e.runStartupCleanup()
-		e.runStartupOrphanedInProgressScan()
-		e.runStartupBareInProgressScan()
-		e.runStartupTransientLabelScan()
-		e.runStartupTerminalScan()
+		e.RunStartupCleanup()
 		if e.cfg.JanitorIntervalHours > 0 {
 			e.runWorktreeJanitor(ctx)
 			e.runLogJanitor(ctx)
@@ -961,6 +795,271 @@ type pollResult struct {
 	SeenRepos  map[string]bool // all repos observed on the board in this poll
 }
 
+// RegisterObservers subscribes the engine's steady-state reactive observers
+// on e.store (and, when the read client is a *boardcache.CacheImpl, on it as
+// well) and returns a function that unsubscribes all of them. It is a
+// verbatim extraction of the registration block Run() has always executed
+// immediately before starting its poll loop — same observers, same
+// construction, same order; Run() itself now calls this method instead of
+// inlining the block.
+//
+// This is a test seam (ADR-1592, mirroring PollOnce/ADR-1449): PollOnce
+// drives poll() directly and never runs any part of Run()'s preamble, so
+// without a way to call this separately, every observer registered here —
+// including PushUnblockObserver, the sole delivery mechanism for gap 1's
+// dependency-unblock propagation (#1592) — is unreachable from tests/sim,
+// exactly the same shape of gap PollWithBackoff/RunStartupCleanup close for
+// backoff.go/worker_liveness.go. tests/sim's NewEnv and RestartEnv call this
+// once, immediately after constructing the Engine, mirroring where Run()
+// calls it in production.
+//
+// Registering twice on the same Engine (e.g. a test that both calls this
+// directly AND later calls Run()) subscribes every observer twice, which is
+// never done in production and not a scenario this method guards against —
+// callers that also invoke Run() must not call this method themselves; Run()
+// already calls it internally.
+func (e *Engine) RegisterObservers() (unregister func()) {
+	// In production wiring readClient is always *CacheImpl; the cast may return
+	// (nil, false) when called from tests that use the pass-through GitHub adapter
+	// directly via NewWithDeps. Code paths that depend on cacheImpl must check nil.
+	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
+
+	var unsubs []func()
+
+	// wakeChObserver fires on board-state changes. After store unification, the
+	// shared store receives both engine-side mutations (LockChanged) and webhook/
+	// reconcile-side mutations (Status/Labels/Comments/LinkedPR). Register once
+	// on the shared store — no cacheImpl registration needed or allowed.
+	if e.wakeCh != nil {
+		wakeObs := newWakeChObserver(e.wakeCh)
+		unsubs = append(unsubs, e.store.Subscribe(wakeObs))
+	}
+
+	// mayNeedWorkObserver populates e.mayNeedWork when items change. Register
+	// once on the shared store; all mutation types flow through it post-unification.
+	mwnObs := newMayNeedWorkObserver(&e.mayNeedWorkMu, &e.mayNeedWork)
+	unsubs = append(unsubs, e.store.Subscribe(mwnObs))
+
+	// InvocationObserver fires on InvocationRecorded mutations (engine-side).
+	invObs := &InvocationObserver{Stages: e.cfg.Stages, Emit: e.emitStructural}
+	unsubs = append(unsubs, e.store.Subscribe(invObs))
+
+	// StageChangeObserver fires on StatusChanged mutations. After store unification
+	// it registers on the shared store (not cacheImpl) so it sees all status changes.
+	stageObs := &StageChangeObserver{Emit: e.emitStructural}
+	unsubs = append(unsubs, e.store.Subscribe(stageObs))
+
+	// PushUnblockObserver fires on StateChanged (issue close) and removes
+	// fabrik:blocked from dependents whose all blockers are now resolved.
+	// StateChanged is not in wakeChFlags so this registration has no effect on
+	// poll-wake behaviour. Registered on e.store only (post store-unification).
+	pushUnblockObs := &PushUnblockObserver{
+		Store:  e.store,
+		Remove: func(owner, repo string, n int) { e.removeBlockedIfResolved(owner, repo, n) },
+		Logf:   func(format string, args ...any) { e.logf(0, "push-unblock", format, args...) },
+	}
+	unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
+
+	// CommentBreakerObserver resets the comment-processing circuit breaker on
+	// linked-PR state changes (#1089).
+	cbObs := &CommentBreakerObserver{Store: e.store}
+	unsubs = append(unsubs, e.store.Subscribe(cbObs))
+
+	if cacheImpl != nil {
+		// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
+		// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
+		unsubs = append(unsubs, cacheImpl.SubscribePause(func(paused bool) {
+			state := "healthy"
+			if paused {
+				state = "unhealthy"
+			}
+			e.emitStructural(tui.WebhookStatusEvent{State: state})
+		}))
+	}
+
+	return func() {
+		for _, unsub := range unsubs {
+			unsub()
+		}
+	}
+}
+
+// PollBackoffResult carries PollWithBackoff's computed next-poll interval —
+// the one piece of state a caller needs to act on (resetting its own
+// ticker). See PollWithBackoff's own doc comment.
+type PollBackoffResult struct {
+	// NextInterval is the interval the caller should use for its next poll
+	// cycle — computed from idle backoff, GraphQL rate-limit hysteresis, and
+	// (for the REST hard-gate short-circuit) time until the REST budget
+	// resets. Zero when PollWithBackoff returns a non-nil error: mirrors
+	// Run()'s original behavior of leaving the ticker on its prior schedule
+	// when poll() itself fails, rather than resetting to some fallback value.
+	NextInterval time.Duration
+}
+
+// PollWithBackoff is a verbatim extraction of what Run()'s doPollCycle
+// closure has always done around a single poll() call: the REST/core
+// rate-limit hard gate (skip the whole work phase, including poll(), until
+// GitHub's hourly reset), idle-timer bookkeeping, GraphQL rate-limit
+// hysteresis (two-threshold: activate below 20%, clear above 50%), and the
+// resulting effective next-poll interval. Run() itself now calls this
+// instead of inlining the block — same statements, same order, same log
+// lines and TUI events, just under a name an external caller can reach. The
+// one unavoidable reordering: emitStructural(PollCompletedEvent) now happens
+// inside this method, before the caller can reset its own ticker from the
+// returned interval (previously the ticker reset came first) — the two have
+// no ordering dependency on each other, so this is not a behavior change.
+//
+// This is a test seam (ADR-1592, mirroring PollOnce/ADR-1449 and
+// RegisterObservers above): PollOnce drives poll() directly and reaches none
+// of this — backoff.go's five pure functions (shouldPauseForRESTRateLimit,
+// idleBackoffMultiplier, nextRateLimitLow, isRateLimitNearZero,
+// computeEffectiveInterval) have no call site outside Run()'s own closure,
+// so without this seam gap 2 (#1592) — GraphQL rate-limit backoff across
+// successive polls — is 100% unreachable from tests/sim, the same shape of
+// gap RegisterObservers closes for the reactive-observer registration block.
+//
+// The five pieces of state doPollCycle's closure locals held
+// (prevMultiplier, rateLimitLow, rateLimitRatio, lastRemainingCount,
+// restRateLimitPaused) are now Engine fields (backoffPrevMultiplier,
+// backoffRateLimitLow, backoffRateLimitRatio, backoffLastRemaining,
+// backoffRestPaused) so state persists correctly across a scenario's
+// successive PollWithBackoff calls, mirroring the existing idleStart field's
+// precedent. Unlike idleStart's zero-value (a genuine "not idle" sentinel),
+// backoffPrevMultiplier and backoffRateLimitRatio have non-zero starting
+// values (1 and 1.0 respectively) that both New() and NewWithDeps() set
+// explicitly.
+//
+// configuredInterval is the base poll interval (cfg.PollSeconds as a
+// Duration, in Run(); a scenario may pass whatever it wants to test
+// against). Deliberately does NOT reset any ticker itself — Run() owns its
+// own ticker and resets it from the returned NextInterval; a test driving
+// this repeatedly has no ticker to reset in the first place.
+func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Duration) (PollBackoffResult, error) {
+	// REST/core rate-limit hard gate. The GraphQL-driven interval backoff below
+	// conserves the GraphQL budget (spent by the poll read) but does nothing for
+	// the REST/core budget, which is spent by per-item mutations (reactions,
+	// labels, comments, merges) and janitor fetches. When REST is exhausted,
+	// skip the ENTIRE work phase — fetch, dispatch, and mutations — until
+	// GitHub's hourly reset, rather than hammering 403s in a retry storm.
+	// restStats are refreshed from the headers of every REST response (including
+	// 403s), so Reset is authoritative even once the budget is at zero.
+	//
+	// Both time references below use e.now(), not time.Now() directly (a
+	// change from this block's pre-#1592 shape, when it lived inline in
+	// Run()'s doPollCycle closure): byte-identical to the prior behavior in
+	// production (e.now() falls back to time.Now() whenever no Clock is
+	// injected — see engine/clock.go), and required for this method to be
+	// meaningfully testable at all — restStats.Reset is computed relative to
+	// whatever clock the read client uses (tests/sim/simgh's RateLimitStats
+	// reads the injected Clock), so comparing it against real time.Now()
+	// from tests/sim's default 2026-01-01 clock start would report the
+	// budget as permanently already-reset. Widens e.now()'s existing
+	// CooldownAt-scoped contract (engine/clock.go) to this call site; see
+	// ADR-1592.
+	restStats, _ := e.client.RateLimitStats()
+	if shouldPauseForRESTRateLimit(restStats.Remaining, restStats.Limit, restStats.Reset, e.now()) {
+		if !e.backoffRestPaused {
+			e.logf(0, "warn", "REST rate limit exhausted (%d/%d remaining) — pausing all work until reset at %s\n",
+				restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
+			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
+			e.backoffRestPaused = true
+		}
+		return PollBackoffResult{NextInterval: restStats.Reset.Sub(e.now()) + rateLimitResetBuffer}, nil
+	}
+	if e.backoffRestPaused {
+		e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
+			restStats.Remaining, restStats.Limit)
+		e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
+		e.backoffRestPaused = false
+	}
+
+	result, err := e.poll(ctx)
+	if err != nil {
+		return PollBackoffResult{}, err
+	}
+
+	// Update idle timer.
+	if result.Active {
+		if !e.idleStart.IsZero() {
+			e.logf(0, "poll", "activity detected — idle backoff reset\n")
+		}
+		e.idleStart = time.Time{}
+	} else if e.idleStart.IsZero() {
+		e.idleStart = time.Now()
+	}
+
+	// Update rate-limit state using two-threshold hysteresis:
+	// activate when ratio drops below 20%; clear only when ratio rises above 50%.
+	// Activity detection does NOT reset rate-limit backoff — it is a separate concern.
+	_, graphqlStats := e.client.RateLimitStats()
+	if graphqlStats.Limit > 0 {
+		ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
+		newRateLimitLow := nextRateLimitLow(e.backoffRateLimitLow, ratio)
+		if newRateLimitLow && !e.backoffRateLimitLow {
+			e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
+		} else if !newRateLimitLow && e.backoffRateLimitLow {
+			if isRateLimitNearZero(e.backoffLastRemaining, graphqlStats.Limit) {
+				e.logf(0, "info", "GraphQL rate limit recovered (%d/%d remaining) — triggering immediate probe\n", graphqlStats.Remaining, graphqlStats.Limit)
+				if e.wakeCh != nil {
+					select {
+					case e.wakeCh <- struct{}{}:
+					default:
+					}
+				}
+			} else {
+				e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
+			}
+			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketGraphQL, Exhausted: false})
+		}
+		e.backoffRateLimitLow = newRateLimitLow
+		if e.backoffRateLimitLow {
+			e.backoffRateLimitRatio = ratio
+		} else {
+			e.backoffRateLimitRatio = 1.0
+		}
+		e.backoffLastRemaining = graphqlStats.Remaining
+	}
+
+	// Compute and apply effective interval.
+	var idleDuration time.Duration
+	if !e.idleStart.IsZero() {
+		idleDuration = time.Since(e.idleStart)
+	}
+	webhookHealthy := e.webhookMgr != nil && e.webhookMgr.IsHealthyOrStartingUp()
+	if e.webhookMgr != nil && e.webhookMgr.IsDisabled() {
+		e.logf(0, "webhook", "poll-only mode active — webhook subscription disabled; restart Fabrik to retry\n")
+	}
+	effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, e.backoffRateLimitRatio, webhookHealthy)
+
+	// Notify webhook manager of any new repos discovered during this poll.
+	if e.webhookMgr != nil && result.SeenRepos != nil {
+		e.webhookMgr.UpdateRepos(result.SeenRepos)
+	}
+
+	// Log backoff level transitions.
+	mult := idleBackoffMultiplier(idleDuration)
+	if mult != e.backoffPrevMultiplier && !e.idleStart.IsZero() {
+		if mult == 0 {
+			e.logf(0, "poll", "idle backoff: max (%v)\n", effectiveInterval)
+		} else if mult > 1 {
+			e.logf(0, "poll", "idle backoff: %dx (%v)\n", mult, effectiveInterval)
+		}
+		e.backoffPrevMultiplier = mult
+	}
+	if result.Active {
+		e.backoffPrevMultiplier = 1
+	}
+
+	e.emitStructural(tui.PollCompletedEvent{
+		ItemCount:         result.ItemCount,
+		Dispatched:        result.Dispatched,
+		GraphQLStats:      tui.RateLimitStats{Limit: graphqlStats.Limit, Remaining: graphqlStats.Remaining, Reset: graphqlStats.Reset},
+		EffectiveInterval: effectiveInterval,
+	})
+	return PollBackoffResult{NextInterval: effectiveInterval}, nil
+}
+
 // PollOnce runs exactly one poll cycle and reports only whether it errored —
 // pollResult stays internal, so this seam cannot be used to reach into engine
 // internals beyond triggering a cycle. It is a thin, deliberately bare
@@ -983,6 +1082,32 @@ type pollResult struct {
 func (e *Engine) PollOnce(ctx context.Context) error {
 	_, err := e.poll(ctx)
 	return err
+}
+
+// HasInFlightWorker reports whether any engine-dispatched worker — per-item
+// (registered via WorkerEntered before its goroutine starts, cleared via a
+// deferred WorkerExited when it returns) or merge-train repo-scoped (see
+// mergeTrainInFlight/e.store.ExitRepoWorker) — is currently running. It is
+// the same liveness signal the idle-upgrade check below (dispatched == 0
+// branch) and the shutdown-pause path (shutdown.go's inFlightSnapshot) treat
+// as authoritative for "is the engine actually quiescent right now."
+//
+// Test seam (ADR-1449 pattern), added for tests/sim's RunPoll (#1450 follow-
+// up, PR #1538/CI run 31459112834): a poll cycle that dispatches a worker
+// returns from PollOnce immediately, leaving the goroutine running in the
+// background exactly as production does — RunPoll previously papered over
+// that gap with a small *fixed* real sleep (workerYield, 100ms) just to give
+// the goroutine some wall-clock time to progress, then relied on
+// AdvanceUntil's poll-count bound to eventually observe completion across
+// several such cycles. Under CPU contention a fixed sleep is not a reliable
+// proxy for "the worker made progress" — a starved goroutine can need many
+// more polls than expected to reach the same state, and a poll-count bound
+// has no way to know that, so it can expire before the worker ever finishes.
+// HasInFlightWorker lets RunPoll wait for the dispatched worker's *actual*
+// completion instead of a guessed duration, restoring the poll-count bound's
+// meaning regardless of runner load.
+func (e *Engine) HasInFlightWorker() bool {
+	return e.store.HasInFlightWorker()
 }
 
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
@@ -1387,11 +1512,28 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// the setting is later turned off.
 	e.settleMergeTrainMemberCloses(board)
 
+	// Runaway guard alert settle scan (ADR-1533): retries the outstanding
+	// fireRunawayGuard alert comment for any member carrying
+	// fabrik:awaiting-runaway-alert (a member the guard already paused but whose
+	// AddComment call failed). Runs unconditionally every poll, independent of
+	// merge_train: on/off — a marker written while it was enabled keeps draining
+	// even if the setting is later turned off, mirroring
+	// settleMergeTrainMemberCloses immediately above.
+	e.settleRunawayGuardAlertScan(board)
+
 	// Non-default-base explicit close settle scan (ADR-1097): retries the outstanding
 	// closeIssueIfNonDefaultBase CloseIssue call for any item carrying
 	// fabrik:awaiting-close. Runs unconditionally every poll, independent of
 	// itemMayNeedWork/itemNeedsWork dispatch — the item has already reached Done.
 	e.settleNonDefaultBaseCloses(board)
+
+	// Landing verification settle scan (#1616): the post-Done backstop that verifies
+	// a merge-attributable Done transition's credited PR actually merged, for any
+	// item carrying fabrik:awaiting-landing-verification. Runs unconditionally every
+	// poll, independent of itemMayNeedWork/itemNeedsWork dispatch — the item has
+	// already reached Done by the time this marker is written, sourced directly from
+	// board.Items like every other settle scan in this ADR-1270 family.
+	e.settleLandingVerification(board)
 
 	// Claude usage-limit settle scans (#1183): the operator-triggered restart-free
 	// clear runs first so a clear request and the resulting account-wide label sweep

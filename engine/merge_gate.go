@@ -671,14 +671,28 @@ func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.Projec
 	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
 	e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
 	e.removeRebaseNeededLabel(owner, repo, item)
-	if err := e.recordAdvanceOutcome(board, item, stage); err != nil {
-		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
+	advErr := e.recordAdvanceOutcome(board, item, stage)
+	if advErr != nil {
+		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", advErr)
 	}
-	// Runs unconditionally on a confirmed merge, regardless of the advance's
-	// outcome above — see awaitingAdvanceLabel's doc comment (advance_settle.go)
-	// for why that's safe even when recordAdvanceOutcome just failed.
+	// closeIssueIfNonDefaultBase runs unconditionally on a confirmed merge,
+	// regardless of the advance's outcome above — see awaitingAdvanceLabel's
+	// doc comment (advance_settle.go) for why that's safe even when
+	// recordAdvanceOutcome just failed.
 	if merged {
 		e.closeIssueIfNonDefaultBase(item, prNumber)
+		// #1616: mark for post-Done landing verification — but only once the
+		// item actually reached Done (advErr == nil). Unlike
+		// closeIssueIfNonDefaultBase, this marker's entire purpose is to verify
+		// a Done transition; applying it while the item is still stranded at
+		// its prior stage (a failed advance, e.g. a missing "Done" status
+		// option) would be a false claim it never made. No fabrik:credited-pr:<N>
+		// label is needed here — the ordinary auto-merge path's credited PR is
+		// always durably rediscoverable via FetchLinkedPR, unlike merge-train's
+		// integration/singleton PR.
+		if advErr == nil {
+			e.addLabel(item, awaitingLandingVerificationLabel)
+		}
 	}
 }
 

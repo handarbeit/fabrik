@@ -12,8 +12,9 @@ package plugin
 // disk hash that is not any known embedded hash).
 //
 // Historical bootstrapping:
-//   v0.0.64–v0.0.65: 80638a6ed85feb0e1b1516886e13cc3c803eea4ebcf77a24d537a9c977ea4ef0
-//   v0.0.66–current: 72e9c60393cc1c0015c6823fde643b83da246b13585cf17604c6c8636b77aefc
+//
+//	v0.0.64–v0.0.65: 80638a6ed85feb0e1b1516886e13cc3c803eea4ebcf77a24d537a9c977ea4ef0
+//	v0.0.66–current: 72e9c60393cc1c0015c6823fde643b83da246b13585cf17604c6c8636b77aefc
 var KnownEmbeddedVersions = []string{
 	"80638a6ed85feb0e1b1516886e13cc3c803eea4ebcf77a24d537a9c977ea4ef0", // v0.0.64–v0.0.65
 	"72e9c60393cc1c0015c6823fde643b83da246b13585cf17604c6c8636b77aefc", // v0.0.66–current
@@ -23,4 +24,6 @@ var KnownEmbeddedVersions = []string{
 	"68d43ba01c4fdd8dad52d37000df4b52fb43cdbfcc8b9065949ff4683341a4c2", // v0.0.76
 	"ad8659bb7559f437bd0bbd6d369e2f4ec21d8988848287085388d24380f6c509", // v0.0.77
 	"1874111d5e0f5a786f992372560bc506c2eae690ce49dd0a35e150f1a97c0abd", // v0.0.78
+	"bea6eb4ac4d755eacb42a8f9782a9d7b76a3d79094f3e7d9b6ae632764f70b0c", // v0.0.79
+	"a397186c44776d3f567ccc98fe5876bc5508e23a9211854157ffff303e301020", // v0.0.80
 }

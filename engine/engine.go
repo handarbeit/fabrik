@@ -57,6 +57,7 @@ type Config struct {
 	TrainTrialWindowDuration  time.Duration       // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
 	MaxCommentCyclesPerWindow int                 // Comment-processing circuit breaker: max non-advancing comment-processing invocations per issue before pausing (0 = default 10; #1089)
 	CommentCycleWindow        time.Duration       // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
+	MaxNoOpCommentCycles      int                 // Success-agnostic comment-processing circuit breaker: max consecutive no-progress comment-processing invocations per issue+stage before pausing, regardless of whether each invocation itself exited successfully. Deliberately higher than MaxReviewCycles's default — see effectiveMaxNoOpCommentCycles (0 = default 10; #1555, sibling of #1089/#1382)
 	KillGraceSigInt           time.Duration       // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm          time.Duration       // Grace window after SIGTERM before SIGKILL (default 10s)
 	DrainDeadline             time.Duration       // Bound on a clean stop's worker drain, covering both the kill escalation and the shutdown pause-write phase (default 30s; ADR-1393). <= 0 falls back to the default in drainDeadline() — unlike kill_grace, a clean stop has no "0 = wait forever" mode.
@@ -90,6 +91,16 @@ type cloneCall struct {
 	done chan struct{} // closed when clone completes (success or failure)
 	dir  string        // bareDir on success; empty on failure
 	err  error         // clone error on failure; nil on success
+	// ownerKey identifies the item (issueKey format, "owner/repo#N") that owned
+	// a *failed* clone attempt. Set only on failure, before done is closed, so
+	// it's safely visible to waiters via the channel-close happens-before edge.
+	// It is the identity half of the retry-boundary gate (ADR-1543): a failed
+	// entry is only ever cleared by a caller whose own issueKey matches
+	// ownerKey and whose own (already-fetched) Labels no longer carry
+	// fabrik:paused — i.e. the specific item that owned the failure, redispatched
+	// after an operator has cleared the pause. See ensureRepoReady and
+	// ensureSpawnTargetReady.
+	ownerKey string
 }
 
 type Engine struct {
@@ -114,6 +125,19 @@ type Engine struct {
 	idleCount                int                      // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart                time.Time                // when consecutive idle polls began; zero value = not idle
 	pollsUntilStalenessCheck int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
+	// backoffPrevMultiplier, backoffRateLimitLow, backoffRateLimitRatio,
+	// backoffLastRemaining, and backoffRestPaused are PollWithBackoff's
+	// persistent state (engine/poll.go) — promoted from doPollCycle closure
+	// locals to Engine fields (ADR-1592) so a test driving successive
+	// PollWithBackoff calls sees correctly-persisted backoff state, mirroring
+	// idleStart's own precedent. Unlike idleStart's zero-value ("not idle"),
+	// backoffPrevMultiplier and backoffRateLimitRatio have non-zero starting
+	// values that both New() and NewWithDeps() set explicitly.
+	backoffPrevMultiplier int
+	backoffRateLimitLow   bool
+	backoffRateLimitRatio float64
+	backoffLastRemaining  int
+	backoffRestPaused     bool
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
@@ -127,8 +151,12 @@ type Engine struct {
 	mergeTrainInFlight          sync.Map                      // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
 	mergeTrainEjectionsMu       sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts    map[string]int                // key: "owner/repo#N", ejection count per member
+	mergeTrainCloneSkipMu       sync.Mutex                    // guards mergeTrainCloneSkipCounts
+	mergeTrainCloneSkipCounts   map[string]int                // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor)
 	mergeTrainTrialsMu          sync.Mutex                    // guards mergeTrainTrials
 	mergeTrainTrials            map[string][]time.Time        // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
+	mergeTrainRunawayMu         sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533)
+	mergeTrainRunawayAlerted    map[string]int                // key: "owner/repo#N"; value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-repo by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
 	queuedReviewEjectsMu        sync.Mutex                    // guards queuedReviewEjects
 	queuedReviewEjects          map[string]map[int]int        // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208)
 	issueCtxs                   sync.Map                      // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
@@ -165,6 +193,15 @@ type Engine struct {
 	// test proving the guard exists would pass unmodified against pre-#1440 code too.
 	// Nil in production (zero cost).
 	trainRedBatchHook func()
+	// cloneAttemptHook, when non-nil, is called once per genuine clone owner
+	// attempt — right before ensureBareClone is invoked in both ensureRepoReady
+	// and ensureSpawnTargetReady — a test-only call-observation seam (ADR-1543,
+	// #1543 R5) mirroring trainRedBatchHook's pattern above. It gives tests a
+	// direct count of real clone attempts independent of AddComment counting,
+	// which isn't a valid duplicate-clone proxy for ensureSpawnTargetReady
+	// (every distinct parent legitimately posts its own comment by design).
+	// Nil in production (zero cost).
+	cloneAttemptHook func(nameWithOwner string)
 	// generatedFilesOverride overrides the package-level generatedFiles mapping when
 	// non-nil. Tests inject a synthetic path + fake regen command, since the throwaway
 	// repos built by setupTrainRepo have none of docs/llms-full.txt's real source files
@@ -187,6 +224,19 @@ type Engine struct {
 	// pre-seam behavior. Tests substitute it via SetClock to control
 	// itemstate.CooldownAt timing deterministically (ADR-1449).
 	clock Clock
+	// trainCIPollInterval overrides pollTrainCI/pollForMergeable's hardcoded
+	// 30s retry interval when non-zero. Both functions poll real GitHub state
+	// (check runs, mergeable fields) on a real-wall-clock ticker unrelated to
+	// the Clock seam above — trial-branch CI genuinely takes real time to run
+	// in production, so there is nothing to advance a virtual clock past.
+	// tests/sim's merge-train scenarios (#1452) still need this real sleep to
+	// be short: a single red-batch bisection matrix drives a dozen-plus
+	// trials, and at 30s/retry that either blows past the sim harness's
+	// worker-quiescence bound or makes the suite take minutes. Zero (the
+	// production default — New never sets this) preserves the exact 30s
+	// literal. See SetTrainCIPollIntervalForTest and adrs/1452-mergetrain-sim-
+	// harness-seams.md.
+	trainCIPollInterval time.Duration
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -264,23 +314,27 @@ func New(cfg Config) (*Engine, error) {
 	// (see releaseUpgradeToken's doc comment).
 	releaseClient := gh.NewClient(releaseUpgradeToken(cfg))
 	eng := &Engine{
-		cfg:                      cfg,
-		client:                   ghClient,
-		releaseClient:            releaseClient,
-		hostClient:               ghClient,
-		claude:                   &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktreeManagers:         make(map[string]*WorktreeManager),
-		fabrikDir:                fabrikDir,
-		store:                    sharedStore,
-		mayNeedWork:              make(map[string]bool),
-		seededRepos:              make(map[string]bool),
-		checkedAutoMergeRepos:    make(map[string]bool),
-		repoAccess:               make(map[string]gh.RepoAccess),
-		sem:                      make(chan struct{}, cfg.MaxConcurrent),
-		mergeTrainEjectionCounts: make(map[string]int),
-		mergeTrainTrials:         make(map[string][]time.Time),
-		queuedReviewEjects:       make(map[string]map[int]int),
-		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
+		cfg:                       cfg,
+		client:                    ghClient,
+		releaseClient:             releaseClient,
+		hostClient:                ghClient,
+		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
+		worktreeManagers:          make(map[string]*WorktreeManager),
+		fabrikDir:                 fabrikDir,
+		store:                     sharedStore,
+		mayNeedWork:               make(map[string]bool),
+		seededRepos:               make(map[string]bool),
+		checkedAutoMergeRepos:     make(map[string]bool),
+		repoAccess:                make(map[string]gh.RepoAccess),
+		sem:                       make(chan struct{}, cfg.MaxConcurrent),
+		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainCloneSkipCounts: make(map[string]int),
+		mergeTrainTrials:          make(map[string][]time.Time),
+		mergeTrainRunawayAlerted:  make(map[string]int),
+		queuedReviewEjects:        make(map[string]map[int]int),
+		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
+		backoffPrevMultiplier:     1,
+		backoffRateLimitRatio:     1.0,
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -325,21 +379,25 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	}
 	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
-		cfg:                      cfg,
-		client:                   client,
-		releaseClient:            client,
-		claude:                   claude,
-		worktreeManagers:         wms,
-		store:                    itemstate.NewStore(nil),
-		mayNeedWork:              make(map[string]bool),
-		seededRepos:              make(map[string]bool),
-		checkedAutoMergeRepos:    make(map[string]bool),
-		repoAccess:               make(map[string]gh.RepoAccess),
-		sem:                      make(chan struct{}, maxConcurrent),
-		mergeTrainEjectionCounts: make(map[string]int),
-		mergeTrainTrials:         make(map[string][]time.Time),
-		queuedReviewEjects:       make(map[string]map[int]int),
-		pauseIssueMu:             make(map[string]*pauseIssueMuEntry),
+		cfg:                       cfg,
+		client:                    client,
+		releaseClient:             client,
+		claude:                    claude,
+		worktreeManagers:          wms,
+		store:                     itemstate.NewStore(nil),
+		mayNeedWork:               make(map[string]bool),
+		seededRepos:               make(map[string]bool),
+		checkedAutoMergeRepos:     make(map[string]bool),
+		repoAccess:                make(map[string]gh.RepoAccess),
+		sem:                       make(chan struct{}, maxConcurrent),
+		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainCloneSkipCounts: make(map[string]int),
+		mergeTrainTrials:          make(map[string][]time.Time),
+		mergeTrainRunawayAlerted:  make(map[string]int),
+		queuedReviewEjects:        make(map[string]map[int]int),
+		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
+		backoffPrevMultiplier:     1,
+		backoffRateLimitRatio:     1.0,
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
@@ -355,6 +413,64 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	// CacheImpl as the unified source of truth.
 	eng.readClient = boardcache.NewGitHubAdapter(client)
 	return eng
+}
+
+// RegisterWorktreeManagerForTest registers wm as the WorktreeManager for
+// nameWithOwner ("owner/repo") — bypassing the normal ensureRepoReady/
+// ensureBareClone dynamic-clone path production always uses (New's engine
+// starts with an empty worktreeManagers map and bare-clones every repo it
+// touches, including its own, from e.fabrikDir on first access).
+//
+// Test seam only (ADR-1449, tests/sim). NewWithDeps's own worktrees
+// parameter can register at most one repo, keyed off cfg.Owner+"/"+cfg.Repo
+// — sufficient for a single-repo test Env, where that key equals the one
+// real repo being tested. A multi-repo test Env (cfg.Repo == "", mirroring
+// production's own multi-repo instance topology — see
+// spawnTargetServedByThisInstance) has no such single key: NewWithDeps would
+// register the one supplied wm under the nonsensical "owner/" key, matching
+// no real repo, and every repo the engine actually touches would fall
+// through to the dynamic ensureBareClone path — which fails outside a
+// network-and-real-GitHub-connected environment, exactly the cost
+// tests/sim exists to avoid. This lets a multi-repo Env register one
+// pre-built, locally-backed WorktreeManager per repo directly instead.
+func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *WorktreeManager) {
+	wm.logfFn = e.logf
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.worktreeManagers[nameWithOwner] = wm
+}
+
+// SetTrainCIPollIntervalForTest overrides pollTrainCI/pollForMergeable's
+// hardcoded 30s retry interval — see the trainCIPollInterval field's doc
+// comment for why this exists and why it's a duration override rather than a
+// Clock-seam concern. Test seam only (ADR-1449, #1452, tests/sim); production
+// never calls this, so trainCIPollIntervalOrDefault always returns the
+// original 30s literal outside a test.
+func (e *Engine) SetTrainCIPollIntervalForTest(d time.Duration) {
+	e.trainCIPollInterval = d
+}
+
+// trainCIPollIntervalOrDefault returns the test-overridden CI poll interval
+// when set, otherwise the production default of 30 seconds.
+func (e *Engine) trainCIPollIntervalOrDefault() time.Duration {
+	if e.trainCIPollInterval > 0 {
+		return e.trainCIPollInterval
+	}
+	return 30 * time.Second
+}
+
+// SetGeneratedFilesForTest overrides the declared generated-file mapping
+// (generatedFiles) with a single synthetic entry: path regenerated by
+// running command. Exposes the unexported generatedFileSpec machinery
+// (engine/generated_files.go) to an external test package — needed because
+// R4's mixed-generated-file conflict scenario (#1452) requires a generated
+// path whose regeneration command is cheap and self-contained, unlike
+// production's real docs/llms-full.txt regen script, which depends on
+// source files no throwaway sim repo has. Test seam only (ADR-1449, #1452,
+// tests/sim); production never calls this, so generatedFileSet always
+// returns the real generatedFiles mapping outside a test.
+func (e *Engine) SetGeneratedFilesForTest(path string, command []string) {
+	e.generatedFilesOverride = []generatedFileSpec{{Path: path, Command: command}}
 }
 
 // defaultRepo returns "owner/repo" from cfg, or "" if both are empty.
@@ -524,77 +640,107 @@ var ErrSkipItem = errors.New("skip item")
 //
 // Concurrent callers for the same repo are serialized via cloneInFlight: the first
 // caller performs the clone while others wait. On failure, only the first caller
-// posts the comment/labels; waiters silently return ErrSkipItem.
+// posts the comment/labels; waiters silently return ErrSkipItem — unless a waiter
+// is the specific item that owned the failed attempt and its own (already-fetched)
+// Labels show fabrik:paused has since been removed, in which case it clears the
+// failed entry and becomes the new owner (see ADR-1543's identity-gated retry
+// boundary, and the cloneCall.ownerKey doc comment).
 func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if owner == "" || repo == "" {
 		return nil // cannot determine repo — let processItem handle it
 	}
 	nameWithOwner := owner + "/" + repo
+	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	callerKey := issueKey(item, e.defaultRepo())
 
-	// Fast path: already registered (common case after first clone).
-	e.mu.Lock()
-	_, registered := e.worktreeManagers[nameWithOwner]
-	e.mu.Unlock()
-	if registered {
-		return nil
-	}
+	for {
+		// Fast path: already registered (common case after first clone).
+		e.mu.Lock()
+		_, registered := e.worktreeManagers[nameWithOwner]
+		e.mu.Unlock()
+		if registered {
+			return nil
+		}
 
-	// Singleflight-style coordination: elect one goroutine to perform the clone.
-	call := &cloneCall{done: make(chan struct{})}
-	actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
-	if loaded {
-		// Another goroutine is already cloning (or has just cloned) this repo.
-		existing := actual.(*cloneCall)
-		<-existing.done
-		if existing.err != nil {
-			e.logf(item.Number, "warn", "bare clone of %s already failed for another worker — skipping\n", nameWithOwner)
+		// Singleflight-style coordination: elect one goroutine to perform the clone.
+		call := &cloneCall{done: make(chan struct{})}
+		actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
+		if loaded {
+			// Another goroutine is already cloning (or has just cloned) this repo.
+			existing := actual.(*cloneCall)
+			select {
+			case <-existing.done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if existing.err != nil {
+				// Retry-boundary check: only the item that owned the failed attempt,
+				// once its own pause label is confirmed gone, may retry. Any other
+				// caller — including same-burst siblings of the original owner —
+				// silently skips, exactly as before.
+				if existing.ownerKey == callerKey && !hasLabel(item.Labels, "fabrik:paused") {
+					// Clear the failed entry so this retry becomes a fresh owner.
+					// CompareAndDelete may fail if another goroutine already
+					// cleared/replaced it (e.g. a concurrent call for the same
+					// item) — either way, re-loop and re-evaluate.
+					e.cloneInFlight.CompareAndDelete(nameWithOwner, actual)
+					continue
+				}
+				e.logf(item.Number, "warn", "bare clone of %s already failed for another worker — skipping\n", nameWithOwner)
+				return ErrSkipItem
+			}
+			// Clone succeeded; register the WM using the winner's bareDir.
+			e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+			return nil
+		}
+
+		// This goroutine is the owner: perform the clone.
+		if e.cloneAttemptHook != nil {
+			e.cloneAttemptHook(nameWithOwner)
+		}
+		bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		call.dir = bareDir
+		call.err = err
+
+		if err != nil {
+			// Record who owned this failure before releasing waiters, so the
+			// retry-boundary check above can identify a legitimate retry later.
+			call.ownerKey = callerKey
+			// Signal waiters before cleanup so they can read call.err/ownerKey.
+			close(call.done)
+			// Deliberately NOT deleted here (ADR-1543): deleting before the failure
+			// is fully handled let a same-burst sibling become a second owner and
+			// duplicate the clone + comment (#1543). The entry now persists until a
+			// caller matching ownerKey retries with fabrik:paused confirmed absent.
+
+			msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
+			e.pauseIssue(item, msg, pauseOpts{
+				awaitingInput: true,
+				reactRocket:   true,
+			})
+			// Append a history entry so the TUI records the failure.
+			hist := tui.LoadHistory()
+			hist = append(hist, tui.HistoryEntry{
+				IssueNumber: item.Number,
+				Repo:        nameWithOwner,
+				Title:       item.Title,
+				StageName:   "clone",
+				Success:     false,
+				CompletedAt: time.Now(),
+			})
+			tui.SaveHistory(hist)
+			e.logf(item.Number, "error", "cannot clone repo %s: %v — pausing issue\n", nameWithOwner, err)
 			return ErrSkipItem
 		}
-		// Clone succeeded; register the WM using the winner's bareDir.
-		worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+
+		// Success: register the WM, then signal waiters.
+		// Leave the cloneInFlight entry in place (closed channel, nil err); future callers
+		// will exit at the fast-path registered check before reaching cloneInFlight.
+		e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
+		close(call.done)
 		return nil
 	}
-
-	// This goroutine is the owner: perform the clone.
-	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
-	call.dir = bareDir
-	call.err = err
-
-	if err != nil {
-		// Signal waiters before cleanup so they can read call.err.
-		close(call.done)
-		// Delete the entry so future poll cycles (after user removes fabrik:paused) can retry.
-		e.cloneInFlight.Delete(nameWithOwner)
-
-		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
-		e.pauseIssue(item, msg, pauseOpts{
-			awaitingInput: true,
-			reactRocket:   true,
-		})
-		// Append a history entry so the TUI records the failure.
-		hist := tui.LoadHistory()
-		hist = append(hist, tui.HistoryEntry{
-			IssueNumber: item.Number,
-			Repo:        nameWithOwner,
-			Title:       item.Title,
-			StageName:   "clone",
-			Success:     false,
-			CompletedAt: time.Now(),
-		})
-		tui.SaveHistory(hist)
-		e.logf(item.Number, "error", "cannot clone repo %s: %v — pausing issue\n", nameWithOwner, err)
-		return ErrSkipItem
-	}
-
-	// Success: register the WM, then signal waiters.
-	// Leave the cloneInFlight entry in place (closed channel, nil err); future callers
-	// will exit at the fast-path registered check before reaching cloneInFlight.
-	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
-	close(call.done)
-	return nil
 }
 
 // ensureSpawnTargetReady guarantees that a WorktreeManager exists for
@@ -611,6 +757,13 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 // post their own error comment and labels on parentItem so no parent issue
 // silently loses its failure notification when concurrent workers race on the
 // same new target repo.
+//
+// As with ensureRepoReady, a failed cloneInFlight entry is only ever cleared
+// by a caller whose own parentItem matches the entry's owner and whose own
+// (already-fetched) Labels no longer carry fabrik:paused — the same
+// identity-gated retry boundary (ADR-1543), closing the same-burst
+// second-owner window that would otherwise run a second concurrent
+// `git clone --bare` into the same destination directory.
 func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, targetRepo string, parentItem gh.ProjectItem) error {
 	parentOwner, parentRepo := itemOwnerRepo(parentItem, e.defaultRepo())
 	if parentOwner == "" || parentRepo == "" {
@@ -618,55 +771,75 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 	}
 	nameWithOwner := targetOwner + "/" + targetRepo
 	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	callerKey := issueKey(parentItem, e.defaultRepo())
 
-	// Fast path: already registered.
-	e.mu.Lock()
-	_, registered := e.worktreeManagers[nameWithOwner]
-	e.mu.Unlock()
-	if registered {
-		return nil
-	}
-
-	// Singleflight coordination: elect one goroutine to perform the clone.
-	call := &cloneCall{done: make(chan struct{})}
-	actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
-	if loaded {
-		// Another goroutine is already cloning (or has just cloned) this repo.
-		// Each parent item is independent here, so every waiter that observes a
-		// clone failure must post its own error comment — unlike ensureRepoReady
-		// waiters, which silently skip because the same item owns all call sites.
-		existing := actual.(*cloneCall)
-		select {
-		case <-existing.done:
-		case <-ctx.Done():
-			return ctx.Err()
+	for {
+		// Fast path: already registered.
+		e.mu.Lock()
+		_, registered := e.worktreeManagers[nameWithOwner]
+		e.mu.Unlock()
+		if registered {
+			return nil
 		}
-		if existing.err != nil {
-			e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, existing.err)
-			return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s failed: %w", targetOwner, targetRepo, existing.err)
+
+		// Singleflight coordination: elect one goroutine to perform the clone.
+		call := &cloneCall{done: make(chan struct{})}
+		actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
+		if loaded {
+			// Another goroutine is already cloning (or has just cloned) this repo.
+			// Each parent item is independent here, so every waiter that observes a
+			// clone failure must post its own error comment — unlike ensureRepoReady
+			// waiters, which silently skip because the same item owns all call sites.
+			existing := actual.(*cloneCall)
+			select {
+			case <-existing.done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if existing.err != nil {
+				// Retry-boundary check: only the parent that owned the failed
+				// attempt, once its own pause label is confirmed gone, may retry.
+				if existing.ownerKey == callerKey && !hasLabel(parentItem.Labels, "fabrik:paused") {
+					// Clear the failed entry so this retry becomes a fresh owner.
+					// CompareAndDelete may fail if another goroutine already
+					// cleared/replaced it — either way, re-loop and re-evaluate.
+					e.cloneInFlight.CompareAndDelete(nameWithOwner, actual)
+					continue
+				}
+				e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, existing.err)
+				return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s failed: %w", targetOwner, targetRepo, existing.err)
+			}
+			e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+			return nil
 		}
-		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
-		return nil
-	}
 
-	// This goroutine is the owner: perform the clone.
-	bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
-	call.dir = bareDir
-	call.err = err
+		// This goroutine is the owner: perform the clone.
+		if e.cloneAttemptHook != nil {
+			e.cloneAttemptHook(nameWithOwner)
+		}
+		bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		call.dir = bareDir
+		call.err = err
 
-	if err != nil {
-		// Signal waiters before cleanup so they can read call.err.
+		if err != nil {
+			// Record who owned this failure before releasing waiters, so the
+			// retry-boundary check above can identify a legitimate retry later.
+			call.ownerKey = callerKey
+			// Signal waiters before cleanup so they can read call.err/ownerKey.
+			close(call.done)
+			// Deliberately NOT deleted here (ADR-1543): see ensureRepoReady's
+			// identical comment. A second owner here would run a second concurrent
+			// `git clone --bare` into the same directory — the exact corruption
+			// race ADR-022 exists to prevent, so this matters more here, not less.
+			e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, err)
+			return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s: %w", targetOwner, targetRepo, err)
+		}
+
+		// Success: register WM, then signal waiters.
+		e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
 		close(call.done)
-		// Delete so future retries (after user removes fabrik:paused) can re-attempt.
-		e.cloneInFlight.Delete(nameWithOwner)
-		e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, err)
-		return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s: %w", targetOwner, targetRepo, err)
+		return nil
 	}
-
-	// Success: register WM, then signal waiters.
-	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
-	close(call.done)
-	return nil
 }
 
 // postSpawnCloneError posts an error comment and adds fabrik:paused +

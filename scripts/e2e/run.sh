@@ -13,6 +13,36 @@
 # --clean (if given, must be the first argument) runs scripts/e2e/reset.sh for a
 # clean-slate bed before the run. Anything else is passed to `go test`.
 #
+# Pre-gate (R1, #1454): before ANY of the above — before bed preflight, before
+# the build, before a single live GitHub/Claude call — this script runs the
+# free, fast layers first (scripts/sim/run.sh --all, then the github/
+# wire-contract tests) and aborts with a distinct exit code if either fails.
+# Spending GraphQL quota and Claude tokens to discover a bug the sim or the
+# wire-contract tests already caught for $0 is exactly the waste this ordering
+# exists to remove. See run_pregate below for the full rationale.
+#
+#   E2E_SKIP_PREGATE=1     skip the pre-gate entirely (iteration-only escape
+#                           hatch, mirroring E2E_SKIP_PREP — scripts/cut-
+#                           release.sh never sets this; the release path
+#                           always pays the pre-gate cost)
+#
+# Bed preflight (on by default — see preflight_bed below for the full rationale):
+#   Before anything runs, the bed checkout is fast-forwarded to the ref under
+#   test, its binary is rebuilt IN PLACE, stage-config drift is reported, and the
+#   engine is restarted onto that binary — with the run aborting if the binary or
+#   the running engine does not actually carry that ref. Nothing here used to be
+#   automated, and a bed 194 commits behind main produced runs indistinguishable
+#   from real ones.
+#
+#   Ordering is load-bearing: preflight leaves the bed STOPPED, --clean's
+#   reset.sh runs against the stopped bed (it refuses a live one), and only then
+#   is the engine started.
+#
+#   E2E_BED_REF=<ref>      ref to test (default: origin/main)
+#   E2E_SKIP_PREP=1        skip preflight entirely (bed prepared by hand)
+#   E2E_BED_NO_BUILD=1     verify and report only; never stop/build/start, and
+#                          fail loud if the bed is not already on the ref
+#
 # Two-mode validation gate (E2E_TRAIN_MODE, default: both "off" and "on"):
 #   FABRIK_MERGE_TRAIN is read at Fabrik startup, so exercising both landing
 #   paths requires a bed restart between them — never an in-run flip while
@@ -185,13 +215,281 @@ fi
 # "GraphQL budget exhaustion detection" in the header comment above.
 readonly BUDGET_EXHAUSTED_EXIT=3
 
-# Optional clean-slate reset before the run (must be the first argument).
-if [ "${1:-}" = "--clean" ]; then
-  shift
-  echo "== --clean: resetting the test bed via scripts/e2e/reset.sh =="
-  "$REPO_ROOT/scripts/e2e/reset.sh"
-  echo "== reset complete; starting run =="
-fi
+# Distinct exit code for a preflight failure — the suite never started, so a
+# non-zero exit here must not be read as "the engine is broken."
+readonly PREFLIGHT_FAILED_EXIT=4
+
+# Distinct exit code for a pre-gate failure (R1, #1454) — the sim suite
+# and/or the github/ wire-contract tests failed before any bed preflight,
+# build, or live GitHub/Claude call was made. Distinct from PREFLIGHT_FAILED_EXIT
+# (4, a bed-state problem) and BUDGET_EXHAUSTED_EXIT (3, a live-run problem):
+# this one means the free layers themselves caught something, so a caller
+# (e.g. cut-release.sh) can tell "cheap layer caught it, saved you the live
+# run" apart from "live e2e itself failed" or "GraphQL budget exhausted."
+readonly PREGATE_FAILED_EXIT=5
+
+# ---------------------------------------------------------------------------
+# Pre-gate (R1, #1454): refuse to spend live budget until the free, fast
+# layers pass.
+#
+# scripts/sim/run.sh --all (the sim e2e scenarios plus simgh's own model
+# tests) and the github/ wire-contract tests are BOTH already unconditional
+# inside `go test -race ./...` and already run on every PR (R7 — confirmed,
+# not built; see tests/sim/README.md's "Runtime and the `sim` tag decision"
+# and github/wire_contract_test.go). Re-running them here, scoped, is
+# deliberate rather than redundant: this script can be (and regularly is)
+# invoked standalone — E2E_SKIP_PREP=1, a manual `scripts/e2e/run.sh` — and
+# must never assume unit tests were "just run" by whoever invoked it.
+# Running the scoped subsets (./tests/sim/... and ./github/...) rather than
+# the full `go test -race ./...` keeps the pre-gate's own cost close to just
+# these two layers and matches the issue's own three-way phrasing (unit ->
+# sim e2e -> wire-contract tests as distinct layers) instead of blurring it
+# back into one broad "run everything" step.
+#
+# Ordering is load-bearing, exactly like preflight_bed below: this function
+# is called FIRST in the dispatch guard, strictly before prepare_bed_and_reset
+# — so a pre-gate failure is proven, by construction, to have made no bed
+# preflight, no build, and no live GitHub/Claude call. That ordering — not a
+# runtime check inside the suite itself — is what R1's AC1 demonstrates.
+# ---------------------------------------------------------------------------
+run_pregate() {
+  if [ -n "${E2E_SKIP_PREGATE:-}" ]; then
+    echo "== pre-gate skipped (E2E_SKIP_PREGATE set) — sim/wire-contract layers assumed already green =="
+    return 0
+  fi
+
+  echo "== pre-gate: sim suite + github wire-contract tests (R1, #1454) =="
+  if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
+    echo "pre-gate: sim suite failed — aborting before touching the live bed or making any live call." >&2
+    exit "$PREGATE_FAILED_EXIT"
+  fi
+  if ! ( cd "$REPO_ROOT" && go test -race -count=1 ./github/... ); then
+    echo "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call." >&2
+    exit "$PREGATE_FAILED_EXIT"
+  fi
+  echo "== pre-gate passed =="
+}
+
+# ---------------------------------------------------------------------------
+# Bed preflight: guarantee the bed is running the engine we mean to test.
+#
+# The bed (~/dev/fabrik-test) is a full fabrik source checkout with its own
+# built binary, and NOTHING in this suite rebuilds it. That is a silent
+# correctness hole: a stale bed produces a run that looks exactly like a real
+# one — same scenarios, same duration, same green/red — while testing an
+# engine nobody asked about. Found the hard way: a bed sat 194 commits behind
+# main, and a "run the suite against main" would have measured the engine as
+# of #1531 and reported it as current.
+#
+# The steps below were previously tribal knowledge rediscovered by hand every
+# time (README §"Test bed prerequisites" + item 17, the build-in-place rule,
+# the no---auto-upgrade rule). They are encoded here so the default path is
+# the correct one.
+#
+# Knobs:
+#   E2E_SKIP_PREP=1   skip entirely (bed already prepared by hand)
+#   E2E_BED_REF=<ref> ref to test (default: origin/main)
+#   E2E_BED_NO_BUILD=1  verify the bed's state but never rebuild/restart —
+#                     fails loud on mismatch instead of fixing it
+# ---------------------------------------------------------------------------
+preflight_bed() {
+  local ref="${E2E_BED_REF:-origin/main}"
+
+  echo "== preflight: bed at $TEST_BED, target ref $ref =="
+
+  if [ ! -d "$TEST_BED/.git" ]; then
+    echo "preflight: $TEST_BED is not a git checkout — see tests/e2e/README.md" >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+
+  # Never clobber uncommitted engine work in the bed. Untracked files (logs,
+  # .env backups) are normal there and deliberately ignored; modified TRACKED
+  # files usually mean someone is mid-experiment (e.g. the neutralize/rebuild
+  # cycle README §AC3 describes) and must not be silently reset.
+  local dirty
+  dirty="$(cd "$TEST_BED" && git status --porcelain --untracked-files=no)"
+  if [ -n "$dirty" ]; then
+    echo "preflight: $TEST_BED has modified tracked files — refusing to update it." >&2
+    echo "$dirty" >&2
+    echo "Commit, stash, or revert them, or re-run with E2E_SKIP_PREP=1." >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+
+  # Wrapped, not bare: under `set -e` a bare fetch aborts the script with git's
+  # own exit code (128) and git's own message, so the run looks like it died of
+  # nothing in particular. The most common cause is an SSH key that is not
+  # loaded or no longer accepted, which reads as "Permission denied
+  # (publickey)" with no indication it came from the bed preflight.
+  if ! ( cd "$TEST_BED" && git fetch origin --quiet ); then
+    echo "preflight: git fetch failed in $TEST_BED — cannot resolve $ref." >&2
+    echo "  Most likely the SSH key for the remote is not loaded: try 'ssh-add' (see 'ssh-add -l')." >&2
+    echo "  The bed is untouched; nothing was stopped, rebuilt, or reset." >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+
+  local want
+  want="$(cd "$TEST_BED" && git rev-parse "$ref")"
+  local want_short="${want:0:7}"
+  BED_REF_SHORT="$want_short"
+  local have
+  have="$(cd "$TEST_BED" && git rev-parse HEAD)"
+
+  if [ "$have" != "$want" ]; then
+    # Report both directions: the target is usually ahead (a stale bed), but it
+    # can equally be an ancestor (deliberately testing an older ref), and
+    # "0 commits behind" alone reads as a contradiction of the mismatch above.
+    local counts ahead behind divergence
+    counts="$(cd "$TEST_BED" && git rev-list --left-right --count "HEAD...$want" 2>/dev/null || echo "? ?")"
+    ahead="$(printf '%s' "$counts" | awk '{print $1}')"
+    behind="$(printf '%s' "$counts" | awk '{print $2}')"
+    divergence="$behind commit(s) behind, $ahead ahead"
+
+    if [ -n "${E2E_BED_NO_BUILD:-}" ]; then
+      echo "preflight: bed is at ${have:0:7}, want $want_short ($divergence) and E2E_BED_NO_BUILD is set" >&2
+      exit "$PREFLIGHT_FAILED_EXIT"
+    fi
+    echo "   bed checkout ${have:0:7} is $divergence vs $ref — updating to $want_short"
+    ( cd "$TEST_BED" && git checkout --quiet --detach "$want" )
+  else
+    echo "   bed checkout already at $want_short"
+  fi
+
+  # Build IN PLACE. A binary built elsewhere and copied in can be SIGKILL'd on
+  # Apple Silicon (README item 17), so this is not merely a convenience.
+  if [ -z "${E2E_BED_NO_BUILD:-}" ]; then
+    echo "   building bed binary in place"
+    ( cd "$TEST_BED" && go build -o fabrik . )
+  fi
+
+  # Fail loud if the binary does not actually carry the ref under test. This is
+  # the check whose absence made the 194-commit run possible.
+  local ver
+  ver="$( cd "$TEST_BED" && ./fabrik --version 2>&1 | head -1 )"
+  if ! printf '%s' "$ver" | grep -q "$want_short"; then
+    echo "preflight: bed binary reports '$ver' but the ref under test is $want_short" >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+  echo "   bed binary: $ver"
+
+  # Stage-config drift is reported, never auto-applied: .fabrik/stages/ is bed
+  # configuration, and silently rewriting it could change what the suite means.
+  local drift
+  drift="$( cd "$TEST_BED" && ./fabrik refresh-stages 2>&1 || true )"
+  if [ -n "$drift" ]; then
+    echo "   stage-config drift detected (not applied — run 'fabrik refresh-stages --apply' in the bed if intended):"
+    printf '%s\n' "$drift" | sed 's/^/     /'
+  else
+    echo "   stage configs current"
+  fi
+
+  # Verify-only mode inspects and reports; it never stops, builds, or starts
+  # anything, so a bed someone else is driving stays untouched.
+  if [ -n "${E2E_BED_NO_BUILD:-}" ]; then
+    echo "== preflight (verify-only) complete — bed left as-is =="
+    return 0
+  fi
+
+  # Leave the bed STOPPED on exit. reset.sh refuses to run against a live
+  # instance (see its header and the --worktrees guard), and a running engine
+  # would still be holding the pre-build binary anyway — so the instance is
+  # started by preflight_bed_start() only after any --clean reset has run.
+  stop_bed_instance
+
+  echo "== preflight (build) complete — bed stopped, ready for reset =="
+}
+
+# stop_bed_instance terminates a running bed engine and waits for it to exit.
+# SIGTERM, not SIGKILL: the engine's clean-stop path (#1393) durably pauses
+# in-flight issues rather than abandoning them mid-stage.
+stop_bed_instance() {
+  local lock="$TEST_BED/.fabrik/fabrik.lock"
+  [ -f "$lock" ] || return 0
+
+  local pid
+  pid="$(cat "$lock" 2>/dev/null || echo "")"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  echo "   stopping running bed instance (pid $pid)"
+  kill -TERM "$pid" 2>/dev/null || true
+  local i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 1; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "preflight: bed instance $pid did not exit within 60s" >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+}
+
+# preflight_bed_start brings the bed engine up on the freshly built binary and
+# refuses to continue unless its own startup banner names the ref under test.
+# Runs after any --clean reset, since reset.sh requires a stopped instance.
+preflight_bed_start() {
+  local want_short="$1"
+
+  # No --auto-upgrade: it would replace this freshly built binary with a
+  # release mid-suite (README item 17).
+  echo "== preflight: starting bed instance (-notui, no --auto-upgrade) =="
+  ( cd "$TEST_BED" && nohup ./fabrik -notui > "$TEST_BED/bed-run.log" 2>&1 & )
+
+  # The startup banner goes to the engine's STDOUT (captured in bed-run.log),
+  # while ENGINE_LOG holds the structured per-item log — which never contains
+  # it. Check both rather than picking one: which stream carries the banner is
+  # exactly the kind of detail that drifts, and getting it wrong here fails the
+  # run for a bed that is in fact perfectly healthy.
+  local bed_stdout="$TEST_BED/bed-run.log"
+  local i=0
+  while [ "$i" -lt 90 ]; do
+    if grep -qh 'Fabrik starting' "$bed_stdout" "$ENGINE_LOG" 2>/dev/null; then break; fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  local banner
+  banner="$(grep -hm1 'Fabrik starting' "$bed_stdout" "$ENGINE_LOG" 2>/dev/null | head -1 || echo "")"
+  if [ -z "$banner" ]; then
+    echo "preflight: bed did not report startup within 90s — see $bed_stdout and $ENGINE_LOG" >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+  if ! printf '%s' "$banner" | grep -q "$want_short"; then
+    echo "preflight: running bed reports '$banner' but the ref under test is $want_short" >&2
+    exit "$PREFLIGHT_FAILED_EXIT"
+  fi
+  echo "   bed running: $banner"
+}
+
+# BED_REF_SHORT is set by preflight_bed and consumed by preflight_bed_start.
+# Declared here (a bare assignment, safe on source) rather than inside the
+# dispatch guard so both functions can see it under `set -u`.
+BED_REF_SHORT=""
+
+# prepare_bed_and_reset runs the side-effecting pre-run sequence. It is invoked
+# ONLY from the dispatch guard at the bottom of this file, never at top level:
+# everything above that guard must be safe to execute on `source`, because
+# scripts/e2e/backoff_detection_test.sh sources this file for its function
+# definitions and runs in CI, where no bed exists at all. An earlier revision
+# called preflight at top level and broke that test (exit 4,
+# "not a git checkout") — the preflight was right, its placement wasn't.
+#
+# Ordering here is load-bearing: preflight leaves the bed stopped, reset.sh
+# runs against the stopped bed (it refuses a live one), then the engine starts.
+prepare_bed_and_reset() {
+  if [ -n "${E2E_SKIP_PREP:-}" ]; then
+    echo "== preflight skipped (E2E_SKIP_PREP set) — bed assumed prepared =="
+  else
+    preflight_bed
+  fi
+
+  # Optional clean-slate reset before the run (must be the first argument).
+  if [ "${1:-}" = "--clean" ]; then
+    echo "== --clean: resetting the test bed via scripts/e2e/reset.sh =="
+    "$REPO_ROOT/scripts/e2e/reset.sh"
+    echo "== reset complete =="
+  fi
+
+  if [ -z "${E2E_SKIP_PREP:-}" ] && [ -z "${E2E_BED_NO_BUILD:-}" ]; then
+    preflight_bed_start "$BED_REF_SHORT"
+  fi
+}
 
 # Default timeout — generous because scenarios can wait on Claude for
 # minutes, and a full two-mode gate run under contention needs headroom above
@@ -465,24 +763,89 @@ switch_and_run() {
   fi
 }
 
-# Guarded so scripts/e2e/backoff_detection_test.sh can `source` this file to
-# reach detect_rate_limit_backoff (and the other helper functions above)
-# without triggering an actual gate run. Everything above this guard (repo
-# root resolution, TEST_BED/ENGINE_LOG/BED_TOKEN setup, function
+# Guarded so scripts/e2e/backoff_detection_test.sh and
+# scripts/e2e/pregate_test.sh can `source` this file to reach
+# detect_rate_limit_backoff / run_pregate (and the other helper functions
+# above) without triggering an actual gate run. Everything above this guard
+# (repo root resolution, TEST_BED/ENGINE_LOG/BED_TOKEN setup, function
 # definitions) is safe to execute on source — read-only or pure function
 # definitions, no gate invocation. When executed directly (./run.sh or
 # `bash run.sh`), BASH_SOURCE[0] equals $0, so this still dispatches exactly
 # as before this guard existed.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  # Pre-gate FIRST (R1, #1454) — strictly before any bed preflight, build,
+  # restart, or live GitHub/Claude call. See run_pregate's own comment for
+  # why this ordering is the mechanism, not a runtime check.
+  run_pregate
+
+  # Bed preflight + optional --clean reset. Inside the guard so sourcing this
+  # file (backoff_detection_test.sh / pregate_test.sh) never touches a bed —
+  # or, in CI, aborts on the absence of one.
+  prepare_bed_and_reset "$@"
+  # --clean is consumed here, not inside the function: `shift` there would only
+  # affect the function's own positional parameters, leaving --clean in "$@"
+  # to be passed on to `go test` as an unknown flag.
+  if [ "${1:-}" = "--clean" ]; then
+    shift
+  fi
+
+  # Scenarios that deliberately exhaust a repo's merge-train state, and so
+  # cannot share that repo with anything else under "on".
+  #
+  # TestMergeTrainRunawayGuardPausesBatch queues poison members on RepoBeta
+  # until the runaway guard fires — that IS the scenario. The guard's state is
+  # keyed per repo with a 1h window (ADR-059 D8), so for the next hour every
+  # Queued member on Beta is paused before dispatch. TestCrossRepoSpawn puts
+  # its child on Beta, so under "on" it inherits that pause, never closes, and
+  # its parent blocks until the scenario times out ~52 minutes later.
+  #
+  # Measured 2026-08-13 across two independent runs (-parallel 4 and 2):
+  # guard fired 16:47:46, cross-repo child queued 17:41:44 and was paused by
+  # the already-tripped guard. The engine is correct at every step; the bed
+  # scheduling is what's wrong.
+  #
+  # Only Alpha and Beta exist, and neither is free: Alpha hosts the other four
+  # train scenarios (poisoning it would be strictly worse) and cross-repo
+  # spawn structurally needs two distinct repos, so it cannot vacate Beta.
+  # Temporal separation is therefore the available fix, not relocation — and a
+  # different project board would not help, since the guard is keyed by repo
+  # and one engine instance serves both.
+  #
+  # Running it last also lowers the peak concurrent Queued/awaiting-CI
+  # population, which is what drives the ADR-1270/ADR-1208 settle scans'
+  # GraphQL cost (#1527) — the same cost that invalidated both on-leg runs
+  # that day with a rate-limit backoff.
+  TRAIN_ISOLATED_RE='TestMergeTrainRunawayGuardPausesBatch'
+
+  # A caller-supplied -run means they are targeting specific scenarios; honour
+  # that exactly rather than forcing an isolated leg they did not ask for.
+  caller_has_run=0
+  for a in "$@"; do
+    case "$a" in -run | -run=* | --run | --run=*) caller_has_run=1 ;; esac
+  done
+
   if [ -n "${E2E_TRAIN_MODE:-}" ]; then
     # Single mode forced by the caller — one switch + one suite invocation.
     # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
     # E2E_PARALLEL_ON existed — see the header comment.
-    switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+    if [ "$E2E_TRAIN_MODE" = "on" ] && [ "$caller_has_run" -eq 0 ]; then
+      switch_and_run on "$PARALLEL" -skip "$TRAIN_ISOLATED_RE" "$@"
+      switch_and_run on "$PARALLEL" -run "^(${TRAIN_ISOLATED_RE})\$"
+    else
+      switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+    fi
   else
-    # Default: the full two-mode validation gate. "off" first — see header
-    # comment for why. "on" gets the tighter E2E_PARALLEL_ON cap.
+    # Default: the full validation gate. "off" first — see header comment for
+    # why. "on" gets the tighter E2E_PARALLEL_ON cap, and is split into a main
+    # leg plus an isolated leg for the scenarios above. switch_and_run
+    # restarts the bed each time, which also clears the in-memory guard state
+    # — so the isolation is explicit, not merely dependent on ordering.
     switch_and_run off "$PARALLEL" "$@"
-    switch_and_run on "$PARALLEL_ON" "$@"
+    if [ "$caller_has_run" -eq 0 ]; then
+      switch_and_run on "$PARALLEL_ON" -skip "$TRAIN_ISOLATED_RE" "$@"
+      switch_and_run on "$PARALLEL_ON" -run "^(${TRAIN_ISOLATED_RE})\$"
+    else
+      switch_and_run on "$PARALLEL_ON" "$@"
+    fi
   fi
 fi

@@ -777,6 +777,23 @@ user: your-github-username
 # Comment-processing circuit breaker (#1089): rolling window in minutes over
 # which max_comment_cycles_per_window is measured.
 # comment_cycle_window: 30
+
+# Success-agnostic comment-processing circuit breaker (#1555): maximum
+# consecutive comment-processing invocations for the same issue and stage that
+# produce no observable progress (no commit, no issue-body update, no
+# FABRIK_STAGE_COMPLETE) before pausing — regardless of whether each
+# invocation itself exited successfully, and regardless of how the window
+# above measures time. Sibling of max_comment_cycles_per_window: that one
+# bounds a burst of invocations within a rolling window; this one bounds a
+# loop whose invocations are spaced sparser than any window. Deliberately
+# higher than max_review_cycles's default (5): both counters observe the
+# same dispatch funnel (this one also counts review-reinvoke cycles), but
+# only max_review_cycles is refunded on a no-op reinvoke — a bot reviewer
+# is meant to be tolerated indefinitely (ADR-1518), so this threshold needs
+# enough headroom above ordinary duplicate-bot-delivery churn (observed up
+# to 4 consecutive rounds in normal operation) that it doesn't silently
+# override that guarantee.
+# max_no_op_comment_cycles: 10
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
@@ -841,6 +858,7 @@ FABRIK_USER=my-personal-username
 | `--train-trial-window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `--max-train-trials-per-window` is measured (0 = use default of 60; also `FABRIK_TRAIN_TRIAL_WINDOW`). | `0` (60 min) |
 | `--max-comment-cycles-per-window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (0 = use default of 10; also `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW`). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083) — resets on any forward progress (stage completion, new commit, PR state change, issue-body edit, or manual unpause). | `0` (10) |
 | `--comment-cycle-window` | Comment-processing circuit breaker (#1089): rolling window in minutes over which `--max-comment-cycles-per-window` is measured (0 = use default of 30; also `FABRIK_COMMENT_CYCLE_WINDOW`). | `0` (30 min) |
+| `--max-no-op-comment-cycles` | Success-agnostic comment-processing circuit breaker (#1555): maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress (no commit, no issue-body update, no `FABRIK_STAGE_COMPLETE`) before pausing with `fabrik:paused` + `fabrik:awaiting-input` — regardless of whether each invocation itself exited successfully (0 = use default of 10; also `FABRIK_MAX_NO_OP_COMMENT_CYCLES`). Sibling of `--max-comment-cycles-per-window`: bounds a loop whose invocations are spaced sparser than any rolling window can see. Deliberately higher than `--max-review-cycles`'s default (5) — see `max_no_op_comment_cycles` above. | `0` (10) |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output; prevents worker goroutines from blocking when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits (0 = use built-in default of 30 sec; also `FABRIK_CLAUDE_WAIT_DELAY`) | `0` (30 sec) |
 | `--janitor-interval` | Hours between janitor runs (closed-issue cleanup, stale-label eviction); 0 disables the janitor; also `FABRIK_JANITOR_INTERVAL` | `1` |
 | `--log-retention-days` | Delete `.fabrik/logs/` files older than this many days; 0 disables age-based pruning; also `FABRIK_LOG_RETENTION_DAYS` | `14` |
@@ -854,6 +872,19 @@ FABRIK_USER=my-personal-username
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
 | `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
+
+#### Unrecognized `config.yaml` Key Warnings
+
+go-yaml silently discards any `.fabrik/config.yaml` key with no matching field on Fabrik's internal config struct — so a typo, a stale key left over from a past experiment, or an entry for a knob that's actually CLI/env-only (see the table below) parses cleanly and does *nothing*, with no error anywhere. At startup, Fabrik now detects every such key and reports it — non-fatal, on stderr:
+
+```
+[startup] warning: .fabrik/config.yaml: unrecognised key "archive_after"
+          (this knob is CLI/env-only — set FABRIK_ARCHIVE_AFTER or -archive-after)
+```
+
+A key with no matching flag or env var at all (a plain typo, never a real knob) gets only the base warning line, with no suggestion clause. This never fails startup — it's purely diagnostic, mirroring the [Stage YAML Drift Warning](#stage-yaml-drift-warning)'s "warn, don't block" behavior for the inverse case (an *extra* key here, vs. a *missing* one there).
+
+The flag/env suggestion is derived mechanically from Fabrik's snake_case (`config.yaml`) ↔ kebab-case (CLI flag) ↔ `FABRIK_SCREAMING_SNAKE_CASE` (env var) naming convention, verified live against the registered flag set — not a hand-maintained list, so it can't go stale as new knobs are added. Four already-recognized `config.yaml` keys break that convention (`git_ssh` vs. `--ssh`, `tui` vs. `--notui`/`FABRIK_TUI` (inverted), `project` vs. `FABRIK_PROJECT_NUMBER`, `janitor_interval_hours` vs. `--janitor-interval`) — for these four only, typo'ing the key in a way that happens to match the *other* name can produce a misleading "CLI/env-only" suggestion even though a `config.yaml` key already exists, just spelled differently. See ADR-1544.
 
 ### Environment Variables
 
@@ -896,6 +927,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TRAIN_TRIAL_WINDOW` | `train_trial_window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` is measured (positive integer; invalid or unset values default to 60). See `--train-trial-window`. | `60` |
 | `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW` | `max_comment_cycles_per_window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083). See `--max-comment-cycles-per-window`. | `10` |
 | `FABRIK_COMMENT_CYCLE_WINDOW` | `comment_cycle_window` | Comment-processing circuit breaker (#1089): rolling window in minutes over which `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW` is measured (positive integer; invalid or unset values default to 30). See `--comment-cycle-window`. | `30` |
+| `FABRIK_MAX_NO_OP_COMMENT_CYCLES` | `max_no_op_comment_cycles` | Success-agnostic comment-processing circuit breaker (#1555): maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress before pausing, regardless of invocation success (positive integer; invalid or unset values default to 10). See `--max-no-op-comment-cycles`. | `10` |
 | `FABRIK_CONVERGENCE_BUDGET` | *(no config.yaml key)* | Wall-clock budget for post-Validate yolo PR convergence (Go duration syntax: `30m`, `1h`, `2h30m`; `0` disables; invalid values default to 30 min). When the budget expires and the PR has not merged, Fabrik pauses the issue with `fabrik:awaiting-input`. | `30m` |
 | `FABRIK_AUTO_MERGE_STRATEGY` | `auto_merge_strategy` | Merge method Fabrik attempts first — both when calling GitHub's `enablePullRequestAutoMerge` for yolo PRs and when merging a PR directly (e.g. merge-train landings). If the repository disallows the configured method, Fabrik falls back through the remaining allowed methods (logged) rather than failing. Accepted values: `MERGE`, `SQUASH`, `REBASE`. Invalid or unset values default to `MERGE`. | `MERGE` |
 | `FABRIK_CLAUDE_WAIT_DELAY` | *(no config.yaml key)* | Seconds to wait after Claude exits before recovering buffered output (non-negative integer; `0` or unset uses the default of 30; invalid values default to 30). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits. | `30` |
@@ -2224,6 +2256,35 @@ Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces 
 
 ---
 
+### Fabrik Project Onboarding Plugin
+
+The **Fabrik Project Onboarding plugin** (`fabrik-project-onboarding`) is a separate, optional Claude Code plugin aimed at a product manager or business owner, not the engineer — no terminal, git, or technical background needed. It interviews you about a project and its features, then writes the result as a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
+
+#### Skills
+
+| Skill | Purpose |
+|-------|---------|
+| `onboard` | A 30–45 minute interview about the project as a whole — the problem it solves, who it serves, what's in and out of scope, hard constraints, and domain vocabulary. Writes `.specify/memory/constitution.md`, the ground rules every later spec inherits. Run once at the start of a project. |
+| `write-spec` | Turns a feature described in plain language into a structured spec — user stories, requirements, success criteria, and a graded quality checklist — under `specs/NNN-feature-name/`. |
+| `clarify` | Reads an existing spec, finds what's vague or missing, and asks up to five targeted questions one at a time, writing each answer straight into the document. |
+
+#### Install
+
+In an interactive Claude Code session:
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik-project-onboarding@fabrik
+```
+
+The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Fabrik Project Onboarding**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/fabrik-project-onboarding/GETTING-STARTED.md) for the full non-technical walkthrough.
+
+#### Attribution
+
+The `write-spec` and `clarify` skills are adapted from [github/spec-kit](https://github.com/github/spec-kit) (MIT licensed); `onboard` is a Fabrik-original interview skill mapped onto Spec Kit's constitution output shape. See the plugin's own `NOTICE.md` for the full license text and a detailed account of what was kept, removed, and changed from upstream.
+
+---
+
 ### How Skills Work
 
 Each stage references a **skill** -- a markdown file that contains detailed methodology
@@ -2522,6 +2583,11 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:awaiting-placement` | Set on a spawned child issue when its initial project-board Status placement fails (the child, board item, and `blockedBy` link already exist — only the column placement is missing). Retried every poll from `board.Items` directly. Cleared on successful placement, or when the child is observed closed. Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on both child and parent (ADR-062). |
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
 | `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal). |
+| `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field. Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
+| `fabrik:awaiting-runaway-alert` | Set when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input` applied unconditionally) but its `AddComment` alert call fails. Retried every poll by a settle scan, independent of `fabrik:paused`'s presence, until the alert succeeds or a fallback comment lands. Cleared only once some explanation is confirmed delivered — a persistent comment-post outage leaves the marker in place indefinitely rather than erasing the last diagnostic signal. See [§6.18 Runaway Guard Alert Retry](state-machine.md#618-runaway-guard-alert-retry-adr-1533) (ADR-1533). |
+| `fabrik:awaiting-landing-verification` | Set immediately after a Done transition attributable to a merge (merge-train batch/singleton landing, or the ordinary auto-merge path) succeeds. The post-Done settle scan confirms the credited PR actually reached `MERGED`. Clears automatically once confirmed. See [§6.19 Post-Done Landing Verification](state-machine.md#619-post-done-landing-verification-adr-1616) (ADR-1616). |
+| `fabrik:credited-pr:<N>` | Set alongside `fabrik:awaiting-landing-verification`, but only by the two merge-train landing paths, recording which PR (the integration/singleton PR, distinct from the member's own closed-not-merged PR) was credited for the Done transition. Clears whenever `fabrik:awaiting-landing-verification` clears. See §6.19. |
+| `fabrik:landing-verification-failed` | Set only on a **confirmed** non-merge of the credited PR — the issue is simultaneously reopened and moved back to `Validate`. **Not self-clearing** — remove manually once the credited PR is re-landed and re-verified. See §6.19. |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
@@ -2581,7 +2647,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 
 **`allowed_tools` is a call-time permission filter, not an availability filter.** A tool absent from the allowed set is still offered to the model in its tool schema; under `--permission-mode dontAsk`, absence from the allowed list is not a guarantee the tool call is rejected either (see the Worktree Boundary Enforcement caveat below and #1372). The only mechanism that removes a tool from what the model is even offered is `--disallowedTools`, a separate, construction-time exclusion.
 
-**`ScheduleWakeup` and `Workflow` are unconditionally suppressed via `--disallowedTools`** on every invocation, regardless of stage config, `allowed_tools`, or whether `fabrik:unrestricted` is set. Both tools promise cross-turn resumption — a scheduled wakeup or a completion notification delivered after the current turn ends — that a headless Fabrik stage cannot honor: there is no running session to receive it. Without suppression, a stage worker calls one of these tools, the turn ends, the stage exits without `FABRIK_STAGE_COMPLETE`, and the next retry deterministically re-derives the identical stall (`Workflow` additionally risks spending session budget on background subagents that never report back). See ADR-1365.
+**`ScheduleWakeup`, `Workflow`, `Monitor`, and `CronCreate` are unconditionally suppressed via `--disallowedTools`** on every invocation, regardless of stage config, `allowed_tools`, or whether `fabrik:unrestricted` is set. Each tool promises delivery to a future turn, session, or external callback — a scheduled wakeup, a completion notification, a streamed report, or a future cron fire — that a headless Fabrik stage cannot honor: there is no running session to receive it. Without suppression, a stage worker calls one of these tools, the turn ends, the stage exits without `FABRIK_STAGE_COMPLETE`, and the next retry deterministically re-derives the identical stall (`Workflow` additionally risks spending session budget on background subagents that never report back). See ADR-1365.
 
 **Default allowed-tool set** (used when a stage does not specify `allowed_tools`):
 
