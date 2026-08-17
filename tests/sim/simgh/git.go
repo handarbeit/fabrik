@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // This file is the git-backed half of the model. Everything git can genuinely
@@ -63,14 +65,57 @@ func gitEnv() []string {
 	)
 }
 
+// gitCommandTimeout bounds how long a single git subprocess call may run
+// before it is killed (R2, R4, #1624). Every call site here already holds
+// the repo's gitMu for the duration of the subprocess (per this file's own
+// doc comment), so an unbounded git invocation strands every other goroutine
+// waiting on that lock until the whole suite's -timeout fires -- exactly
+// #1624's Symptom 1. 30s is generous for these tiny synthetic repos (even a
+// `git gc --prune=now`) while still failing well inside the suite timeout.
+//
+// A var, not a const, purely so tests can shrink it (see
+// git_timeout_test.go) -- it is not meant as an operator-tunable knob.
+//
+// Note the limit this has: exec.CommandContext's cancellation watcher is
+// wired up only after Cmd.Start() returns, so this bounds a git process once
+// it has actually started, not a hang inside the fork/exec syscall itself
+// (the specific point #1624's Symptom 1 goroutine dump was stuck in). That
+// residual case is addressed by capping the suite's -parallel (R1, so
+// fork/exec contention stays rare) and by the runner scripts' process-group
+// reap (R3, so a leaked goroutine's underlying OS process cannot outlive the
+// suite). See ADR-1624.
+var gitCommandTimeout = 30 * time.Second
+
+// gitTimeoutError formats a diagnostic naming the git subcommand and its
+// working directory (R4) -- before this, learning which invocation wedged
+// required reading a goroutine dump.
+func gitTimeoutError(dir string, args []string) error {
+	return fmt.Errorf("git %s (dir=%s): timed out after %s and was killed", strings.Join(args, " "), dir, gitCommandTimeout)
+}
+
+// newGitCmd builds an exec.CommandContext for a git invocation in dir, bound
+// by gitCommandTimeout and wired with the standard sim git environment.
+// Callers run it however they need (CombinedOutput, Output, ...) and then
+// check ctx.Err() == context.DeadlineExceeded to distinguish a timeout from
+// an ordinary git failure -- see gitTimeoutError.
+func newGitCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
+	return cmd
+}
+
 // runGit executes git in dir and returns trimmed stdout. Caller must hold the
 // repo's gitMu.
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = gitEnv()
+	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+	defer cancel()
+	cmd := newGitCmd(ctx, dir, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return string(out), gitTimeoutError(dir, args)
+		}
 		return string(out), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
@@ -80,18 +125,21 @@ func runGit(dir string, args ...string) (string, error) {
 // non-zero exit as an error. Used where a non-zero exit is a meaningful answer
 // rather than a failure — a conflicting merge, most importantly.
 func runGitAllowFail(dir string, args ...string) (out string, ok bool, err error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = gitEnv()
-	combined, err := cmd.CombinedOutput()
-	if err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+	defer cancel()
+	cmd := newGitCmd(ctx, dir, args...)
+	combined, cmdErr := cmd.CombinedOutput()
+	if cmdErr == nil {
 		return strings.TrimSpace(string(combined)), true, nil
 	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return strings.TrimSpace(string(combined)), false, gitTimeoutError(dir, args)
+	}
 	var exitErr *exec.ExitError
-	if ok := asExitError(err, &exitErr); ok {
+	if ok := asExitError(cmdErr, &exitErr); ok {
 		return strings.TrimSpace(string(combined)), false, nil
 	}
-	return strings.TrimSpace(string(combined)), false, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	return strings.TrimSpace(string(combined)), false, fmt.Errorf("git %s: %w", strings.Join(args, " "), cmdErr)
 }
 
 // asExitError reports whether err is an *exec.ExitError, assigning it to target.
@@ -134,15 +182,24 @@ func initBare(dir, defaultBranch string) error {
 
 // runGitStdin executes git with the given stdin, returning trimmed stdout only
 // (not stderr), since callers here consume object IDs.
+//
+// Bounded by gitCommandTimeout like runGit/runGitAllowFail (R2, #1624), even
+// though it's a third, less-used sibling not named in the issue's text: it's
+// the very first git call every scenario makes (initBare, via SeedRepo), so
+// leaving it unbounded would be an inconsistent, easily-forgotten hang
+// vector. Its external signature is unchanged.
 func runGitStdin(dir, stdin string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = gitEnv()
+	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+	defer cancel()
+	cmd := newGitCmd(ctx, dir, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", gitTimeoutError(dir, args)
+		}
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
