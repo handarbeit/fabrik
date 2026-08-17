@@ -475,13 +475,18 @@ suite *less* reliable, backwards from the intended relationship.
 
 `scripts/sim/run.sh` (the sole entry point both manual runs and
 `scripts/e2e/run.sh`'s pre-gate go through — see that script's own header
-comment) now passes an explicit `-parallel "$SIM_PARALLEL"` (default **8**,
-overridable via the environment) instead of leaving `go test` to inherit
-`GOMAXPROCS`. This does not apply to a bare `go test -race ./...` invoked
-directly (CI's own gate, or a developer running the whole tree by hand) —
-only to invocations that go through `scripts/sim/run.sh`. CI's own runners
-are 2–4 cores, well below where this class of contention appears, which is
-part of why the flake was essentially unreproducible there.
+comment) now passes an explicit `-parallel "$SIM_PARALLEL"` (default
+**`min(8, host cores)`**, overridable via the environment — not a flat 8:
+review caught that a flat 8 would *increase* concurrent git-spawning on any
+host with fewer than 8 cores, versus the previous `GOMAXPROCS`-derived
+default, so a low-core host is never worse off than before this change,
+while every host still caps at 8 regardless of how many cores it has above
+that) instead of leaving `go test` to inherit `GOMAXPROCS` uncapped. This
+does not apply to a bare `go test -race ./...` invoked directly (CI's own
+gate, or a developer running the whole tree by hand) — only to invocations
+that go through `scripts/sim/run.sh`. CI's own runners are 2–4 cores, well
+below where this class of contention appears, which is part of why the
+flake was essentially unreproducible there.
 
 Measured before/after on the 28-core machine that produced #1624
 (`scripts/sim/run.sh --all`, `-race`): capping `-parallel` at 8 (from an

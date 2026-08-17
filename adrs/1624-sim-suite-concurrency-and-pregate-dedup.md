@@ -43,19 +43,26 @@ had to win the flaky suite's coin flip twice in a row to publish.
 
 `scripts/sim/run.sh` — the sole entry point both manual runs and `scripts/e2e/run.sh`'s
 pre-gate go through, so there is exactly one place this number lives — now passes
-`-parallel "$SIM_PARALLEL"` (default **8**, env-overridable) instead of leaving `go test` to
-inherit `GOMAXPROCS`. This is the actual root-cause mitigation: fewer concurrent scenarios
-means fewer concurrent `fork/exec` calls, which is what makes the wedge, the SIGSEGV, and
-the TSan abort rare in the first place.
+`-parallel "$SIM_PARALLEL"` (default **`min(8, host cores)`**, env-overridable) instead of
+leaving `go test` to inherit `GOMAXPROCS` uncapped. This is the actual root-cause mitigation:
+fewer concurrent scenarios means fewer concurrent `fork/exec` calls, which is what makes the
+wedge, the SIGSEGV, and the TSan abort rare in the first place.
 
-**8 is a reasoned starting point, not an empirically re-tuned value.** It sits comfortably
+**8 is a reasoned upper bound, not an empirically re-tuned value — and the default is not a
+flat 8.** An earlier version of this default was a flat 8 regardless of host core count;
+review caught that this would *increase* concurrent git-spawning, versus the previous
+`GOMAXPROCS`-derived default, on any host with fewer than 8 cores (a modest laptop or CI
+runner) — the exact mechanism this cap exists to guard against, just at smaller absolute
+scale. The shipped default is `min(8, host cores)` (`sim_default_parallel()` in
+`scripts/sim/run.sh`, probed via the portable `getconf _NPROCESSORS_ONLN` with an `nproc`
+fallback), so a low-core host is never worse off than before this change, while every host
+still caps at 8 regardless of how many cores it has above that. 8 itself sits comfortably
 below the 28-core host that produced the incident, close to (but not below) the interim
 `GOMAXPROCS`-reduction mitigation used in production, and above the pre-existing
 `mergeTrainSlots` semaphore (cap 3) that already throttles a narrower, heavier real-git
 subset (merge-train scenarios specifically) — this cap is a suite-wide analogue of a pattern
 that already existed in miniature. If a future high-core-count run still shows contention at
-this value, or if it turns out to over-constrain a low-core CI runner, the number itself is
-cheap to change; nothing else depends on its exact value.
+this value, the number itself is cheap to change; nothing else depends on its exact value.
 
 This does not touch CI's own `go test -race -timeout 5m ./...` (unscoped `-parallel`) — CI
 runners are 2-4 cores, well below where this class of contention appears, which is also why
@@ -251,7 +258,8 @@ before this existed — the original policy for that case is unchanged.
   and its flake exposure, exactly once instead of twice — but this is purely an efficiency
   and exposure win layered on top of R1-R4, not a substitute for them. A standalone
   `scripts/e2e/run.sh` invocation is unaffected.
-- `SIM_PARALLEL=8` and `gitCommandTimeout=30s` are both reasoned defaults, not values proven
-  optimal by exhaustive testing — see the R1 and R2/R4 sections above for the reasoning
-  behind each, and revisit them if future evidence (a still-flaky very-high-core-count run,
-  or a genuinely slow git operation timing out falsely) suggests otherwise.
+- `SIM_PARALLEL`'s `min(8, host cores)` default and `gitCommandTimeout=30s` are both reasoned
+  defaults, not values proven optimal by exhaustive testing — see the R1 and R2/R4 sections
+  above for the reasoning behind each, and revisit them if future evidence (a still-flaky
+  very-high-core-count run, or a genuinely slow git operation timing out falsely) suggests
+  otherwise.
