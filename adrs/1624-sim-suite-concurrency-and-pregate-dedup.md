@@ -123,24 +123,39 @@ children it forks inherit that group — without an external dependency, on both
 needs a different shape: it is a multi-stage pipe (`go test -json | tee | jq`) whose exit
 code capture already depends on `pipefail`, and naively backgrounding only the pipe's last
 stage would make `$!` resolve to `jq`'s PID, not `go test`'s — silently breaking both the
-reap and the exit-code capture. It uses process substitution (`exec 3> >(tee ... | jq ...)`,
-`go test ... >&3 2>&1 &`) instead, so `$!` (captured right after backgrounding `go test`) is
-`go test`'s own PID, preserving the existing log-capture and `wait ... || rc=$?` exit-code
+reap and the exit-code capture. `go test`'s stdout/stderr are instead routed to the `tee |
+jq` consumer through a named pipe (`mkfifo`), with the consumer backgrounded as its own real
+job before `go test` starts, so `$!` (captured right after backgrounding `go test`) is `go
+test`'s own PID, preserving the existing log-capture and `wait ... || rc=$?` exit-code
 discipline unchanged. (This exact file has a prior incident from getting a similar
 restructuring wrong — see #1547 — which is why this shape was chosen deliberately rather
 than by the more obvious but fragile "just background the pipeline" route.)
 
-The process substitution is opened on an explicit fd (3) rather than inline on the `go test`
-command specifically so its own PID can be captured and `wait`ed on separately from `go
-test`'s: `wait "$suite_pid"` only blocks until `go test` exits, not until the `tee`/`jq`
-consumer reading its now-closed pipe has finished flushing `$jsonlog` to disk. During review,
-the first version of this fix backgrounded `go test` with the process substitution written
-inline (`go test ... > >(tee ... | jq ...) 2>&1 &`) and captured only `go test`'s PID — this
+The consumer's own PID (`consumer_pid`) is captured separately from `go test`'s
+(`suite_pid`) specifically so it can be `wait`ed on too: `wait "$suite_pid"` only blocks
+until `go test` exits, not until the `tee`/`jq` consumer reading its now-closed pipe has
+finished flushing `$jsonlog` to disk. During review, the first version of this fix
+backgrounded `go test` with the consumer fed via a *process substitution*
+(`go test ... > >(tee ... | jq ...) 2>&1 &`) and captured only `go test`'s PID — this
 reproducibly raced `report_test_timings`/`report_test_outcomes`/the `E2E_TIMEOUT` grep
 against a still-writing consumer (confirmed with a deliberately slow consumer: the log file
 was empty or truncated immediately after `wait` returned, and only complete after an
-additional, unbounded delay). Opening the substitution on fd 3 and `wait`ing on its PID too,
-after `wait "$suite_pid"`, closes that gap.
+additional, unbounded delay). Opening the process substitution on an explicit fd (3) and
+`wait`ing on its own PID too, after `wait "$suite_pid"`, closed that specific race — but a
+second review pass on that fix surfaced a further, more serious problem: a process
+substitution does not get its own process group under `set -m`. Traced during review:
+group-killing a process substitution's `$!` is a silent no-op (no such group exists — the
+consumer instead sits inside whatever group was current when it started), and even a plain,
+non-group kill of that one PID only takes down the process substitution's own top-level
+shell, leaving `tee`/`jq`'s own descendants running, reparented to pid 1 — reproducing
+exactly the orphan class this whole issue exists to close, one process stage further down
+than `go test` itself. The fix landed here instead: feed the consumer through a named pipe
+(`mkfifo` + `exec 3> "$fifo"`, safe to `rm -f` immediately after — the `exec` blocks until
+the backgrounded reader has already opened its end, so both ends are provably connected by
+the time it returns) and background it as a genuine job (`{ tee ... | jq ...; } < "$fifo"
+&`) rather than an anonymous process substitution. A real backgrounded job *does* get its
+own process group under `set -m`, confirmed during review to be fully, cleanly reapable via
+the same `kill -TERM -"$consumer_pid"` idiom already used for `$suite_pid`.
 
 ### R5 — a tree-scoped pre-gate dedup signal, not a blanket opt-out
 

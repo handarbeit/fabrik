@@ -714,28 +714,48 @@ detect_rate_limit_backoff() {
 # defeating the hardening this function exists to provide.
 #
 # Process-group reap (R3, #1624): go test itself is backgrounded (not the
-# whole `tee | jq` pipe) and its stdout+stderr are routed to them via a
-# process substitution opened on fd 3 (`exec 3> >(tee ... | jq ...)`,
-# `go test ... >&3 2>&1 &`) instead — this is NOT run_reaped, which
-# backgrounds a plain command and waits for its own exit status directly. A
-# pipe's last stage is what `$!`/`wait` would report if the whole
-# `cmd1 | cmd2 | cmd3` were backgrounded as one job, and jq is wrapped in
-# `|| true` precisely so a jq hiccup can't fail the leg — meaning `wait`ing
-# on that PID would silently always see 0, discarding go test's real exit
-# code the same `pipefail` trick below exists to preserve for a *foreground*
-# pipeline. Backgrounding go test alone sidesteps this: `$!` is go test's own
-# PID, its own exit status is what `wait` reports directly (no pipefail
-# needed), and it still gets a process group of its own (`set -m`, top of
-# file) that the INT/TERM traps below can kill.
+# whole `tee | jq` pipe) and its stdout+stderr are routed to it via a named
+# pipe on fd 3 (`mkfifo`, a backgrounded `{ tee ... | jq ...; } < "$fifo" &`
+# reader, then `go test ... >&3 2>&1 &`) instead — this is NOT run_reaped,
+# which backgrounds a plain command and waits for its own exit status
+# directly. A pipe's last stage is what `$!`/`wait` would report if the
+# whole `cmd1 | cmd2 | cmd3` were backgrounded as one job, and jq is wrapped
+# in `|| true` precisely so a jq hiccup can't fail the leg — meaning
+# `wait`ing on that PID would silently always see 0, discarding go test's
+# real exit code the same `pipefail` trick below exists to preserve for a
+# *foreground* pipeline. Backgrounding go test alone sidesteps this: `$!` is
+# go test's own PID, its own exit status is what `wait` reports directly (no
+# pipefail needed), and it still gets a process group of its own (`set -m`,
+# top of file) that the INT/TERM traps below can kill.
 #
-# The process substitution is opened explicitly on fd 3, rather than inline
-# on the go test command, specifically so its own PID can be captured and
-# `wait`ed on too: `wait "$suite_pid"` only blocks until go test exits, not
-# until the tee/jq consumer reading its now-closed pipe has finished
-# flushing $jsonlog — without a second, explicit `wait` on the consumer,
-# report_test_timings/report_test_outcomes/the E2E_TIMEOUT grep below can
-# race a still-writing consumer and observe a truncated or momentarily-empty
-# $jsonlog (reproduced with a deliberately slow consumer during review).
+# The consumer (`tee | jq`) is fed via a named pipe rather than a process
+# substitution (`exec 3> >(tee ... | jq ...)`), and backgrounded as a real
+# job (`{ ...; } &`, capturing its own `$!` as consumer_pid) rather than left
+# anonymous, specifically so it too gets its own process group under `set
+# -m` and can be group-killed exactly like $suite_pid. A process substitution
+# does NOT get its own process group — traced during review: killing only
+# its own top-level PID (with or without the `-`-prefixed group form; the
+# group form is simply a no-op there, since no such group exists) leaves the
+# `tee`/`jq` pipeline's own descendants running, reparented to pid 1 — i.e.
+# it reproduces exactly the orphan class this whole issue exists to close,
+# just one process stage further down. The named-pipe form was confirmed
+# (during review) to fully reap `tee` and `jq` together via
+# `kill -TERM -"$consumer_pid"`, the same idiom used for `$suite_pid` below.
+# `mkfifo` + `exec 3> "$fifo"` is also what makes the consumer job's `$!`
+# capturable *before* go test starts writing to fd 3 — the `exec 3> "$fifo"`
+# open blocks until the backgrounded reader has already opened its end (FIFO
+# open rendezvous), so it is safe to `rm -f "$fifo"` immediately afterward:
+# both ends are already connected by then, and unlinking only removes the
+# now-unneeded directory entry, not the open file descriptors.
+#
+# The consumer's own PID is captured (rather than relying on `wait
+# "$suite_pid"` alone) specifically so it can be `wait`ed on too:
+# `wait "$suite_pid"` only blocks until go test exits, not until the tee/jq
+# consumer reading its now-closed pipe has finished flushing $jsonlog —
+# without a second, explicit `wait` on the consumer, report_test_timings/
+# report_test_outcomes/the E2E_TIMEOUT grep below can race a still-writing
+# consumer and observe a truncated or momentarily-empty $jsonlog (reproduced
+# with a deliberately slow consumer during review).
 #
 # After the suite invocation, regardless of $rc, this function also checks
 # fabrik.log in full (not from a captured byte offset — see below) for the
@@ -785,28 +805,34 @@ switch_and_run() {
     budget_before=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
   fi
 
-  # fd 3 is opened onto the process substitution (tee | jq) explicitly,
-  # rather than inline on the go test command, so its own PID ($!) is
-  # captured separately from go test's — see the R3 comment above for why
-  # `wait "$suite_pid"` alone is not enough: it only waits for go test to
-  # exit, not for the tee/jq consumer reading go test's closed pipe to
-  # finish flushing $jsonlog to disk. Without this, report_test_timings /
-  # report_test_outcomes / the E2E_TIMEOUT grep below could race a still-
-  # writing consumer and see a truncated (or momentarily empty) file —
-  # confirmed reproducible with a deliberately slow consumer.
-  exec 3> >(tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; })
+  # The consumer (tee | jq) is fed via a named pipe and backgrounded as its
+  # own real job, so it gets its own process group and can be group-killed
+  # exactly like $suite_pid — see the R3 comment above for why a process
+  # substitution can't do this safely. mkfifo's rendezvous means the
+  # `rm -f "$fifo"` right after `exec 3>` is race-free: that `exec` blocks
+  # until the backgrounded reader below has already opened its end.
+  local fifo
+  fifo="$(mktemp -u)"
+  mkfifo "$fifo"
+  { tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }; } < "$fifo" &
   local consumer_pid=$!
+  exec 3> "$fifo"
+  rm -f "$fifo"
+
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
       ./tests/e2e/... "$@" >&3 2>&1 &
   local suite_pid=$!
   exec 3>&-
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; exit 130' INT
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; exit 143' TERM
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; exit 143' TERM
   wait "$suite_pid" || rc=$?
-  trap - INT TERM
-  # Wait for the consumer to drain and finish writing $jsonlog before any
-  # of it is read below — see the comment above the `exec 3>` line.
+  # Wait for the consumer to drain and finish writing $jsonlog before any of
+  # it is read below — see the comment above. Still under the INT/TERM trap
+  # (not cleared until after this), so a kill of this script while the
+  # consumer is draining reaps its whole group too, rather than leaving this
+  # wait unbounded with no signal path.
   wait "$consumer_pid" 2>/dev/null || true
+  trap - INT TERM
 
   budget_after=""
   if [ -n "$BED_TOKEN" ]; then
