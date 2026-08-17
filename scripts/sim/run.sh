@@ -51,8 +51,22 @@
 # pre-gate (scripts/e2e/run.sh's run_pregate, and scripts/cut-release.sh
 # transitively) always goes through this one script, so there is exactly one
 # place this number lives.
+#
+# Process-group reap (R3, #1624): `go test` is launched as a backgrounded job
+# (not via `exec`, which would replace this shell and leave nothing able to
+# react to a kill) so a trap can reap it. `set -m` gives that background job
+# its own process group, whose leader is the `go test` process itself — its
+# own child, the compiled `sim.test` binary that actually runs the suite,
+# inherits that same group. Killing this runner (Ctrl-C, a CI job
+# cancellation, a plain `kill`) now kills that whole group via the trap
+# below, instead of leaving `go test`'s children behind: #1624's evidence was
+# eight orphaned `sim.test` processes found alive at ~97% CPU each, some over
+# 20 hours old, because nothing had ever reaped them. `setsid`, the common
+# Linux idiom for this, is not shipped on macOS by default, so this uses
+# portable bash job control instead.
 
 set -euo pipefail
+set -m
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -66,4 +80,14 @@ if [ "${1:-}" = "--all" ]; then
 fi
 
 echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL $TARGET $* =="
-exec go test -race -count=1 -parallel "$SIM_PARALLEL" "$TARGET" "$@"
+
+go test -race -count=1 -parallel "$SIM_PARALLEL" "$TARGET" "$@" &
+GO_TEST_PID=$!
+trap 'kill -TERM -"$GO_TEST_PID" 2>/dev/null || true' EXIT INT TERM
+
+set +e
+wait "$GO_TEST_PID"
+RC=$?
+set -e
+trap - EXIT INT TERM
+exit "$RC"
