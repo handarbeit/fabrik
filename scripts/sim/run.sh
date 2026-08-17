@@ -32,11 +32,32 @@
 #   tests/sim/simclaude        1.1s  (--all)
 #   tests/sim/simgh/ghfault    1.1s  (--all)
 #                            ~107s total wall clock (--all)
+#
+# Parallelism cap (R1, #1624): `go test`'s default `-parallel` is
+# `GOMAXPROCS`, i.e. every core the host has. On a high-core-count machine
+# (28 cores, the one that produced #1624) that means dozens of concurrent
+# `t.Parallel()` scenarios each spawning real `git` children at once —
+# high-concurrency `fork/exec` from a heavily multi-threaded Go process,
+# which #1624 documents causing three distinct failure modes: a wedged
+# fork/exec that strands a scenario's `gitMu` until the suite-wide test
+# timeout, a child `git` killed outright (SIGSEGV), and even a `-race`
+# (ThreadSanitizer) runtime abort. None of that is proportional to how much
+# real work the suite is doing — it's purely a function of host core count —
+# so leaving `-parallel` at its default makes the gate's reliability depend
+# on which machine happens to run it, which is backwards: a bigger machine
+# should never make the same suite *less* reliable. SIM_PARALLEL therefore
+# pins an explicit, host-core-count-independent cap rather than inheriting
+# GOMAXPROCS; override via the environment for experimentation, but the
+# pre-gate (scripts/e2e/run.sh's run_pregate, and scripts/cut-release.sh
+# transitively) always goes through this one script, so there is exactly one
+# place this number lives.
 
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+SIM_PARALLEL="${SIM_PARALLEL:-8}"
 
 TARGET="./tests/sim"
 if [ "${1:-}" = "--all" ]; then
@@ -44,5 +65,5 @@ if [ "${1:-}" = "--all" ]; then
   shift
 fi
 
-echo "== sim suite: go test -race -count=1 $TARGET $* =="
-exec go test -race -count=1 "$TARGET" "$@"
+echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL $TARGET $* =="
+exec go test -race -count=1 -parallel "$SIM_PARALLEL" "$TARGET" "$@"
