@@ -119,6 +119,23 @@ and the machine that produced the incident, are both Darwin). `set -m` plus a ba
 job achieves the same thing — the job becomes its own process group leader, and any further
 children it forks inherit that group — without an external dependency, on both platforms.
 
+**Trap-before-background, everywhere a PID is captured.** Every one of this PR's three
+trap-installing call sites (`scripts/sim/run.sh`'s own top-level trap, `run_reaped`, and
+`switch_and_run`) declares its PID variable(s) empty and installs the INT/TERM trap *before*
+backgrounding the job, not after capturing `$!` — caught in review across three separate
+passes, one per call site, all the same defect: backgrounding first and installing the trap
+a few statements later leaves a window with no handler at all, where a signal hits bash's
+default disposition and orphans the job that had just started — the exact leak class R3
+exists to close, recurring at its own fix sites. Since a trap's command string is
+re-expanded at signal-delivery time, not install time, referencing a not-yet-assigned PID
+variable is safe (`kill -TERM -""` is a harmless no-op under `|| true`); the same trap text
+protects the job once its PID is assigned a line or two later. This is the tightest ordering
+bash allows — the single-statement gap between backgrounding a job and capturing its `$!`
+cannot itself be closed, since there is no atomic "start and capture PID" primitive — but it
+reduces the exposed window from "several statements, including possible I/O" to "one
+assignment," and was confirmed clean via kills timed at (and, for `switch_and_run`,
+deliberately widened past) that boundary.
+
 `scripts/e2e/run.sh`'s main suite invocation (`switch_and_run`) is the one call site that
 needs a different shape: it is a multi-stage pipe (`go test -json | tee | jq`) whose exit
 code capture already depends on `pipefail`, and naively backgrounding only the pipe's last

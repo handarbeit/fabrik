@@ -84,9 +84,18 @@ fi
 echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL $TARGET $* =="
 
 START_TS=$(date +%s)
+# GO_TEST_PID is declared and the trap installed BEFORE backgrounding, not
+# after: a signal landing between starting the job and capturing `$!` would
+# otherwise have no handler yet, leaving the just-started `go test` (and its
+# `sim.test` child) unreaped -- the exact orphan class R3 exists to close
+# (found during Review, #1624). A trap's command string is re-expanded at
+# signal-delivery time, not install time, so referencing $GO_TEST_PID before
+# it's assigned is safe -- `kill -TERM -""` is a harmless no-op under
+# `|| true`.
+GO_TEST_PID=""
+trap 'kill -TERM -"$GO_TEST_PID" 2>/dev/null || true' EXIT INT TERM
 go test -race -count=1 -parallel "$SIM_PARALLEL" "$TARGET" "$@" &
 GO_TEST_PID=$!
-trap 'kill -TERM -"$GO_TEST_PID" 2>/dev/null || true' EXIT INT TERM
 
 set +e
 wait "$GO_TEST_PID"

@@ -294,12 +294,22 @@ readonly PREGATE_FAILED_EXIT=5
 # (see switch_and_run's own comment), and backgrounding only the pipe's last
 # stage would silently lose that — see switch_and_run for the process-
 # substitution restructuring that avoids the problem instead.
+#
+# `pid` is declared and the trap installed BEFORE "$@" is backgrounded, not
+# after: a signal landing between starting the job and capturing `$!` would
+# otherwise have no handler yet, leaving the just-started job unreaped — the
+# exact orphan class this function exists to close (found during Review,
+# #1624; mirrors switch_and_run's own fix for the identical gap). A trap's
+# command string is re-expanded at signal-delivery time, not install time,
+# so referencing $pid before it's assigned is safe — `kill -TERM -""` is a
+# harmless no-op under `|| true`.
 # ---------------------------------------------------------------------------
 run_reaped() {
-  "$@" &
-  local pid=$!
+  local pid=""
   trap 'kill -TERM -"$pid" 2>/dev/null || true; exit 130' INT
   trap 'kill -TERM -"$pid" 2>/dev/null || true; exit 143' TERM
+  "$@" &
+  pid=$!
   local rc=0
   wait "$pid" || rc=$?
   trap - INT TERM
