@@ -2256,9 +2256,9 @@ Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces 
 
 ---
 
-### Fabrik Project Onboarding Plugin
+### Entwurf Plugin
 
-The **Fabrik Project Onboarding plugin** (`fabrik-project-onboarding`) is a separate, optional Claude Code plugin aimed at a product manager or business owner, not the engineer — no terminal, git, or technical background needed. It interviews you about a project and its features, then writes the result as a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
+The **Entwurf plugin** (`entwurf`) is a separate, optional Claude Code plugin aimed at a product manager or business owner, not the engineer — no terminal, git, or technical background needed. It interviews you about a project and its features, then writes the result as a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
 
 #### Skills
 
@@ -2274,10 +2274,10 @@ In an interactive Claude Code session:
 
 ```
 /plugin marketplace add handarbeit/fabrik
-/plugin install fabrik-project-onboarding@fabrik
+/plugin install entwurf@fabrik
 ```
 
-The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Fabrik Project Onboarding**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/fabrik-project-onboarding/GETTING-STARTED.md) for the full non-technical walkthrough.
+The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Entwurf**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/entwurf/GETTING-STARTED.md) for the full non-technical walkthrough.
 
 #### Attribution
 

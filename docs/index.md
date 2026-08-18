@@ -387,7 +387,7 @@ fabrik --auto-upgrade</pre>
           A Claude Code plugin for your own session — ask "what's on the board?" or "why is #42 stuck?" and steer Fabrik from inside interactive Claude Code. No binary install needed.
         </div>
       </a>
-      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#fabrik-project-onboarding-plugin" aria-label="Project Onboarding Plugin — open documentation">
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#entwurf-plugin" aria-label="Project Onboarding Plugin — open documentation">
         <span class="feature-icon">📝</span>
         <div class="feature-title">Project Onboarding Plugin</div>
         <div class="feature-desc">

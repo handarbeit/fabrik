@@ -24,13 +24,13 @@
       }
     },
     {
-      "name": "fabrik-project-onboarding",
+      "name": "entwurf",
       "description": "Onboard a software project and write its feature specifications, for product managers and business owners rather than engineers. Interviews you about project goals, scope, constraints, and vocabulary, then turns feature ideas into Spec Kit specifications ready to hand to Fabrik for build.",
       "category": "productivity",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/handarbeit/fabrik.git",
-        "path": "plugin/fabrik-project-onboarding",
+        "path": "plugin/entwurf",
         "ref": "main"
       },
       "homepage": "https://fabrik.handarbeit.io",

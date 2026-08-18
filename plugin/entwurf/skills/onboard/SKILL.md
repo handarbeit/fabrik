@@ -218,4 +218,8 @@ Three things to call out by name rather than leaving them to notice:
 
 > "I've saved this in your project folder, inside a folder called `.specify`. The dot at the front means your computer hides it in Finder and File Explorer — that's normal, and nothing's gone wrong. Just ask me to show you the project setup any time and I'll open it for you."
 
-Then point at what's next, as something they can say rather than something they must run: features get written up one at a time — they describe a feature in their own words and ask for it to be turned into a spec — and each one inherits this document automatically, so none of this has to be repeated.
+Then point at what's next. Two things, in order:
+
+**Features get written up one at a time** — they describe a feature in their own words and ask for it to be turned into a spec. Say it as something they can say rather than something they must run, and note that each one inherits this document automatically, so none of this has to be repeated.
+
+**Then the other two roles.** Once the features are specified, a technical architect and an experience or design lead each do the same kind of interview for their own side of the product — constraints, then design, then the technical baseline. Mention it once, so they know the method continues past them and who it needs next. They do not run those themselves; they hand the project on.
