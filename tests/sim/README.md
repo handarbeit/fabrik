@@ -421,9 +421,17 @@ the scenarios in "What this layer is permanently blind to" above) measures at
 **~21–23s** on a development machine, dominated by the real-time costs
 documented above (`lockVerifyDelay`, the stage retry cooldown, `workerYield`
 pacing) rather than by CPU work — every scenario in this package uses
-`t.Parallel()` for exactly this reason, since none of them contend on CPU or
-shared state and the dominant cost is wall-clock waiting, which parallelizes
-almost for free. `tests/sim/simclaude` alone is ~2–3s.
+`t.Parallel()` for exactly this reason, since the dominant cost is wall-clock
+waiting, which parallelizes almost for free **on a modest core count**.
+`tests/sim/simclaude` alone is ~2–3s.
+[Qualified by #1624](#parallelism-cap-r1-1624): "none of them contend on CPU
+or shared state" turned out to be false at high host core counts — every
+scenario's `NewEnv` seeds a real bare git repository via a real `git init
+--bare` subprocess (`SeedRepo`), so `t.Parallel()`'s default `-parallel`
+(`GOMAXPROCS`) turns into dozens of concurrent `fork/exec` calls on a
+many-core machine, which is exactly what produced #1624's wedged-`gitMu`
+hang, killed-child SIGSEGVs, and `-race` runtime aborts. See that section for
+the fix.
 
 **Updated for #1450's port** (R1's 12 target scenarios, ~30 new test
 functions across 8 new files): `go test -race -count=1 ./tests/sim/` now
@@ -450,6 +458,49 @@ starved. Now a dispatched poll pays exactly as long as the worker actually
 took, no more and no less, so the total is close to the same on an
 unloaded machine and — the actual point of the fix — no longer prone to
 exhausting a poll-count bound (`AdvanceUntil`'s `maxPolls`) on a loaded one.
+
+### Parallelism cap (R1, #1624)
+
+`go test`'s default `-parallel` is `GOMAXPROCS` — every core the host has.
+On the 28-core machine that produced #1624, that meant dozens of concurrent
+`t.Parallel()` scenarios each spawning real `git` children at once:
+high-concurrency `fork/exec` from a heavily multi-threaded Go process, which
+manifested three ways — a wedged `fork/exec` that stranded a scenario's
+`gitMu` until the suite-wide test timeout, a child `git` process killed
+outright (SIGSEGV), and even a `-race` (ThreadSanitizer) runtime abort. None
+of that is proportional to how much real work the suite is doing; it's
+purely a function of host core count, which made the gate's reliability
+depend on which machine happened to run it — a bigger machine made the same
+suite *less* reliable, backwards from the intended relationship.
+
+`scripts/sim/run.sh` (the sole entry point both manual runs and
+`scripts/e2e/run.sh`'s pre-gate go through — see that script's own header
+comment) now passes an explicit `-parallel "$SIM_PARALLEL"` (default
+**`min(8, host cores)`**, overridable via the environment — not a flat 8:
+review caught that a flat 8 would *increase* concurrent git-spawning on any
+host with fewer than 8 cores, versus the previous `GOMAXPROCS`-derived
+default, so a low-core host is never worse off than before this change,
+while every host still caps at 8 regardless of how many cores it has above
+that) instead of leaving `go test` to inherit `GOMAXPROCS` uncapped. This
+does not apply to a bare `go test -race ./...` invoked directly (CI's own
+gate, or a developer running the whole tree by hand) — only to invocations
+that go through `scripts/sim/run.sh`. CI's own runners are 2–4 cores, well
+below where this class of contention appears, which is part of why the
+flake was essentially unreproducible there.
+
+Measured before/after on the 28-core machine that produced #1624
+(`scripts/sim/run.sh --all`, `-race`): capping `-parallel` at 8 (from an
+unbounded `GOMAXPROCS`=28) showed no material regression, comfortably within
+this suite's normal run-to-run variance, while removing the
+unbounded-parallelism condition #1624 traces the hang/SIGSEGV/TSan-abort
+trio to — the uncapped case's real cost is not a fixed number anyway, since
+it also *occasionally hangs to the 10-minute suite timeout* per #1624's own
+evidence. Per R6 (#1624 — see "Updated for #1454... then removed by #1624
+(R6)" below), the specific before/after wall-clock figures are deliberately
+not recorded here — run `scripts/sim/run.sh --all` to see this run's own
+total. `scripts/sim/run.sh` also reaps `go test`'s
+process group on exit/interrupt (R3, #1624) so an aborted run can't leave
+orphaned `sim.test` processes running; see that script's own header comment.
 
 Comfortably under the ~90s line R8 sets, so **no `sim` build tag** — this
 package is part of the default `go test ./...` (and CI's `go test -race
@@ -539,32 +590,28 @@ Scope (which explicitly does not include changing this package's own testing
 infrastructure beyond what its scenarios need) is positioned to make
 unilaterally.
 
-**Updated for #1454 (correcting stale figures).** The "~92s total" /
-"comfortably under the ~90s line" conclusion two sections up predates the
-merge-train suite's addition (#1452, directly above) and has been stale
-since. Current measured runtime on a dev machine, recorded here as the
-honest current numbers rather than re-derived on every future edit (per this
-issue's own R8 — these figures are inherently machine- and load-dependent,
-as this section's whole revision history demonstrates):
+**Updated for #1454 (correcting stale figures), then removed by #1624 (R6).**
+The "~92s total" / "comfortably under the ~90s line" conclusion two sections
+up predates the merge-train suite's addition (#1452, directly above) and had
+gone stale by the time #1454 recorded a fresh set of numbers here. Those
+numbers then went stale too — by #1624, `tests/sim` alone measured 106.6s
+against this section's own documented 42.5s, a ~2.5× gap, because scenarios
+kept being added underneath a figure nobody was re-measuring. This is not a
+one-off: this section's revision history is three rounds of "correct the
+stale number," each one going stale again.
 
-```
-tests/sim               42.5s     the scenarios
-tests/sim/simgh        105.0s     unit tests of the model itself
-tests/sim/simclaude      1.1s
-tests/sim/simgh/ghfault  1.1s
-                        ~107s total wall clock
-```
-
-The scenario layer alone (42.5s) is the part that matters for a pre-gate —
-it's the layer that actually exercises the pipeline — and it is plenty fast
-for that purpose; `simgh`'s own 105s is the model's unit-test suite, not
-pipeline coverage, and dominates the `--all` total the same way it has
-throughout this file's history. `scripts/sim/run.sh` (repo root) is the
-frictionless on-demand entry point this issue adds (R8): with no arguments
-it runs the scenario layer only (`./tests/sim`, ~42.5s); `--all` runs the
-full tree above (~107s). It's both the manual "run the sim layer by hand
-before committing to a full live e2e run" entry point and what
-`scripts/e2e/run.sh`'s pre-gate calls — see
+So as of #1624 (R6), this file stops asserting a specific current runtime.
+`go test`'s own per-package "ok"/"FAIL" lines already report real elapsed
+time for every run, and `scripts/sim/run.sh` (repo root — the frictionless
+on-demand entry point R8 adds) prints its own total wall-clock time after
+every run — run it to find out how long the suite currently takes; a number
+written in this file cannot stay true. With no arguments it runs the
+scenario layer only (`./tests/sim`) — the part that matters for a pre-gate,
+since it's the layer that actually exercises the pipeline; `--all` runs the
+full tree, where `tests/sim/simgh`'s own unit-test suite dominates the total
+the same way it has throughout this file's history. It's both the manual
+"run the sim layer by hand before committing to a full live e2e run" entry
+point and what `scripts/e2e/run.sh`'s pre-gate calls — see
 `adrs/1454-sim-pre-gate-not-replacement.md` for the full layering decision.
 
 **Updated for #1592's sequence-shaped scenarios** (8 new test functions across 4 new
@@ -914,11 +961,15 @@ first, not a defect in the refund mechanism itself.
 ## Running it
 
 ```bash
-scripts/sim/run.sh                     # on-demand entry point (R8): scenario layer only, ~42.5s
-scripts/sim/run.sh --all               # full tree (this package + simgh + simclaude + ghfault), ~107s
+scripts/sim/run.sh                     # on-demand entry point (R8): scenario layer only
+scripts/sim/run.sh --all               # full tree (this package + simgh + simclaude + ghfault)
 go test -race ./tests/sim/...          # equivalent to --all above, invoked directly
 bash tests/sim/simgh/nonvacuity.sh     # the simgh mutation sweep (needs a clean tree)
 ```
+
+`scripts/sim/run.sh` prints its own total wall-clock time after every run
+(R6, #1624) — see "Runtime and the `sim` tag decision" above for why this
+file no longer commits a specific number to prose.
 
 The tests use the real `git` binary and skip when it is unavailable, following
 the repo-wide `skipIfNoGit` convention.

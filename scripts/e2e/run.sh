@@ -26,6 +26,34 @@
 #                           release.sh never sets this; the release path
 #                           always pays the pre-gate cost)
 #
+#   FABRIK_PREGATE_VERIFIED_SHA=<sha>   tree-scoped dedup signal (R5, #1624):
+#                           if set, equal to a freshly-resolved `git
+#                           rev-parse HEAD`, AND the working tree is clean
+#                           (`git status --porcelain` empty), the pre-gate is
+#                           skipped because it was already run, in full,
+#                           against this exact tree earlier in the same
+#                           invocation. The clean-tree check matters because
+#                           HEAD alone only identifies the committed tree —
+#                           a step running between the SHA being captured and
+#                           this check that rewrites a tracked file on disk
+#                           without committing it (cut-release.sh's own
+#                           step 4 does this to plugin/known_embedded_versions.go)
+#                           would otherwise leave a HEAD match vouching for a
+#                           tree that no longer matches what was actually
+#                           checked (found during Review, #1624).
+#                           scripts/cut-release.sh exports this itself, right
+#                           after its own step 3 pre-gate passes, so its step
+#                           5 call into this script doesn't pay for the
+#                           identical sim + wire-contract checks a second
+#                           time. Unlike E2E_SKIP_PREGATE (a blanket,
+#                           deliberately-never-set-by-cut-release.sh opt-out),
+#                           this is narrow: a mismatched or unset SHA, or a
+#                           dirty tree, always falls through to the full
+#                           pre-gate, so a standalone `scripts/e2e/run.sh`
+#                           invocation (which never sees this var) still pays
+#                           full price, exactly as before this existed. See
+#                           export_pregate_verified_sha in cut-release.sh.
+#
 # Bed preflight (on by default — see preflight_bed below for the full rationale):
 #   Before anything runs, the bed checkout is fast-forwarded to the ref under
 #   test, its binary is rebuilt IN PLACE, stage-config drift is reported, and the
@@ -186,8 +214,17 @@
 #   - handarbeit/projects/2 ("Fabrik Test") exists with stage columns
 #   - Fabrik instance running at ~/dev/fabrik-test/ (typically with --auto-upgrade)
 # See tests/e2e/README.md for setup details.
+#
+# Process-group reap (R3, #1624): every `go test` invocation below runs via
+# run_reaped (or an inline equivalent for the one call site with more complex
+# redirection — see switch_and_run), so killing this script reaps that
+# invocation's process group instead of leaving its own children (most
+# concretely, a compiled `*.test` binary) running headless. See run_reaped's
+# own doc comment for the mechanism and why it traps INT/TERM only, never
+# EXIT.
 
 set -euo pipefail
+set -m
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -229,6 +266,57 @@ readonly PREFLIGHT_FAILED_EXIT=4
 readonly PREGATE_FAILED_EXIT=5
 
 # ---------------------------------------------------------------------------
+# run_reaped (R3, #1624): run "$@" as a backgrounded job in its own process
+# group and reap that whole group if this script is killed while it's in
+# flight, instead of leaving its children (most concretely, a compiled
+# `*.test` binary) running headless after the runner that spawned them is
+# gone. `set -m` (top of file) is what gives every backgrounded job its own
+# process group, led by the job itself — any further children it forks
+# inherit that same group, so `kill -TERM -"$pid"` (a negative PID targets
+# the whole process group, not just that one process) reaches all of them.
+#
+# Deliberately traps only INT/TERM, never EXIT: scripts/e2e/pregate_test.sh
+# and scripts/e2e/backoff_detection_test.sh `source` this file for its
+# function definitions and install their OWN EXIT trap for fixture cleanup
+# in that same shell (traps are shell-wide, not per-function) — an EXIT trap
+# set and cleared here would clobber theirs. On a caught signal the trap
+# kills the job's process group and re-exits with the shell-conventional
+# 128+signum code (130 for INT, 143 for TERM) rather than letting the script
+# continue past an interrupt it was told to stop for.
+#
+# `setsid`, the usual Linux idiom for giving a child its own process group,
+# is not shipped on macOS by default, so this uses portable bash job control
+# instead — the same approach scripts/sim/run.sh's own R3 fix uses.
+#
+# Not used for switch_and_run's main suite invocation below, which needs its
+# own inline variant: that call is a multi-stage pipe (go test | tee | jq)
+# whose exit code capture already depends on `pipefail`
+# (see switch_and_run's own comment), and backgrounding only the pipe's last
+# stage would silently lose that — see switch_and_run for the process-
+# substitution restructuring that avoids the problem instead.
+#
+# `pid` is declared and the trap installed BEFORE "$@" is backgrounded, not
+# after: a signal landing between starting the job and capturing `$!` would
+# otherwise have no handler yet, leaving the just-started job unreaped — the
+# exact orphan class this function exists to close (found during Review,
+# #1624; mirrors switch_and_run's own fix for the identical gap). A trap's
+# command string is re-expanded at signal-delivery time, not install time,
+# so referencing $pid before it's assigned is safe — `kill -TERM -""` is a
+# harmless no-op under `|| true`.
+# ---------------------------------------------------------------------------
+run_reaped() {
+  local pid=""
+  trap 'kill -TERM -"$pid" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$pid" 2>/dev/null || true; exit 143' TERM
+  "$@" &
+  pid=$!
+  local rc=0
+  wait "$pid" || rc=$?
+  trap - INT TERM
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # Pre-gate (R1, #1454): refuse to spend live budget until the free, fast
 # layers pass.
 #
@@ -258,12 +346,42 @@ run_pregate() {
     return 0
   fi
 
+  # R5, #1624: a tree-scoped dedup signal, not a blanket opt-out. Re-resolve
+  # HEAD ourselves rather than trusting the caller's claim — a stale or
+  # mismatched value (wrong ref, dirty tree since the caller's own pre-gate
+  # ran) always falls through to the full pre-gate below, never a silent
+  # false skip. See the header comment for the full rationale.
+  #
+  # The SHA match alone is not sufficient: `git rev-parse HEAD` only
+  # identifies the committed tree, and cut-release.sh's own step 4 (Build,
+  # between the SHA being captured and this check) can rewrite
+  # plugin/known_embedded_versions.go on disk without committing it —
+  # a HEAD match would then be silently vouching for a tree that no longer
+  # matches what was actually checked (found during Review, #1624). So this
+  # also requires a clean working tree (`git status --porcelain` empty) —
+  # any uncommitted change, tracked or untracked, falls through to the full
+  # pre-gate exactly like a SHA mismatch does.
+  if [ -n "${FABRIK_PREGATE_VERIFIED_SHA:-}" ]; then
+    local current_sha dirty
+    current_sha="$(git rev-parse HEAD)"
+    dirty="$(git status --porcelain)"
+    if [ "$FABRIK_PREGATE_VERIFIED_SHA" = "$current_sha" ] && [ -z "$dirty" ]; then
+      echo "== pre-gate skipped (already verified for $current_sha in this invocation, R5 #1624) =="
+      return 0
+    fi
+    if [ "$FABRIK_PREGATE_VERIFIED_SHA" != "$current_sha" ]; then
+      echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA ($FABRIK_PREGATE_VERIFIED_SHA) does not match HEAD ($current_sha) — running the full pre-gate =="
+    else
+      echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA matches HEAD ($current_sha) but the working tree has uncommitted changes since it was verified — running the full pre-gate =="
+    fi
+  fi
+
   echo "== pre-gate: sim suite + github wire-contract tests (R1, #1454) =="
   if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
     echo "pre-gate: sim suite failed — aborting before touching the live bed or making any live call." >&2
     exit "$PREGATE_FAILED_EXIT"
   fi
-  if ! ( cd "$REPO_ROOT" && go test -race -count=1 ./github/... ); then
+  if ! run_reaped go test -race -count=1 ./github/...; then
     echo "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call." >&2
     exit "$PREGATE_FAILED_EXIT"
   fi
@@ -624,17 +742,57 @@ detect_rate_limit_backoff() {
 # The suite invocation runs under `go test -json`, teed to a per-leg log, so
 # a non-zero exit can be classified (report_test_outcomes) and, if it was
 # specifically an E2E_TIMEOUT kill, followed by best-effort teardown — see
-# the header comment. `|| rc=$?` (rather than toggling set -e/+e) is what
-# lets this function inspect the pipeline's exit status without the script
-# aborting first: it's not the last element of an AND/OR list, so `set -e`
-# does not trigger on it, and `pipefail` ensures $? reflects go test's own
-# exit code even though it isn't the last command in the pipeline. The
-# report_test_outcomes call below is guarded with `|| echo warning...` for
-# the same reason: it's a standalone statement under `set -e`, so an
+# the header comment. The report_test_outcomes call below is guarded with
+# `|| echo warning...`: it's a standalone statement under `set -e`, so an
 # unguarded jq failure there (e.g. an unexpected future `go test -json`
 # schema change) would abort the script before ever reaching the
 # timeout-panic check and auto-teardown that follow it — silently
 # defeating the hardening this function exists to provide.
+#
+# Process-group reap (R3, #1624): go test itself is backgrounded (not the
+# whole `tee | jq` pipe) and its stdout+stderr are routed to it via a named
+# pipe on fd 3 (`mkfifo`, a backgrounded `{ tee ... | jq ...; } < "$fifo" &`
+# reader, then `go test ... >&3 2>&1 &`) instead — this is NOT run_reaped,
+# which backgrounds a plain command and waits for its own exit status
+# directly. A pipe's last stage is what `$!`/`wait` would report if the
+# whole `cmd1 | cmd2 | cmd3` were backgrounded as one job, and jq is wrapped
+# in `|| true` precisely so a jq hiccup can't fail the leg — meaning
+# `wait`ing on that PID would silently always see 0, discarding go test's
+# real exit code the same `pipefail` trick below exists to preserve for a
+# *foreground* pipeline. Backgrounding go test alone sidesteps this: `$!` is
+# go test's own PID, its own exit status is what `wait` reports directly (no
+# pipefail needed), and it still gets a process group of its own (`set -m`,
+# top of file) that the INT/TERM traps below can kill.
+#
+# The consumer (`tee | jq`) is fed via a named pipe rather than a process
+# substitution (`exec 3> >(tee ... | jq ...)`), and backgrounded as a real
+# job (`{ ...; } &`, capturing its own `$!` as consumer_pid) rather than left
+# anonymous, specifically so it too gets its own process group under `set
+# -m` and can be group-killed exactly like $suite_pid. A process substitution
+# does NOT get its own process group — traced during review: killing only
+# its own top-level PID (with or without the `-`-prefixed group form; the
+# group form is simply a no-op there, since no such group exists) leaves the
+# `tee`/`jq` pipeline's own descendants running, reparented to pid 1 — i.e.
+# it reproduces exactly the orphan class this whole issue exists to close,
+# just one process stage further down. The named-pipe form was confirmed
+# (during review) to fully reap `tee` and `jq` together via
+# `kill -TERM -"$consumer_pid"`, the same idiom used for `$suite_pid` below.
+# `mkfifo` + `exec 3> "$fifo"` is also what makes the consumer job's `$!`
+# capturable *before* go test starts writing to fd 3 — the `exec 3> "$fifo"`
+# open blocks until the backgrounded reader has already opened its end (FIFO
+# open rendezvous), so it is safe to `rm -rf "$fifo_dir"` (the directory
+# $fifo lives in — see below) immediately afterward: both ends are already
+# connected by then, and removing it only removes the now-unneeded directory
+# entry, not the open file descriptors.
+#
+# The consumer's own PID is captured (rather than relying on `wait
+# "$suite_pid"` alone) specifically so it can be `wait`ed on too:
+# `wait "$suite_pid"` only blocks until go test exits, not until the tee/jq
+# consumer reading its now-closed pipe has finished flushing $jsonlog —
+# without a second, explicit `wait` on the consumer, report_test_timings/
+# report_test_outcomes/the E2E_TIMEOUT grep below can race a still-writing
+# consumer and observe a truncated or momentarily-empty $jsonlog (reproduced
+# with a deliberately slow consumer during review).
 #
 # After the suite invocation, regardless of $rc, this function also checks
 # fabrik.log in full (not from a captured byte offset — see below) for the
@@ -662,8 +820,10 @@ switch_and_run() {
   # bed-restart check, not a scenario run, so it's a much smaller exposure
   # window than the suite invocation below, and extending it the same
   # machinery would mean auto-tearing-down a bed that may just be mid-restart
-  # rather than actually stuck.
-  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" go test -tags=e2e -v -count=1 -timeout 3m \
+  # rather than actually stuck. It is, however, still run via run_reaped
+  # (R3, #1624) so a kill of this script during the restart doesn't leave its
+  # own test binary running behind it.
+  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" run_reaped go test -tags=e2e -v -count=1 -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
   echo "== running suite with E2E_TRAIN_MODE=${mode}, -parallel=${parallel} =="
   local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
@@ -682,11 +842,61 @@ switch_and_run() {
     budget_before=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
   fi
 
+  # The consumer (tee | jq) is fed via a named pipe and backgrounded as its
+  # own real job, so it gets its own process group and can be group-killed
+  # exactly like $suite_pid — see the R3 comment above for why a process
+  # substitution can't do this safely. mkfifo's rendezvous means the
+  # `rm -f "$fifo"` right after `exec 3>` is race-free: that `exec` blocks
+  # until the backgrounded reader below has already opened its end.
+  #
+  # $suite_pid is declared (empty) and the INT/TERM trap installed
+  # immediately after the consumer is backgrounded — before go test is even
+  # started — rather than after both are launched: a signal landing in that
+  # gap would hit bash's default disposition (immediate termination, no
+  # handler run) and orphan whatever had already started, exactly the class
+  # of leak this whole fix exists to close (found during Review). Since a
+  # trap's command string is re-expanded at signal-delivery time, not at
+  # install time, referencing `$suite_pid` here is safe even before it's
+  # assigned below — `kill -TERM -""` is a harmless no-op under `|| true`.
+  # The trap also removes $fifo_dir (found during Review): $fifo is already
+  # set by this point, so it's safe to reference immediately, and without
+  # this a signal landing between `mkfifo` and the unconditional `rm -f
+  # "$fifo"` below (normal-path cleanup, after the writer end opens) would
+  # leave a stray named pipe behind in $TMPDIR — a minor leak, not a process
+  # orphan, but avoidable the same way.
+  #
+  # $fifo lives inside its own `mktemp -d` directory rather than being named
+  # directly by `mktemp -u` (found during Review): `-u` only reserves a
+  # name, it doesn't create anything, so another process (or a pre-existing
+  # file) could occupy that path between the reservation and `mkfifo`,
+  # aborting the script under `set -euo pipefail`. `mktemp -d` creates the
+  # directory atomically, so a path inside it cannot collide with anything
+  # else — `mkfifo` there is race-free. Cleanup removes the whole directory
+  # (`rm -rf`, not just the fifo) so nothing is left behind either way.
+  local fifo_dir fifo
+  fifo_dir="$(mktemp -d)"
+  fifo="$fifo_dir/fifo"
+  mkfifo "$fifo"
+  local suite_pid=""
+  { tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }; } < "$fifo" &
+  local consumer_pid=$!
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 143' TERM
+  exec 3> "$fifo"
+  rm -rf "$fifo_dir"
+
   E2E_TRAIN_MODE="$mode" go test -tags=e2e -json -count=1 -timeout "$TIMEOUT" -parallel "$parallel" \
-      ./tests/e2e/... "$@" 2>&1 \
-    | tee "$jsonlog" \
-    | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; } \
-    || rc=$?
+      ./tests/e2e/... "$@" >&3 2>&1 &
+  suite_pid=$!
+  exec 3>&-
+  wait "$suite_pid" || rc=$?
+  # Wait for the consumer to drain and finish writing $jsonlog before any of
+  # it is read below — see the comment above. Still under the INT/TERM trap
+  # (not cleared until after this), so a kill of this script while the
+  # consumer is draining reaps its whole group too, rather than leaving this
+  # wait unbounded with no signal path.
+  wait "$consumer_pid" 2>/dev/null || true
+  trap - INT TERM
 
   budget_after=""
   if [ -n "$BED_TOKEN" ]; then
