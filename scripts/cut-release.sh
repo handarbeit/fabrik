@@ -5,7 +5,7 @@
 #   scripts/cut-release.sh v0.0.67
 #   scripts/cut-release.sh v0.0.67 --skip-tests       # skip race-tested suite (last-resort)
 #   scripts/cut-release.sh v0.0.67 --no-doc-issue     # skip filing the doc-update issue
-#   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the plugin/fabrik version auto-bump
+#   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the marketplace plugin version auto-bumps
 #   scripts/cut-release.sh v0.0.67 --skip-integration=<reason>
 #       # Skip the mandatory live e2e integration gate (step 5 below). This is
 #       # a LOUD, RECORDED escape hatch, not a quiet default — see step 5's own
@@ -36,9 +36,9 @@
 #      "Fidelity-drift policy" section). This is a release-checklist step, not
 #      something left to memory.
 #   6. Commit release-notes.md (if dirty) as arbeithand
-#   6b. If plugin/fabrik's source changed since the previous tag, patch-bump
-#       plugin/fabrik/.claude-plugin/plugin.json and commit as arbeithand
-#       (skippable with --no-plugin-bump)
+#   6b. For each plugin listed in .claude-plugin/marketplace.json whose source
+#       changed since the previous tag, patch-bump its .claude-plugin/plugin.json
+#       and commit them together as arbeithand (skippable with --no-plugin-bump)
 #   7. Tag, push tag with credential helpers nuked + PAT-in-URL
 #   8. Watch the release workflow run; fail loudly on non-success
 #   9. Verify the published release author and discussion author are both arbeithand
@@ -422,42 +422,78 @@ else
   ok "release-notes commit pushed"
 fi
 
-# ─── 6b. auto-bump plugin/fabrik version if source changed ───────────────────
+# ─── 6b. auto-bump marketplace plugin versions if source changed ─────────────
 # Claude Code's /plugin update compares plugin.json's version field against
-# marketplace.json@main; same version number means no refresh fires even if
-# the plugin's source changed. Patch-bump plugin/fabrik's manifest whenever
-# its source changed since the previous tag, so users always get fresh
-# content. plugin/fabrik-workflows is out of scope — it's not listed in
-# marketplace.json and has its own content-hash-based change detection.
+# marketplace.json@main; same version number means no refresh fires even if the
+# plugin's source changed. Patch-bump the manifest of every plugin whose source
+# changed since the previous tag, so users always get fresh content.
+#
+# The plugin list is derived from marketplace.json rather than hardcoded: a
+# plugin listed there is bumpable from that moment on, with no matching edit
+# here. That coupling is deliberate — marketplace.json membership is exactly
+# what makes /plugin update's version comparison apply to a plugin, so the two
+# cannot drift apart. plugin/fabrik-workflows is out of scope for the same
+# reason: it isn't listed, isn't served by /plugin update, and has its own
+# content-hash-based change detection.
 step "Plugin version bump"
-PLUGIN_MANIFEST="plugin/fabrik/.claude-plugin/plugin.json"
 if [ "$NO_PLUGIN_BUMP" -eq 1 ]; then
-  warn "--no-plugin-bump was passed; skipping plugin/fabrik version bump"
+  warn "--no-plugin-bump was passed; skipping plugin version bumps"
 elif [ -z "$PREV_TAG" ]; then
-  warn "no previous release tag found — skipping plugin/fabrik version bump (first release?)"
+  warn "no previous release tag found — skipping plugin version bumps (first release?)"
 else
-  if ! BUMP_OUTPUT="$(go run ./tools/bump-plugin-version/ plugin/fabrik "$PLUGIN_MANIFEST" "$PREV_TAG")"; then
-    die "bump-plugin-version failed for plugin/fabrik (prev tag: $PREV_TAG)"
+  MARKETPLACE_JSON=".claude-plugin/marketplace.json"
+  [ -f "$MARKETPLACE_JSON" ] || die "$MARKETPLACE_JSON not found"
+
+  # Only git-subdir entries carry a source.path pointing at a directory in this
+  # repo; any other source type is distributed from elsewhere and is not ours to
+  # bump. Enumerated by a Go helper rather than jq, so the release path depends
+  # on nothing the repo doesn't already require.
+  if ! PLUGIN_DIRS="$(go run ./tools/list-marketplace-plugins/ "$MARKETPLACE_JSON")"; then
+    die "failed to enumerate plugins from $MARKETPLACE_JSON"
   fi
-  if [ -z "$BUMP_OUTPUT" ]; then
-    ok "plugin/fabrik unchanged since $PREV_TAG — no bump needed"
-  else
+
+  BUMPED_MANIFESTS=""
+  BUMPED_SUMMARY=""
+
+  for PLUGIN_DIR in $PLUGIN_DIRS; do
+    PLUGIN_MANIFEST="$PLUGIN_DIR/.claude-plugin/plugin.json"
+    [ -f "$PLUGIN_MANIFEST" ] \
+      || die "$PLUGIN_MANIFEST not found (listed in $MARKETPLACE_JSON)"
+
+    if ! BUMP_OUTPUT="$(go run ./tools/bump-plugin-version/ "$PLUGIN_DIR" "$PLUGIN_MANIFEST" "$PREV_TAG")"; then
+      die "bump-plugin-version failed for $PLUGIN_DIR (prev tag: $PREV_TAG)"
+    fi
+    if [ -z "$BUMP_OUTPUT" ]; then
+      ok "$PLUGIN_DIR unchanged since $PREV_TAG — no bump needed"
+      continue
+    fi
+
     OLD_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f1)"
     NEW_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f2)"
-    ok "bumped plugin/fabrik $OLD_PLUGIN_VER -> $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+    PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
+    ok "bumped $PLUGIN_DIR $OLD_PLUGIN_VER -> $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
 
-    # Append a changelog line so the version bump is visible in the GitHub
-    # Release notes. release-notes/<version>.md was already committed and
-    # pushed above, so this lands in a second commit alongside the manifest
-    # bump rather than amending the already-pushed one.
-    insert_notes_line "$NOTES_FILE" "- Auto-bumped fabrik plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+    BUMPED_MANIFESTS="$BUMPED_MANIFESTS $PLUGIN_MANIFEST"
+    BUMPED_SUMMARY="$BUMPED_SUMMARY $PLUGIN_NAME@$NEW_PLUGIN_VER"
 
-    git add "$PLUGIN_MANIFEST" "$NOTES_FILE"
+    # Append a changelog line so each bump is visible in the GitHub Release
+    # notes. release-notes/<version>.md was already committed and pushed above,
+    # so this lands in a later commit alongside the manifest bumps rather than
+    # amending the already-pushed one.
+    insert_notes_line "$NOTES_FILE" "- Auto-bumped $PLUGIN_NAME plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+  done
+
+  if [ -z "$BUMPED_MANIFESTS" ]; then
+    ok "no marketplace plugin source changed since $PREV_TAG — nothing to bump"
+  else
+    # Intentionally unquoted: BUMPED_MANIFESTS is a space-separated path list.
+    # Plugin paths come from marketplace.json and contain no spaces.
+    git add $BUMPED_MANIFESTS "$NOTES_FILE"
     GIT_AUTHOR_NAME="$BOT_LOGIN" \
     GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
     GIT_COMMITTER_NAME="$BOT_LOGIN" \
     GIT_COMMITTER_EMAIL="$BOT_EMAIL" \
-    git commit -m "Bump fabrik plugin to $NEW_PLUGIN_VER" --quiet
+    git commit -m "Bump plugin versions:$BUMPED_SUMMARY" --quiet
     COMMIT_AUTHOR="$(git log -1 --pretty=format:'%an <%ae>')"
     [ "$COMMIT_AUTHOR" = "$BOT_LOGIN <$BOT_EMAIL>" ] \
       || die "plugin-bump commit author wrong (got: $COMMIT_AUTHOR)"
