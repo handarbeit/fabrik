@@ -80,6 +80,12 @@ normal-looking draft with no sign it was designed blind.
 If an experience baseline already exists, treat this as an amendment: read the other
 baselines' Open questions first and lead with anything addressed to you.
 
+**If a ratified architecture baseline was built against this document**, an amendment here
+can leave its budgets and fitness functions derived from a guarantee you have just
+superseded. Say so plainly, record it as an Open question addressed to the architect, and
+note that stage 5 must re-run to restore coverage — the same shape as stage 3's
+`Amended since sign-off` note, running the other way.
+
 **If the document carries a "Written without architecture constraints" line and those
 constraints now exist**, reconcile against them, delete the line, and record the
 reconciliation in the register. That is the only thing that lifts the ratification hold —

@@ -32,13 +32,13 @@ ALL_SKILLS = sorted((P / "skills").glob("*/SKILL.md")) + sorted((P / "skills").g
 fails = []
 def fail(msg): fails.append(msg)
 
+for p in [C, FOUND, EXP, BASE]:
+    if not p.exists(): sys.exit(f"missing file: {p}")
+
 raw = {p: p.read_text() for p in [C, FOUND, EXP, BASE]}
 def flat(p):
     """Whitespace-normalised, so a phrase spanning a line break still matches."""
     return re.sub(r"\s+", " ", raw[p])
-
-for p in [C, FOUND, EXP, BASE]:
-    if not p.exists(): sys.exit(f"missing file: {p}")
 
 # 1. Stop conditions must fire on missing SPECS, never conjunctively.
 for n, p in [("architecture-foundations", FOUND), ("experience-baseline", EXP)]:

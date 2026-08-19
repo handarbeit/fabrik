@@ -44,7 +44,10 @@ Establish the project root as `../../CONVENTIONS.md` describes. Read, in this or
    question you either answer here or record as an open risk — state inventory, composite state, interaction budgets, and
    any **Open questions** addressed to the architect
 3. `.specify/memory/decisions.md` — so you do not re-decide something settled, and so you
-   can check the **class** of anything described to you as agreed
+   can check the **class** of anything described to you as agreed. Also compare the
+   experience baseline's version against `**Against experience baseline**` in this
+   document's footer: if it has moved, the budgets and fitness functions below may be
+   derived from a guarantee that has since been superseded — say so before starting
 4. `.specify/memory/constitution.md` — and compare its version to the
    `**Against constitution**` field in the constraints. If it has moved, say so; something
    recorded as fixed may no longer be
@@ -235,6 +238,7 @@ explain each change, and record it in the register as a supersession. Remove the
 # [Project] Architecture Baseline
 
 **Last reviewed against specs**: 001–NNN as at [YYYY-MM-DD]
+**Against experience baseline**: [x.y.z]
 
 ## Supersedes / defers to
 ## Constraints                     *(from stage 3; amend in place if wrong)*
@@ -310,13 +314,16 @@ and leave the file alone. Two stages, two files, per `../../CONVENTIONS.md`.
 - [ ] Existing technical material is superseded or deferred to, explicitly
 - [ ] Constraints recorded in stage 3 are unchanged, or each change is explained
 - [ ] The constitution version this was signed against is recorded, or its absence is recorded in its place
+- [ ] The experience baseline version this was built against is recorded, and is the current one
 
 ## Readiness
 
 - [ ] Every feature at the head of the build order can start without a further decision; anything blocked is listed with what unblocks it
 - [ ] Every open question another baseline addressed to the architect is answered here, or restated with why it is still open
 - [ ] Every [NEEDS DESIGN] in the experience baseline is answered system-side or listed as an open risk
-- [ ] No *unparked* blocking marker remains — unresolved markers: CLARIFICATION __ DECISION __ LOOKUP __ DESIGN __ MEASUREMENT __ (parked __)
+- [ ] No *unparked* blocking marker remains: CLARIFICATION __ · DECISION __ · LOOKUP __ (parked __)
+
+*(Counts only — DESIGN __ · MEASUREMENT __. Neither blocks ratification; a document carrying them is honest, not defective.)*
 
 Mark any item that cannot apply to this project `[~]` with a one-line reason — `[~]` is
 not a failure and does not block ratification.
