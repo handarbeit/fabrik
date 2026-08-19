@@ -71,6 +71,11 @@ func TestGitSubdirPluginDirsErrors(t *testing.T) {
 			wantSub: "has no source.path",
 		},
 		{
+			name:    "whitespace in source.path is an error",
+			content: `{"plugins":[{"name":"a","source":{"source":"git-subdir","path":"plugin/my plugin"}}]}`,
+			wantSub: "whitespace in source.path",
+		},
+		{
 			name:    "malformed JSON is an error",
 			content: `{"plugins":[`,
 			wantSub: "parsing",

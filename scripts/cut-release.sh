@@ -223,8 +223,11 @@ BRANCH="$(git branch --show-current)"
 ok "on main"
 
 # Allow uncommitted release-notes/<version>.md, plugin/known_embedded_versions.go,
-# and plugin/fabrik/.claude-plugin/plugin.json (all three are updated by this
-# script itself, after the build step and in step 6b).
+# and any plugin/*/.claude-plugin/plugin.json (all are updated by this script
+# itself, after the build step and in step 6b). The manifest pattern is
+# deliberately not pinned to one plugin: step 6b bumps every marketplace-listed
+# plugin, so a run that dies partway through can leave any of them modified but
+# uncommitted, and a retry must not abort on the mess its own predecessor made.
 #
 # Allowlist disposition (reviewed for #1070, extended for #816): all three
 # files are committed by this script's own step 6 / step 6b, *before* the tag
@@ -234,7 +237,7 @@ ok "on main"
 # does not need to be tightened; the built-artifact VCS check lives in
 # .goreleaser.yaml/release.yml instead (see
 # adrs/071-release-artifact-vcs-verification.md).
-DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$| M plugin/fabrik/\.claude-plugin/plugin\.json$|^M  plugin/fabrik/\.claude-plugin/plugin\.json$" || true)
+DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$| M plugin/[^/]+/\.claude-plugin/plugin\.json$|^M  plugin/[^/]+/\.claude-plugin/plugin\.json$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
 ok "working tree acceptable"

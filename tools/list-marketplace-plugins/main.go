@@ -80,6 +80,15 @@ func gitSubdirPluginDirs(path string) ([]string, error) {
 		if p.Source.Path == "" {
 			return nil, fmt.Errorf("%s: plugin %q is git-subdir but has no source.path", path, p.Name)
 		}
+		// The release script consumes this output with shell word-splitting
+		// (for dir in $PLUGIN_DIRS). A path containing whitespace would split
+		// into two nonexistent paths and fail with a confusing missing-file
+		// error several steps later. Reject it here, where the message can say
+		// what is actually wrong.
+		if strings.ContainsAny(p.Source.Path, " \t\n") {
+			return nil, fmt.Errorf("%s: plugin %q has whitespace in source.path (%q); "+
+				"the release script splits this list on whitespace", path, p.Name, p.Source.Path)
+		}
 		dirs = append(dirs, p.Source.Path)
 	}
 	if len(dirs) == 0 {
