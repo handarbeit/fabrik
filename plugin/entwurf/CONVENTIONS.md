@@ -401,7 +401,9 @@ reversible is exactly such a decision.
 
 ## Baseline status
 
-Each baseline carries this footer.
+Each baseline carries this footer. `architecture-baseline` carries one extra field,
+`**Against experience baseline**`, because it is the only baseline built on top of
+another one — see below.
 
 ```
 **Version**: [x.y.z] | **Status**: Draft | **Signed off by**: —
@@ -438,6 +440,11 @@ because it was previously restated per skill, fixed in one, and left broken in t
    together. A ratification recorded only in the conversation did not happen.
 5. **If a later gate fails**, say so plainly and return the document to Draft. A binding
    document beside a failing gate is worse than an honest draft.
+
+`architecture-baseline` also carries `**Against experience baseline**: [x.y.z]`. It is the
+only baseline derived from another, so its budgets and fitness functions can be left
+resting on a guarantee the experience lead has since superseded. Same purpose as
+**Against constitution**, one tier down.
 
 **Against constitution** records the version this was signed against. When the
 constitution moves past it, the baseline may be stale — say so rather than assuming it

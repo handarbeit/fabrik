@@ -180,6 +180,31 @@ for n, p in BASELINES.items():
     if "[~]" not in raw[p]:
         fail(f"{n}: gate never mentions '[~]' — the not-applicable state is unreachable from where it is needed")
 
+# 19. Every footer field a skill writes must be described in CONVENTIONS' canonical
+#     footer section. A field added to one skill and not to the shared description
+#     leaves CONVENTIONS no longer describing the document it claims to govern.
+conv_footer = flat(C)
+for n, p_ in BASELINES.items():
+    tmpl = re.findall(r"\*\*(Version|Status|Signed off by|Ratified|Last Amended|Against [a-z ]+)\*\*", raw[p_])
+    for field in set(tmpl):
+        if f"**{field}**" not in conv_footer:
+            fail(f"{n}: writes footer field '**{field}**' that CONVENTIONS' footer section never describes")
+
+# 20. The marketplace listing and the plugin manifest must agree — the listing is what
+#     someone reads before installing, and they drifted once already.
+import json as _json
+mk = [x for x in _json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())["plugins"]
+      if x["name"] == "entwurf"]
+pj = _json.loads((P / ".claude-plugin/plugin.json").read_text())
+if not mk:
+    fail("marketplace.json: no entwurf entry")
+else:
+    for role in ["product owner", "technical architect", "experience lead"]:
+        a = re.search(re.escape(role) + r" \(([^)]*)\)", mk[0]["description"])
+        b = re.search(re.escape(role) + r" \(([^)]*)\)", pj["description"])
+        if bool(a) != bool(b) or (a and b and a.group(1) != b.group(1)):
+            fail(f"marketplace.json and plugin.json disagree on what the {role} stage covers")
+
 print("entwurf consistency\n")
 for f in fails: print(f"  ✗ {f}")
 print(f"\n{'all invariants hold' if not fails else f'{len(fails)} violation(s)'}")
