@@ -34,15 +34,22 @@ SOFTWARE.
 ## What was changed
 
 Spec Kit's commands assume a Claude Code / CLI environment and cover the whole
-lifecycle from idea to implementation. This plugin covers **spec authoring
-only** — everything downstream of the specification is Fabrik's scope — and is
-written for a product manager or business owner rather than an engineer.
+lifecycle from idea to implementation.
+
+This plugin began as spec authoring only, for a product manager or business owner rather
+than an engineer. It has since grown two further expert roles — a technical architect and
+an experience lead — which are **not** adapted from Spec Kit, because Spec Kit has no
+equivalent. They are original work, built to the same shape: a guided interview producing
+a project-level baseline plus per-feature artifacts, each gated by a fixed checklist.
+Everything past the specification is still out of scope: no `plan`, `tasks`, `analyze`
+or `implement`.
 
 **Kept:** the spec template and section structure, sequential `specs/NNN-name/`
 numbering, `.specify/feature.json`, `.specify/memory/constitution.md`, the
 requirements quality checklist (all sixteen items verbatim, in upstream's order)
-and its re-validation pass, the three-marker `[NEEDS CLARIFICATION]` cap, and
-clarify's full coverage taxonomy with its five-question ceiling and incremental
+and its re-validation pass, the three-marker `[NEEDS CLARIFICATION]` cap **for feature
+documents** (project baselines are uncapped and counted instead), and clarify's full
+coverage taxonomy with its five-question ceiling and incremental
 write-back.
 
 **Removed:** the `plan`, `tasks`, `analyze`, `implement`, and `checklist`
@@ -69,8 +76,11 @@ behavioural changes were made deliberately and depart from upstream:
 - **No invented facts.** Neither skill may propose a specific number, name, or
   threshold the person hasn't implied. Where upstream would fill a measurable
   success criterion with a plausible figure, this writes the shape and marks
-  the figure `[NEEDS BASELINE]`. `[NEEDS BASELINE]` is local to this plugin and
-  does not count against upstream's three-marker cap.
+  the figure `[NEEDS MEASUREMENT]`. That marker, and `[NEEDS DECISION]`,
+  `[NEEDS LOOKUP]` and `[NEEDS DESIGN]`, are local to this plugin and do not count
+  against upstream's three-marker cap. `[NEEDS BASELINE]` is a legacy spelling of
+  `[NEEDS MEASUREMENT]`, kept as an alias so markers already written into existing specs
+  are never rewritten.
 - **No temporary-directory fallback.** Upstream assumes a repo checkout. These
   skills write only to a folder the person has connected, and hand the files
   back for download when there isn't one, rather than saving to a scratch
@@ -101,6 +111,35 @@ strategy, delivery process, architecture, tech stack) is deliberately excluded
 and deferred to the build stage; technical preferences raised during the
 interview are recorded in a clearly non-binding section instead.
 
+## What was added to upstream's namespace
+
+Spec Kit defines `.specify/` and `specs/NNN-name/`. This plugin writes seven paths that
+upstream does **not** define, six of them inside `.specify/`:
+
+```
+.specify/memory/architecture.md                          technical baseline
+.specify/memory/experience.md                            experience baseline
+.specify/memory/decisions.md                             decision register
+.specify/memory/checklists/architecture-foundations.md   stage 3 gate
+.specify/memory/checklists/architecture-baseline.md      stage 5 gate
+.specify/memory/checklists/experience.md                 stage 4 gate
+adrs/NNN-short-title.md                                  decision records
+```
+
+These names are this plugin's own. Upstream assigns them no meaning and could later claim
+any of them — if it does, these are the files that would need renaming, and nothing else
+here depends on their names.
+
+They are **additive**. No upstream file is modified: `spec.md`,
+`checklists/requirements.md` and `.specify/feature.json` are written exactly as upstream
+defines them, and `.specify/memory/constitution.md` keeps upstream's shape and location
+with only its content narrowed (see **Changed** below). A Spec Kit project that has these
+files added to it loses nothing and stays readable by upstream tooling.
+
+Two further per-feature paths — `specs/NNN-*/technical.md` and `specs/NNN-*/experience.md`
+— are reserved in the plugin's conventions but have no producer yet.
+
 Spec output remains compatible with upstream Spec Kit, so anything that
 consumes a Spec Kit `specs/NNN-name/` folder — including `/speckit.plan` and
-`/speckit.tasks` in Claude Code — works against these specs unchanged.
+`/speckit.tasks` in Claude Code — works against these specs unchanged. The additions
+above sit alongside that folder rather than inside it.

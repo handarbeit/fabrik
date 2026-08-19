@@ -1,20 +1,34 @@
-# Fabrik Project Onboarding
+# Entwurf
 
-Onboard a software project and write its feature specifications — aimed at the product manager or business owner, not the engineer. No terminal, no git, no technical background needed.
+Turn a project into buildable specifications, one expert role at a time — the product owner, the technical architect, and the experience lead. Each is interviewed about their own side of the product; nobody is asked to answer for a role they don't hold.
+
+The product-owner path needs no terminal, no git, and no technical background.
 
 A **specification** — a spec — is a written description of what a piece of software should do and why, in enough detail that someone can build it without guessing. This plugin writes them with you, by asking questions.
 
-Three skills, meant to be used in that order:
+### The product owner's skills
+
+No technical background needed. Start here — everything else reads what these produce.
 
 - **onboard** — a 30–45 minute interview about the project as a whole: the problem, who it serves, what's in and out of scope, the hard constraints, and the words the business uses. Writes a short document — the project *constitution* — recording the ground rules every later spec has to respect, so you only answer these questions once.
 - **write-spec** — turns a feature described in plain language into a structured spec: the things people need to do with it (*user stories*), what it must do (*requirements*), how you'd know it worked (*success criteria*), and a checklist that grades the result.
 - **clarify** — reads a spec, finds what's vague or missing, asks up to five targeted questions one at a time, and writes each answer back into the document.
 
+### The architect's and designer's skills
+
+For the two expert roles, run after the specifications exist. These assume the person being interviewed *is* the expert — they don't simplify, and they don't ask questions someone outside the discipline could answer.
+
+- **architecture-foundations** — the immovable facts, plus the shared data model and who owns each part of it, the contracts between features, and who is allowed to do what. Runs early and is re-run as specifications accumulate, because that shared model is what stops eleven features drifting apart.
+- **experience-baseline** — conditions of use, the states every screen must handle, the component vocabulary, the words, the accessibility floor, and the interaction budgets. Decided once for the whole product.
+- **architecture-baseline** — converts what the product promises users into what the system guarantees developers: the domain model, contracts, budgets, build order, and the fitness functions that make it checkable rather than advisory.
+
+They run in that order for a reason: what the user must experience determines what the system must guarantee, which determines how it is built. Reverse it and the architect ends up inventing the guarantees.
+
 The files it writes follow a widely-used open format called [Spec Kit](https://github.com/github/spec-kit), so any development team can pick them up without translation — as can Fabrik, the tool that builds software from specs like these automatically.
 
 ## Install
 
-In the Claude desktop app: **Cowork** → **Customize** → **Plugins** → **Add marketplace**, enter `handarbeit/fabrik`, then install **Fabrik Project Onboarding**. Updates appear as an **Update** button in the same place.
+In the Claude desktop app: **Cowork** → **Customize** → **Plugins** → **Add marketplace**, enter `handarbeit/fabrik`, then install **Entwurf**. Updates appear as an **Update** button in the same place.
 
 You'll need the desktop app on a computer. The phone app can't connect to a folder, and these skills need somewhere to save your specs.
 
@@ -63,7 +77,7 @@ Install into Claude Code instead:
 
 ```
 /plugin marketplace add handarbeit/fabrik
-/plugin install fabrik-project-onboarding@fabrik
+/plugin install entwurf@fabrik
 ```
 
 `NOTICE.md`, alongside this file in the plugin source, records what was adapted from upstream Spec Kit and what was deliberately left out.

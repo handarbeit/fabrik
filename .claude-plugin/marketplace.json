@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "fabrik",
-  "description": "The Fabrik plugin marketplace — ambient awareness of Fabrik (a GitHub-Project-driven SDLC pipeline orchestrator) for your interactive Claude Code session.",
+  "description": "The Fabrik plugin marketplace \u2014 ambient awareness of Fabrik (a GitHub-Project-driven SDLC pipeline orchestrator) for your interactive Claude Code session.",
   "owner": {
     "name": "handarbeit.io",
     "url": "https://handarbeit.io"
@@ -24,13 +24,13 @@
       }
     },
     {
-      "name": "fabrik-project-onboarding",
-      "description": "Onboard a software project and write its feature specifications, for product managers and business owners rather than engineers. Interviews you about project goals, scope, constraints, and vocabulary, then turns feature ideas into Spec Kit specifications ready to hand to Fabrik for build.",
+      "name": "entwurf",
+      "description": "Turn a project into buildable specifications, one expert role at a time. Guided interviews for the three people a project needs: the product owner (goals, scope, vocabulary, then feature specifications), the technical architect (constraints, shared domain model, contracts, then the architecture baseline), and the experience lead (conditions of use, states, components, content). Output is a standard GitHub Spec Kit specs/ folder ready to hand to a development team, or to Fabrik. The product-owner path needs no terminal, git, or technical background.",
       "category": "productivity",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/handarbeit/fabrik.git",
-        "path": "plugin/fabrik-project-onboarding",
+        "path": "plugin/entwurf",
         "ref": "main"
       },
       "homepage": "https://fabrik.handarbeit.io",

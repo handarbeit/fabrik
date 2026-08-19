@@ -114,3 +114,10 @@ jobs:
       # no build, no network.
       - name: ADR reference integrity
         run: bash scripts/check-adr-references.sh
+
+      # Cross-file invariants in the entwurf plugin. Four review rounds found the
+      # same class of defect every time — a rule fixed in one skill and left broken
+      # in its mirror — so the mirrors are asserted mechanically rather than by
+      # review. Pure text check: no build, no network.
+      - name: Entwurf plugin consistency
+        run: python3 scripts/check-entwurf-consistency.py
