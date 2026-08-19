@@ -2462,14 +2462,14 @@ The `fabrik:yolo` label means Fabrik will pick it up automatically and run it th
 
 Claude Code's `/plugin update` detects a new plugin release by comparing the cached `plugin.json` `version` field against the version at `ref: main` in `marketplace.json` — same version number means no refresh fires, even if the plugin's source changed. To prevent users from getting stuck on stale cached content, `cut-release.sh` may commit a version bump to `plugin/fabrik/.claude-plugin/plugin.json` before it tags the release:
 
-- **When it fires**: after the release-notes commit is pushed and before the tag is created, the script diffs `plugin/fabrik` (excluding the manifest itself) against the previous release tag. If anything changed, it patch-bumps `plugin.json`'s `version` field (e.g. `0.2.0` → `0.2.1`) and commits it as `@arbeithand`, in a separate commit alongside an appended changelog line in that release's `release-notes/<version>.md`, e.g.:
+- **When it fires**: after the release-notes commit is pushed and before the tag is created, the script diffs each plugin listed in `marketplace.json` (excluding its own manifest) against the previous release tag. For each one that changed, it patch-bumps that `plugin.json`'s `version` field (e.g. `0.2.0` → `0.2.1`) and commits it as `@arbeithand`, in a separate commit alongside an appended changelog line in that release's `release-notes/<version>.md`, e.g.:
 
   ```
   - Auto-bumped fabrik plugin to 0.2.1 (source changed since v0.0.75)
   ```
 
 - **When it doesn't fire**: if `plugin/fabrik`'s source is unchanged since the previous tag, or there is no previous tag (first-ever release), no extra commit is made and nothing is appended to the release notes.
-- **Scope**: only `plugin/fabrik` (the one plugin listed in `marketplace.json`) is bumped. `plugin/fabrik-workflows` is embedded directly into the Fabrik binary and distributed via `fabrik init`/`fabrik upgrade`; it uses independent content-hash-based change detection and is not affected by the `/plugin update` staleness issue this bump exists to fix.
+- **Scope**: every plugin listed in `marketplace.json` with a `git-subdir` source is bumped — the list is derived from that file rather than hardcoded, so listing a plugin is all that is needed to include it. All bumped manifests land in one commit, each with its own changelog line. `plugin/fabrik-workflows` is out of scope: it is embedded directly into the Fabrik binary and distributed via `fabrik init`/`fabrik upgrade`, uses independent content-hash-based change detection, and is not affected by the `/plugin update` staleness issue this bump exists to fix.
 - **Bump type**: patch-only. Minor/major version bumps for `plugin/fabrik` remain a manual responsibility.
 - **Escape hatch**: pass `--no-plugin-bump` to skip this step entirely, e.g. for a hotfix release where you don't want the extra commit:
 
