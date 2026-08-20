@@ -416,48 +416,35 @@ machine behaves, assuming the wire layer does what we think".
 
 ## Runtime and the `sim` tag decision (R8/AC9)
 
-`go test -race ./tests/sim/` (this package alone — `Env`, `simclaude`, and
-the scenarios in "What this layer is permanently blind to" above) measures at
-**~21–23s** on a development machine, dominated by the real-time costs
-documented above (`lockVerifyDelay`, the stage retry cooldown, `workerYield`
-pacing) rather than by CPU work — every scenario in this package uses
-`t.Parallel()` for exactly this reason, since the dominant cost is wall-clock
-waiting, which parallelizes almost for free **on a modest core count**.
-`tests/sim/simclaude` alone is ~2–3s.
-[Qualified by #1624](#parallelism-cap-r1-1624): "none of them contend on CPU
-or shared state" turned out to be false at high host core counts — every
-scenario's `NewEnv` seeds a real bare git repository via a real `git init
---bare` subprocess (`SeedRepo`), so `t.Parallel()`'s default `-parallel`
-(`GOMAXPROCS`) turns into dozens of concurrent `fork/exec` calls on a
-many-core machine, which is exactly what produced #1624's wedged-`gitMu`
-hang, killed-child SIGSEGVs, and `-race` runtime aborts. See that section for
-the fix.
+**This file does not record a current runtime.** `go test`'s own per-package
+`ok`/`FAIL` lines report real elapsed time on every run, and
+`scripts/sim/run.sh` prints its own total wall-clock time — ask the runner,
+not this file. Every previously-recorded figure here went stale, several
+within days of being written, and the corrections went stale in turn; a
+number in a document cannot track a suite that grows scenarios underneath it.
 
-**Updated for #1450's port** (R1's 12 target scenarios, ~30 new test
-functions across 8 new files): `go test -race -count=1 ./tests/sim/` now
-measures at **~35s** on a development machine — up from the ~21–23s baseline
-above, still dominated by the same real-time costs (more scenarios, each
-paying the same fixed per-poll `workerYield`/cooldown costs, parallelized via
-`t.Parallel()` exactly as before). `tests/sim/simgh` (below) is unaffected by
-this port and remains the slower of the two packages.
+`tests/sim` carries **no `sim` build tag**: it is part of the default
+`go test ./...` (and CI's `go test -race -timeout 5m ./...`), guarded only by
+the existing `skipIfNoGit` idiom, exactly like `tests/sim/simgh`.
 
-**Updated again for the worker-quiescence fix** (see "What this harness
-cannot avoid: real wall-clock time" above): `go test -race -count=1
-./tests/sim/` now measures at **~36–40s**, essentially unchanged from the
-~35s figure directly above — replacing the fixed per-dispatch `workerYield`
-sleep with a wait for the dispatched worker's actual completion did not
-meaningfully change the package's total runtime (confirmed across several
-repeated `-count=1` runs, including under sustained external CPU load on the
-measuring machine: ~36–40s each time, no exhaustion). What changed is
-variance and correctness under load, not the mean: previously, a poll that
-dispatched a worker always paid the fixed 100ms regardless of whether the
-worker actually needed that long, and a worker needing genuinely more real
-time (e.g. `lockVerifyDelay`) relied on several such polls happening to add
-up to enough real time — a bet that only paid off when the CPU wasn't
-starved. Now a dispatched poll pays exactly as long as the worker actually
-took, no more and no less, so the total is close to the same on an
-unloaded machine and — the actual point of the fix — no longer prone to
-exhausting a poll-count bound (`AdvanceUntil`'s `maxPolls`) on a loaded one.
+That decision no longer rests on a runtime threshold, and deliberately so.
+R8 originally framed it as "under ~90s, no tag; slower, tag it" — a rule
+written when the suite was ~21s and before the live e2e suite's own cost was
+being weighed against it. The live suite takes roughly four hours. Against
+that, the question is not whether this layer is cheap enough to keep on every
+PR; it is how much more coverage is worth adding to it. A pre-gate that
+catches a state-machine regression in seconds is worth far more than the
+seconds it costs, so the tag decision follows from the layer's purpose (see
+`adrs/1454-sim-pre-gate-not-replacement.md`) rather than from a stopwatch.
+
+What *is* worth knowing about cost is structural rather than numeric:
+`simgh`'s fidelity comes from real git, so every scenario spawns real
+subprocesses, and the merge-train scenarios (#1452) are qualitatively the
+heaviest — real repeated `git merge`/push/`gc` work per trial. That pressure
+grows with the scenario count, which is why the parallelism cap below exists
+and why `mergeTrainSlots` caps concurrent merge-train git activity
+independently of `-parallel`. See `adrs/1452-mergetrain-sim-harness-seams.md`
+and `adrs/1624-sim-suite-concurrency-and-pregate-dedup.md`.
 
 ### Parallelism cap (R1, #1624)
 
@@ -495,139 +482,11 @@ this suite's normal run-to-run variance, while removing the
 unbounded-parallelism condition #1624 traces the hang/SIGSEGV/TSan-abort
 trio to — the uncapped case's real cost is not a fixed number anyway, since
 it also *occasionally hangs to the 10-minute suite timeout* per #1624's own
-evidence. Per R6 (#1624 — see "Updated for #1454... then removed by #1624
-(R6)" below), the specific before/after wall-clock figures are deliberately
-not recorded here — run `scripts/sim/run.sh --all` to see this run's own
-total. `scripts/sim/run.sh` also reaps `go test`'s
+evidence. Per R6 (#1624), the specific before/after wall-clock figures are
+deliberately not recorded here — run `scripts/sim/run.sh --all` to see this
+run's own total, per the section above. `scripts/sim/run.sh` also reaps `go test`'s
 process group on exit/interrupt (R3, #1624) so an aborted run can't leave
 orphaned `sim.test` processes running; see that script's own header comment.
-
-Comfortably under the ~90s line R8 sets, so **no `sim` build tag** — this
-package is part of the default `go test ./...` (and CI's `go test -race
--timeout 5m ./...`), guarded only by the existing `skipIfNoGit` idiom, exactly
-like `tests/sim/simgh` already is.
-
-`tests/sim/simgh`'s own pre-existing suite (~65–76s, unaffected by this
-issue; measured at ~92s under this port's `-count=1` run above, within normal
-machine-load variance) runs as a separate package and is not part of this
-measurement, though `go test -race ./tests/sim/...` runs both concurrently —
-Go parallelizes across packages by default — so the wall-clock cost this
-issue actually adds to a full run is closer to "the slower of the two," not
-their sum: this port's own `go test -race -count=1 ./tests/sim/...` measured
-**~92s total**, i.e. still bounded by `simgh`'s pre-existing runtime, not by
-this port's additions.
-
-**Updated for #1451's recovery-machinery scenarios** (~30 new test
-functions across 8 new files — R1's 7 settle-scan escalation pairs, R2's
-rebase cycle limit, R3's 4 restart kill points plus `RestartEnv`'s own
-round-trip test, R4's partial-mutation scenario, R5's 2 Claude-limit
-scenarios, R6's concurrency scenario): `go test -race -count=1
-./tests/sim/` (this package alone) now measures at **~36s**, essentially
-unchanged from the ~36–40s baseline directly above despite the added
-scenario count — the direct-seed + fault-injection technique used for 6 of
-R1's 7 settle scans (seed the marker label plus minimal item state, fault
-one call) avoids a full pipeline dispatch for most of the new coverage, and
-R6's concurrency scenario deliberately uses a single-dispatch pipeline
-rather than a PR-creating one (see `concurrency_test.go`'s own doc comment
-for why — two earlier drafts using pipeline depth for realism each measured
-100+ real wall-clock seconds on their own before this was found).
-`go test -race -count=1 ./tests/sim/...` (this package + `simgh` +
-`simclaude` + `simgh/ghfault`, run concurrently) measured **~84s total**,
-still bounded by `simgh`'s own ~84s runtime rather than by this issue's
-additions — comfortably under the ~90s line, so the "no `sim` build tag"
-decision above still holds.
-
-**Updated for #1452's merge-train suite** (~25 new test functions across 9
-new files, one shared helper file): this is the first addition to genuinely
-exceed the ~90s line, and honestly, not by a small margin — each merge-train
-scenario does real, repeated `git merge`/push/`git gc` work (per trial, and
-several scenarios run multiple trials), which is qualitatively heavier than
-anything else in this package. `go test -race -count=1 -run TestMergeTrain
-./tests/sim/` (this issue's scenarios alone) measures at **~90–130s**
-depending on machine load. Two mitigations were applied, both documented in
-`adrs/1452-mergetrain-sim-harness-seams.md`:
-
-- `mergeTrainEnv`'s `CIBackstopTimeout` (10s) and
-  `SetTrainCIPollIntervalForTest` (15ms) give the verdict seeder headroom
-  against contention without changing the common-case (sub-millisecond)
-  latency.
-- `mergeTrainSlots`, a package-level semaphore capping concurrent
-  merge-train real-git activity at 3 scenarios regardless of how many
-  `t.Parallel()`-marked merge-train test functions exist. Measured directly:
-  running all merge-train scenarios with unlimited concurrency (no
-  semaphore) pushed individual scenario wall-clock to 40–70s apiece under
-  `-race` and — more importantly — starved *other, unrelated* package tests
-  badly enough to fail four of them
-  (`TestCruiseFullPipeline_NonVacuous`, `TestRestartEnv_RoundTrip`,
-  `TestYoloAutoMergeLabel`, `TestSmoke_FullPipelineToDone`) via
-  `workerQuiescenceTimeout`/`AdvanceUntil` exhaustion in one full-package
-  `-race` run, and drove the whole package to **~660s**. With the semaphore,
-  `go test -race -count=1 ./tests/sim/...` (this package + `simgh` +
-  `simclaude` + `simgh/ghfault`, run concurrently) measured **~106–130s** in
-  clean runs — still a real increase over the ~84s baseline directly above,
-  now the actual bottleneck rather than `simgh`. One further run, under
-  unusually heavy external load on the measuring machine, saw a single
-  *pre-existing, unrelated* test (`TestRebaseCycleLimit`) exhaust
-  `workerQuiescenceTimeout` at ~440s total — the same environment-contention
-  risk class this file's "worker-quiescence fix" section above already
-  documents, not a new failure mode this issue introduced, but the
-  semaphore's 3-way cap is a *mitigation* of that risk, not an elimination
-  of it under genuinely adverse load.
-
-**The "no `sim` build tag" decision is revisited, not reaffirmed, by this
-issue.** ~90–130s (typical) to ~440s (adverse-load outlier) is no longer
-"comfortably under" anything — it is argued to remain acceptable rather than
-gated behind a build tag, for three reasons: (1) merge-train is exactly the
-subsystem this package exists to make safe to test at all, per this issue's
-own Problem statement — gating its only sim coverage behind an opt-in tag
-would mean it silently stops running in ordinary CI; (2) the semaphore
-already bounds the worst realistic case to roughly 2–3x the package's
-pre-existing runtime, not open-ended; (3) `tests/sim/simgh`'s own ~90–100s
-is already comparable in magnitude and already ungated. If this package's
-total continues to grow with future additions, revisiting the build-tag
-question is a reasonable future call — but not one this issue's own
-Scope (which explicitly does not include changing this package's own testing
-infrastructure beyond what its scenarios need) is positioned to make
-unilaterally.
-
-**Updated for #1454 (correcting stale figures), then removed by #1624 (R6).**
-The "~92s total" / "comfortably under the ~90s line" conclusion two sections
-up predates the merge-train suite's addition (#1452, directly above) and had
-gone stale by the time #1454 recorded a fresh set of numbers here. Those
-numbers then went stale too — by #1624, `tests/sim` alone measured 106.6s
-against this section's own documented 42.5s, a ~2.5× gap, because scenarios
-kept being added underneath a figure nobody was re-measuring. This is not a
-one-off: this section's revision history is three rounds of "correct the
-stale number," each one going stale again.
-
-So as of #1624 (R6), this file stops asserting a specific current runtime.
-`go test`'s own per-package "ok"/"FAIL" lines already report real elapsed
-time for every run, and `scripts/sim/run.sh` (repo root — the frictionless
-on-demand entry point R8 adds) prints its own total wall-clock time after
-every run — run it to find out how long the suite currently takes; a number
-written in this file cannot stay true. With no arguments it runs the
-scenario layer only (`./tests/sim`) — the part that matters for a pre-gate,
-since it's the layer that actually exercises the pipeline; `--all` runs the
-full tree, where `tests/sim/simgh`'s own unit-test suite dominates the total
-the same way it has throughout this file's history. It's both the manual
-"run the sim layer by hand before committing to a full live e2e run" entry
-point and what `scripts/e2e/run.sh`'s pre-gate calls — see
-`adrs/1454-sim-pre-gate-not-replacement.md` for the full layering decision.
-
-**Updated for #1592's sequence-shaped scenarios** (8 new test functions across 4 new
-files — gap 1's two dependency-unblock scenarios, gap 2's two backoff scenarios, gap
-3's stale-worker-reap scenario, gap 4's three reinvoke-cycle-counter scenarios): all
-eight, run standalone via `-run`, measure at **~5–6s** — none of them do real git work
-beyond a single `EnsureWorktree` per scenario (`preCreateWorktree`,
-`reinvokeCycleCountersEnv`), and none loop more than a handful of polls. `go test -race
--count=1 -skip TestMergeTrainAssembly_PoisonMatrix ./tests/sim/...` (this package +
-`simgh` + `simclaude` + `simgh/ghfault`, run concurrently) measured **~80s for this
-package, ~100s for `simgh`** — both within the ranges #1454's own entry directly above
-already established as the package's current baseline, so #1592 does not move the "no
-`sim` build tag" needle further. (`TestMergeTrainAssembly_PoisonMatrix` itself is
-excluded from that figure as a pre-existing flake unrelated to this issue — confirmed
-independently reproducible on an unmodified `main` checkout, tracked separately from
-#1592's own scope.)
 
 ## Settle-scan inventory and recovery-machinery coverage (#1451)
 
