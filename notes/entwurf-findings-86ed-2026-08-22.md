@@ -28,7 +28,7 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Ten findings and three smaller ones.** Nothing here is a defect in the method as written —
+**Eleven findings and three smaller ones.** Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
 
@@ -46,10 +46,11 @@ Some will bounce back. There will be judgement calls in flight. That is true of 
 is not a failure of the specifications. What matters is that a team of people and a team of
 agents fail differently, in three specific ways:
 
-**No memory across issues.** A human team accumulates shared understanding — a decision made in
-one ticket is in everyone's head for the next one. Every Fabrik worker starts fresh. A
-judgement call made while implementing issue 12 is invisible to issue 40, and the two may
-decide the same question differently without either noticing.
+**Memory exists, but in a different artifact than entwurf writes to.** I assumed workers had no
+memory across issues and that is wrong — see finding 10. Fabrik agents write ADRs, and on
+`~/dev/fantasy` they have written 204 of them, 182 citing another ADR and 187 citing an issue,
+with supersession marked in line. The gap is not amnesia; it is that entwurf's register and
+Fabrik's ADRs are two halves of one job and neither tool writes to the other's half.
 
 **Asking is cheap for people and expensive for agents.** An engineer leans over and asks; it
 costs seconds, and the answer is absorbed by everyone in earshot. A worker either blocks the
@@ -382,37 +383,76 @@ two domains rather than routing the whole thing to one.
 
 ---
 
-## 10. Escalation is normal, and the pipeline has nowhere to put the answer
+## 10. The register and the ADR log are two halves of one job, and each tool uses only its own
 
-`FABRIK_BLOCKED_ON_INPUT` exists, so a worker can stop and ask. Three things around it are
-missing, and each maps onto one of the deficits above.
+**I had this wrong and the evidence corrected it.** My first draft claimed Fabrik workers carry
+no memory between issues. They do. On `~/dev/fantasy` — Fabrik without entwurf, one human, the
+full six-stage pipeline — agents have written **204 ADRs**. 182 of them cite another ADR, 187
+cite an issue, and supersession is marked in line (*"Superseded by ADR-109"*). A recent one
+reasons about a review bot's diff limit, quotes its own measurements, and links two prior
+decisions. That is a working institutional memory, written by agents, for agents.
+
+Now put the two projects side by side:
+
+| | `~/dev/fantasy` — Fabrik alone | 86ED — entwurf then Fabrik |
+|---|---|---|
+| ADRs | **204** | **1** |
+| Decision register | none | **87 rows** |
+| Specs | 538, one per issue | 15, one per feature |
+
+Each tool produced its own artifact and ignored the other's entirely.
+
+**Both artifacts are load-bearing and they are not substitutes.** `CONVENTIONS.md` already says
+why:
+
+> ADRs record individual decisions and their reasoning. They do not tell you which decision is
+> still in force.
+
+Fantasy's in-line supersession softens that — you *can* find what is current — but only by
+scanning every ADR touching a topic and checking each status. That is a search, not a lookup,
+and it gets worse at 204 and worse again at 500. And the register carries classes ADRs do not:
+working assumptions, exploratory ideas, technical suggestions binding on nobody, and unresolved
+markers naming who resolves them. Fantasy has no place for *"we are proceeding on this but
+nobody has confirmed it"*.
+
+Meanwhile 86ED has one ADR and 87 register rows — the mirror failure. Several of those rows are
+implementation-shaped decisions with real reasoning that deserved an ADR and got a table cell.
+
+**Proposed change.** State the division of labour and make each tool write to both:
+
+- **An ADR is the reasoning**; a register row is **what is currently true**. A decision worth an
+  ADR is worth a register row pointing at it. A register row whose reasoning would not fit in a
+  cell wants an ADR.
+- **Fabrik's stage skills should append a register row** when they make a decision that outlives
+  their issue — with an honest Class, which is the column that keeps an agent's judgement call
+  visibly distinct from a product owner's ruling.
+- **entwurf should write ADRs**, not only register rows, for its own architecture decisions.
+  Topic 3 already says to write one for a reclassified commitment; that instruction should be
+  general.
+
+## 11. Escalation is normal, and the answer has nowhere reusable to land
+
+`FABRIK_BLOCKED_ON_INPUT` exists, so a worker can stop and ask. Two things around it are
+missing.
 
 **The block is role-blind.** A worker can say it is blocked; it cannot say *on whom*. The
-baseline already carries the vocabulary — 86ED's open questions are grouped as *addressed to
-the product owner*, *to the architect*, *to the experience lead*, and that grouping is what
-made them actionable. A block that names its audience lands in the right person's lane. A block
-that does not becomes a notification somebody has to triage.
-
-**The answer goes nowhere reusable.** When the block clears, the answer lives in an issue
-comment. The decision register — *what is currently true, and who decided it* — is the artifact
-built precisely for this, and no worker writes to it. **That register is the shared memory a
-team has and a pipeline does not.** A Plan agent that settles a CSV format should append a row
-with an honest Class, and the next worker should find it there rather than deciding again.
+baseline already carries the vocabulary — 86ED's open questions are grouped as *addressed to the
+product owner*, *to the architect*, *to the experience lead*, and that grouping is what made
+them actionable. A block that names its audience lands in the right lane; one that does not
+becomes something a human has to triage.
 
 **A worker's escalation is evidence about the corpus, not just about that issue.** Plan's skill
-currently frames an open question as an upstream failure — *"if there are, something was missed
-upstream."* True, and the useful response is not only to flag it but to treat it as a **stage-3
-re-run trigger**. The existing triggers are "a new specification introduces an entity, a state
-or an authority". A worker blocking on an ambiguity is at least as strong a signal that the
-corpus has drifted.
+frames an open question as an upstream failure — *"if there are, something was missed
+upstream."* True, and the useful response is also to treat it as a **stage-3 re-run trigger**.
+The existing triggers are "a new specification introduces an entity, a state or an authority";
+a worker blocking on an ambiguity is at least as strong a signal that the corpus has drifted.
 
 **And this reframes finding 4.** The 27 deferrals are not wrong. A real team receives
-specifications with open ends and resolves them in a standup. The problem is not that the
-decisions are deferred — it is that the asking is cheap for that team and expensive for this
-one. So the fix is both halves: **name the consumer, and make sure a route to them exists.**
-86ED built that route — an outer-loop board, one issue per question, a skill that briefs the
-person on what is waiting for them. It was built for entwurf's findings. It is equally the
-escalation channel the inner loop needs, and neither plugin knows it exists.
+specifications with open ends and settles them in a standup. The problem is that asking is cheap
+for that team and expensive for this one — so the fix is both halves: **name the consumer, and
+make sure a route to them exists.** 86ED built that route: an outer-loop board, one issue per
+question, a skill that briefs the person on what is waiting. It was built for entwurf's
+findings, it is equally the inner loop's escalation channel, and neither plugin knows it exists.
 
 ---
 
