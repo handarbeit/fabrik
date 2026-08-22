@@ -4,6 +4,11 @@
 existed when entwurf's stage 3 first ran; four more specifications and two constitution
 amendments followed over four days, driven by what stage 3 found.
 
+**The pairing**: entwurf and Fabrik ship from the same repository and are intended to be used
+together. entwurf produces the specifications, the architecture baseline and the decision
+register; **Fabrik's agents consume all three**. Several findings below
+follow from that, and the two plugins currently do not reference each other at all.
+
 **Why this is worth reading**: `CONVENTIONS.md` cites this project as the motivating case for
 making stage 3 a living document — *"eleven specifications written over days drifted, because
 each new feature changed the meaning of earlier ones and nothing owned the shared entities."*
@@ -81,35 +86,172 @@ reads as settled while the specifications still say the old thing.
 **What we built.** A `## Spec amendments owed` section: spec, amendment, and the finding it
 came from. It became the most operationally important part of the document.
 
+**And it matters more than "untidy" because agents read both documents.** An unapplied
+amendment does not leave a gap in a worker's context — it leaves a **contradiction**. The
+baseline says the roster supplies facts; the specification says the roster derives authority.
+Both are in front of the agent. It will pick one, silently, and there is nothing in either
+document telling it which wins.
+
 **Proposed change.** Add it to the `architecture.md` template between `## Deferred to the
 baseline` and `## Open questions`, with a line in the gate: *every decision requiring a
 specification change is listed as owed until the specification reflects it.*
 
 ---
 
-## 3. Topic 4 should ask *how* it will be built, not only who by
+## 3. entwurf produces specifications; Fabrik consumes them. The method says so nowhere.
 
-**What happened.** Topic 4 was answered late: the build team is one person plus an agent
-pipeline that drives coding agents through a specification-to-merge lifecycle. That single fact
-changed the completeness bar for everything before it.
+The two plugins ship from the same repository, are used together by design, and **do not
+reference each other**. entwurf's output is `specs/NNN-name/spec.md`. Fabrik's Specify stage
+opens with:
 
-An engineer who encounters "what is a Matter?" asks someone. **An agent invents one** —
-plausibly, self-consistently, and differently in each of the four specifications that reference
-it. The inconsistency surfaces at integration.
+> Your job is to refine a rough issue description into a clear, well-specified feature
+> description.
 
-So the twenty-four unowned fields stopped being a documentation gap and became a delivery risk,
-and a build-order rule fell out of it:
+and Plan states plainly: *"The issue body is the spec, owned by Specify."* So Fabrik's model is
+issue-first — a rough issue becomes a spec — while entwurf's is file-first. Where entwurf has
+run, **Specify's authoring job is already done, and doing it again would overwrite an authored
+specification with a generated one.**
 
-> A specification is pipeline-ready when everything it references is owned — not when its own
-> checklist passes.
+86ED discovered this per-project and recorded it as a local gotcha. `~/dev/fantasy` solved the
+opposite direction — the issue body is the spec and Specify projects it to a file. Neither
+solution is in the plugin, so every project meets the seam cold.
 
-**What the method says today.** Topic 4 asks who builds it, how many, what they know, how long
-there is. All useful. It does not ask **how** — and agent-built and human-built projects have
-materially different definitions of a finished specification.
+**Proposed change.** State the pairing in both plugins, and define the entwurf-first direction:
 
-**Proposed change.** Extend topic 4 with the build model, and note the consequence: where
-specifications are the direct input to automated implementation, every unowned field and every
-unapplied amendment is a defect waiting to be built rather than a question waiting to be asked.
+- **Where a `specs/NNN-*/spec.md` exists, the issue references it rather than containing it**,
+  and Specify becomes a *reading and consistency* stage rather than an authoring one. Its
+  existing "check consistency with existing features" work is the valuable half and should
+  read `.specify/memory/architecture.md` and `decisions.md`, not only `CLAUDE.md`.
+- **Specify must never rewrite an authored specification.** Stock behaviour destroys it.
+- entwurf's README should say what happens next; Fabrik's should say what it expects to find.
+
+### 3a. The PLANNED per-feature paths already have a producer
+
+`CONVENTIONS.md` describes `specs/NNN-name/technical.md` as PLANNED with no producer:
+
+> The baselines are written to be inherited by per-feature documents that do not exist yet.
+
+**Fabrik's Plan stage produces exactly that document** — a per-feature implementation design
+derived from the spec — and posts it as a stage comment rather than writing the file. The
+producer exists; the two halves have never been introduced.
+
+### 3b. Stage 5's outputs are Fabrik configuration, not advice
+
+- **Build order** is the board's dependency graph. 86ED's own orientation already says *"build
+  order is a stage-5 output — do not hand-wire issue dependencies before then,"* which is a
+  project reinventing the rule.
+- **Fitness functions** are what Validate gates on. Stage 5 currently describes them
+  abstractly; paired with Fabrik they have a concrete home, and "the check is owed to stage 5"
+  becomes "the check is owed to Validate."
+- **Pipeline readiness** is a board rule: a specification whose referenced entities are unowned
+  does not get an issue yet.
+
+### 3c. The outer and inner loops
+
+The two plugins are two loops and the projects using them will invent the distinction anyway.
+86ED did, on day two, and it clarified everything downstream:
+
+| | Outer loop — entwurf | Inner loop — Fabrik |
+|---|---|---|
+| Cycle | product | code |
+| Worked by | people | agents |
+| Output | specifications, decisions, ADRs | pull requests |
+
+The seam between them is human-gated: an outer-loop task settles a specification, and only then
+does an inner-loop issue exist for it. Nothing crosses automatically. Worth shipping rather
+than rediscovering.
+
+---
+
+## 3d. Because agents implement, "an implementation detail" is now a defect class
+
+**This is the finding I would rank first.**
+
+The corpus contains **27 deliberate deferrals** — ten phrased as "an implementation detail",
+seventeen as "outside this spec's scope" — spread across **9 of its 15 specifications**. Every
+one of them is well-judged by the standards of specification writing. Examples:
+
+- *the specific CSV file format is an implementation detail outside this spec's scope*
+- *the exact matching criteria for a stable source identifier are an implementation detail*
+- *the specific mechanism for detecting similar names worth flagging is an implementation detail*
+
+With a human engineer these are correct. Over-specifying is a real failure and the specs avoid
+it. **With an agent implementation they are invention points** — and unlike an unowned entity,
+which stage 3 surfaces, a deferral is *invisible to every check in the method*. It reads as
+good practice. It passes 16/16.
+
+The risk is not that the decision is undeferred. It is that the chain runs:
+
+```
+spec defers → Research or Plan agent decides → nobody sees it until Review
+```
+
+The decision still gets made — by an agent, silently, differently in each specification that
+defers the same thing, with the first human sight of it at Review.
+
+**Proposed change.** `write-spec` and `clarify` should treat a deferral as requiring a **named
+consumer**, in the same way `[NEEDS LOOKUP]` requires a named fetcher:
+
+> Deferring a decision is legitimate. Deferring it to nobody is not. Every "this is an
+> implementation detail" must name who decides it and when — a human at Plan, the architect at
+> stage 5, or the build team. Where implementation is automated, a deferral with no named
+> consumer is a decision an agent will make silently, and the same deferral appearing in two
+> specifications is two agents making it differently.
+
+That is a small change to a checklist item and it would have caught all 27.
+
+## 3e. Precedence was written for humans reading documents. Agents read them now.
+
+Fabrik's workers consume the specifications, `.specify/memory/architecture.md` and
+`.specify/memory/decisions.md`. Three of the method's rules become load-bearing in a way they
+were not when a person was doing the reading.
+
+**"Draft" means advisory, and the build may deviate.** `CONVENTIONS.md`:
+
+> **Draft** — advisory. The build may deviate, but must say where and why.
+
+Stage 3 stays Draft by design until stage 5. So for most of a project's life, **the architecture
+baseline is advisory to the build** — and an agent has to know both that it is permitted to
+deviate and that it is obliged to say so. Neither is discoverable from the document, which
+carries `**Status**: Draft` in a footer and explains nowhere what that obliges a reader to do.
+
+**The Class column is now a parsing rule, not a nuance.**
+
+> A row whose class is anything other than **Decided** is not a commitment and must never be
+> quoted downstream as though it were.
+
+Downstream is an agent. It will read `Working assumption` and `Recommended and accepted` and
+`Technical suggestion` rows in the same table as `Decided` ones, and nothing in its context
+tells it these bind differently. On 86ED the register carries all six classes and several
+architect's-own-defaults deliberately flagged as guesses — exactly the rows an agent should
+not build against without asking.
+
+**Precedence needs to be machine-legible.** The ordering exists and is good:
+
+> 1. The constitution outranks every baseline · 2. A ratified baseline outranks a draft ·
+> 3. An earlier stage's decision stands until the earlier role amends it · 4. Constraints
+> recorded at stage 3 bind stage 4 regardless of document status
+
+Rule 3 is the one that resolves the contradiction above — the specification wins until amended,
+and the baseline's decision is inert until applied. That is the right answer and **no worker
+will ever find it**, because it lives in the plugin's shared rulebook rather than anywhere a
+Fabrik agent reads.
+
+**Proposed change.** A short precedence block, written for a worker rather than a role, carried
+where workers actually look — the project's orientation file, or better, a Fabrik stage-skill
+section:
+
+> The specification is what you build. The architecture baseline constrains how. Where they
+> disagree, the specification wins and you flag the disagreement rather than resolving it — a
+> baseline decision that the specification has not absorbed is not yet in force. Anything in
+> the decision register whose Class is not "Decided" is not a commitment; treat it as context
+> and ask. A Draft baseline is advisory: you may deviate, and you must say where and why.
+
+**And the non-negotiables need to reach the worker at all.** 86ED's baseline carries four —
+one central authority decision point, insert-only audit at the storage layer, no status
+collapsed into one column, sensitive material in a separate tier rather than a filtered view.
+Each records how a violation would be detected. Those are precisely Review and Validate gates,
+and nothing currently carries them from the baseline to the stage that would enforce them.
 
 ---
 
