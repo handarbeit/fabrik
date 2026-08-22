@@ -37,6 +37,78 @@ method never states: the reader of these documents is an agent.
 
 ---
 
+## Handoff — read this first
+
+*Written for whoever implements this, in a session that was not there when it was written.*
+
+**Status.** Fifteen findings and three smaller ones. **One is settled** — the ADR `Level` field
+in finding 13, agreed by the maintainer on 2026-08-22 and already applied to 86ED as an example
+in `adrs/001`. Everything else is a proposal. Nothing in `CONVENTIONS.md` or any skill has been
+changed.
+
+### Trust calibration — four of these claims were wrong first
+
+This note was corrected repeatedly by the maintainer while being written, and a reader should
+know where the soft ground is. I claimed, and was wrong about:
+
+- **that agent-implementation was a variable to discover at topic 4.** It is the premise —
+  entwurf and Fabrik are designed to be used together.
+- **that Fabrik consumes only specifications.** It consumes the baseline and the decision
+  register too, which turns an unapplied amendment from an omission into a contradiction.
+- **that Fabrik workers carry no memory between issues.** They write ADRs; `~/dev/fantasy` has
+  204 of them, densely cross-referenced.
+- **that entwurf's and Fabrik's decision artifacts are two halves of one job.** They are three
+  altitudes that barely overlap.
+
+**Verify before trusting.** Every claim here is checkable against two repositories:
+`~/dev/86ed` (entwurf then Fabrik, mid-flight) and `~/dev/fantasy` (Fabrik alone, 538 issues,
+204 ADRs, no baseline). Where a number appears — 27 deferrals, 204 ADRs, 25 unowned fields —
+it was measured, and the command that measured it is worth re-running rather than believing.
+
+### Suggested order, and what each touches
+
+Roughly dependency order. Effort is rough and assumes reading the surrounding text first.
+
+| # | Finding | Touches | Effort |
+|---|---|---|---|
+| 13 | ADR `Level` field — **settled** | `CONVENTIONS.md` § Decision records; Fabrik stage skills | small |
+| 3 | Name the pairing; Specify must not overwrite an authored spec | both plugins' READMEs; `fabrik-specify` | small, high value |
+| 5 | Precedence written for a worker, not a role | `CONVENTIONS.md` § Precedence; a Fabrik stage skill | small |
+| 7 + 15 | Gate re-evaluation rule and the list sweep — **do these together, they are one family** | `CONVENTIONS.md` § Gates; all three baseline skills' closing steps | medium |
+| 4 | A deferral must name its consumer | `write-spec` and `clarify` checklists | small, **ranked first for value** |
+| 6 | Fourth field disposition — deliberately out of scope | `architecture-foundations` topic 6 | small |
+| 1 | The specification beat — stage 3 → stage 2 → stage 3 | `CONVENTIONS.md` § The stages | medium |
+| 2 | `## Spec amendments owed` in the template | `architecture-foundations` template + gate | small |
+| 10 | Register and ADRs are three altitudes | `CONVENTIONS.md` §§ Decision register, Decision records | medium |
+| 11 | Escalation: role-addressed blocks, and a re-run trigger | Fabrik stage skills; `architecture-foundations` re-run triggers | medium |
+| 12 | Stage 5 frames mechanisms rather than choosing them; and when to run the method at all | `CONVENTIONS.md` § The stages; `architecture-baseline` | **large — a real change of position** |
+| 14 | `.specify/` is hidden | four skills' closing reports, or a rename | **decision first, then small** |
+| 9 | Three smaller ones | scattered | small |
+
+### Two that are not like the others
+
+**Finding 12** proposes that stage 5 *frame* cross-cutting mechanisms rather than choose them,
+on the evidence that fantasy's best ADRs could only have been written once the constraint was
+real. That is a change of position on what stage 5 is for, not a clarification. Read the whole
+finding before touching `architecture-baseline`.
+
+**Finding 14** is a decision, not an implementation. `.specify/` is Spec Kit's name and
+`CONVENTIONS.md` deliberately protects it. The note lays out four options and recommends none.
+
+### What this would do to 86ED
+
+86ED is the evidence for most of this and would be the first project on the new shape. Its
+stage 3 is complete — 89 of 89 fields owned, nothing contested, no amendments owed — so the
+earlier concern about disturbing work in flight has largely lapsed. Two cautions remain:
+
+- **A `.specify/` rename or a domain-model split would move paths** that `CLAUDE.md`, the
+  hiring brief and several issue bodies reference by name.
+- **86ED has one ADR and has not run stage 5.** Any finding about ADR volume or altitude mixing
+  is theoretical there and observed on fantasy. Do not test it against 86ED and conclude the
+  problem is small.
+
+---
+
 ## The frame these findings sit in
 
 **Fabrik is an entire engineering team.** That is the useful way to read everything below.
