@@ -28,7 +28,7 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Thirteen findings and three smaller ones.** Nothing here is a defect in the method as written —
+**Fourteen findings and three smaller ones.** Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
 
@@ -607,6 +607,51 @@ which level they are at usually has not decided.
 **And use change rate as the test for what belongs where.** Context changes rarely, Code changes
 constantly. A slow-changing commitment buried in a stream of fast-changing ones is functionally
 lost. That is the argument for separation, independent of tooling.
+
+---
+
+## 14. The method apologises four times for where it puts things
+
+`.specify/` is a hidden directory holding the most-read human documents in the project — the
+constitution, the architecture baseline, the decision register, the gates. Four skills carry the
+same closing instruction:
+
+> **Where it was saved**, and that `.specify` is hidden by the operating system.
+
+`write-spec` goes further and tells the author to warn the reader in plain words. **A method
+that instructs its authors to apologise for its output location, in four places, is telling you
+something.**
+
+The split is arbitrary on its own terms. Spec Kit puts per-feature specifications in a visible
+`specs/` and project-level memory in a hidden `.specify/`. Both are human-readable prose written
+for people to read. There is no principle separating them, only history.
+
+**What is genuinely at stake.** The name is not entwurf's — `CONVENTIONS.md` protects it
+deliberately:
+
+> `.specify/` and `specs/NNN-name/` are GitHub Spec Kit's own names — never rename them to match
+> a skill, and never invent variants.
+
+That restraint is right in spirit: a method should not fork someone else's convention for taste.
+But on 86ED the dependency appears **conventional rather than functional**. `.specify/` holds
+`memory/` and a one-line `feature.json` pointer that entwurf's own `write-spec` writes. No Spec
+Kit tooling is running. What breaks on a rename is recognisability to someone who knows Spec
+Kit, not anything that executes.
+
+**Options, in increasing cost:**
+
+1. **Leave it and keep apologising.** Defensible, and the current position.
+2. **A visible entry point.** A top-level document that links into `.specify/memory/`, so a
+   human or an agent exploring the repository finds the constitution without knowing to look for
+   a dotfile. Cheapest, preserves interop, costs a second path to the same documents.
+3. **Rename.** Fixes it properly and forks the convention. Worth doing only with a clear view of
+   what actually consumes the path.
+4. **Raise it upstream.** The complaint is about Spec Kit's choice, and it is a reasonable one to
+   make there.
+
+Worth noting that the discoverability problem is sharper with agents than with people. A person
+told once where to look remembers. A fresh Fabrik worker explores the repository, and `ls` does
+not show it the constitution.
 
 ---
 
