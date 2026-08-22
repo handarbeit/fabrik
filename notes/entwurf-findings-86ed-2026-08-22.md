@@ -28,9 +28,41 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Nine findings and three smaller ones.** Nothing here is a defect in the method as written —
+**Ten findings and three smaller ones.** Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
+
+---
+
+---
+
+## The frame these findings sit in
+
+**Fabrik is an entire engineering team.** That is the useful way to read everything below.
+entwurf's job is to hand that team a body of work resolved well enough that contradictions do
+not keep bouncing back to the product owner, the experience lead and the architect.
+
+Some will bounce back. There will be judgement calls in flight. That is true of any team and it
+is not a failure of the specifications. What matters is that a team of people and a team of
+agents fail differently, in three specific ways:
+
+**No memory across issues.** A human team accumulates shared understanding — a decision made in
+one ticket is in everyone's head for the next one. Every Fabrik worker starts fresh. A
+judgement call made while implementing issue 12 is invisible to issue 40, and the two may
+decide the same question differently without either noticing.
+
+**Asking is cheap for people and expensive for agents.** An engineer leans over and asks; it
+costs seconds, and the answer is absorbed by everyone in earshot. A worker either blocks the
+issue or decides silently. The cost asymmetry inverts the incentive exactly where you least
+want it inverted.
+
+**No "that can't be right."** The most valuable thing a team does with a fresh specification set
+is read it and disbelieve parts of it. That function exists in this method — it is stage 3 —
+but it runs periodically rather than continuously, and nothing routes a worker's disbelief back
+into it.
+
+So the target is not *no escalation*. It is **escalation that is cheap, correctly addressed, and
+recorded where the next worker will see it.** Several findings below are versions of that.
 
 ---
 
@@ -347,6 +379,40 @@ correctly refused it: the product half had already been answered in a clarificat
 months earlier, and only the storage half was his. Interview rules already say to route
 neighbouring-domain claims to their owner; they could also say to *split* a question that spans
 two domains rather than routing the whole thing to one.
+
+---
+
+## 10. Escalation is normal, and the pipeline has nowhere to put the answer
+
+`FABRIK_BLOCKED_ON_INPUT` exists, so a worker can stop and ask. Three things around it are
+missing, and each maps onto one of the deficits above.
+
+**The block is role-blind.** A worker can say it is blocked; it cannot say *on whom*. The
+baseline already carries the vocabulary — 86ED's open questions are grouped as *addressed to
+the product owner*, *to the architect*, *to the experience lead*, and that grouping is what
+made them actionable. A block that names its audience lands in the right person's lane. A block
+that does not becomes a notification somebody has to triage.
+
+**The answer goes nowhere reusable.** When the block clears, the answer lives in an issue
+comment. The decision register — *what is currently true, and who decided it* — is the artifact
+built precisely for this, and no worker writes to it. **That register is the shared memory a
+team has and a pipeline does not.** A Plan agent that settles a CSV format should append a row
+with an honest Class, and the next worker should find it there rather than deciding again.
+
+**A worker's escalation is evidence about the corpus, not just about that issue.** Plan's skill
+currently frames an open question as an upstream failure — *"if there are, something was missed
+upstream."* True, and the useful response is not only to flag it but to treat it as a **stage-3
+re-run trigger**. The existing triggers are "a new specification introduces an entity, a state
+or an authority". A worker blocking on an ambiguity is at least as strong a signal that the
+corpus has drifted.
+
+**And this reframes finding 4.** The 27 deferrals are not wrong. A real team receives
+specifications with open ends and resolves them in a standup. The problem is not that the
+decisions are deferred — it is that the asking is cheap for that team and expensive for this
+one. So the fix is both halves: **name the consumer, and make sure a route to them exists.**
+86ED built that route — an outer-loop board, one issue per question, a skill that briefs the
+person on what is waiting for them. It was built for entwurf's findings. It is equally the
+escalation channel the inner loop needs, and neither plugin knows it exists.
 
 ---
 
