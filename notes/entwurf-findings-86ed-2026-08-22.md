@@ -28,7 +28,7 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Twelve findings and three smaller ones.** Nothing here is a defect in the method as written —
+**Thirteen findings and three smaller ones.** Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
 
@@ -546,6 +546,67 @@ and a narrowing of stage 5:
 > promise and belongs here. A mechanism is a means, and the moment before anything is built is
 > the moment you know least about it. Name it, state what it must achieve and how a violation
 > would show, and let the ADR that chooses it be written when the constraint is real.
+
+---
+
+## 13. What C4 offers: declare the level, and notice which one is missing
+
+The altitude confusion in finding 10 is the problem C4 was built for. Its lasting contribution
+is not the four names but the discipline behind them: **most architecture disagreements are two
+people zoomed to different levels, and neither has said so.** C4 makes the level a required
+part of the statement.
+
+### The taxonomy only half fits, and the half that misses matters
+
+| C4 level | Who covers it here |
+|---|---|
+| **Context** — the system, its users, the systems it touches | entwurf: Constraints, existing systems, obligations |
+| **Container** — deployable and runnable units | **nobody, currently** |
+| **Component** — groupings within a container | entwurf: interface contracts. Fabrik: `validator-dependency-injection`, `kind-registry-module-singleton` |
+| **Code** | Fabrik, occasionally. C4 says rarely draw this, and it is right |
+
+**C4 has no level for the domain model**, which is most of what entwurf's stage 3 produces —
+which entity exists, which feature owns each field, who may do what. That is not structure and
+C4 does not claim to cover it. So the taxonomy should be borrowed for the structural altitudes
+and not stretched over the rest.
+
+### The Container level is the actual gap between the two tools
+
+This is the useful finding. On 86ED, Container is **explicitly deferred** — the whole stack
+table moved to stage 5 when the platform commitment was reclassified, so there is currently no
+statement anywhere about deployable units.
+
+On fantasy, Fabrik filled that level by itself, issue by issue: `pnpm-workspaces`,
+`electron-vite`, `ipc-contextbridge`, `event-log-storage`. Nobody framed it; the pipeline
+decided it while building, and the decisions are sound.
+
+So the seam between entwurf and Fabrik sits **exactly at Container**, and neither tool claims
+it. Combined with finding 12 — that stage 5 should frame mechanisms rather than choose them —
+the open question sharpens usefully:
+
+> **Which Container decisions must stage 5 make, and which may Fabrik make?**
+
+A defensible split: stage 5 owns Container decisions that a specification depends on or that
+are expensive to reverse — is there a mobile client at all, is there one datastore or several,
+does anything run offline. Fabrik owns those that are cheap to change and only knowable while
+building — which bundler, which test runner, how a package is laid out. Fantasy's ADRs are
+almost all in the second group, which suggests the split is real rather than invented.
+
+### What to actually take
+
+**Require a level on every ADR.** Not the altitude prefix I proposed above — a named field, with
+C4's vocabulary where it applies:
+
+> `**Level**: Context | Container | Component | Code | Domain`
+
+That solves the numbering collision without a second directory, makes the ten decisions that
+shape the system findable among the two hundred that shape a module, and forces the writer to
+place their own decision — which is where C4's value actually lives. An author who cannot say
+which level they are at usually has not decided.
+
+**And use change rate as the test for what belongs where.** Context changes rarely, Code changes
+constantly. A slow-changing commitment buried in a stream of fast-changing ones is functionally
+lost. That is the argument for separation, independent of tooling.
 
 ---
 
