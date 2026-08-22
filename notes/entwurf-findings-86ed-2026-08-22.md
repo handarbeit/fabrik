@@ -28,7 +28,9 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-Nothing here is a defect in the method as written. These are things it does not currently say.
+**Nine findings and three smaller ones.** Nothing here is a defect in the method as written —
+these are things it does not currently say. Findings 3 through 5 all follow from one fact the
+method never states: the reader of these documents is an agent.
 
 ---
 
@@ -98,7 +100,7 @@ specification change is listed as owed until the specification reflects it.*
 
 ---
 
-## 3. entwurf produces specifications; Fabrik consumes them. The method says so nowhere.
+## 3. entwurf produces specifications, a baseline and a register; Fabrik consumes all three — and neither plugin says so
 
 The two plugins ship from the same repository, are used together by design, and **do not
 reference each other**. entwurf's output is `specs/NNN-name/spec.md`. Fabrik's Specify stage
@@ -125,7 +127,7 @@ solution is in the plugin, so every project meets the seam cold.
 - **Specify must never rewrite an authored specification.** Stock behaviour destroys it.
 - entwurf's README should say what happens next; Fabrik's should say what it expects to find.
 
-### 3a. The PLANNED per-feature paths already have a producer
+### 3a — the PLANNED per-feature paths already have a producer
 
 `CONVENTIONS.md` describes `specs/NNN-name/technical.md` as PLANNED with no producer:
 
@@ -135,7 +137,7 @@ solution is in the plugin, so every project meets the seam cold.
 derived from the spec — and posts it as a stage comment rather than writing the file. The
 producer exists; the two halves have never been introduced.
 
-### 3b. Stage 5's outputs are Fabrik configuration, not advice
+### 3b — stage 5's outputs are Fabrik configuration, not advice
 
 - **Build order** is the board's dependency graph. 86ED's own orientation already says *"build
   order is a stage-5 output — do not hand-wire issue dependencies before then,"* which is a
@@ -146,7 +148,7 @@ producer exists; the two halves have never been introduced.
 - **Pipeline readiness** is a board rule: a specification whose referenced entities are unowned
   does not get an issue yet.
 
-### 3c. The outer and inner loops
+### 3c — the outer and inner loops
 
 The two plugins are two loops and the projects using them will invent the distinction anyway.
 86ED did, on day two, and it clarified everything downstream:
@@ -163,9 +165,9 @@ than rediscovering.
 
 ---
 
-## 3d. Because agents implement, "an implementation detail" is now a defect class
+## 4. Because agents implement, "an implementation detail" is now a defect class
 
-**This is the finding I would rank first.**
+**Of everything here, this is the one I would fix first.**
 
 The corpus contains **27 deliberate deferrals** — ten phrased as "an implementation detail",
 seventeen as "outside this spec's scope" — spread across **9 of its 15 specifications**. Every
@@ -200,7 +202,7 @@ consumer**, in the same way `[NEEDS LOOKUP]` requires a named fetcher:
 
 That is a small change to a checklist item and it would have caught all 27.
 
-## 3e. Precedence was written for humans reading documents. Agents read them now.
+## 5. Precedence was written for humans reading documents. Agents read them now
 
 Fabrik's workers consume the specifications, `.specify/memory/architecture.md` and
 `.specify/memory/decisions.md`. Three of the method's rules become load-bearing in a way they
@@ -255,7 +257,7 @@ and nothing currently carries them from the baseline to the stage that would enf
 
 ---
 
-## 4. A clean checklist does not mean a consistent corpus
+## 6. A clean checklist does not mean a consistent corpus
 
 **What happened.** A specification came back **16/16 with no clarification markers while
 directly contradicting an existing specification** — it permitted configuration to cross a
@@ -282,7 +284,7 @@ nobody declared; nothing currently tells the architect to find things two specs 
 
 ---
 
-## 5. The gate decays silently, and nothing says when to re-run it
+## 7. The gate decays silently, and nothing says when to re-run it
 
 **What happened.** The baseline moved through four version bumps without its checklist being
 re-evaluated. It sat claiming a spec range and a set of counts that were two constitution
@@ -304,7 +306,7 @@ new specifications, not for amendments to the baseline itself.
 
 ---
 
-## 6. There is a third disposition, and it is neither owned nor unowned
+## 8. There is a third disposition, and it is neither owned nor unowned
 
 **What happened.** Twice a field marked "no feature exists that could own it" was reclassified
 rather than closed. One was deliberately unspecified because the constitution treats that class
@@ -323,7 +325,7 @@ as writing "the platform owns it."
 
 ---
 
-## 7. Three smaller findings
+## 9. Three smaller findings
 
 **entwurf produces AI-assisted documents and says nothing about labelling them.** This project
 independently wrote rules into three of its own specifications requiring AI-assisted content to
