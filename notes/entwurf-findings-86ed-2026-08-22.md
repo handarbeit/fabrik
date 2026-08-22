@@ -28,7 +28,7 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Eleven findings and three smaller ones.** Nothing here is a defect in the method as written —
+**Twelve findings and three smaller ones.** Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
 
@@ -392,6 +392,10 @@ cite an issue, and supersession is marked in line (*"Superseded by ADR-109"*). A
 reasons about a review bot's diff limit, quotes its own measurements, and links two prior
 decisions. That is a working institutional memory, written by agents, for agents.
 
+**And they were written as the implementation proceeded, issue by issue** — not up front, not by
+an architect. The log is a byproduct of building rather than a precondition for it. That timing
+turns out to matter more than the artifact does; see finding 12.
+
 Now put the two projects side by side:
 
 | | `~/dev/fantasy` — Fabrik alone | 86ED — entwurf then Fabrik |
@@ -453,6 +457,76 @@ for that team and expensive for this one — so the fix is both halves: **name t
 make sure a route to them exists.** 86ED built that route: an outer-loop board, one issue per
 question, a skill that briefs the person on what is waiting. It was built for entwurf's
 findings, it is equally the inner loop's escalation channel, and neither plugin knows it exists.
+
+---
+
+## 12. Two projects, two philosophies — and entwurf should say which one it is for
+
+The comparison is more instructive than any single finding, because the two projects did the
+opposite thing and both worked.
+
+**`~/dev/fantasy` discovered its architecture.** 538 issues, 204 ADRs written as each issue was
+worked, no architecture baseline at all. Every decision is grounded in something real that came
+up while building — ADR-160 exists because a review bot has a 500 KB diff limit, which is not a
+fact anybody could have written down in advance.
+
+**86ED is deciding its architecture first.** Fifteen specifications and a baseline before a line
+of code, on the maintainer's explicit position: *we must fully spec this system before we
+build.*
+
+Both are legitimate. What each buys is different, and entwurf currently says nothing about
+which situation it is for.
+
+### What the up-front baseline buys that emergent ADRs cannot
+
+**Cross-corpus findings.** An ADR written while implementing issue 12 optimises for issue 12.
+Nobody was checking whether it contradicts issue 40, because issue 40 does not exist yet. The
+findings stage 3 produced on 86ED were all of this kind: *Venue is used by eleven specifications
+and defined by none*; *two specifications derive the same authority by different mechanisms*;
+*the same field set is defined twice, identically*. **No per-issue process finds those**, because
+no single issue can see them.
+
+That is also why 86ED needed entwurf and fantasy did not. 86ED arrived with eleven
+specifications written over days that had already drifted — the exact condition `CONVENTIONS.md`
+describes. Fantasy never had that problem because it never had a large up-front corpus to drift.
+
+### What emergent ADRs buy that an up-front baseline cannot
+
+**Facts you cannot know yet.** A diff limit. A native binding that behaves badly. A prompt that
+costs more than expected. Fantasy's ADRs are grounded because the ground existed when they were
+written. An up-front decision about the same thing would have been a guess with a confident
+tone.
+
+### The consequence for stage 5
+
+This is the part worth acting on. Stage 5 currently owns two kinds of thing:
+
+- **Budgets and fitness functions** — targets, converted from user-facing guarantees. Legitimately
+  up front. You cannot discover what you promised.
+- **Cross-cutting mechanisms chosen for a quality** — synchronisation, notification delivery,
+  storage tiering. **These are exactly what fantasy's ADRs are made of**, and deciding them
+  before anything is built is deciding them at the moment you know least.
+
+`CONVENTIONS.md` defers a mechanism to stage 5 when it is *"chosen for a quality — performance,
+cost, scale, resilience — because those trade against the experience."* The trade-off reasoning
+is right. The conclusion may be a step too far: stage 5 should **frame** such a mechanism —
+name it, say what it must achieve, say how a violation would be detected — and leave the choice
+to an ADR written when the constraint is real.
+
+**Proposed change.** A short section in `CONVENTIONS.md` on when this method is worth running,
+and a narrowing of stage 5:
+
+> **When to run this.** These stages exist for a corpus that must be coherent before it is
+> built — many features specified in parallel, several people writing them, or a domain where
+> the cost of discovering a contradiction late is high. A project that can grow one issue at a
+> time, with decisions recorded as they are made, may need only a constitution and an ADR log.
+> Stage 3 exists to find what no single feature can see. If nothing spans your features, it has
+> nothing to find.
+
+> **Stage 5 sets targets and frames mechanisms; it does not choose them.** A budget is a
+> promise and belongs here. A mechanism is a means, and the moment before anything is built is
+> the moment you know least about it. Name it, state what it must achieve and how a violation
+> would show, and let the ADR that chooses it be written when the constraint is real.
 
 ---
 
