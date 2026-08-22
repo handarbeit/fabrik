@@ -396,15 +396,22 @@ decisions. That is a working institutional memory, written by agents, for agents
 an architect. The log is a byproduct of building rather than a precondition for it. That timing
 turns out to matter more than the artifact does; see finding 12.
 
-Now put the two projects side by side:
+**They are not two halves of one job. They are three altitudes, and only two of them share a
+directory.**
 
-| | `~/dev/fantasy` — Fabrik alone | 86ED — entwurf then Fabrik |
+| Altitude | Artifact | Example |
 |---|---|---|
-| ADRs | **204** | **1** |
-| Decision register | none | **87 rows** |
-| Specs | 538, one per issue | 15, one per feature |
+| Domain, product, authority — *what is currently true* | register row | *"Routing does not branch on severity; severity determines safeguards, type determines destination"* |
+| High-level architecture — *a commitment a reasonable person would question later* | ADR, written by entwurf | *"Platform commitment reclassified from constraint to reversible decision"* |
+| Implementation — *module structure, library choice, pattern* | ADR, written by a Fabrik worker | *"Validator dependency injection"*, *"Kind registry module singleton"*, *"pnpm workspaces"* |
 
-Each tool produced its own artifact and ignored the other's entirely.
+Fantasy's 204 ADRs are almost entirely the third kind. 86ED's register rows are almost entirely
+the first. **They barely overlap at all** — which is why neither project noticed it was missing
+the other's artifact.
+
+*(86ED currently has one ADR against fantasy's 204, and that comparison is not meaningful: 86ED
+has not run stage 5, the phase that produces architecture decisions, and has built nothing. It
+is mid-flight, not deficient.)*
 
 **Both artifacts are load-bearing and they are not substitutes.** `CONVENTIONS.md` already says
 why:
@@ -419,8 +426,15 @@ working assumptions, exploratory ideas, technical suggestions binding on nobody,
 markers naming who resolves them. Fantasy has no place for *"we are proceeding on this but
 nobody has confirmed it"*.
 
-Meanwhile 86ED has one ADR and 87 register rows — the mirror failure. Several of those rows are
-implementation-shaped decisions with real reasoning that deserved an ADR and got a table cell.
+**The collision 86ED will hit the moment Fabrik runs.** `adrs/` is one directory with one
+numbering sequence, and two tools will write into it at different altitudes. 86ED's `adrs/001`
+is a platform reclassification. The first Fabrik worker to make an implementation call will
+write `adrs/002` about a build tool or an injection pattern. They will interleave, numbered as
+peers, and a reader looking for architectural commitments will be reading them alongside
+decisions about which test runner won.
+
+Fantasy never hit this because it only ever had the third altitude. 86ED is the first project
+where both tools write ADRs, and nothing separates them.
 
 **Proposed change.** State the division of labour and make each tool write to both:
 
@@ -430,9 +444,14 @@ implementation-shaped decisions with real reasoning that deserved an ADR and got
 - **Fabrik's stage skills should append a register row** when they make a decision that outlives
   their issue — with an honest Class, which is the column that keeps an agent's judgement call
   visibly distinct from a product owner's ruling.
-- **entwurf should write ADRs**, not only register rows, for its own architecture decisions.
-  Topic 3 already says to write one for a reclassified commitment; that instruction should be
-  general.
+- **Separate the two altitudes in `adrs/`.** A prefix, a subdirectory, or a required
+  `**Altitude**` field — anything that lets a reader find the ten decisions that shape the
+  system without reading the two hundred that shape a module. Whatever the mechanism, it has to
+  exist before both tools write into the same directory, which on 86ED is imminent.
+- **Do not push implementation ADRs into the register.** Two hundred rows about factory patterns
+  would drown eighty-seven about what is currently true in the domain. A Fabrik worker should
+  append a register row only when its decision changes something at the first altitude — which
+  will be rare, and is exactly why the Class column matters when it happens.
 
 ## 11. Escalation is normal, and the answer has nowhere reusable to land
 
