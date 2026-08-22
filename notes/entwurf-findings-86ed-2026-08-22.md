@@ -28,7 +28,8 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Fourteen findings and three smaller ones.** Nothing here is a defect in the method as written —
+**Fourteen findings and three smaller ones.** One is settled — the ADR `Level` field in finding
+13, agreed 2026-08-22. The rest are proposals. Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
 
@@ -594,8 +595,10 @@ almost all in the second group, which suggests the split is real rather than inv
 
 ### What to actually take
 
-**Require a level on every ADR.** Not the altitude prefix I proposed above — a named field, with
-C4's vocabulary where it applies:
+**Require a level on every ADR.** **Agreed by the maintainer, 2026-08-22** — the only finding in
+this note settled rather than proposed. It takes effect when 86ED's architecture phase begins,
+which is the first moment either tool writes an ADR in anger. Not the altitude prefix I proposed
+above — a named field, with C4's vocabulary where it applies:
 
 > `**Level**: Context | Container | Component | Code | Domain`
 
