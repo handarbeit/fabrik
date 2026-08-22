@@ -28,7 +28,7 @@ v2.0.0    1        after three more specifications
 Every drop came from a specification being written. None came from further work on the
 architecture document. That is the headline, and several findings below follow from it.
 
-**Fourteen findings and three smaller ones.** One is settled — the ADR `Level` field in finding
+**Fifteen findings and three smaller ones.** One is settled — the ADR `Level` field in finding
 13, agreed 2026-08-22. The rest are proposals. Nothing here is a defect in the method as written —
 these are things it does not currently say. Findings 3 through 5 all follow from one fact the
 method never states: the reader of these documents is an agent.
@@ -331,6 +331,8 @@ and on the checkbox state being durable:
 
 It says nothing about **when** a re-evaluation is required. The re-run trigger is defined for
 new specifications, not for amendments to the baseline itself.
+
+**This is one instance of a wider pattern — see finding 15.**
 
 **Proposed change.** One sentence in Gates:
 
@@ -655,6 +657,63 @@ Kit, not anything that executes.
 Worth noting that the discoverability problem is sharper with agents than with people. A person
 told once where to look remembers. A fresh Fabrik worker explores the repository, and `ls` does
 not show it the constitution.
+
+---
+
+## 15. Every list in the baseline decays in the same direction, and nothing sweeps them
+
+Finding 7 recorded the gate going four versions stale. That was not an isolated slip — it is one
+instance of a pattern, and the second instance was worse.
+
+**What happened.** A stage-3 re-run took the domain model to zero unowned fields, updated the
+gate, and never touched `## Open questions`. The document then sat claiming **fourteen questions
+addressed to the product owner when thirteen had already been answered by his own work** over the
+preceding three days. He could reasonably have answered them again.
+
+**The pattern.** The baseline holds several sections that are lists, and every one of them is
+appended to freely and pruned only deliberately:
+
+| Section | Decays by |
+|---|---|
+| `## Open questions` | questions answered elsewhere and never struck |
+| `## Spec amendments owed` | amendments applied and never removed |
+| `## Deliberately deferred` | parked markers whose fetcher delivered |
+| the gate's counts | any amendment at all |
+| `Last reviewed against specs` / `Against constitution` | a spec or a constitution version landing |
+
+Appending is cheap and feels safe. Pruning requires re-reading the whole section against
+everything that has happened since. So they all rot in the **same direction — over-reporting
+open work** — and that direction feels conservative, which is exactly why nobody catches it.
+
+**Why over-reporting is not the safe error.** A document claiming fourteen open questions when
+one is real trains its readers to discount it, and the one real question goes with the rest. And
+where the reader is an agent, it is worse than discounting: an agent does not discount. It will
+treat a resolved question as open, and on a project with an escalation channel it will spend
+that channel asking something already answered.
+
+**The mechanism is already in the repository.** The decision register is the authority on what is
+currently true — that is its entire purpose. Every stale open question on 86ED had a matching
+`Current` row in the register answering it. So the sweep is not a judgement call, it is a join:
+
+> **For each open question, is there a `Current` register row that answers it? If so it is not
+> open.** Same for an amendment owed, and for a parked marker whose fetcher has delivered.
+
+**Proposed change.** A closing step in every baseline skill, before the gate is written:
+
+> **Sweep before you evaluate.** Re-read `## Open questions`, `## Spec amendments owed` and
+> `## Deliberately deferred` against the decision register. Anything the register now answers is
+> closed — strike it, record the number as retired rather than reusing it, and say in the gate
+> how many closed this run. These sections only ever grow unless a run deliberately shrinks
+> them, and they decay toward over-reporting, which reads as caution and behaves as noise.
+
+And a gate item to make it checkable:
+
+> - [ ] Every open question, owed amendment and parked marker was re-read against the register
+>       this run, and the number closed is recorded
+
+**This is the finding I would rank second**, after the deferral one. Both are the same species:
+something that reads as careful practice — deferring a decision, leaving a question open —
+quietly accumulating into a document nobody can act on.
 
 ---
 
