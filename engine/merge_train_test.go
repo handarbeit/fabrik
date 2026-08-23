@@ -3100,6 +3100,443 @@ func TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.T) {
 	}
 }
 
+// ── singleton fast path tests (#1644) ─────────────────────────────────────────
+
+// singletonFastPathTestSetup builds a bare-minimum trialParams + trainMember +
+// PRDetails triple for singletonFastPathEligible's pure-decision tests — no real
+// git, no worktree activity. Research's note applies here: the guard sits
+// before assembleAndValidate is ever called, so it needs its own independent
+// test seam driven by real GitHubClient mock calls, not the trainValidateFn
+// seam every other combined-Validate test in this file uses.
+func singletonFastPathTestSetup(eng *Engine) (trialParams, trainMember, *gh.PRDetails) {
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{
+		item:    gh.ProjectItem{Number: 9, Title: "Issue Nine", ItemID: "item-9", Repo: "owner/repo", Status: "Queued"},
+		prNum:   90,
+		headSHA: "head-sha",
+	}
+	pr := &gh.PRDetails{Number: 90, HeadSHA: "head-sha", MergeableState: "clean"}
+	return p, m, pr
+}
+
+func TestSingletonFastPathEligible_AncestorGreenMergeable_ReturnsTrue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			if base != "base-sha" || head != "head-sha" {
+				t.Errorf("expected FetchCommitsBehind(base-sha, head-sha) — the pinned base, never a live origin/<base> read (R3) — got (%s, %s)", base, head)
+			}
+			return 0, nil // pinned base is an ancestor — fast-forward
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{{Name: "build", Status: "completed", Conclusion: "success"}}, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if !eligible {
+		t.Fatalf("expected eligible, got ineligible: %s", reason)
+	}
+}
+
+// TestSingletonFastPathEligible_HeadSHAMismatch_FallsThrough is the TOCTOU
+// guard: the member's PR was re-pushed after batch formation, so the cached
+// headSHA snapshot no longer reflects what's actually on the PR. Must fall
+// through before any ancestry/CI API call is made.
+func TestSingletonFastPathEligible_HeadSHAMismatch_FallsThrough(t *testing.T) {
+	var behindCalled, checksCalled bool
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			behindCalled = true
+			return 0, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			checksCalled = true
+			return nil, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+	pr.HeadSHA = "a-different-sha"
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible on a stale head-SHA snapshot")
+	}
+	if behindCalled || checksCalled {
+		t.Error("expected the TOCTOU check to short-circuit before any ancestry/CI API call")
+	}
+	if reason == "" {
+		t.Error("expected a non-empty reason (R4 — the specific unmet condition must be logged)")
+	}
+}
+
+func TestSingletonFastPathEligible_NoPinnedBaseSHA_FallsClosed(t *testing.T) {
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+	p.baseSHA = ""
+
+	eligible, _ := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible with no pinned base SHA available")
+	}
+}
+
+// TestSingletonFastPathEligible_BaseNotAncestor_FallsThrough is AC2: the pinned
+// base has moved past the member's head since pinning, so the merge would not
+// be a fast-forward — the combination is genuinely untested and the fast path
+// must not fire.
+func TestSingletonFastPathEligible_BaseNotAncestor_FallsThrough(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			return 3, nil // pinned base is 3 commits ahead of the member's head
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible when the pinned base is not an ancestor of the member's head")
+	}
+	if reason == "" {
+		t.Error("expected a non-empty reason")
+	}
+}
+
+func TestSingletonFastPathEligible_MergeableStateDirty_FallsThrough(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+	pr.MergeableState = "dirty"
+
+	eligible, _ := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible for a dirty (conflicting) mergeable_state")
+	}
+}
+
+// TestSingletonFastPathEligible_CheckRunInProgress_FallsThrough is AC3: checks
+// are green so far but not yet complete (one run still in_progress) — must
+// fall through to the trial, not fast-path on partial evidence.
+func TestSingletonFastPathEligible_CheckRunInProgress_FallsThrough(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{{Name: "build", Status: "in_progress"}}, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible for an in-progress (incomplete) check run")
+	}
+	if reason == "" {
+		t.Error("expected a non-empty reason")
+	}
+}
+
+// TestSingletonFastPathEligible_FetchCommitsBehindError_FailsClosed and
+// TestSingletonFastPathEligible_FetchCheckRunsError_FailsClosed are AC4: an API
+// error is ambiguity, never positive evidence — both must fall through to the
+// trial, never be treated as "assume up to date"/"assume green" the way
+// trialBehind's unrelated, lower-stakes decision does on error.
+func TestSingletonFastPathEligible_FetchCommitsBehindError_FailsClosed(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			return 0, fmt.Errorf("network error")
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible on a FetchCommitsBehind error — ambiguity must fail closed (R2)")
+	}
+	if reason == "" {
+		t.Error("expected a non-empty reason")
+	}
+}
+
+func TestSingletonFastPathEligible_FetchCheckRunsError_FailsClosed(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, fmt.Errorf("network error")
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible on a FetchCheckRuns error — ambiguity must fail closed (R2)")
+	}
+	if reason == "" {
+		t.Error("expected a non-empty reason")
+	}
+}
+
+// TestTrySingletonFastPath_Eligible_LandsMemberPRDirectly is AC1's
+// function-level proof: an ancestor, green-and-complete, mergeable singleton
+// lands via a direct merge of its own PR — no trial branch, no draft/landing
+// PR, and no fabrik:credited-pr:<N> label (R5) — only
+// fabrik:awaiting-landing-verification, mirroring the ordinary auto-merge
+// path's labeling.
+func TestTrySingletonFastPath_Eligible_LandsMemberPRDirectly(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, HeadSHA: "head-sha", MergeableState: "clean"}, nil
+		},
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{{Name: "build", Status: "completed", Conclusion: "success"}}, nil
+		},
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{item: gh.ProjectItem{Number: 9, Title: "Issue Nine", ItemID: "item-9", Repo: "owner/repo", Status: "Queued"}, prNum: 90, headSHA: "head-sha"}
+
+	handled := eng.trySingletonFastPath(context.Background(), state, p, m)
+	if !handled {
+		t.Fatal("expected trySingletonFastPath to report handled (true)")
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	if len(client.mergePRCalls) != 1 || client.mergePRCalls[0].prNumber != 90 {
+		t.Fatalf("expected MergePR called once on the member's own PR #90, got %+v", client.mergePRCalls)
+	}
+	if len(client.createPRCalls) != 0 {
+		t.Errorf("expected no dedicated landing PR to be created, got %d", len(client.createPRCalls))
+	}
+	if len(client.createDraftPRCalls) != 0 {
+		t.Errorf("expected no draft CI PR to be created, got %d", len(client.createDraftPRCalls))
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 board status update (Queued -> Done), got %d", len(client.updateStatusCalls))
+	}
+
+	var sawAwaiting, sawCredited bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == awaitingLandingVerificationLabel {
+			sawAwaiting = true
+		}
+		if strings.HasPrefix(c.labelName, creditedPRLabelPrefix) {
+			sawCredited = true
+		}
+	}
+	if !sawAwaiting {
+		t.Error("expected fabrik:awaiting-landing-verification to be applied")
+	}
+	if sawCredited {
+		t.Error("expected NO fabrik:credited-pr:<N> label — the merged PR is the item's own linked PR (R5)")
+	}
+}
+
+// TestTrySingletonFastPath_NotEligible_FallsThroughNoSideEffects proves the
+// caller-visible half of AC2/AC4: when eligibility is not confirmed, nothing is
+// merged or advanced, and the caller learns to build the trial (false).
+func TestTrySingletonFastPath_NotEligible_FallsThroughNoSideEffects(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, HeadSHA: "head-sha", MergeableState: "clean"}, nil
+		},
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			return 5, nil // base moved — not a fast-forward
+		},
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{item: gh.ProjectItem{Number: 9, Title: "Issue Nine", ItemID: "item-9", Repo: "owner/repo", Status: "Queued"}, prNum: 90, headSHA: "head-sha"}
+
+	handled := eng.trySingletonFastPath(context.Background(), state, p, m)
+	if handled {
+		t.Fatal("expected trySingletonFastPath to report not-handled (false) so the caller builds the trial")
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected no MergePR call, got %+v", client.mergePRCalls)
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no board status update, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// TestTrySingletonFastPath_AlreadyMerged_ResumesLanding is the restart-safety
+// case: a prior run merged the member's own PR but died before advancing the
+// board (e.g. crashed between MergePR and the Done transition). The next poll
+// re-admits the member to Queued; trySingletonFastPath must resume straight to
+// the Done transition without re-running eligibility.
+func TestTrySingletonFastPath_AlreadyMerged_ResumesLanding(t *testing.T) {
+	var eligibilityCallMade bool
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, HeadSHA: "head-sha", MergeableState: "clean", Merged: true}, nil
+		},
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			eligibilityCallMade = true
+			return 0, nil
+		},
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{item: gh.ProjectItem{Number: 9, Title: "Issue Nine", ItemID: "item-9", Repo: "owner/repo", Status: "Queued"}, prNum: 90, headSHA: "head-sha"}
+
+	handled := eng.trySingletonFastPath(context.Background(), state, p, m)
+	if !handled {
+		t.Fatal("expected trySingletonFastPath to report handled (true)")
+	}
+	if eligibilityCallMade {
+		t.Error("expected eligibility to be skipped entirely when the PR is already merged")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected no redundant MergePR call for an already-merged PR, got %+v", client.mergePRCalls)
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected the Done transition to still run, got %d status updates", len(client.updateStatusCalls))
+	}
+}
+
+// TestFinishSingletonFastPathLanding_NonDefaultBase_ClosesIssue is R5's own
+// flagged risk: unlike landSingleton/landMergeTrainBatch (which always close
+// the member issue explicitly, regardless of base), the singleton fast path
+// relies on the merged PR's own "Closes #N" — which GitHub only auto-honours
+// into the repository's *default* branch (#1096). A base:<branch>-labeled
+// member must still get its issue closed explicitly via
+// closeIssueIfNonDefaultBase, or it lands but never closes.
+func TestFinishSingletonFastPathLanding_NonDefaultBase_ClosesIssue(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	shaOut, err := exec.Command("git", "-C", wm.baseDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	sha := strings.TrimSpace(string(shaOut))
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", sha)
+
+	var closedIssue int
+	client := &mockGitHubClient{
+		closeIssueFn: func(owner, repo string, n int) error {
+			closedIssue = n
+			return nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: sha, wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{
+		item:  gh.ProjectItem{Number: 42, Title: "Issue 42", ItemID: "item-42", Repo: "owner/repo", Status: "Queued", Labels: []string{"base:develop"}},
+		prNum: 420,
+	}
+
+	eng.finishSingletonFastPathLanding(state, p, m)
+
+	if closedIssue != 42 {
+		t.Errorf("expected closeIssueIfNonDefaultBase to close issue #42, got #%d", closedIssue)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var sawAwaiting bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == awaitingLandingVerificationLabel {
+			sawAwaiting = true
+		}
+	}
+	if !sawAwaiting {
+		t.Error("expected fabrik:awaiting-landing-verification to be applied")
+	}
+}
+
+// TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath is AC5:
+// the #1644 guard is gated on len(current) == 1 — a 2-member batch must never
+// evaluate singleton eligibility for either member, and must never merge
+// either member's own PR directly (only the shared integration PR).
+func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	// The singleton fast path's own ancestry check calls FetchCommitsBehind
+	// with a member's own head SHA as the `head` argument (base=p.baseSHA, a
+	// commit SHA); landGreenBatch's unrelated main-moved check (trialBehind)
+	// calls it with branch NAMES (base=p.baseBranch, head=trialBranch) — so
+	// this precisely isolates the singleton check without also flagging
+	// trialBehind's always-present call.
+	for _, c := range client.fetchCommitsBehindCalls {
+		if c.head == sha1 || c.head == sha2 {
+			t.Errorf("singleton fast path's ancestry check must never run for a multi-member batch, got call %+v", c)
+		}
+	}
+
+	// Neither member's own PR (10, 11) should ever be merged directly — only
+	// the shared integration PR.
+	for _, c := range client.mergePRCalls {
+		if c.prNumber == 10 || c.prNumber == 11 {
+			t.Errorf("expected no direct merge of a member's own PR in a multi-member batch, got %+v", c)
+		}
+	}
+}
+
 // TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation is the issue #1094
 // regression test for this call site: pollForMergeable already judged the integration
 // PR acceptable (mergeable_state=clean), but MergePR's own new precondition check
