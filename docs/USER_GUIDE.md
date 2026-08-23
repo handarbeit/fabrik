@@ -1295,6 +1295,10 @@ Both engines drain the same `Queued` column and advance their members to **Done*
 
 **Batch tuning.** `--max-batch-size` (default 5) caps how many `Queued` items land in one batch, **per repo**. A red batch (a genuine cross-PR conflict — rare, since every member already passed Validate alone) is isolated by halving bisection, bounded by `--max-bisect-validations`; the poisoner is ejected and the survivors re-form. If the base branch moves under an in-flight batch (an external push), the trial is rebased and re-validated up to `--max-train-rebase-cycles` times before the batch dissolves back to `Queued`. See the flag reference above for all knobs.
 
+**Single-member fast path.** When exactly one item is Queued for a repo, the train skips the trial entirely and lands that item's own PR directly — no trial branch, no draft CI PR, no second combined-Validate CI run — **whenever** the base branch hasn't moved since the item entered Queued, the PR is mergeable, and its own CI is already green and complete. This is the common case: Validate rebases onto base before signalling completion, so a lone Queued item is typically already up to date. If any of those conditions doesn't hold (most notably, another PR merged onto the base branch after this one entered Queued), Fabrik falls back to the ordinary trial cycle automatically — you don't need to configure anything for either path.
+
+Two observable differences from the batch-landing path: nothing on `--max-batch-size`/`--max-bisect-validations`/`--max-train-rebase-cycles` applies (there is no trial to bisect or rebase), and the issue's own linked PR is the one that merges, rather than a separate integration PR.
+
 **Scope note.** In v1 the train batches **yolo** `Queued` items only. `fabrik:cruise` and manual-merge items return early at Validate (before the train gate) and never enter the train — batching human-merge items behind an explicit "go" is a planned fast-follow.
 
 ### Draft PR Workflow
