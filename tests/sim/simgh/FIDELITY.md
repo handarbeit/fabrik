@@ -189,7 +189,13 @@ mergeability cannot be computed without one.
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
 commits on the base that the head lacks. This matches production, which reads
 `behind_by` from the REST compare endpoint (`compare/base...head`,
-`github/prs.go`).
+`github/prs.go`). `base`/`head` each accept either a branch name or a raw
+commit SHA (`resolveCompareRef`, `git.go`) — mirroring the real endpoint's ref
+grammar, which accepts a branch, tag, or SHA on either side. Before #1644 this
+resolved branch names only; #1644's singleton fast path compares the pinned
+base commit SHA against a member's head SHA (R3 — never a live branch read),
+which is the first production caller to pass a raw SHA rather than a branch
+name, and surfaced the gap.
 
 ### Head SHAs — **Modelled**
 
