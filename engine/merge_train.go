@@ -1379,6 +1379,20 @@ func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.
 	if err != nil {
 		return false, fmt.Sprintf("could not fetch check runs for %s: %v", m.headSHA, err)
 	}
+	// classifyLandingCI's zero-check-runs branch falls back to mergeable_state
+	// alone (ADR-933's "Actions disabled" case) — correct for its usual caller
+	// (pollForMergeable, judging a landing PR whose tree was already validated
+	// by a just-polled trial CI run) but wrong here: R1.2 requires positive
+	// evidence that the member's OWN CI already ran and passed, and this fast
+	// path never builds a trial, so zero check runs on the member's own PR
+	// head means "nothing has actually run" (or CI hasn't reported yet), not
+	// "green by absence." Falling through to classifyLandingCI's fallback
+	// would land an unvalidated tree — exactly the false positive R2/AC4
+	// require failing closed on — so it's rejected before classifyLandingCI
+	// is even consulted, regardless of mergeable_state.
+	if len(checkRuns) == 0 {
+		return false, "zero check runs on the member's own PR head — no positive CI evidence to land on"
+	}
 	result, detail := e.classifyLandingCI(p.owner, p.repo, pr.MergeableState, m.headSHA, checkRuns)
 	if result != TrainCIGreen {
 		return false, fmt.Sprintf("CI not confirmed green and complete: %s", detail)

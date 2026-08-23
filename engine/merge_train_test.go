@@ -3241,6 +3241,42 @@ func TestSingletonFastPathEligible_CheckRunInProgress_FallsThrough(t *testing.T)
 	}
 }
 
+// TestSingletonFastPathEligible_ZeroCheckRuns_FallsThrough guards against a
+// false positive found during review: classifyLandingCI's zero-check-runs
+// branch falls back to mergeable_state alone (ADR-933's "Actions disabled"
+// case) — correct for its usual caller (pollForMergeable, judging a landing
+// PR whose tree a just-polled trial CI run already validated) but wrong for
+// this fast path, which never builds a trial. A member whose own PR head has
+// zero check runs has had nothing actually validated — R1.2 requires
+// positive evidence the member's own CI ran and passed, so this must fall
+// through even with an accepted mergeable_state, never land on absence of
+// data (R2/AC4). Reproduces the exact false positive that made
+// TestMergeTrainRedSingleton_Dispatchable/_ReroutesOffQueued/
+// _FailedRerouteNoCommentNoCount (tests/sim) land a red-CI singleton
+// directly: those scenarios seed a failing check run on the *trial* SHA
+// (poisonVerdict), never on the member's own untried PR head, so before this
+// fix the fast path saw zero check runs there and (wrongly) treated that as
+// green.
+func TestSingletonFastPathEligible_ZeroCheckRuns_FallsThrough(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	p, m, pr := singletonFastPathTestSetup(eng)
+	pr.MergeableState = "clean" // an accepted mergeable_state must not be enough on its own
+
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
+	if eligible {
+		t.Fatal("expected ineligible with zero check runs, even with an accepted mergeable_state — absence of CI data is not positive evidence")
+	}
+	if reason == "" {
+		t.Error("expected a non-empty reason")
+	}
+}
+
 // TestSingletonFastPathEligible_FetchCommitsBehindError_FailsClosed and
 // TestSingletonFastPathEligible_FetchCheckRunsError_FailsClosed are AC4: an API
 // error is ambiguity, never positive evidence — both must fall through to the
