@@ -280,6 +280,14 @@ and should recognize.
   automatically once the permission configuration is fixed and a later
   invocation isn't denied — no manual removal needed. The outcome is
   identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`.
+- **`fabrik:nondefault-base-pr-noted`** — Set after a one-time comment names
+  an item's PR and explains that GitHub creates no Development-panel
+  issue↔PR link at all for a PR targeting a non-default base branch (only
+  relevant on a `base:<branch>` item). Purely informational — does not gate
+  dispatch, does not suppress anything, and (unlike `fabrik:awaiting-close`)
+  carries no retry/escalation: a failed comment post is not retried, since
+  there's no durable outstanding action to retry toward, only a missed
+  one-time notice.
 
 ## Notes for skill authors
 
