@@ -2016,7 +2016,7 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 // one internal-train batch (per repo) dispatched to a single worker. Runs in the poll
 // goroutine; the enqueue is a per-item GitHub mutation idempotent via fabrik:auto-merge-enabled.
 func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []gh.ProjectItem, projectID string) {
-	var trainItems []gh.ProjectItem
+	var trainCandidates []gh.ProjectItem
 	for _, item := range items {
 		// Precedence rule 1 (FR-3): native merge queue present → ADR-058 enqueue path.
 		if e.cfg.MergeQueue != "off" && item.LinkedPRIsMergeQueueEnabled {
@@ -2039,17 +2039,22 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 			continue
 		}
 		// Precedence rule 2 (FR-3): else the internal merge train.
-		trainItems = append(trainItems, item)
+		trainCandidates = append(trainCandidates, item)
 	}
 
 	// #1647: exclude any member whose resolved base branch differs from the
 	// repository default before the batch cap and before dispatch ever snapshots
-	// batchNumbers — see filterNonDefaultBaseMembers and ADR-1647.
-	trainItems = e.filterNonDefaultBaseMembers(repoKey, trainItems)
+	// batchNumbers — see filterNonDefaultBaseMembers and ADR-1647. Keep the
+	// pre-cap result (filteredTrainItems) separate from the post-cap trainItems
+	// below: the runaway-guard branch needs to know exactly which members this
+	// call excluded for a non-default base, not which members the batch cap
+	// additionally dropped.
+	filteredTrainItems := e.filterNonDefaultBaseMembers(repoKey, trainCandidates)
 
-	if len(trainItems) == 0 {
+	if len(filteredTrainItems) == 0 {
 		return
 	}
+	trainItems := filteredTrainItems
 	// FR-4: cap the internal-train batch to the first N items by entry order (ADR-059 D2),
 	// applied PER repo group. Log the truncation explicitly so operators can see it — never silent.
 	if maxBatch := e.effectiveMaxBatchSize(); len(trainItems) > maxBatch {
@@ -2058,11 +2063,17 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 	}
 	// Hook 2: pre-dispatch runaway guard check (ADR-059 D8). Handles beyond-cap Queued
 	// members that the in-flight worker couldn't reach during Hook 1 (one-poll-cycle gap).
-	// Uses the uncapped `items` slice so all Queued members are paused, not just the batch cap.
+	// Uses the uncapped `items` slice so all Queued members are paused, not just the batch cap
+	// — except any member filterNonDefaultBaseMembers just excluded this poll (#1647):
+	// markNonDefaultBaseExcluded's own comment promises such a member "remains safely in
+	// Queued, not paused, not failed, not moved," so it must never be swept into this
+	// unrelated safety pause. Batch-cap-overflow members are unaffected — they were never
+	// excluded by filterNonDefaultBaseMembers, so they remain in the pause set as before.
 	if count, tripped := e.isRunawayTripped(repoKey); tripped {
 		owner, repo := parseOwnerRepo(repoKey)
-		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(items))
-		e.fireRunawayGuard(ctx, owner, repo, items, count)
+		pauseItems := excludeNonDefaultBaseExclusions(items, trainCandidates, filteredTrainItems)
+		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(pauseItems))
+		e.fireRunawayGuard(ctx, owner, repo, pauseItems, count)
 		return
 	}
 	// Log the batch snapshot only when its composition changed since the last emission
@@ -2184,6 +2195,41 @@ func (e *Engine) filterNonDefaultBaseMembers(repoKey string, items []gh.ProjectI
 		e.markNonDefaultBaseExcluded(item, base, def)
 	}
 	return kept
+}
+
+// excludeNonDefaultBaseExclusions filters items to drop any member present in
+// trainCandidates but absent from filteredTrainItems — i.e. any member
+// filterNonDefaultBaseMembers just excluded this poll for a non-default base
+// (#1647). Used ahead of the runaway guard's pause+alert (routeQueuedGroup),
+// which otherwise sweeps the full uncapped items slice: without this, a
+// member markNonDefaultBaseExcluded just told "remains safely in Queued, not
+// paused" could still be paused and alerted in the very same poll cycle if
+// the runaway guard trips concurrently. Queue-enabled members (never in
+// trainCandidates at all) and batch-cap overflow (dropped only after
+// filteredTrainItems is computed, so never counted as "excluded" here) both
+// pass through unaffected — this narrows only the base-exclusion category.
+func excludeNonDefaultBaseExclusions(items, trainCandidates, filteredTrainItems []gh.ProjectItem) []gh.ProjectItem {
+	kept := make(map[int]bool, len(filteredTrainItems))
+	for _, ti := range filteredTrainItems {
+		kept[ti.Number] = true
+	}
+	excluded := make(map[int]bool)
+	for _, tc := range trainCandidates {
+		if !kept[tc.Number] {
+			excluded[tc.Number] = true
+		}
+	}
+	if len(excluded) == 0 {
+		return items
+	}
+	out := make([]gh.ProjectItem, 0, len(items))
+	for _, it := range items {
+		if excluded[it.Number] {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 // mergeTrainBatchSignature returns an order-independent signature for a Queued batch's

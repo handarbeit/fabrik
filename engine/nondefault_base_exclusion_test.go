@@ -276,6 +276,92 @@ func TestRouteQueuedGroup_ExcludesNonDefaultBaseMember_NoDispatch(t *testing.T) 
 	}
 }
 
+// TestRouteQueuedGroup_RunawayGuardHook2_NeverPausesNonDefaultBaseExcluded is a
+// Review-stage regression test (found by handarbeit-pruefer on PR #1652): Hook
+// 2's runaway-guard pause (routeQueuedGroup) used to sweep the pre-filter
+// `items` slice unconditionally, so a member excluded this same poll for a
+// non-default base — just told via markNonDefaultBaseExcluded's own comment
+// that it "remains safely in Queued, not paused, not failed, not moved" —
+// could still be paused and runaway-alerted in the very same call if the
+// runaway guard had already tripped. A default-base sibling in the same
+// batch must still be paused/alerted as before (sanity: the fix must not
+// blunt Hook 2 generally).
+func TestRouteQueuedGroup_RunawayGuardHook2_NeverPausesNonDefaultBaseExcluded(t *testing.T) {
+	client := &mockGitHubClient{}
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+
+	shaOut := gitOutputDir(t, wm.baseDir, "rev-parse", "HEAD")
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", strings.TrimSpace(shaOut))
+
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+	eng.cfg.MaxTrainTrialsPerWindow = 1
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	repoKey := "owner/repo"
+	eng.recordTrial(repoKey) // trips the counter (threshold 1)
+
+	defaultItem := makeTrainItem(1, "Default base member")
+	excludedItem := makeTrainItem(2, "Non-default base member")
+	excludedItem.Labels = append(excludedItem.Labels, "base:develop")
+
+	eng.routeQueuedGroup(context.Background(), repoKey, []gh.ProjectItem{defaultItem, excludedItem}, "PVT_test")
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	// #2 (non-default-base excluded): must get the exclusion comment/label,
+	// and must NOT be paused or runaway-alerted.
+	excludedLabeled, excludedPaused, excludedAlerted := false, false, false
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 2 {
+			if c.labelName == nonDefaultBaseExcludedLabel {
+				excludedLabeled = true
+			}
+			if c.labelName == "fabrik:paused" {
+				excludedPaused = true
+			}
+		}
+	}
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 2 && strings.Contains(c.body, "runaway guard") {
+			excludedAlerted = true
+		}
+	}
+	if !excludedLabeled {
+		t.Errorf("expected #2 to get %s despite the runaway guard being tripped", nonDefaultBaseExcludedLabel)
+	}
+	if excludedPaused {
+		t.Error("expected #2 (non-default-base excluded) never paused by the runaway guard — its own comment promises it stays safely in Queued")
+	}
+	if excludedAlerted {
+		t.Error("expected #2 (non-default-base excluded) never runaway-alerted")
+	}
+
+	// #1 (default base): sanity — Hook 2 must still pause/alert normally.
+	defaultPaused, defaultAlerted := false, false
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 1 && c.labelName == "fabrik:paused" {
+			defaultPaused = true
+		}
+	}
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 && strings.Contains(c.body, "runaway guard") {
+			defaultAlerted = true
+		}
+	}
+	if !defaultPaused {
+		t.Error("expected #1 (default base) still paused by the runaway guard (sanity)")
+	}
+	if !defaultAlerted {
+		t.Error("expected #1 (default base) still runaway-alerted (sanity)")
+	}
+
+	if _, ok := eng.mergeTrainInFlight.Load(repoKey); ok {
+		t.Error("expected no worker dispatched when the runaway guard is already tripped")
+	}
+}
+
 // TestRouteQueuedGroup_MixedBatch_NonDefaultBaseMemberNeverInTrial is the
 // AC1 regression test: end-to-end through the real routeQueuedGroup ->
 // dispatchMergeTrainWorker -> runMergeTrainWorker path (real git, no mocks
