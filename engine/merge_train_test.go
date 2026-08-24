@@ -3349,8 +3349,11 @@ func TestTrySingletonFastPath_Eligible_LandsMemberPRDirectly(t *testing.T) {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 
-	if len(client.mergePRCalls) != 1 || client.mergePRCalls[0].prNumber != 90 {
-		t.Fatalf("expected MergePR called once on the member's own PR #90, got %+v", client.mergePRCalls)
+	if len(client.mergePRAtHeadSHACalls) != 1 || client.mergePRAtHeadSHACalls[0].prNumber != 90 || client.mergePRAtHeadSHACalls[0].expectedHeadSHA != "head-sha" {
+		t.Fatalf("expected MergePRAtHeadSHA called once on the member's own PR #90 pinned to head-sha, got %+v", client.mergePRAtHeadSHACalls)
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected the unpinned MergePR to never be called for the singleton fast path, got %+v", client.mergePRCalls)
 	}
 	if len(client.createPRCalls) != 0 {
 		t.Errorf("expected no dedicated landing PR to be created, got %d", len(client.createPRCalls))
@@ -3404,8 +3407,8 @@ func TestTrySingletonFastPath_NotEligible_FallsThroughNoSideEffects(t *testing.T
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR call, got %+v", client.mergePRCalls)
+	if len(client.mergePRAtHeadSHACalls) != 0 {
+		t.Errorf("expected no MergePRAtHeadSHA call, got %+v", client.mergePRAtHeadSHACalls)
 	}
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("expected no board status update, got %d", len(client.updateStatusCalls))
@@ -3443,11 +3446,61 @@ func TestTrySingletonFastPath_AlreadyMerged_ResumesLanding(t *testing.T) {
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no redundant MergePR call for an already-merged PR, got %+v", client.mergePRCalls)
+	if len(client.mergePRAtHeadSHACalls) != 0 {
+		t.Errorf("expected no redundant MergePRAtHeadSHA call for an already-merged PR, got %+v", client.mergePRAtHeadSHACalls)
 	}
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected the Done transition to still run, got %d status updates", len(client.updateStatusCalls))
+	}
+}
+
+// TestTrySingletonFastPath_MergeConflictsOnHeadSHA_LeavesQueuedForRetry is the
+// TOCTOU-closure proof flagged in review: singletonFastPathEligible's evidence
+// was gathered against a specific head SHA, but nothing stopped a new commit
+// from landing on the member's own, externally-writable PR branch before the
+// merge call actually ran — unlike every other merge-train landing path, which
+// only ever merges a Fabrik-owned branch nobody else can push to. Pinning the
+// merge to that SHA (MergePRAtHeadSHA) means such a race surfaces as a refused
+// merge (mirroring GitHub's real 409 via gh.ErrConflict), not a silently
+// unvalidated land — the member simply stays in Queued for a fresh, correctly
+// re-evaluated attempt on the next poll (same "leave in Queued, retry whole
+// disposition" idiom as any other merge failure at this call site).
+func TestTrySingletonFastPath_MergeConflictsOnHeadSHA_LeavesQueuedForRetry(t *testing.T) {
+	var gotExpectedSHA string
+	client := &mockGitHubClient{
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, HeadSHA: "head-sha", MergeableState: "clean"}, nil
+		},
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{{Name: "build", Status: "completed", Conclusion: "success"}}, nil
+		},
+		mergePRAtHeadSHAFn: func(owner, repo string, prNumber int, expectedHeadSHA string) error {
+			gotExpectedSHA = expectedHeadSHA
+			return fmt.Errorf("%w: head moved", gh.ErrConflict)
+		},
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{item: gh.ProjectItem{Number: 9, Title: "Issue Nine", ItemID: "item-9", Repo: "owner/repo", Status: "Queued"}, prNum: 90, headSHA: "head-sha"}
+
+	handled := eng.trySingletonFastPath(context.Background(), state, p, m)
+	if !handled {
+		t.Fatal("expected trySingletonFastPath to report handled (true) — a merge-time failure is not a fall-through-to-trial case")
+	}
+	if gotExpectedSHA != "head-sha" {
+		t.Errorf("expected the merge to be pinned to the validated head SHA, got %q", gotExpectedSHA)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no board status update after a refused merge, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected no issue close after a refused merge, got %d", len(client.closeIssueCalls))
 	}
 }
 
@@ -3565,11 +3618,16 @@ func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *test
 	}
 
 	// Neither member's own PR (10, 11) should ever be merged directly — only
-	// the shared integration PR.
+	// the shared integration PR (via the unpinned MergePR).
 	for _, c := range client.mergePRCalls {
 		if c.prNumber == 10 || c.prNumber == 11 {
 			t.Errorf("expected no direct merge of a member's own PR in a multi-member batch, got %+v", c)
 		}
+	}
+	// The singleton fast path is the only caller of MergePRAtHeadSHA — asserting
+	// it was never called at all is a stronger version of the same guarantee.
+	if len(client.mergePRAtHeadSHACalls) != 0 {
+		t.Errorf("expected MergePRAtHeadSHA never called for a multi-member batch, got %+v", client.mergePRAtHeadSHACalls)
 	}
 }
 

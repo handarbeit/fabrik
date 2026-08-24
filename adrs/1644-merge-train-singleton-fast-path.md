@@ -47,8 +47,9 @@ Add a new, narrowly-scoped guard checked from `runMergeTrainWorker`'s re-form lo
    - `FetchCommitsBehind(owner, repo, p.baseSHA, m.headSHA) == 0` — ancestry checked against the
      **pinned** `baseSHA` already on `trialParams`, never a live `origin/<base>` read;
    - `gh.MergeableStateAccepted(pr.MergeableState)` (ADR-072) — the narrower "not dirty" check;
-   - `FetchCheckRuns` + `classifyLandingCI(...) == TrainCIGreen` (ADR-1153/ADR-1441), reused
-     unmodified.
+   - `FetchCheckRuns`, rejecting outright if it returns zero check runs (see Rationale — this is a
+     stricter pre-condition than `classifyLandingCI` itself applies), then
+     `classifyLandingCI(...) == TrainCIGreen` (ADR-1153/ADR-1441), reused unmodified.
 
    Every error return and every non-affirmative classification returns `(false, reason)` — there is
    no code path that returns eligible except by every check having been positively satisfied.
@@ -66,10 +67,11 @@ Add a new, narrowly-scoped guard checked from `runMergeTrainWorker`'s re-form lo
    details once; if already `Merged` (a prior run merged but died before advancing), resumes
    straight to `finishSingletonFastPathLanding` without re-running eligibility. Otherwise runs
    `singletonFastPathEligible`, logs the disposition either way (R4), and on eligible calls
-   `MergePR` then `finishSingletonFastPathLanding`. Once eligibility is confirmed positive, a
-   subsequent execution failure (e.g. a transient `MergePR` error) still returns `true` — "handled,
-   don't build a trial this poll" — mirroring every existing landing helper's "leave in Queued,
-   retry the whole disposition next poll" idiom.
+   `MergePRAtHeadSHA` (pinned to `m.headSHA` — see Rationale) then `finishSingletonFastPathLanding`.
+   Once eligibility is confirmed positive, a subsequent execution failure (e.g. a transient merge
+   error, or the pinned SHA no longer matching) still returns `true` — "handled, don't build a trial
+   this poll" — mirroring every existing landing helper's "leave in Queued, retry the whole
+   disposition next poll" idiom.
 
 `assembleAndValidate`, `assembleAndValidateInner`, `bisect`, `landOneAtATime`, and
 `landGreenBatch`'s main-moved rebase loop are all unchanged.
@@ -150,6 +152,40 @@ repository's *default* branch (#1096). Omitting this call would silently reintro
 landed-but-open-issue bug for a `base:<branch>`-labeled Queued member — nothing today prevents such
 a member from reaching Queued, even though the trial itself is always built against
 `wm.DefaultBaseBranch()` (an existing, unrelated quirk out of scope here).
+
+### Why does `singletonFastPathEligible` reject zero check runs, when `classifyLandingCI` itself treats that as green?
+
+`classifyLandingCI`'s zero-check-runs branch falls back to `mergeable_state` alone (ADR-933's
+"Actions disabled" case) — correct for its usual caller, `pollForMergeable`, which judges a landing
+PR whose tree a just-polled *trial* CI run already validated, so "zero check runs on the landing PR
+itself" is a benign GitHub quirk (checks sometimes don't re-run on a promoted PR), not an absence of
+validation. This fast path never builds a trial, so that precondition doesn't hold: zero check runs
+on the member's own PR head means nothing has actually validated that tree at all, not "green by
+absence." Falling through to `classifyLandingCI`'s fallback here would land an unvalidated tree —
+precisely the false positive R2/AC4 require failing closed on. `singletonFastPathEligible` therefore
+rejects on zero check runs *before* `classifyLandingCI` is even consulted, regardless of
+`mergeable_state` — a fast-path-specific precondition layered in front of the reused classifier,
+not a fork of it. (Found in review: the original implementation called `classifyLandingCI`
+directly and inherited this fallback, which a red-singleton sim scenario exposed — the scenario
+seeds a failing check run on the *trial* SHA a real trial would produce, never on the member's own,
+never-tried PR head, so the fast path saw zero check runs there and read that as green.)
+
+### Why `MergePRAtHeadSHA` instead of the existing `MergePR`?
+
+`MergePR`'s own self-gate re-reads `mergeable`/`mergeable_state` live immediately before merging,
+but never confirms the head is still the exact commit some earlier, separate check validated. That
+distinction is immaterial for every pre-existing `MergePR` caller: `landSingleton`,
+`landMergeTrainBatch`, and the ordinary auto-merge path all merge a Fabrik-owned trial, integration,
+or landing branch nobody else pushes to. This fast path is the first merge-train landing path to
+merge the member's own, externally-writable PR branch directly (R5) *after* a separate, earlier
+CI/ancestry classification (`singletonFastPathEligible`) — so a commit landing on that branch
+between the classification and the merge call would be merged having never been validated by this
+code path at all. GitHub's merge endpoint accepts an optional `sha` field for exactly this: a
+request whose live head no longer matches is rejected (409, mapped to `gh.ErrConflict`) instead of
+merging whatever is actually there. `MergePRAtHeadSHA(owner, repo, prNumber, expectedHeadSHA)` is a
+new, narrowly-added `GitHubClient` method (shared implementation with `MergePR`, `expectedHeadSHA ==
+""` meaning unpinned) used only by this fast path; every other caller is unchanged. (Found in
+review — flagged as an open TOCTOU gap between the eligibility check and an unpinned merge call.)
 
 ### Why does the fast path need no interaction with the runaway guard or trial counter?
 

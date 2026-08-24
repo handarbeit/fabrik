@@ -1487,7 +1487,13 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 	}
 	e.logf(m.item.Number, "merge-train", "singleton fast path taken for #%d: %s — landing PR #%d directly, no trial branch, no draft CI PR\n", m.item.Number, reason, m.prNum)
 
-	if err := e.client.MergePR(p.owner, p.repo, m.prNum); err != nil {
+	// MergePRAtHeadSHA, not MergePR: singletonFastPathEligible's CI/mergeability
+	// evidence was gathered against pr.HeadSHA (== m.headSHA, confirmed equal
+	// above) on the member's own, externally-writable PR branch. Pinning the
+	// merge request to that exact SHA closes the window between that check and
+	// this call — a push landing in between is rejected (ErrConflict, mapped
+	// from GitHub's 409) rather than silently merged unvalidated.
+	if err := e.client.MergePRAtHeadSHA(p.owner, p.repo, m.prNum, m.headSHA); err != nil {
 		e.logf(m.item.Number, "merge-train", "singleton fast path: merge of PR #%d failed: %v — leaving #%d in Queued for retry\n", m.prNum, err, m.item.Number)
 		return true
 	}

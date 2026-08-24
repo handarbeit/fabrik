@@ -59,12 +59,22 @@ func TestMergeTrainSingletonFastPath_UpToDateAndGreen_LandsWithoutTrial(t *testi
 		t.Errorf("expected no dedicated landing PR either, got %d CreatePR call(s)", got)
 	}
 
-	merges := env.Sim.Log().ByMethod("MergePR")
+	// The fast path merges via MergePRAtHeadSHA (#1644 review fix), not the
+	// unpinned MergePR — pinning the merge to the SHA singletonFastPathEligible
+	// actually validated, since (unlike every other merge-train landing path)
+	// this merges the member's own, externally-writable PR branch directly.
+	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 0 {
+		t.Errorf("expected the unpinned MergePR never called by the fast path, got %d", got)
+	}
+	merges := env.Sim.Log().ByMethod("MergePRAtHeadSHA")
 	if len(merges) != 1 {
-		t.Fatalf("expected exactly 1 MergePR call, got %d", len(merges))
+		t.Fatalf("expected exactly 1 MergePRAtHeadSHA call, got %d", len(merges))
 	}
 	if merges[0].Args.Number != prNum {
 		t.Errorf("expected the merged PR to be the member's own PR #%d, got #%d", prNum, merges[0].Args.Number)
+	}
+	if len(merges[0].Args.Values) != 1 || merges[0].Args.Values[0] != pr.HeadSHA {
+		t.Errorf("expected the merge pinned to the member's validated head SHA %s, got %+v", pr.HeadSHA, merges[0].Args.Values)
 	}
 }
 
