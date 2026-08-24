@@ -180,20 +180,29 @@ func (d *Daemon) client(owner string) (GitHubLister, bool) {
 	return c, ok
 }
 
-// ApplyReload atomically swaps in a freshly reloaded Config and merges
-// addedClients into Clients — the write side of the concurrency-safety
-// boundary config()/client()/clientForOwner() read through. Called only
-// from handleReload (execute.go), and only once every newly-watched owner
-// in addedClients has already been fully bootstrapped (minted token,
-// refresh goroutine started) by the caller: ApplyReload itself starts and
-// mints nothing, so a partial addedClients here would silently leave a new
-// owner without a live refresh loop. Config and Clients change together
-// under one write-lock acquisition so no reader can observe the new repo in
-// Config.WatchedRepos before its owner's client exists in Clients (R5).
-func (d *Daemon) ApplyReload(merged Config, addedClients map[string]GitHubLister) {
+// ApplyReload atomically swaps in a freshly reloaded Config, merges
+// addedClients into Clients, and deletes removedOwners from Clients — the
+// write side of the concurrency-safety boundary config()/client()/
+// clientForOwner() read through. Called only from handleReload (execute.go),
+// and only once every newly-watched owner in addedClients has already been
+// fully bootstrapped (minted token, refresh goroutine started) by the
+// caller: ApplyReload itself starts and mints nothing, so a partial
+// addedClients here would silently leave a new owner without a live
+// refresh loop. removedOwners must likewise already have had their Auth's
+// refresh loop stopped by the caller (AuthSet.pruneOwners) — ApplyReload
+// only drops the Daemon-side Clients entry, mirroring the AuthSet-side
+// deletion pruneOwners already performed. Config and Clients change
+// together under one write-lock acquisition so no reader can observe the
+// new repo in Config.WatchedRepos before its owner's client exists in
+// Clients (R5), nor a removed repo's owner still resolvable via client()
+// after its Clients entry should be gone.
+func (d *Daemon) ApplyReload(merged Config, addedClients map[string]GitHubLister, removedOwners []string) {
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
 	d.Config = merged
+	for _, owner := range removedOwners {
+		delete(d.Clients, owner)
+	}
 	if len(addedClients) == 0 {
 		return
 	}

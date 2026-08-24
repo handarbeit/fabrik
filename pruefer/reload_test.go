@@ -38,7 +38,7 @@ func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
 	}
 
 	merged, _ := applyConfigReload(d.config(), Config{WatchedRepos: []string{"owner/repo1", "owner/repo2"}, ConcurrencyCap: 3})
-	d.ApplyReload(merged, nil) // same owner already has a client — nothing new to add
+	d.ApplyReload(merged, nil, nil) // same owner already has a client — nothing new to add
 
 	d.poll(context.Background())
 	hist := client.listOpenPRsHistorySnapshot()
@@ -81,7 +81,7 @@ func TestDaemon_ApplyReload_RemovedRepoStopsPollingButInFlightReviewCompletes(t 
 	waitUntil(t, 2*time.Second, func() bool { return claude.currentCount() == 2 })
 
 	merged, _ := applyConfigReload(d.config(), Config{WatchedRepos: []string{"owner/repoB"}, ConcurrencyCap: 3})
-	d.ApplyReload(merged, nil)
+	d.ApplyReload(merged, nil, nil)
 
 	close(claude.release)
 	select {
@@ -114,12 +114,12 @@ func TestDaemon_Semaphore_ConcurrencyCapLiveResize(t *testing.T) {
 		t.Fatalf("initial semaphore cap = %d, want 2", cap(d.semaphore()))
 	}
 
-	d.ApplyReload(Config{ConcurrencyCap: 5}, nil)
+	d.ApplyReload(Config{ConcurrencyCap: 5}, nil, nil)
 	if got := cap(d.semaphore()); got != 5 {
 		t.Errorf("semaphore cap after growing ConcurrencyCap = %d, want 5", got)
 	}
 
-	d.ApplyReload(Config{ConcurrencyCap: 1}, nil)
+	d.ApplyReload(Config{ConcurrencyCap: 1}, nil, nil)
 	if got := cap(d.semaphore()); got != 1 {
 		t.Errorf("semaphore cap after shrinking ConcurrencyCap = %d, want 1", got)
 	}
@@ -136,7 +136,7 @@ func TestDaemon_Semaphore_ResizeDoesNotDisturbInFlightHolder(t *testing.T) {
 	sem := d.semaphore()
 	sem <- struct{}{} // acquire the only slot, as reviewOne would
 
-	d.ApplyReload(Config{ConcurrencyCap: 3}, nil) // resize while a holder is out
+	d.ApplyReload(Config{ConcurrencyCap: 3}, nil, nil) // resize while a holder is out
 
 	release := make(chan struct{})
 	go func() {
@@ -202,7 +202,7 @@ func TestDaemon_ConcurrentReloadDuringActivePoll(t *testing.T) {
 			newCap := 2 + (i % 5)
 			d.ApplyReload(Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: newCap}, map[string]GitHubLister{
 				"owner": client, // re-affirm the same client, exercising the Clients write path too
-			})
+			}, nil)
 		}
 	}()
 
@@ -425,5 +425,50 @@ func TestHandleReload_LogsDiffSummary(t *testing.T) {
 	}
 	if !strings.Contains(joined, "Model") || !strings.Contains(joined, "sonnet") || !strings.Contains(joined, "opus") {
 		t.Errorf("log output missing Model change (sonnet -> opus): %s", joined)
+	}
+}
+
+// TestHandleReload_RemovedOwnerPrunesClientAndAuth is the handleReload-level
+// proof for the #1640 review finding: dropping an owner's last watched repo
+// via reload must leave that owner unresolvable through the daemon (not
+// just absent from watched_repos) and must drop its Auth from authSet —
+// otherwise its refresh goroutine keeps minting tokens for an owner Pruefer
+// no longer watches, indefinitely.
+func TestHandleReload_RemovedOwnerPrunesClientAndAuth(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - verveguy/otherrepo\n"), 0600); err != nil {
+		t.Fatalf("writing initial config: %v", err)
+	}
+
+	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "verveguy"},
+	})
+	defer srv.Close()
+	defer closeLog()
+	captureLogf(t)
+
+	if _, ok := daemon.client("verveguy"); !ok {
+		t.Fatal("expected verveguy to be servable before the reload")
+	}
+	beforeInstallationCount := authSet.InstallationCount()
+
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
+		t.Fatalf("writing updated config: %v", err)
+	}
+	handleReload(context.Background(), args, authSet, daemon)
+
+	if _, ok := daemon.client("verveguy"); ok {
+		t.Error("expected verveguy to no longer be servable through the daemon after its last watched repo was removed")
+	}
+	if _, ok := authSet.Clients["verveguy"]; ok {
+		t.Error("expected authSet.Clients to no longer contain verveguy after the reload")
+	}
+	if got := authSet.InstallationCount(); got != beforeInstallationCount-1 {
+		t.Errorf("InstallationCount() = %d, want %d (verveguy's dedicated installation dropped)", got, beforeInstallationCount-1)
+	}
+	if _, ok := daemon.client("handarbeit"); !ok {
+		t.Error("expected handarbeit (still watched) to remain servable")
 	}
 }

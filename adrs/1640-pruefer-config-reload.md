@@ -54,6 +54,22 @@ This mirrors `BootstrapMulti`'s own all-or-nothing bootstrap contract, but scope
 
 **Accepted, documented trade-off**: if `mintOwnerAuth` succeeds for one owner but a *later* owner in the same batch fails, the first owner's freshly-minted token is minted but never committed — it is simply never referenced by anything and expires unused (~1h later, per `tokenRefreshMargin`'s neighborhood). This is not a leak requiring cleanup; a retried reload re-mints cleanly. `TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing` asserts the property that actually matters — no owner from a failed batch is ever observable through `Daemon`/`AuthSet` — rather than asserting a zero mint count for the earlier owner, which this trade-off makes untrue by design.
 
+### 6a. Owner *removal* prunes the client and, in non-pinned mode, cancels its refresh loop
+
+An owner disappearing from `watched_repos` (its last repo removed, not just one of several) is the mirror image of Decision 6, and needed its own path: `noLongerWatchedOwners(old, cand)` (next to `newlyWatchedOwners`) computes the set, and `AuthSet.pruneOwners(removed)` deletes each from `as.Clients` and — only in non-pinned mode — cancels and drops its `*Auth`. `Daemon.ApplyReload` gained a third `removedOwners []string` parameter to delete the same owners from `Daemon.Clients` under the same `cfgMu` write lock as the `Config` swap.
+
+This was not part of the original implementation — added in response to a review finding (both an inline PR thread comment and the bot review's own summary) pointing out that `ApplyReload` only ever *added* to `Clients`, never removed: a reload-removed owner's `*Auth` kept its `RunRefreshLoop` goroutine running (started at bootstrap via `RunRefreshLoops`, or by a prior reload via `mintOwnerAuth`/`CommitOwner`) for the rest of the process's life, continuing to mint installation tokens for an owner Pruefer no longer watches — not a correctness hazard (`poll()`/`isWatchedRepo` already gate on current `WatchedRepos`), but an unbounded goroutine/API-traffic leak across a long-running daemon's lifetime of repeated add/remove reloads.
+
+`Auth` gained an unexported `cancel context.CancelFunc` field, set by a new `startRefreshLoop` helper (the sole path either `RunRefreshLoops` or a reload's mint-then-commit now uses to start a loop) that derives a per-Auth cancellable child context before spawning the goroutine. `pruneOwners` reads that field and calls it.
+
+**Non-pinned mode needs no reference counting.** `mintOwnerAuth` discovers a non-pinned installation by `inst.Account == owner` — one owner, one installation, one `*Auth`, always. Removing that owner's `Clients` entry therefore always orphans exactly its own `*Auth`; no other owner can be affected.
+
+**Pinned-installation mode (`AppInstallationID != 0`) is deliberately exempt from cancellation.** Every owner there shares the single App-level `*Auth` (`as.auths[0]`) regardless of `watched_repos` content — it never accumulates per owner the way non-pinned Auths do, so there is no leak to fix by cancelling it. Cancelling it on the last pinned owner's removal would additionally strand `mintOwnerAuth`'s pinned-mode short-circuit (`if len(as.auths) == 0 { return error }`) for the next owner reload-added under the same pin, including the case where `watched_repos` briefly has zero entries for that installation. `pruneOwners` only ever deletes the `Clients` entry in this mode.
+
+**Atomicity is preserved**: pruning happens in `handleReload` only after every newly-watched owner in the same batch has already minted successfully — the same point `addedClients` is committed — so a reload that ultimately fails (R4/AC3) never prunes anything, exactly as it never partially commits an addition.
+
+Covered by `TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner` (asserts the actual goroutine returns, not just the map entry), `TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth`, `TestNoLongerWatchedOwners`, and `TestHandleReload_RemovedOwnerPrunesClientAndAuth` (the `handleReload`-level end-to-end check).
+
 ### 7. `PollInterval`, `AutoUpgrade`, and `ReconciliationFallbackInterval` needed small mechanism changes to actually be live, not just reclassified
 
 Tagging a field `live` only means `applyConfigReload` will write it into `Daemon.Config`; whether the running daemon's *behavior* actually changes depends on whether anything still reads that field only once, before a long-lived loop begins. Three fields needed a small change to stay true to their tag:
@@ -79,6 +95,7 @@ Without this, tagging these fields `live` would have been cosmetic — correct o
 - A `watched_repos` edit — the most common config change in practice (per the issue's own motivating incident) — no longer requires a restart, and therefore no longer kills in-flight reviews, drops the Hookdeck session, or resets TUI session state.
 - The reloadable/restart-only classification is structurally enforced (`TestConfig_AllFieldsClassified`), not a document that can silently drift from the code the way the issue's own first-cut list already had.
 - The concurrency-safety boundary this issue introduces (`cfgMu`) is confined to `Daemon`; `Config` itself remains an ordinary value type used identically everywhere except the daemon's own long-lived state.
+- Owner removal is symmetric with owner addition (Decision 6a): a reload-removed owner's client and (in non-pinned mode) refresh goroutine are torn down in the same reload that removes it, so repeated add/remove cycles across a long-running daemon's life don't accumulate orphaned goroutines or unnecessary token-mint API calls.
 
 **Negative / Trade-offs:**
 - `Daemon.Config`/`Daemon.Clients` gained a locking discipline that didn't exist before — every future production read site must remember to go through `config()`/`client()`/`clientForOwner()` rather than the field directly. Nothing enforces this at compile time (the fields are still plain exported fields); a lapse here degrades to a `-race` finding rather than a build failure.
@@ -89,7 +106,7 @@ Without this, tagging these fields `live` would have been cosmetic — correct o
 ## Related Work
 
 - ADR-1113 (`adrs/1113-pruefer-v1-architecture.md`) — establishes the poll loop and `Daemon` shape this issue adds a concurrency-safety layer to.
-- ADR-1233 (`adrs/1233-pruefer-multi-installation-auth.md`) — establishes `AuthSet`/`BootstrapMulti` and the "only ever touch installations for owners actually in `watched_repos`" security property; this issue's `mintOwnerAuth`/`CommitOwner` extend that property to a reload-discovered owner rather than only a startup-time one.
+- ADR-1233 (`adrs/1233-pruefer-multi-installation-auth.md`) — establishes `AuthSet`/`BootstrapMulti` and the "only ever touch installations for owners actually in `watched_repos`" security property; this issue's `mintOwnerAuth`/`CommitOwner`/`pruneOwners` extend that property in both directions — a reload-discovered owner is minted, and a reload-dropped owner's installation stops being touched — rather than only ever expanding from a startup-time set.
 - ADR-1254 (`adrs/1254-event-driven-hookdeck-ingestion.md`), ADR-1563 (`adrs/1563-hookdeck-drop-accounting-and-signature-drift-escalation.md`) — establish the Hookdeck `EventSource`, dedupe ring, and reconciliation-fallback machinery R3 requires this issue not disturb; classifying `event_source`/`hookdeck.*`/`reconciliation.startup` restart-only is what keeps this issue from having to touch any of it.
 - `engine/sighup_unix.go` — Fabrik's own, differently-scoped `SIGHUP` handler (graceful restart via re-exec), discussed in Context above as prior art that this issue deliberately does *not* follow, and cross-referenced from `cmd/pruefer/README.md` to avoid operator confusion.
 

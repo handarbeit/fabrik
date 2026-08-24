@@ -188,12 +188,24 @@ func handleReload(ctx context.Context, args []string, authSet *AuthSet, daemon *
 		if m.mintedFresh {
 			installationID := m.auth.InstallationID
 			prefix := fmt.Sprintf("installation %d: ", installationID)
-			go m.auth.RunRefreshLoop(ctx, func(format string, args ...any) {
+			m.auth.startRefreshLoop(ctx, func(format string, args ...any) {
 				logf(0, "auth", prefix+format, args...)
 			})
 		}
 	}
 
-	daemon.ApplyReload(merged, addedClients)
+	// Owners no longer present in watched_repos are pruned only now, after
+	// every newly-watched owner in this same batch has already minted
+	// successfully — an earlier prune (e.g. right after computing merged)
+	// would violate R4/AC3's atomicity if a later owner's mint then failed
+	// and aborted the whole reload above: the removed owner's client would
+	// already be gone even though the reload as a whole never took effect.
+	// pruneOwners also stops the removed owner's refresh goroutine (in
+	// non-pinned-installation mode) so it doesn't keep minting installation
+	// tokens for an owner Pruefer no longer watches.
+	removedOwners := noLongerWatchedOwners(old, merged)
+	authSet.pruneOwners(removedOwners)
+
+	daemon.ApplyReload(merged, addedClients, removedOwners)
 	logReloadSummary(diff)
 }

@@ -43,6 +43,12 @@ type Auth struct {
 
 	mu        sync.Mutex
 	expiresAt time.Time
+	// cancel stops this Auth's own RunRefreshLoop goroutine, set by
+	// startRefreshLoop when the loop is started. Used by
+	// AuthSet.pruneOwners to stop refreshing a token for an installation no
+	// watched owner references anymore, once a config reload removes its
+	// last owner (#1640 review finding — see pruneOwners' doc comment).
+	cancel context.CancelFunc
 }
 
 // refresh mints a new installation token, applies it to the client, and
@@ -316,8 +322,23 @@ func distinctOwners(watchedRepos []string) []string {
 // lines with the installation ID.
 func (as *AuthSet) RunRefreshLoops(ctx context.Context, logf func(installationID int64) func(format string, args ...any)) {
 	for _, a := range as.auths {
-		go a.RunRefreshLoop(ctx, logf(a.InstallationID))
+		a.startRefreshLoop(ctx, logf(a.InstallationID))
 	}
+}
+
+// startRefreshLoop derives a per-Auth cancellable context from ctx, records
+// the resulting cancel func on a (so pruneOwners can stop this one Auth's
+// loop independently of every other Auth's), and starts RunRefreshLoop in
+// its own goroutine. The sole way any Auth's refresh loop is started,
+// whether at bootstrap (RunRefreshLoops) or by a reload minting a new
+// owner's token (handleReload in execute.go) — both paths must go through
+// this so pruneOwners always has a cancel func to call.
+func (a *Auth) startRefreshLoop(ctx context.Context, logf func(format string, args ...any)) {
+	loopCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	a.cancel = cancel
+	a.mu.Unlock()
+	go a.RunRefreshLoop(loopCtx, logf)
 }
 
 // InstallationCount returns the number of distinct installations minted —
@@ -410,5 +431,74 @@ func (as *AuthSet) CommitOwner(owner string, a *Auth, mintedFresh bool) {
 	as.Clients[owner] = a.client
 	if mintedFresh {
 		as.auths = append(as.auths, a)
+	}
+}
+
+// noLongerWatchedOwners returns the distinct owners present in old's
+// WatchedRepos but absent from cand's, in old's first-seen order — the set
+// a config reload must prune auth/client state for via pruneOwners.
+// Removing one repo under an owner that still has another watched repo
+// never appears here — the mirror image of newlyWatchedOwners.
+func noLongerWatchedOwners(old, cand Config) []string {
+	candOwners := make(map[string]bool)
+	for _, o := range distinctOwners(cand.WatchedRepos) {
+		candOwners[o] = true
+	}
+	var removed []string
+	for _, o := range distinctOwners(old.WatchedRepos) {
+		if !candOwners[o] {
+			removed = append(removed, o)
+		}
+	}
+	return removed
+}
+
+// pruneOwners removes every owner in removed from as.Clients and, in
+// non-pinned-installation mode, cancels and drops the *Auth that owner's
+// installation was minted for — stopping its refresh goroutine so a
+// reload-removed owner doesn't leave GitHub App tokens being minted for it
+// indefinitely (review finding on #1640: an owner's Auth/client previously
+// had no removal path at all, only additions via mintOwnerAuth/CommitOwner).
+//
+// Non-pinned mode maps exactly one owner to one installation — mintOwnerAuth
+// discovers an installation by inst.Account == owner, so each non-pinned
+// *Auth is scoped to exactly the one owner it was minted for. Removing that
+// owner's Clients entry therefore always orphans exactly that Auth; no
+// reference counting across owners is needed.
+//
+// Pinned-installation mode (pinnedInstallationID != 0) is deliberately
+// exempt from cancellation: every owner there shares the single App-level
+// Auth (as.auths[0]) regardless of watched_repos, so it never accumulates
+// per owner the way non-pinned Auths do. Cancelling it on the last pinned
+// owner's removal would strand mintOwnerAuth's pinned-mode short-circuit —
+// which requires len(as.auths) > 0 — for the next owner reload-added under
+// the same pin, including the case where watched_repos briefly has zero
+// entries under that installation.
+func (as *AuthSet) pruneOwners(removed []string) {
+	if as.pinnedInstallationID != 0 {
+		for _, o := range removed {
+			delete(as.Clients, o)
+		}
+		return
+	}
+	for _, o := range removed {
+		c, ok := as.Clients[o]
+		if !ok {
+			continue
+		}
+		delete(as.Clients, o)
+		for i, a := range as.auths {
+			if a.client != c {
+				continue
+			}
+			a.mu.Lock()
+			cancel := a.cancel
+			a.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			as.auths = append(as.auths[:i], as.auths[i+1:]...)
+			break
+		}
 	}
 }

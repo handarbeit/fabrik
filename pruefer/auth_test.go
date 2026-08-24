@@ -658,6 +658,131 @@ func TestAuthSet_CommitOwner_NoDuplicateAuthOnPinnedOwner(t *testing.T) {
 	}
 }
 
+func TestNoLongerWatchedOwners(t *testing.T) {
+	old := Config{WatchedRepos: []string{"handarbeit/fabrik", "verveguy/otherrepo", "verveguy/second"}}
+	cand := Config{WatchedRepos: []string{"handarbeit/fabrik"}}
+	got := noLongerWatchedOwners(old, cand)
+	if len(got) != 1 || got[0] != "verveguy" {
+		t.Errorf("noLongerWatchedOwners = %v, want [verveguy] (deduped, and an owner keeping another watched repo is not removed)", got)
+	}
+}
+
+func TestNoLongerWatchedOwners_NoChangeIsEmpty(t *testing.T) {
+	cfg := Config{WatchedRepos: []string{"handarbeit/fabrik"}}
+	if got := noLongerWatchedOwners(cfg, cfg); len(got) != 0 {
+		t.Errorf("noLongerWatchedOwners(cfg, cfg) = %v, want empty", got)
+	}
+}
+
+// TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner is the
+// non-vacuous proof for the #1640 review finding: pruning a non-pinned
+// owner must not just delete its Clients map entry — it must actually stop
+// that owner's RunRefreshLoop goroutine, not merely leave it running
+// forever against a Clients entry nobody references anymore.
+//
+// Deliberately does not touch the shared tokenRefreshMargin/
+// tokenRefreshRetryDelay package vars (unlike
+// TestAuthSet_RunRefreshLoops_IndependentPerInstallation, which must
+// because it wants a refresh to actually fire): with the default,
+// multi-minute margin and an hour-long ExpiresAt, RunRefreshLoop's first
+// select blocks on ctx.Done() for the test's whole duration, so there is
+// nothing to race against those vars. Mirrors startRefreshLoop's own logic
+// (deriving a cancellable child context, recording it on the Auth) so the
+// assertion exercises exactly the mechanism pruneOwners uses in production,
+// with a completion channel the production helper doesn't expose.
+func TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "verveguy"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	cfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, WatchedRepos: []string{"handarbeit/fabrik", "verveguy/otherrepo"}}
+	as, err := BootstrapMulti(cfg, srv.URL)
+	if err != nil {
+		t.Fatalf("BootstrapMulti: %v", err)
+	}
+	if as.InstallationCount() != 2 {
+		t.Fatalf("InstallationCount() = %d, want 2 before pruning", as.InstallationCount())
+	}
+
+	var verveguyAuth *Auth
+	for _, a := range as.auths {
+		if as.Clients["verveguy"] == a.client {
+			verveguyAuth = a
+		}
+	}
+	if verveguyAuth == nil {
+		t.Fatal("could not find verveguy's Auth in as.auths")
+	}
+
+	// Mirrors startRefreshLoop: derive a cancellable child context, record
+	// it on the Auth (the field pruneOwners reads), and run RunRefreshLoop
+	// in a goroutine we can observe the completion of.
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	verveguyAuth.mu.Lock()
+	verveguyAuth.cancel = loopCancel
+	verveguyAuth.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		verveguyAuth.RunRefreshLoop(loopCtx, func(format string, args ...any) {})
+		close(done)
+	}()
+
+	as.pruneOwners([]string{"verveguy"})
+
+	if _, ok := as.Clients["verveguy"]; ok {
+		t.Error("expected verveguy's Clients entry to be removed by pruneOwners")
+	}
+	if as.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 after pruning verveguy's (non-pinned, unshared) installation", as.InstallationCount())
+	}
+	select {
+	case <-done:
+		// pruneOwners called verveguyAuth.cancel, which cancelled loopCtx,
+		// which made RunRefreshLoop return — the actual mechanism under
+		// test, not a proxy for it.
+	case <-time.After(time.Second):
+		t.Fatal("RunRefreshLoop did not return within 1s of pruneOwners — its cancel func was not invoked")
+	}
+}
+
+// TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth confirms pruning an
+// owner under a pinned installation only removes that owner's Clients
+// entry — it never cancels or drops the single shared Auth, since another
+// owner (or a future reload-added one) still depends on it.
+func TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", nil, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	cfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999, WatchedRepos: []string{"handarbeit/fabrik"}}
+	as, err := BootstrapMulti(cfg, srv.URL)
+	if err != nil {
+		t.Fatalf("BootstrapMulti: %v", err)
+	}
+	a, fresh, err := as.mintOwnerAuth(cfg, "ownerB")
+	if err != nil {
+		t.Fatalf("mintOwnerAuth: %v", err)
+	}
+	as.CommitOwner("ownerB", a, fresh)
+
+	as.pruneOwners([]string{"ownerB"})
+
+	if _, ok := as.Clients["ownerB"]; ok {
+		t.Error("expected ownerB's Clients entry to be removed by pruneOwners")
+	}
+	if as.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 — the pinned installation's Auth must survive a pinned owner's removal", as.InstallationCount())
+	}
+	if _, ok := as.Clients["handarbeit"]; !ok {
+		t.Error("expected handarbeit (still watched, sharing the same pinned installation) to remain unaffected")
+	}
+}
+
 func TestDistinctOwners(t *testing.T) {
 	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
 	want := []string{"a", "b"}
