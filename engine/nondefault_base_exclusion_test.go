@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -270,5 +273,122 @@ func TestRouteQueuedGroup_ExcludesNonDefaultBaseMember_NoDispatch(t *testing.T) 
 	}
 	if len(client.addCommentCalls) != 1 {
 		t.Errorf("expected exactly one explanatory comment, got %d", len(client.addCommentCalls))
+	}
+}
+
+// TestRouteQueuedGroup_MixedBatch_NonDefaultBaseMemberNeverInTrial is the
+// AC1 regression test: end-to-end through the real routeQueuedGroup ->
+// dispatchMergeTrainWorker -> runMergeTrainWorker path (real git, no mocks
+// standing in for trial-branch assembly), a batch mixing a default-base
+// member (#1) and a base:develop member (#2) forms a trial containing only
+// #1: #2's linked PR is never even looked up by the trial-assembly path
+// (fetchTrainMembers), #2 is never merged into the trial branch, and #2 is
+// never closed/advanced as a landed member — it stays untouched in Queued.
+//
+// AC1 requires this be proved non-vacuous: with the
+// filterNonDefaultBaseMembers call in routeQueuedGroup temporarily commented
+// out, this exact test was confirmed to FAIL — #2's PR was looked up,
+// merged into the trial, and landed/closed as part of a 2-member integration
+// PR that targeted "main" despite #2's base:develop label — before the guard
+// was restored. See the PR description for the observed failure output.
+func TestRouteQueuedGroup_MixedBatch_NonDefaultBaseMemberNeverInTrial(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, worktreeRoot, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+
+	// Register "develop" as an existing non-default branch on origin, exactly
+	// as setupCloseTestRepo does, so #2's base:develop label resolves cleanly
+	// (not via the nonexistent-branch fallback).
+	shaOut := gitOutputDir(t, wm.baseDir, "rev-parse", "HEAD")
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", strings.TrimSpace(shaOut))
+
+	var mu sync.Mutex
+	var createdPRs []createDraftPRCall
+	linkedPRLookups := map[int]int{}
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			mu.Lock()
+			linkedPRLookups[issueNumber]++
+			mu.Unlock()
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs = append(createdPRs, createDraftPRCall{owner, repo, title, head, base, body, issueNumber})
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+
+	defaultItem := makeTrainItem(1, "Default base member")
+	nonDefaultItem := makeTrainItem(2, "Non-default base member")
+	nonDefaultItem.Labels = append(nonDefaultItem.Labels, "base:develop")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.routeQueuedGroup(ctx, "owner/repo", []gh.ProjectItem{defaultItem, nonDefaultItem}, "PVT_test")
+
+	// dispatchMergeTrainWorker launches the worker in a goroutine tracked by
+	// eng.wg — wait for it to finish before asserting, mirroring
+	// TestDispatchMergeTrainWorker_SkipsWhenAlreadyAssembling's wg.Wait() idiom.
+	done := make(chan struct{})
+	go func() {
+		eng.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the merge-train worker to finish")
+	}
+
+	mu.Lock()
+	if linkedPRLookups[2] != 0 {
+		t.Errorf("expected #2's linked PR never looked up by trial assembly (filtered pre-dispatch), got %d lookup(s)", linkedPRLookups[2])
+	}
+	if linkedPRLookups[1] == 0 {
+		t.Error("expected #1's linked PR to be looked up (sanity: the default-base member must still be processed)")
+	}
+	if len(createdPRs) != 1 {
+		t.Errorf("expected exactly 1 draft PR (default-base member only), got %d: %+v", len(createdPRs), createdPRs)
+	} else if createdPRs[0].base != "main" {
+		t.Errorf("expected draft PR base %q, got %q", "main", createdPRs[0].base)
+	}
+	mu.Unlock()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.closeIssueCalls {
+		if c.issueNumber == 2 {
+			t.Error("expected #2 never closed as a landed train member — it must stay untouched in Queued")
+		}
+	}
+	closedIssue1 := false
+	for _, c := range client.closeIssueCalls {
+		if c.issueNumber == 1 {
+			closedIssue1 = true
+		}
+	}
+	if !closedIssue1 {
+		t.Error("expected #1 closed as a landed train member (sanity: the default-base member must still land)")
 	}
 }
