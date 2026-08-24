@@ -188,14 +188,20 @@ func (d *Daemon) client(owner string) (GitHubLister, bool) {
 // fully bootstrapped (minted token, refresh goroutine started) by the
 // caller: ApplyReload itself starts and mints nothing, so a partial
 // addedClients here would silently leave a new owner without a live
-// refresh loop. removedOwners must likewise already have had their Auth's
-// refresh loop stopped by the caller (AuthSet.pruneOwners) — ApplyReload
-// only drops the Daemon-side Clients entry, mirroring the AuthSet-side
-// deletion pruneOwners already performed. Config and Clients change
-// together under one write-lock acquisition so no reader can observe the
-// new repo in Config.WatchedRepos before its owner's client exists in
-// Clients (R5), nor a removed repo's owner still resolvable via client()
-// after its Clients entry should be gone.
+// refresh loop. removedOwners' Auths are, by design, NOT yet stopped when
+// this runs — only detached from AuthSet's own bookkeeping by the caller
+// (AuthSet.pruneOwners) — because a review dispatched before this reload
+// may still be holding a *github.Client backed by one of them; the caller
+// defers actually stopping each one until Daemon.drainThenStopAuth confirms
+// it's safe (see that method and pruneOwners' doc comments for why). This
+// method only drops the Daemon-side Clients entry, mirroring the
+// AuthSet-side deletion pruneOwners already performed — new dispatch can no
+// longer find the removed owner's client here regardless of when its Auth
+// actually stops refreshing. Config and Clients change together under one
+// write-lock acquisition so no reader can observe the new repo in
+// Config.WatchedRepos before its owner's client exists in Clients (R5), nor
+// a removed repo's owner still resolvable via client() after its Clients
+// entry should be gone.
 func (d *Daemon) ApplyReload(merged Config, addedClients map[string]GitHubLister, removedOwners []string) {
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
@@ -258,6 +264,54 @@ func (d *Daemon) acquirePRGate(owner, repo string, prNumber int) (*prGate, func(
 			delete(d.prGates, key)
 		}
 	}
+}
+
+// ownerDrainPollInterval is how often drainThenStopAuth re-checks whether a
+// removed owner's in-flight reviews have finished. Var (not const) so tests
+// aren't forced to wait on it.
+var ownerDrainPollInterval = 2 * time.Second
+
+// ownerReviewsInFlight reports whether any review is currently dispatched
+// for a repo under owner — i.e. holds an entry in prGates keyed
+// "owner/repo#pr" (see acquirePRGate). Matching is case-insensitive for the
+// same reason isWatchedRepo's is: owner here may be operator-typed config
+// casing, while a given prGates key may have been built from a webhook
+// payload's casing.
+func (d *Daemon) ownerReviewsInFlight(owner string) bool {
+	prefix := strings.ToLower(owner) + "/"
+	d.prGatesMu.Lock()
+	defer d.prGatesMu.Unlock()
+	for key := range d.prGates {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// drainThenStopAuth waits until no review is in flight for owner, then
+// stops a's refresh loop (a.Stop()). Meant to run in its own goroutine,
+// spawned once per owner AuthSet.pruneOwners detaches (see handleReload in
+// execute.go) — the deferred half of a #1640 review finding's fix:
+// cancelling a's refresh loop immediately, at reload time, could invalidate
+// the token backing a review dispatched before the reload and still running
+// against owner's repos, since executeReview's *github.Client reference
+// outlives the reload that removed its owner (R3: that review is allowed to
+// finish, not merely allowed to keep running for a while).
+//
+// ctx is the same long-lived context Execute threads through the whole
+// SIGHUP-handling goroutine and every refresh loop; if it's cancelled (the
+// daemon is shutting down) there's nothing left to defer for, so this
+// returns without calling Stop.
+func (d *Daemon) drainThenStopAuth(ctx context.Context, owner string, a *Auth) {
+	for d.ownerReviewsInFlight(owner) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(ownerDrainPollInterval):
+		}
+	}
+	a.Stop()
 }
 
 // semaphore returns the daemon's shared concurrency-capped semaphore,

@@ -143,7 +143,11 @@ func Execute() error {
 // every owner in the batch has minted successfully. Nothing here cancels a
 // running review, drops the Hookdeck EventSource, or resets the dedupe
 // ring (R3) — those are untouched by construction, since this function
-// never rebuilds or reaches into any of them.
+// never rebuilds or reaches into any of them. This includes a removed
+// owner's installation token: its refresh loop is only ever stopped once
+// Daemon.drainThenStopAuth (spawned below) has confirmed no review is still
+// in flight for that owner, so an in-flight review's remaining GitHub calls
+// never lose a valid token out from under them.
 func handleReload(ctx context.Context, args []string, authSet *AuthSet, daemon *Daemon) {
 	cand, err := LoadConfig(args)
 	if err != nil {
@@ -200,12 +204,17 @@ func handleReload(ctx context.Context, args []string, authSet *AuthSet, daemon *
 	// would violate R4/AC3's atomicity if a later owner's mint then failed
 	// and aborted the whole reload above: the removed owner's client would
 	// already be gone even though the reload as a whole never took effect.
-	// pruneOwners also stops the removed owner's refresh goroutine (in
-	// non-pinned-installation mode) so it doesn't keep minting installation
-	// tokens for an owner Pruefer no longer watches.
+	// pruneOwners only detaches each removed (non-pinned) owner's *Auth from
+	// AuthSet's own bookkeeping — it deliberately does NOT stop its refresh
+	// goroutine yet. That happens below, once drainThenStopAuth confirms no
+	// review is still in flight for the owner being removed.
 	removedOwners := noLongerWatchedOwners(old, merged)
-	authSet.pruneOwners(removedOwners)
+	detached := authSet.pruneOwners(removedOwners)
 
 	daemon.ApplyReload(merged, addedClients, removedOwners)
 	logReloadSummary(diff)
+
+	for _, d := range detached {
+		go daemon.drainThenStopAuth(ctx, d.owner, d.auth)
+	}
 }

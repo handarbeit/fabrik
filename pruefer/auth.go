@@ -44,10 +44,11 @@ type Auth struct {
 	mu        sync.Mutex
 	expiresAt time.Time
 	// cancel stops this Auth's own RunRefreshLoop goroutine, set by
-	// startRefreshLoop when the loop is started. Used by
-	// AuthSet.pruneOwners to stop refreshing a token for an installation no
-	// watched owner references anymore, once a config reload removes its
-	// last owner (#1640 review finding — see pruneOwners' doc comment).
+	// startRefreshLoop when the loop is started. Read (under mu) by Stop,
+	// which Daemon.drainThenStopAuth calls once it has confirmed no review
+	// is still in flight for an owner a config reload removed (#1640
+	// review findings — see pruneOwners' and drainThenStopAuth's doc
+	// comments).
 	cancel context.CancelFunc
 }
 
@@ -341,6 +342,21 @@ func (a *Auth) startRefreshLoop(ctx context.Context, logf func(format string, ar
 	go a.RunRefreshLoop(loopCtx, logf)
 }
 
+// Stop cancels a's refresh loop, if one was ever started (startRefreshLoop
+// records cancel; a zero-value or never-started Auth has none, so this is a
+// safe no-op). Safe to call more than once. Split out from pruneOwners
+// (#1640 review finding) so a caller can defer invoking it until it has
+// separately confirmed nothing still depends on a's token — see
+// Daemon.drainThenStopAuth.
+func (a *Auth) Stop() {
+	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // InstallationCount returns the number of distinct installations minted —
 // used for startup logging.
 func (as *AuthSet) InstallationCount() int {
@@ -453,12 +469,30 @@ func noLongerWatchedOwners(old, cand Config) []string {
 	return removed
 }
 
+// detachedAuth pairs a pruned owner with the *Auth its token was minted
+// for. Returned by pruneOwners instead of being cancelled there directly —
+// see that method's doc comment for why.
+type detachedAuth struct {
+	owner string
+	auth  *Auth
+}
+
 // pruneOwners removes every owner in removed from as.Clients and, in
-// non-pinned-installation mode, cancels and drops the *Auth that owner's
-// installation was minted for — stopping its refresh goroutine so a
-// reload-removed owner doesn't leave GitHub App tokens being minted for it
-// indefinitely (review finding on #1640: an owner's Auth/client previously
-// had no removal path at all, only additions via mintOwnerAuth/CommitOwner).
+// non-pinned-installation mode, drops the *Auth that owner's installation
+// was minted for from as.auths — but deliberately does NOT cancel its
+// refresh loop itself, returning it as a detachedAuth instead. Cancelling
+// here, synchronously, was the original #1640 fix, but a second review
+// finding caught a real bug in it: an in-flight review dispatched before
+// the reload already holds a *github.Client backed by this exact Auth (see
+// Daemon.executeReview's d.config()/d.client() snapshot-at-dispatch-time
+// design), and cancelling its refresh loop mid-review risks that review's
+// remaining GitHub calls failing with 401 once the token's actual (not
+// margin-adjusted) expiry passes — with no recovery short of a restart,
+// contradicting R3's "a review already running against a removed repo is
+// allowed to finish" and handleReload's own doc comment ("nothing here
+// cancels a running review"). The caller (handleReload) is responsible for
+// only actually stopping the loop once it has separately confirmed no
+// review is still in flight for this owner — see Daemon.drainThenStopAuth.
 //
 // Non-pinned mode maps exactly one owner to one installation — mintOwnerAuth
 // discovers an installation by inst.Account == owner, so each non-pinned
@@ -467,20 +501,21 @@ func noLongerWatchedOwners(old, cand Config) []string {
 // reference counting across owners is needed.
 //
 // Pinned-installation mode (pinnedInstallationID != 0) is deliberately
-// exempt from cancellation: every owner there shares the single App-level
-// Auth (as.auths[0]) regardless of watched_repos, so it never accumulates
-// per owner the way non-pinned Auths do. Cancelling it on the last pinned
-// owner's removal would strand mintOwnerAuth's pinned-mode short-circuit —
-// which requires len(as.auths) > 0 — for the next owner reload-added under
-// the same pin, including the case where watched_repos briefly has zero
-// entries under that installation.
-func (as *AuthSet) pruneOwners(removed []string) {
+// exempt from detachment/cancellation: every owner there shares the single
+// App-level Auth (as.auths[0]) regardless of watched_repos, so it never
+// accumulates per owner the way non-pinned Auths do. Detaching it on the
+// last pinned owner's removal would strand mintOwnerAuth's pinned-mode
+// short-circuit — which requires len(as.auths) > 0 — for the next owner
+// reload-added under the same pin, including the case where watched_repos
+// briefly has zero entries under that installation.
+func (as *AuthSet) pruneOwners(removed []string) []detachedAuth {
 	if as.pinnedInstallationID != 0 {
 		for _, o := range removed {
 			delete(as.Clients, o)
 		}
-		return
+		return nil
 	}
+	var detached []detachedAuth
 	for _, o := range removed {
 		c, ok := as.Clients[o]
 		if !ok {
@@ -491,14 +526,10 @@ func (as *AuthSet) pruneOwners(removed []string) {
 			if a.client != c {
 				continue
 			}
-			a.mu.Lock()
-			cancel := a.cancel
-			a.mu.Unlock()
-			if cancel != nil {
-				cancel()
-			}
+			detached = append(detached, detachedAuth{owner: o, auth: a})
 			as.auths = append(as.auths[:i], as.auths[i+1:]...)
 			break
 		}
 	}
+	return detached
 }

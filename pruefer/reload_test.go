@@ -472,3 +472,163 @@ func TestHandleReload_RemovedOwnerPrunesClientAndAuth(t *testing.T) {
 		t.Error("expected handarbeit (still watched) to remain servable")
 	}
 }
+
+// --- deferred owner-removal auth cancellation (#1640 review finding) ---
+
+// TestDaemon_OwnerReviewsInFlight covers the prefix-matching primitive
+// drainThenStopAuth polls: present only while a prGate for one of owner's
+// repos is held, case-insensitively, and never confused by an unrelated
+// owner whose name happens to share a prefix (e.g. "acme" vs "acme2").
+func TestDaemon_OwnerReviewsInFlight(t *testing.T) {
+	d := &Daemon{}
+
+	if d.ownerReviewsInFlight("acme") {
+		t.Fatal("expected no reviews in flight for acme before any gate is acquired")
+	}
+
+	_, release := d.acquirePRGate("ACME", "widgets", 7)
+	if !d.ownerReviewsInFlight("acme") {
+		t.Error("expected ownerReviewsInFlight(\"acme\") to be true while a gate for ACME/widgets#7 is held — matching must be case-insensitive")
+	}
+	if d.ownerReviewsInFlight("acme2") {
+		t.Error("expected ownerReviewsInFlight(\"acme2\") to be false — \"acme\" must not prefix-match \"acme2\"'s repos")
+	}
+
+	release()
+	if d.ownerReviewsInFlight("acme") {
+		t.Error("expected no reviews in flight for acme once the gate was released")
+	}
+}
+
+// TestDaemon_DrainThenStopAuth_WaitsForInFlightReviewThenStops is the
+// non-vacuous core of the #1640 review finding's fix: drainThenStopAuth
+// must not call Auth.Stop() while a review is still in flight for the
+// owner being removed, and must call it promptly once that review
+// completes. Shrinks ownerDrainPollInterval so the test doesn't wait out
+// the production 2s poll.
+func TestDaemon_DrainThenStopAuth_WaitsForInFlightReviewThenStops(t *testing.T) {
+	orig := ownerDrainPollInterval
+	ownerDrainPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { ownerDrainPollInterval = orig })
+
+	d := &Daemon{}
+	_, release := d.acquirePRGate("acme", "widgets", 1)
+
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	a := &Auth{cancel: loopCancel}
+	done := make(chan struct{})
+	go func() {
+		<-loopCtx.Done()
+		close(done)
+	}()
+
+	drainDone := make(chan struct{})
+	go func() {
+		d.drainThenStopAuth(context.Background(), "acme", a)
+		close(drainDone)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("drainThenStopAuth stopped the Auth while a review was still in flight for its owner")
+	case <-drainDone:
+		t.Fatal("drainThenStopAuth returned while a review was still in flight for its owner")
+	case <-time.After(100 * time.Millisecond):
+		// still waiting, as expected
+	}
+
+	release()
+
+	select {
+	case <-done:
+		// drainThenStopAuth observed the drain and called a.Stop().
+	case <-time.After(time.Second):
+		t.Fatal("drainThenStopAuth did not stop the Auth within 1s of the in-flight review completing")
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("drainThenStopAuth did not return within 1s of stopping the Auth")
+	}
+}
+
+// TestHandleReload_RemovedOwnerAuthNotStoppedUntilInFlightReviewCompletes
+// covers the full production path (not just the Daemon-level primitive
+// above): a SIGHUP that drops an owner mid-review must not cancel that
+// owner's token-refresh loop until the review genuinely finishes — the bug
+// the second #1640 review finding caught in the first fix (cd83be9f), which
+// cancelled unconditionally at reload time.
+func TestHandleReload_RemovedOwnerAuthNotStoppedUntilInFlightReviewCompletes(t *testing.T) {
+	orig := ownerDrainPollInterval
+	ownerDrainPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { ownerDrainPollInterval = orig })
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - verveguy/otherrepo\n"), 0600); err != nil {
+		t.Fatalf("writing initial config: %v", err)
+	}
+
+	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "verveguy"},
+	})
+	defer srv.Close()
+	defer closeLog()
+	captureLogf(t)
+
+	var verveguyAuth *Auth
+	for _, a := range authSet.auths {
+		if authSet.Clients["verveguy"] == a.client {
+			verveguyAuth = a
+		}
+	}
+	if verveguyAuth == nil {
+		t.Fatal("could not find verveguy's Auth in authSet.auths")
+	}
+
+	// Mirror startRefreshLoop so we have a completion channel to observe —
+	// same mechanism handleReload's own newly-watched-owner path uses, just
+	// not hidden behind it.
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	verveguyAuth.mu.Lock()
+	verveguyAuth.cancel = loopCancel
+	verveguyAuth.mu.Unlock()
+	refreshLoopDone := make(chan struct{})
+	go func() {
+		verveguyAuth.RunRefreshLoop(loopCtx, func(format string, args ...any) {})
+		close(refreshLoopDone)
+	}()
+
+	// Simulate a review already dispatched (before the reload) and still
+	// running against verveguy/otherrepo.
+	_, release := daemon.acquirePRGate("verveguy", "otherrepo", 1)
+
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
+		t.Fatalf("writing updated config: %v", err)
+	}
+	handleReload(context.Background(), args, authSet, daemon)
+
+	// The synchronous parts of the reload must have already taken effect:
+	// verveguy is no longer dispatchable...
+	if _, ok := daemon.client("verveguy"); ok {
+		t.Error("expected verveguy to no longer be servable through the daemon after its last watched repo was removed")
+	}
+	// ...but its in-flight review's token must still be refreshing.
+	select {
+	case <-refreshLoopDone:
+		t.Fatal("handleReload stopped verveguy's refresh loop while a review was still in flight for it")
+	case <-time.After(150 * time.Millisecond):
+		// still running, as expected — R3: the in-flight review must be
+		// allowed to finish with a valid token.
+	}
+
+	release()
+
+	select {
+	case <-refreshLoopDone:
+		// drainThenStopAuth observed the drain and stopped the loop.
+	case <-time.After(time.Second):
+		t.Fatal("verveguy's refresh loop was not stopped within 1s of its in-flight review completing")
+	}
+}

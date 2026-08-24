@@ -688,9 +688,18 @@ func TestNoLongerWatchedOwners_NoChangeIsEmpty(t *testing.T) {
 // select blocks on ctx.Done() for the test's whole duration, so there is
 // nothing to race against those vars. Mirrors startRefreshLoop's own logic
 // (deriving a cancellable child context, recording it on the Auth) so the
-// assertion exercises exactly the mechanism pruneOwners uses in production,
+// assertion exercises exactly the mechanism Auth.Stop uses in production,
 // with a completion channel the production helper doesn't expose.
-func TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner(t *testing.T) {
+//
+// pruneOwners deliberately does NOT cancel the loop itself (a second #1640
+// review finding: doing so unconditionally could invalidate the token
+// backing a review still in flight for the owner being removed — see
+// AuthSet.pruneOwners' and Daemon.drainThenStopAuth's doc comments). This
+// test therefore asserts both halves: pruneOwners only detaches and returns
+// the Auth without touching its loop, and the caller's own mechanism
+// (Auth.Stop, exactly what drainThenStopAuth calls once it's safe) is what
+// actually cancels it.
+func TestAuthSet_PruneOwners_NonPinnedDetachesWithoutCancelling(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
@@ -719,8 +728,8 @@ func TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner(t *testing
 	}
 
 	// Mirrors startRefreshLoop: derive a cancellable child context, record
-	// it on the Auth (the field pruneOwners reads), and run RunRefreshLoop
-	// in a goroutine we can observe the completion of.
+	// it on the Auth (the field Stop reads), and run RunRefreshLoop in a
+	// goroutine we can observe the completion of.
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	verveguyAuth.mu.Lock()
 	verveguyAuth.cancel = loopCancel
@@ -731,7 +740,7 @@ func TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner(t *testing
 		close(done)
 	}()
 
-	as.pruneOwners([]string{"verveguy"})
+	detached := as.pruneOwners([]string{"verveguy"})
 
 	if _, ok := as.Clients["verveguy"]; ok {
 		t.Error("expected verveguy's Clients entry to be removed by pruneOwners")
@@ -739,20 +748,32 @@ func TestAuthSet_PruneOwners_NonPinnedCancelsRefreshLoopAndDropsOwner(t *testing
 	if as.InstallationCount() != 1 {
 		t.Errorf("InstallationCount() = %d, want 1 after pruning verveguy's (non-pinned, unshared) installation", as.InstallationCount())
 	}
+	if len(detached) != 1 || detached[0].owner != "verveguy" || detached[0].auth != verveguyAuth {
+		t.Fatalf("pruneOwners returned %+v, want exactly one detachedAuth{owner: \"verveguy\", auth: verveguyAuth}", detached)
+	}
+
 	select {
 	case <-done:
-		// pruneOwners called verveguyAuth.cancel, which cancelled loopCtx,
+		t.Fatal("pruneOwners cancelled verveguy's refresh loop directly — it must only detach and return the Auth, deferring cancellation to the caller")
+	case <-time.After(200 * time.Millisecond):
+		// still running, as expected — pruneOwners never touched cancel.
+	}
+
+	detached[0].auth.Stop()
+	select {
+	case <-done:
+		// Auth.Stop called verveguyAuth.cancel, which cancelled loopCtx,
 		// which made RunRefreshLoop return — the actual mechanism under
 		// test, not a proxy for it.
 	case <-time.After(time.Second):
-		t.Fatal("RunRefreshLoop did not return within 1s of pruneOwners — its cancel func was not invoked")
+		t.Fatal("Auth.Stop() did not cancel the refresh loop within 1s")
 	}
 }
 
 // TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth confirms pruning an
 // owner under a pinned installation only removes that owner's Clients
-// entry — it never cancels or drops the single shared Auth, since another
-// owner (or a future reload-added one) still depends on it.
+// entry — it never detaches or cancels the single shared Auth, since
+// another owner (or a future reload-added one) still depends on it.
 func TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
@@ -770,7 +791,7 @@ func TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth(t *testing.T) {
 	}
 	as.CommitOwner("ownerB", a, fresh)
 
-	as.pruneOwners([]string{"ownerB"})
+	detached := as.pruneOwners([]string{"ownerB"})
 
 	if _, ok := as.Clients["ownerB"]; ok {
 		t.Error("expected ownerB's Clients entry to be removed by pruneOwners")
@@ -780,6 +801,9 @@ func TestAuthSet_PruneOwners_PinnedModeKeepsSharedAuth(t *testing.T) {
 	}
 	if _, ok := as.Clients["handarbeit"]; !ok {
 		t.Error("expected handarbeit (still watched, sharing the same pinned installation) to remain unaffected")
+	}
+	if detached != nil {
+		t.Errorf("pruneOwners returned %+v in pinned mode, want nil — the shared Auth must never be detached", detached)
 	}
 }
 

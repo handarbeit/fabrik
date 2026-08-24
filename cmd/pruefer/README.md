@@ -197,7 +197,7 @@ Every field is classified as either **live** (applied immediately) or **restart-
 
 | YAML key | Reload |
 |---|---|
-| `watched_repos` | Live. Added repos are polled starting the next cycle; removed repos stop being polled starting the next cycle. A review already in flight for a repo removed mid-reload is allowed to finish — it is never cancelled. |
+| `watched_repos` | Live. Added repos are polled starting the next cycle; removed repos stop being polled starting the next cycle. A review already in flight for a repo removed mid-reload is allowed to finish — it is never cancelled, and its owner's installation token keeps refreshing until it does, so its remaining GitHub API calls never fail with a stale token either. |
 | `poll_interval_seconds` | Live, effective starting the next cycle. |
 | `model` | Live. |
 | `effort` | Live. |
