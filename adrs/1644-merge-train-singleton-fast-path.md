@@ -37,7 +37,9 @@ with any ambiguity falling through to the unchanged trial path (same discipline 
 
 Add a new, narrowly-scoped guard checked from `runMergeTrainWorker`'s re-form loop
 (`engine/merge_train.go`), immediately before the trial-name/`assembleAndValidate` call, gated on
-`len(current) == 1`. Three new functions, added near `landSingleton`:
+`len(current) == 1`. **Before** considering the fast path itself, the loop applies any pending
+review-finding eject signal (#1208, `applyPendingReviewEjects`) for the singleton member — see
+Rationale for why this ordering matters. Three new functions, added near `landSingleton`:
 
 1. **`singletonFastPathEligible(p trialParams, m trainMember, pr *gh.PRDetails) (bool, string)`** —
    the pure decision function. Given the member's already-fetched live PR details, checks, in
@@ -187,6 +189,27 @@ new, narrowly-added `GitHubClient` method (shared implementation with `MergePR`,
 ""` meaning unpinned) used only by this fast path; every other caller is unchanged. (Found in
 review — flagged as an open TOCTOU gap between the eligibility check and an unpinned merge call.)
 
+### Why does the loop apply `applyPendingReviewEjects` before the fast path, not just around it like the other checkpoints?
+
+`applyPendingReviewEjects` (#1208, ADR-1208) existed, before this issue, at exactly three
+checkpoints — all of them downstream of a call to `assembleAndValidate`: the re-form loop's own
+Hook 2 (immediately after a trial resolves), `landOneAtATime`'s per-singleton loop, and
+`landGreenBatch`'s main-moved rebase loop. Every one of those checkpoints exists to catch a
+review-finding eject flagged *while a trial was in flight*, before that trial's result is trusted.
+The fast path breaks that invariant structurally: it never calls `assembleAndValidate` at all, so
+if the guard were placed only where the existing checkpoints are, a length-1 batch would return
+from the worker (having landed via the fast path) without ever reaching any of them — a member
+flagged mid-trial for unresolved review-thread findings could be merged directly, exactly the
+outcome #1208 exists to prevent. (Found in review: the original implementation had no such
+checkpoint for the fast path at all.)
+
+The fix applies `applyPendingReviewEjects` to the singleton member *before* `trySingletonFastPath`
+is even called, as a fourth checkpoint specific to this feature — not merely mirroring the existing
+three, since none of them sit at a point that would ever run for a fast-pathed batch. An ejected
+member leaves `current` empty; the loop `continue`s and the top-of-loop zero-survivors check
+returns, exactly like every other empty-`current` exit. A member with no pending eject flag falls
+through to the fast path exactly as before.
+
 ### Why does the fast path need no interaction with the runaway guard or trial counter?
 
 `e.recordTrial`, the wrapper around `assembleAndValidate` that feeds `isRunawayTripped`, only fires
@@ -230,6 +253,8 @@ progress, identical in kind to any other green land.
 this feature is reachable only from a batch that starts as a singleton at the top of the re-form
 loop, never from the bisection-driven fallback path. `landGreenBatch`'s main-moved rebase loop
 (D5 recovery of an already-green trial) is unaffected, confirmed by inspection: since the guard is
-not inside `assembleAndValidate`, that call site is structurally untouched.
+not inside `assembleAndValidate`, that call site is structurally untouched. `applyPendingReviewEjects`
+(#1208) itself is unmodified — reused as-is, applied to a length-1 slice at a new call site, exactly
+like every other checkpoint's usage.
 
-**References:** [ADR-1153: Train CI Completeness over Mergeable State](1153-train-ci-completeness-over-mergeable-state.md), [ADR-1441: Unstable Requires Check-Run Classification](1441-unstable-requires-check-run-classification.md), [ADR-072: MergePR Self-Gates on Mergeable State](072-mergepr-self-gates-on-mergeable-state.md), [ADR-1616: Post-Done Landing Verification](1616-post-done-landing-verification.md), [ADR-1096: Explicit Close on Non-Default-Base Merge](1096-explicit-close-on-nondefault-base-merge.md), [ADR-059: Internal Merge Train](059-internal-merge-train.md), issue #1614, issue #1615
+**References:** [ADR-1153: Train CI Completeness over Mergeable State](1153-train-ci-completeness-over-mergeable-state.md), [ADR-1441: Unstable Requires Check-Run Classification](1441-unstable-requires-check-run-classification.md), [ADR-072: MergePR Self-Gates on Mergeable State](072-mergepr-self-gates-on-mergeable-state.md), [ADR-1616: Post-Done Landing Verification](1616-post-done-landing-verification.md), [ADR-1096: Explicit Close on Non-Default-Base Merge](1096-explicit-close-on-nondefault-base-merge.md), [ADR-1208: Queued Review-Finding Ejection](1208-queued-review-finding-ejection.md), [ADR-059: Internal Merge Train](059-internal-merge-train.md), issue #1614, issue #1615

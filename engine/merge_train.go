@@ -727,8 +727,25 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		// and re-forms is also eligible. See trySingletonFastPath's doc
 		// comment for why this guard lives here rather than inside
 		// assembleAndValidate itself.
-		if len(current) == 1 && e.trySingletonFastPath(ctx, state, p, current[0]) {
-			return
+		if len(current) == 1 {
+			// Apply any pending review-finding eject signal (#1208) before
+			// considering the fast path. The fast path never calls
+			// assembleAndValidate, so without this it would silently bypass
+			// every one of applyPendingReviewEjects' three existing
+			// checkpoints (this loop's Hook 2 below, landOneAtATime,
+			// landGreenBatch's rebase loop) — landing a member flagged for
+			// unresolved review-thread findings on its own linked PR directly,
+			// the exact case #1208 exists to prevent. An ejected member leaves
+			// `current` empty, so `continue` re-enters the loop and the
+			// top-of-loop zero-survivors check returns.
+			if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, current); ejectedCount > 0 {
+				e.logf(0, "merge-train", "%d member(s) ejected for unresolved review findings before the singleton fast path — re-forming for %s\n", ejectedCount, repoKey)
+				current = remaining
+				continue
+			}
+			if e.trySingletonFastPath(ctx, state, p, current[0]) {
+				return
+			}
 		}
 
 		trialName := p.nextTrialName()
@@ -2451,10 +2468,13 @@ func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, b
 // eject signal (#1208) and, for each flagged member, ejects it via
 // ejectQueuedMemberForReviewFindings and excludes it from the returned remaining slice.
 // Called from inside the merge-train worker goroutine at its natural checkpoints —
-// after assembleAndValidate returns in runMergeTrainWorker's re-form loop, and inside
-// landOneAtATime's per-singleton loop — so a flagged member can never ride a trial
-// (green or otherwise) to landing: the caller must discard the current trial whenever
-// ejectedCount > 0, regardless of that trial's own CI result.
+// before the #1644 singleton fast path is even considered (a fast-path land never calls
+// assembleAndValidate at all, so without this checkpoint it would bypass the other
+// three entirely), after assembleAndValidate returns in runMergeTrainWorker's re-form
+// loop, inside landOneAtATime's per-singleton loop, and inside landGreenBatch's
+// main-moved rebase loop — so a flagged member can never ride a trial (green or
+// otherwise), or the fast path, to landing: the caller must discard the current trial
+// whenever ejectedCount > 0, regardless of that trial's own CI result.
 func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
 	for _, m := range members {
 		if count, ok := e.takePendingReviewEject(repoKey, m.item.Number); ok {

@@ -3555,6 +3555,83 @@ func TestFinishSingletonFastPathLanding_NonDefaultBase_ClosesIssue(t *testing.T)
 	}
 }
 
+// TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPath
+// guards against a gap found in review: applyPendingReviewEjects (#1208) was
+// historically consumed only at three checkpoints, all downstream of
+// assembleAndValidate — but the #1644 singleton fast path returns from the
+// worker before any of them are ever reached, so a member flagged for
+// unresolved review-thread findings while a worker was in flight could be
+// landed directly by the fast path without ever being ejected. The re-form
+// loop must apply any pending eject for a length-1 batch *before* considering
+// the fast path.
+func TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPath(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			if issueNumber == 1 {
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			// Ancestor, mergeable, and (were it ever reached) green — the fast
+			// path would land this member if the eject checkpoint didn't fire
+			// first. This makes the test non-vacuous: it fails loudly if the
+			// checkpoint is ever removed or reordered after the fast path.
+			return &gh.PRDetails{Number: prNumber, HeadSHA: sha1, MergeableState: "clean"}, nil
+		},
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{{Name: "build", Status: "completed", Conclusion: "success"}}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	// Flag #1 for a pending review-finding eject BEFORE the worker runs —
+	// simulates settleQueuedReviewFindings having observed an unresolved
+	// thread on #1 while a worker was already in flight for this repo.
+	eng.markPendingReviewEject("owner/repo", 1, 2)
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	if len(client.mergePRAtHeadSHACalls) != 0 {
+		t.Errorf("expected #1 never landed by the fast path once flagged, got MergePRAtHeadSHA calls %+v", client.mergePRAtHeadSHACalls)
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected #1 never landed via any merge, got MergePR calls %+v", client.mergePRCalls)
+	}
+
+	// #1 must have been rerouted off Queued (the ejection), not landed —
+	// mirrors the multi-member pending-eject test's assertion.
+	foundReroute := false
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "opt-implement" {
+			foundReroute = true
+		}
+	}
+	if !foundReroute {
+		t.Fatal("expected #1 rerouted off Queued to Implement (the review-finding eject), not landed by the fast path")
+	}
+}
+
 // TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath is AC5:
 // the #1644 guard is gated on len(current) == 1 — a 2-member batch must never
 // evaluate singleton eligibility for either member, and must never merge
