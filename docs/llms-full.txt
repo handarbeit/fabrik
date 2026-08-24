@@ -8318,7 +8318,7 @@ Backlog → Specify → Research → Plan → Implement → Review → Validate 
 
 | Stage | Order | Read-Only | PostToPR | CreateDraftPR | MarkPRReady | MaxTurns |
 |-------|-------|-----------|----------|---------------|-------------|----------|
-| Specify | 0 | Yes | No | No | No | 50 |
+| Specify | 0 | No | No | No | No | 50 |
 | Research | 1 | Yes | No | No | No | 50 |
 | Plan | 2 | Yes | No | No | No | 50 |
 | Implement | 3 | No | Yes | Yes | Yes | 50 |
@@ -8365,7 +8365,7 @@ The engine's `updateWorktreeFromMain` rebases the worktree onto main but does no
 
 ### Read-Only Stage Stashing
 
-For `read_only: true` stages (Specify, Research, Plan): dirty state is auto-stashed before Claude runs and restored after. Claude sees a clean worktree.
+For `read_only: true` stages (Research, Plan by default — Specify is write-capable as of #1655, since it commits `specs/<issue>-<slug>/spec.md` on the worktree branch): dirty state is auto-stashed before Claude runs and restored after. Claude sees a clean worktree.
 
 ### Context Files
 
@@ -8464,7 +8464,7 @@ For non-read-only, non-unrestricted stages (Implement, Review, Validate, and any
 
 This proactively restricts Claude Code's file-editing tools to the assigned worktree directory. If Claude attempts to edit or write a file outside the worktree, it receives an error from Claude Code and the stage continues running (the attempt is blocked, not the whole stage).
 
-**Scope:** Enforced for all stages where `read_only: false`. Skipped for read-only stages (Specify, Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML).
+**Scope:** Enforced for all stages where `read_only: false` — including Specify by default (as of #1655), since it commits the spec-file projection to the worktree branch. Skipped for read-only stages (Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML).
 
 **Bypass:** When `fabrik:unrestricted` is present on the issue, `--dangerously-skip-permissions` is passed instead of `--allowedTools`, bypassing this restriction entirely (consistent with the existing semantics of that label).
 
