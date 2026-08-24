@@ -489,6 +489,175 @@ func TestAuth_ExpiresAt_ZeroBeforeAnyRefresh(t *testing.T) {
 	}
 }
 
+func TestNewlyWatchedOwners(t *testing.T) {
+	old := Config{WatchedRepos: []string{"handarbeit/fabrik", "verveguy/otherrepo"}}
+	cand := Config{WatchedRepos: []string{"handarbeit/fabrik", "verveguy/otherrepo", "newowner/repo", "newowner/repo2"}}
+	got := newlyWatchedOwners(old, cand)
+	if len(got) != 1 || got[0] != "newowner" {
+		t.Errorf("newlyWatchedOwners = %v, want [newowner] (deduped, and an already-watched owner adding a repo is not new)", got)
+	}
+}
+
+func TestNewlyWatchedOwners_NoChangeIsEmpty(t *testing.T) {
+	cfg := Config{WatchedRepos: []string{"handarbeit/fabrik"}}
+	if got := newlyWatchedOwners(cfg, cfg); len(got) != 0 {
+		t.Errorf("newlyWatchedOwners(cfg, cfg) = %v, want empty", got)
+	}
+}
+
+func TestAuthSet_MintOwnerAuth_NewOwner(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "newowner"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	cfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, WatchedRepos: []string{"handarbeit/fabrik"}}
+	as, err := BootstrapMulti(cfg, srv.URL)
+	if err != nil {
+		t.Fatalf("BootstrapMulti: %v", err)
+	}
+	if fake.mintCountFor(222) != 0 {
+		t.Fatalf("installation 222 (newowner) minted before it was ever watched — mintCount = %d", fake.mintCountFor(222))
+	}
+
+	newCfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, WatchedRepos: []string{"handarbeit/fabrik", "newowner/repo"}}
+	a, fresh, err := as.mintOwnerAuth(newCfg, "newowner")
+	if err != nil {
+		t.Fatalf("mintOwnerAuth: %v", err)
+	}
+	if !fresh {
+		t.Error("expected mintedFresh=true for a non-pinned new owner")
+	}
+	if a.InstallationID != 222 {
+		t.Errorf("InstallationID = %d, want 222", a.InstallationID)
+	}
+	if fake.mintCountFor(222) != 1 {
+		t.Errorf("mintCountFor(222) = %d, want 1", fake.mintCountFor(222))
+	}
+	// mintOwnerAuth must not itself register anything — that's CommitOwner's job.
+	if _, ok := as.Clients["newowner"]; ok {
+		t.Error("mintOwnerAuth must not register a client itself — CommitOwner does")
+	}
+	if as.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 (mintOwnerAuth alone must not append to auths)", as.InstallationCount())
+	}
+
+	as.CommitOwner("newowner", a, fresh)
+	if client, ok := as.Clients["newowner"]; !ok || client.Token() == "" {
+		t.Fatal("expected CommitOwner to register a token-bearing client for newowner")
+	}
+	if as.InstallationCount() != 2 {
+		t.Errorf("InstallationCount() = %d, want 2 after CommitOwner", as.InstallationCount())
+	}
+}
+
+func TestAuthSet_MintOwnerAuth_NoInstallation_Errors(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	cfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, WatchedRepos: []string{"handarbeit/fabrik"}}
+	as, err := BootstrapMulti(cfg, srv.URL)
+	if err != nil {
+		t.Fatalf("BootstrapMulti: %v", err)
+	}
+
+	_, _, err = as.mintOwnerAuth(cfg, "notinstalled")
+	if err == nil {
+		t.Fatal("expected an error minting a token for an owner with no App installation")
+	}
+	if !strings.Contains(err.Error(), "notinstalled") {
+		t.Errorf("error %q does not name the owner %q", err.Error(), "notinstalled")
+	}
+}
+
+func TestAuthSet_MintOwnerAuth_PinnedInstallation(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	discoveryCalled := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"slug": "pruefer-bot"})
+	})
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		discoveryCalled = true
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token": "ghs_x", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999, WatchedRepos: []string{"handarbeit/fabrik"}}
+	as, err := BootstrapMulti(cfg, srv.URL)
+	if err != nil {
+		t.Fatalf("BootstrapMulti: %v", err)
+	}
+
+	a, fresh, err := as.mintOwnerAuth(cfg, "newowner")
+	if err != nil {
+		t.Fatalf("mintOwnerAuth: %v", err)
+	}
+	if fresh {
+		t.Error("expected mintedFresh=false when sharing the pinned installation")
+	}
+	if a != as.auths[0] {
+		t.Error("expected mintOwnerAuth to return the App's existing pinned Auth, not a new one")
+	}
+	if discoveryCalled {
+		t.Error("expected /app/installations to never be called in pinned-installation mode")
+	}
+
+	as.CommitOwner("newowner", a, fresh)
+	if as.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 — CommitOwner must not append a duplicate Auth for a shared pinned installation", as.InstallationCount())
+	}
+	if client, ok := as.Clients["newowner"]; !ok || client != as.Clients["handarbeit"] {
+		t.Error("expected newowner to share the same pinned client as handarbeit")
+	}
+}
+
+func TestAuthSet_CommitOwner_NoDuplicateAuthOnPinnedOwner(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", nil, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	cfg := Config{AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999, WatchedRepos: []string{"handarbeit/fabrik"}}
+	as, err := BootstrapMulti(cfg, srv.URL)
+	if err != nil {
+		t.Fatalf("BootstrapMulti: %v", err)
+	}
+
+	// Two owners newly discovered in the same reload batch, both sharing
+	// the pinned installation: neither CommitOwner call may append to
+	// auths, or InstallationCount would over-report and RunRefreshLoops
+	// would start a second, redundant refresh goroutine for the same
+	// installation.
+	for _, owner := range []string{"ownerA", "ownerB"} {
+		a, fresh, err := as.mintOwnerAuth(cfg, owner)
+		if err != nil {
+			t.Fatalf("mintOwnerAuth(%s): %v", owner, err)
+		}
+		as.CommitOwner(owner, a, fresh)
+	}
+	if as.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 after committing two owners sharing one pinned installation", as.InstallationCount())
+	}
+	if len(as.Clients) != 3 { // handarbeit (from BootstrapMulti) + ownerA + ownerB
+		t.Errorf("len(Clients) = %d, want 3", len(as.Clients))
+	}
+}
+
 func TestDistinctOwners(t *testing.T) {
 	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
 	want := []string{"a", "b"}
