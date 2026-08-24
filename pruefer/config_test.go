@@ -3,6 +3,7 @@ package pruefer
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -621,6 +622,140 @@ func TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue(t *testing.T
 
 	if _, err := LoadConfig([]string{"-config", path}); err == nil {
 		t.Fatal("LoadConfig: expected an error for an unrecognized request_changes_threshold value, got nil")
+	}
+}
+
+// TestConfig_AllFieldsClassified asserts every field in Config carries a
+// recognized `reload` struct tag (#1640, R2) — a field added without one
+// fails this test rather than silently falling through applyConfigReload's
+// conservative "treat as restart-only" default. Non-vacuous: adding a field
+// with no tag, or a misspelled one, to a scratch copy of Config fails this
+// exact assertion (verified by hand while writing this test, against a
+// throwaway extra field).
+func TestConfig_AllFieldsClassified(t *testing.T) {
+	typ := reflect.TypeOf(Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		tag := f.Tag.Get("reload")
+		switch reloadClass(tag) {
+		case reloadLive, reloadRestart, reloadSkip:
+			// classified
+		default:
+			t.Errorf("Config.%s has no recognized reload tag (got %q) — every field must be tagged live, restart, or skip", f.Name, tag)
+		}
+	}
+}
+
+func TestApplyConfigReload_WatchedReposAddedAndRemoved(t *testing.T) {
+	old := Config{WatchedRepos: []string{"a/one", "a/two"}}
+	cand := Config{WatchedRepos: []string{"a/one", "b/three"}}
+
+	merged, diff := applyConfigReload(old, cand)
+
+	if len(diff.ReposAdded) != 1 || diff.ReposAdded[0] != "b/three" {
+		t.Errorf("ReposAdded = %v, want [b/three]", diff.ReposAdded)
+	}
+	if len(diff.ReposRemoved) != 1 || diff.ReposRemoved[0] != "a/two" {
+		t.Errorf("ReposRemoved = %v, want [a/two]", diff.ReposRemoved)
+	}
+	if len(merged.WatchedRepos) != 2 || merged.WatchedRepos[0] != "a/one" || merged.WatchedRepos[1] != "b/three" {
+		t.Errorf("merged.WatchedRepos = %v, want [a/one b/three]", merged.WatchedRepos)
+	}
+}
+
+func TestApplyConfigReload_LiveFieldIsApplied(t *testing.T) {
+	old := Config{Model: "sonnet", PollInterval: 120 * time.Second}
+	cand := Config{Model: "opus", PollInterval: 120 * time.Second}
+
+	merged, diff := applyConfigReload(old, cand)
+
+	if merged.Model != "opus" {
+		t.Errorf("merged.Model = %q, want opus", merged.Model)
+	}
+	if len(diff.FieldsChanged) != 1 || diff.FieldsChanged[0].Field != "Model" {
+		t.Fatalf("FieldsChanged = %v, want exactly one entry for Model", diff.FieldsChanged)
+	}
+	if diff.FieldsChanged[0].Old != "sonnet" || diff.FieldsChanged[0].New != "opus" {
+		t.Errorf("FieldsChanged[0] = %+v, want Old=sonnet New=opus", diff.FieldsChanged[0])
+	}
+	if len(diff.RestartOnlyChanged) != 0 {
+		t.Errorf("RestartOnlyChanged = %v, want empty", diff.RestartOnlyChanged)
+	}
+}
+
+func TestApplyConfigReload_RestartOnlyFieldIsReportedNotApplied(t *testing.T) {
+	old := Config{AppID: 1, LogFile: "old.log"}
+	cand := Config{AppID: 2, LogFile: "new.log"}
+
+	merged, diff := applyConfigReload(old, cand)
+
+	// AC4: reported...
+	if len(diff.RestartOnlyChanged) != 2 {
+		t.Fatalf("RestartOnlyChanged = %v, want 2 entries (AppID, LogFile)", diff.RestartOnlyChanged)
+	}
+	var names []string
+	for _, c := range diff.RestartOnlyChanged {
+		names = append(names, c.Field)
+	}
+	for _, want := range []string{"AppID", "LogFile"} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("RestartOnlyChanged = %v, missing %q", names, want)
+		}
+	}
+	// ...but never applied (AC4: "not applied", literally true of merged).
+	if merged.AppID != 1 {
+		t.Errorf("merged.AppID = %d, want 1 (unchanged — restart-only)", merged.AppID)
+	}
+	if merged.LogFile != "old.log" {
+		t.Errorf("merged.LogFile = %q, want old.log (unchanged — restart-only)", merged.LogFile)
+	}
+	if len(diff.FieldsChanged) != 0 {
+		t.Errorf("FieldsChanged = %v, want empty — no live fields changed", diff.FieldsChanged)
+	}
+}
+
+func TestApplyConfigReload_NoChangeProducesEmptyDiff(t *testing.T) {
+	cfg := Config{Model: "sonnet", WatchedRepos: []string{"a/one"}, AppID: 1}
+	merged, diff := applyConfigReload(cfg, cfg)
+
+	if !diff.Empty() {
+		t.Errorf("diff = %+v, want Empty()", diff)
+	}
+	if !reflect.DeepEqual(merged, cfg) {
+		t.Errorf("merged = %+v, want unchanged %+v", merged, cfg)
+	}
+}
+
+func TestApplyConfigReload_MixOfLiveAndRestartOnlyBothReported(t *testing.T) {
+	old := Config{Model: "sonnet", AppID: 1}
+	cand := Config{Model: "opus", AppID: 2}
+
+	merged, diff := applyConfigReload(old, cand)
+
+	// The live field is applied even though a restart-only field also
+	// changed in the same reload (my reading of R2: a restart-only change
+	// is reported, not a reason to withhold an otherwise-safe field).
+	if merged.Model != "opus" {
+		t.Errorf("merged.Model = %q, want opus (a restart-only change elsewhere must not block a live field)", merged.Model)
+	}
+	if merged.AppID != 1 {
+		t.Errorf("merged.AppID = %d, want 1 (restart-only, not applied)", merged.AppID)
+	}
+	if len(diff.FieldsChanged) != 1 || len(diff.RestartOnlyChanged) != 1 {
+		t.Errorf("FieldsChanged=%v RestartOnlyChanged=%v, want exactly one of each", diff.FieldsChanged, diff.RestartOnlyChanged)
+	}
+}
+
+func TestDiffRepos_OrderInsensitive(t *testing.T) {
+	added, removed := diffRepos([]string{"a/one", "a/two"}, []string{"a/two", "a/one"})
+	if len(added) != 0 || len(removed) != 0 {
+		t.Errorf("diffRepos with reordered-only input = added:%v removed:%v, want both empty", added, removed)
 	}
 }
 
