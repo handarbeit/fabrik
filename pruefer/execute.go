@@ -26,7 +26,12 @@ func Execute() error {
 		return fmt.Errorf("loading .env: %w", err)
 	}
 
-	cfg, err := LoadConfig(os.Args[1:])
+	// Captured once so a later SIGHUP-triggered reload (handleReload) can
+	// re-run LoadConfig against the same argument list, rather than
+	// re-reading a possibly-stale os.Args.
+	args := os.Args[1:]
+
+	cfg, err := LoadConfig(args)
 	if err != nil {
 		return err
 	}
@@ -98,8 +103,97 @@ func Execute() error {
 			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)
 	}
 
+	// SIGHUP triggers a config reload (#1640) — deliberately a separate
+	// signal channel from the SIGINT/SIGTERM ctx above, not folded into it:
+	// that context's cancellation means shutdown, and a reload must never
+	// be mistaken for one. See handleReload's doc comment for what a
+	// reload does and does not touch.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hupCh:
+				logf(0, "reload", "SIGHUP received — reloading config\n")
+				handleReload(ctx, args, authSet, daemon)
+			}
+		}
+	}()
+
 	if useTUI(cfg) {
 		return runTUI(ctx, daemon)
 	}
 	return daemon.Run(ctx)
+}
+
+// handleReload processes one SIGHUP (#1640): re-reads config via
+// LoadConfig(args), merges it against daemon's currently running config
+// (applyConfigReload — R2/R4), mints a token for any newly-watched owner
+// (R5, all-or-nothing across the whole reload — see AuthSet.mintOwnerAuth's
+// doc comment), and only once every step has succeeded does it apply the
+// merged config (and any newly-minted clients) to daemon and log a
+// diff-style summary (R6).
+//
+// A failure at any step — a malformed/invalid config file, or a newly
+// watched owner with no matching App installation — leaves daemon and
+// authSet completely untouched (R4/AC3/AC5): nothing is committed until
+// every owner in the batch has minted successfully. Nothing here cancels a
+// running review, drops the Hookdeck EventSource, or resets the dedupe
+// ring (R3) — those are untouched by construction, since this function
+// never rebuilds or reaches into any of them.
+func handleReload(ctx context.Context, args []string, authSet *AuthSet, daemon *Daemon) {
+	cand, err := LoadConfig(args)
+	if err != nil {
+		logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
+		return
+	}
+	if cand.VersionRequested {
+		// --version on the original invocation would already have made
+		// Execute print the version and return before a daemon (and thus
+		// this handler) ever existed. Reaching here means the *current*
+		// process wasn't a --version invocation, but re-parsing the same
+		// args produced VersionRequested anyway — LoadConfig re-resolves
+		// the full flag/env/YAML chain every call (R2's documented
+		// caveat), so this is defensive, not expected to fire in practice.
+		logf(0, "reload", "config reload failed: --version is not a reloadable configuration — keeping current config\n")
+		return
+	}
+
+	old := daemon.config()
+	merged, diff := applyConfigReload(old, cand)
+
+	newOwners := newlyWatchedOwners(old, merged)
+	type mintedOwner struct {
+		owner       string
+		auth        *Auth
+		mintedFresh bool
+	}
+	minted := make([]mintedOwner, 0, len(newOwners))
+	for _, owner := range newOwners {
+		a, fresh, err := authSet.mintOwnerAuth(merged, owner)
+		if err != nil {
+			logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
+			return
+		}
+		minted = append(minted, mintedOwner{owner: owner, auth: a, mintedFresh: fresh})
+	}
+
+	addedClients := make(map[string]GitHubLister, len(minted))
+	for _, m := range minted {
+		authSet.CommitOwner(m.owner, m.auth, m.mintedFresh)
+		addedClients[m.owner] = authSet.Clients[m.owner]
+		if m.mintedFresh {
+			installationID := m.auth.InstallationID
+			prefix := fmt.Sprintf("installation %d: ", installationID)
+			go m.auth.RunRefreshLoop(ctx, func(format string, args ...any) {
+				logf(0, "auth", prefix+format, args...)
+			})
+		}
+	}
+
+	daemon.ApplyReload(merged, addedClients)
+	logReloadSummary(diff)
 }

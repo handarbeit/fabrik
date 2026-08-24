@@ -131,6 +131,21 @@ type AuthSet struct {
 	// gets exactly one refresh goroutine from RunRefreshLoops, not one per
 	// owner.
 	auths []*Auth
+
+	// appID, privateKey, and baseURL are the App-level identity BootstrapMulti
+	// resolves once; mintOwnerAuth (#1640, R5) reuses them to mint a token
+	// for a single additional owner discovered by a config reload, without
+	// re-deriving or re-reading the private key file.
+	appID      int64
+	privateKey *rsa.PrivateKey
+	baseURL    string
+	// pinnedInstallationID mirrors the Config.AppInstallationID BootstrapMulti
+	// was called with: non-zero means every owner — including one newly
+	// added at reload time — shares the App's single pinned installation
+	// rather than being resolved via per-owner discovery. Set from
+	// cfg.AppInstallationID in BootstrapMulti so mintOwnerAuth doesn't need
+	// its own Config parameter for this one field.
+	pinnedInstallationID int64
 }
 
 // BootstrapMulti performs the full GitHub App auth flow for every
@@ -170,7 +185,14 @@ func BootstrapMulti(cfg Config, baseURL string) (*AuthSet, error) {
 	}
 	botLogin := slug + "[bot]"
 
-	as := &AuthSet{BotLogin: botLogin, Clients: map[string]*gh.Client{}}
+	as := &AuthSet{
+		BotLogin:             botLogin,
+		Clients:              map[string]*gh.Client{},
+		appID:                cfg.AppID,
+		privateKey:           privateKey,
+		baseURL:              baseURL,
+		pinnedInstallationID: cfg.AppInstallationID,
+	}
 	owners := distinctOwners(cfg.WatchedRepos)
 
 	if cfg.AppInstallationID != 0 {
@@ -302,4 +324,91 @@ func (as *AuthSet) RunRefreshLoops(ctx context.Context, logf func(installationID
 // used for startup logging.
 func (as *AuthSet) InstallationCount() int {
 	return len(as.auths)
+}
+
+// newlyWatchedOwners returns the distinct owners present in cand's
+// WatchedRepos but absent from old's, in cand's first-seen order — the set
+// a config reload must mint a token for before it can be applied (R5).
+// Adding a repo under an already-watched owner never appears here.
+func newlyWatchedOwners(old, cand Config) []string {
+	oldOwners := make(map[string]bool)
+	for _, o := range distinctOwners(old.WatchedRepos) {
+		oldOwners[o] = true
+	}
+	var added []string
+	for _, o := range distinctOwners(cand.WatchedRepos) {
+		if !oldOwners[o] {
+			added = append(added, o)
+		}
+	}
+	return added
+}
+
+// mintOwnerAuth mints a token for owner without mutating as — this is the
+// "mint" half of R5's two-phase mint-then-commit split. Callers must call
+// CommitOwner to actually register the result, and must do so only after
+// every owner in the same reload batch has minted successfully (see
+// handleReload in execute.go): minting owner 2-of-2 failing must leave
+// owner 1 exactly as unregistered as if it had never been attempted.
+//
+// mintedFresh is false when as is in pinned-installation mode
+// (pinnedInstallationID != 0): owner shares the App's single already-minted
+// Auth rather than getting one of its own, so CommitOwner must register the
+// client mapping without appending a duplicate *Auth or starting a second
+// refresh loop for it. In non-pinned mode mintedFresh is always true — a
+// genuinely new *Auth, discovered and minted for this owner specifically.
+func (as *AuthSet) mintOwnerAuth(cfg Config, owner string) (a *Auth, mintedFresh bool, err error) {
+	if as.pinnedInstallationID != 0 {
+		if len(as.auths) == 0 {
+			return nil, false, fmt.Errorf("no pinned installation auth available for owner %q", owner)
+		}
+		return as.auths[0], false, nil
+	}
+
+	jwt, err := gh.BuildAppJWT(as.appID, as.privateKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("building app JWT: %w", err)
+	}
+	installations, err := gh.FetchAppInstallations(as.baseURL, jwt)
+	if err != nil {
+		return nil, false, fmt.Errorf("discovering app installations: %w", err)
+	}
+	var inst *gh.AppInstallation
+	for i := range installations {
+		if installations[i].Account == owner {
+			inst = &installations[i]
+			break
+		}
+	}
+	if inst == nil {
+		return nil, false, fmt.Errorf("no GitHub App installation found for owner %q (newly watched in watched_repos) — install the app on %q", owner, owner)
+	}
+
+	newAuth, err := mintAuth(as.appID, inst.ID, as.BotLogin, as.privateKey, as.baseURL)
+	if err != nil {
+		return nil, false, fmt.Errorf("minting installation token for owner %q (installation %d): %w", owner, inst.ID, err)
+	}
+
+	if inst.RepositorySelection == "selected" {
+		if err := checkSelectedRepos(as.baseURL, newAuth.client.Token(), owner, cfg.WatchedRepos); err != nil {
+			return nil, false, err
+		}
+	}
+
+	return newAuth, true, nil
+}
+
+// CommitOwner registers an already-minted Auth (from mintOwnerAuth) for
+// owner into the set: the "commit" half of R5's two-phase split. mintedFresh
+// must be exactly the value mintOwnerAuth returned alongside a — true
+// appends a to auths (so RunRefreshLoops/InstallationCount pick it up);
+// false (the pinned-installation case) does not, since a is always
+// as.auths[0], already present — several new owners sharing the pinned
+// installation in the same reload batch each call CommitOwner with the same
+// *Auth and mintedFresh=false, so it is never appended more than once.
+func (as *AuthSet) CommitOwner(owner string, a *Auth, mintedFresh bool) {
+	as.Clients[owner] = a.client
+	if mintedFresh {
+		as.auths = append(as.auths, a)
+	}
 }
