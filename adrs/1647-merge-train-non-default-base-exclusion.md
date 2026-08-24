@@ -145,6 +145,22 @@ status every poll. So `markNonDefaultBaseExcluded` simply checks the comment pos
 applies the label only on confirmed success — a failed attempt leaves the label off, and the next
 poll's `filterNonDefaultBaseMembers` call retries the comment for free.
 
+**Label-add failure retry (found in review, PR #1652, handarbeit-pruefer):** the comment-failure
+fix above still left a symmetric gap on the other side of the same `if` — once `postComment`
+succeeds, `markNonDefaultBaseExcluded` applied the label via `addLabel`, which swallows
+`AddLabelToIssue`'s error (log-and-continue, the correct default for most call sites, but wrong
+here). If the label write itself failed after a successful comment post, `hasLabel`'s gate would
+never close, and the same explanatory comment would be reposted every subsequent poll for as long
+as the label add kept failing — a narrower failure mode than the one just fixed (duplicate
+comment noise, not silent permanent loss of the explanation), but the same class of gap. Fixed by
+switching to `addLabelChecked` (`engine/mutate.go`), the engine's existing error-surfacing variant
+of `addLabel` built for exactly this "next action depends on whether the label actually landed"
+shape (its only other caller, `markCreditedLanding`, exists for the identical reason — see
+`landing_verification_settle.go`). On a checked failure, `markNonDefaultBaseExcluded` logs a
+warning and returns without further action; `hasLabel`'s gate stays open, so the next poll's
+`filterNonDefaultBaseMembers` call reaches this function again and reposts the comment for free —
+identical retry shape to the comment-failure path.
+
 ### Runaway-guard interaction (Hook 2)
 
 `routeQueuedGroup` has a third pre-dispatch interaction the initial implementation missed:

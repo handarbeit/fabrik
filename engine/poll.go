@@ -2172,7 +2172,18 @@ func (e *Engine) markNonDefaultBaseExcluded(item gh.ProjectItem, base, def strin
 		// Already logged by postComment. Leave the label off so the next poll retries.
 		return
 	}
-	e.addLabel(item, nonDefaultBaseExcludedLabel)
+	// Use the error-surfacing addLabelChecked, not addLabel: this function's own
+	// idempotency gate (the hasLabel check above) is keyed on the label actually
+	// having landed, not merely attempted. addLabel swallows AddLabelToIssue's
+	// error (log-and-continue, the right default for most call sites), which
+	// would leave the gate open forever on a transient failure here — the same
+	// comment would be reposted on every subsequent poll for as long as the
+	// label add keeps failing, undercutting R3's "post exactly once" contract.
+	// Flagged in review (PR #1652, handarbeit-pruefer) as the same class of gap
+	// this function's comment-failure handling above already closes.
+	if err := e.addLabelChecked(item, nonDefaultBaseExcludedLabel); err != nil {
+		e.logf(item.Number, "warn", "merge-train: could not add label %q for #%d after posting exclusion comment: %v — next poll will repost the comment\n", nonDefaultBaseExcludedLabel, item.Number, err)
+	}
 }
 
 // filterNonDefaultBaseMembers narrows items to only those whose resolved base

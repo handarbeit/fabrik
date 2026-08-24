@@ -251,6 +251,63 @@ func TestMarkNonDefaultBaseExcluded_CommentFails_LabelNotAppliedRetriesNextPoll(
 	}
 }
 
+// TestMarkNonDefaultBaseExcluded_LabelAddFails_RetriesCommentNextPoll covers the
+// symmetric gap flagged in review (PR #1652, handarbeit-pruefer) alongside the
+// comment-failure path above: when AddComment succeeds but the subsequent
+// AddLabelToIssue call fails, the idempotency gate (hasLabel on
+// nonDefaultBaseExcludedLabel) must stay open so the next poll retries —
+// otherwise the same explanatory comment would be reposted every poll for as
+// long as the label add keeps failing, undercutting R3's "post exactly once"
+// contract. Exercises addLabelChecked's error-surfacing behavior, not
+// addLabel's swallow-and-log default.
+func TestMarkNonDefaultBaseExcluded_LabelAddFails_RetriesCommentNextPoll(t *testing.T) {
+	var mu sync.Mutex
+	failLabel := true
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if failLabel {
+				return fmt.Errorf("simulated transient AddLabelToIssue failure")
+			}
+			return nil
+		},
+	}
+	eng := setupCloseTestRepo(t, client)
+
+	item := gh.ProjectItem{Number: 2, Repo: "owner/repo", Labels: []string{"base:develop"}}
+
+	// First poll: AddComment succeeds, AddLabelToIssue fails.
+	kept := eng.filterNonDefaultBaseMembers("owner/repo", []gh.ProjectItem{item})
+	if len(kept) != 0 {
+		t.Fatalf("expected #2 still excluded despite the label-add failure, got %+v", kept)
+	}
+	client.mu.Lock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly one comment attempt after the first poll, got %d", len(client.addCommentCalls))
+	}
+	if len(client.addLabelCalls) != 1 {
+		t.Fatalf("expected exactly one label-add attempt after the first poll, got %d", len(client.addLabelCalls))
+	}
+	client.mu.Unlock()
+
+	// Second poll: item.Labels is still unchanged (the failed add never landed),
+	// so hasLabel's gate must still be open — the comment is reposted.
+	mu.Lock()
+	failLabel = false
+	mu.Unlock()
+	eng.filterNonDefaultBaseMembers("owner/repo", []gh.ProjectItem{item})
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 2 {
+		t.Errorf("expected the comment reposted on the next poll (2 total attempts) since the label never landed, got %d", len(client.addCommentCalls))
+	}
+	if len(client.addLabelCalls) != 2 {
+		t.Errorf("expected a second label-add attempt on the next poll, got %d", len(client.addLabelCalls))
+	}
+}
+
 // TestFilterNonDefaultBaseMembers_SelfClears_WhenBaseNoLongerDiffers covers the
 // self-clearing half of R3: an item previously excluded and labeled whose
 // base: label is later removed (now resolves to the default again) has the
