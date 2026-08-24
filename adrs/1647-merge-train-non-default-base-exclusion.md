@@ -133,6 +133,28 @@ The label self-clears (rather than requiring manual removal) because `routeQueue
 every Queued item every poll — no settle scan is needed; the very next poll after a `base:` label
 is removed or its target branch starts existing naturally clears the exclusion.
 
+### Runaway-guard interaction (Hook 2)
+
+`routeQueuedGroup` has a third pre-dispatch interaction the initial implementation missed:
+Hook 2 of the runaway guard (ADR-059 D8) — the poll-side check that pauses the current
+Queued snapshot outright when the trial counter is already tripped, to catch beyond-cap
+members Hook 1 (the worker goroutine) can't reach — ran on the *uncapped* `items` slice,
+unfiltered. A member `filterNonDefaultBaseMembers` had just excluded this same poll, whose
+own comment promises it "remains safely in `Queued`, not paused, not failed, not moved,"
+could still be swept into that pause+alert if the guard tripped in the same call —
+directly contradicting R4 and the comment text itself. Found in review (PR #1652,
+handarbeit-pruefer).
+
+Fixed by `excludeNonDefaultBaseExclusions`: it diffs the pre-filter `trainCandidates`
+against the post-filter, pre-cap `filteredTrainItems` to identify exactly which member
+numbers `filterNonDefaultBaseMembers` excluded this poll, and drops only those from the
+slice passed to `fireRunawayGuard`. Batch-cap overflow and queue-enabled members are
+unaffected — both are still paused as before, matching the existing "uncapped items slice
+so all Queued members are paused, not just the batch cap" intent for every category the
+runaway guard *does* mean to catch. A base-excluded member never contributes a trial to
+the count the guard is measuring, so excluding it from the guard's blast radius is
+correct, not merely convenient.
+
 ### Multiple `base:` labels
 
 `baseBranchForItem` already resolves multiple `base:` labels on one item (first wins, warns on the
