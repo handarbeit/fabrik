@@ -43,13 +43,6 @@ type Auth struct {
 
 	mu        sync.Mutex
 	expiresAt time.Time
-	// cancel stops this Auth's own RunRefreshLoop goroutine, set by
-	// startRefreshLoop when the loop is started. Read (under mu) by Stop,
-	// which Daemon.drainThenStopAuth calls once it has confirmed no review
-	// is still in flight for an owner a config reload removed (#1640
-	// review findings — see pruneOwners' and drainThenStopAuth's doc
-	// comments).
-	cancel context.CancelFunc
 }
 
 // refresh mints a new installation token, applies it to the client, and
@@ -138,21 +131,6 @@ type AuthSet struct {
 	// gets exactly one refresh goroutine from RunRefreshLoops, not one per
 	// owner.
 	auths []*Auth
-
-	// appID, privateKey, and baseURL are the App-level identity BootstrapMulti
-	// resolves once; mintOwnerAuth (#1640, R5) reuses them to mint a token
-	// for a single additional owner discovered by a config reload, without
-	// re-deriving or re-reading the private key file.
-	appID      int64
-	privateKey *rsa.PrivateKey
-	baseURL    string
-	// pinnedInstallationID mirrors the Config.AppInstallationID BootstrapMulti
-	// was called with: non-zero means every owner — including one newly
-	// added at reload time — shares the App's single pinned installation
-	// rather than being resolved via per-owner discovery. Set from
-	// cfg.AppInstallationID in BootstrapMulti so mintOwnerAuth doesn't need
-	// its own Config parameter for this one field.
-	pinnedInstallationID int64
 }
 
 // BootstrapMulti performs the full GitHub App auth flow for every
@@ -192,14 +170,7 @@ func BootstrapMulti(cfg Config, baseURL string) (*AuthSet, error) {
 	}
 	botLogin := slug + "[bot]"
 
-	as := &AuthSet{
-		BotLogin:             botLogin,
-		Clients:              map[string]*gh.Client{},
-		appID:                cfg.AppID,
-		privateKey:           privateKey,
-		baseURL:              baseURL,
-		pinnedInstallationID: cfg.AppInstallationID,
-	}
+	as := &AuthSet{BotLogin: botLogin, Clients: map[string]*gh.Client{}}
 	owners := distinctOwners(cfg.WatchedRepos)
 
 	if cfg.AppInstallationID != 0 {
@@ -323,37 +294,7 @@ func distinctOwners(watchedRepos []string) []string {
 // lines with the installation ID.
 func (as *AuthSet) RunRefreshLoops(ctx context.Context, logf func(installationID int64) func(format string, args ...any)) {
 	for _, a := range as.auths {
-		a.startRefreshLoop(ctx, logf(a.InstallationID))
-	}
-}
-
-// startRefreshLoop derives a per-Auth cancellable context from ctx, records
-// the resulting cancel func on a (so pruneOwners can stop this one Auth's
-// loop independently of every other Auth's), and starts RunRefreshLoop in
-// its own goroutine. The sole way any Auth's refresh loop is started,
-// whether at bootstrap (RunRefreshLoops) or by a reload minting a new
-// owner's token (handleReload in execute.go) — both paths must go through
-// this so pruneOwners always has a cancel func to call.
-func (a *Auth) startRefreshLoop(ctx context.Context, logf func(format string, args ...any)) {
-	loopCtx, cancel := context.WithCancel(ctx)
-	a.mu.Lock()
-	a.cancel = cancel
-	a.mu.Unlock()
-	go a.RunRefreshLoop(loopCtx, logf)
-}
-
-// Stop cancels a's refresh loop, if one was ever started (startRefreshLoop
-// records cancel; a zero-value or never-started Auth has none, so this is a
-// safe no-op). Safe to call more than once. Split out from pruneOwners
-// (#1640 review finding) so a caller can defer invoking it until it has
-// separately confirmed nothing still depends on a's token — see
-// Daemon.drainThenStopAuth.
-func (a *Auth) Stop() {
-	a.mu.Lock()
-	cancel := a.cancel
-	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+		go a.RunRefreshLoop(ctx, logf(a.InstallationID))
 	}
 }
 
@@ -361,175 +302,4 @@ func (a *Auth) Stop() {
 // used for startup logging.
 func (as *AuthSet) InstallationCount() int {
 	return len(as.auths)
-}
-
-// newlyWatchedOwners returns the distinct owners present in cand's
-// WatchedRepos but absent from old's, in cand's first-seen order — the set
-// a config reload must mint a token for before it can be applied (R5).
-// Adding a repo under an already-watched owner never appears here.
-func newlyWatchedOwners(old, cand Config) []string {
-	oldOwners := make(map[string]bool)
-	for _, o := range distinctOwners(old.WatchedRepos) {
-		oldOwners[o] = true
-	}
-	var added []string
-	for _, o := range distinctOwners(cand.WatchedRepos) {
-		if !oldOwners[o] {
-			added = append(added, o)
-		}
-	}
-	return added
-}
-
-// mintOwnerAuth mints a token for owner without mutating as — this is the
-// "mint" half of R5's two-phase mint-then-commit split. Callers must call
-// CommitOwner to actually register the result, and must do so only after
-// every owner in the same reload batch has minted successfully (see
-// handleReload in execute.go): minting owner 2-of-2 failing must leave
-// owner 1 exactly as unregistered as if it had never been attempted.
-//
-// mintedFresh is false when as is in pinned-installation mode
-// (pinnedInstallationID != 0): owner shares the App's single already-minted
-// Auth rather than getting one of its own, so CommitOwner must register the
-// client mapping without appending a duplicate *Auth or starting a second
-// refresh loop for it. In non-pinned mode mintedFresh is always true — a
-// genuinely new *Auth, discovered and minted for this owner specifically.
-func (as *AuthSet) mintOwnerAuth(cfg Config, owner string) (a *Auth, mintedFresh bool, err error) {
-	if as.pinnedInstallationID != 0 {
-		if len(as.auths) == 0 {
-			return nil, false, fmt.Errorf("no pinned installation auth available for owner %q", owner)
-		}
-		return as.auths[0], false, nil
-	}
-
-	jwt, err := gh.BuildAppJWT(as.appID, as.privateKey)
-	if err != nil {
-		return nil, false, fmt.Errorf("building app JWT: %w", err)
-	}
-	installations, err := gh.FetchAppInstallations(as.baseURL, jwt)
-	if err != nil {
-		return nil, false, fmt.Errorf("discovering app installations: %w", err)
-	}
-	var inst *gh.AppInstallation
-	for i := range installations {
-		if installations[i].Account == owner {
-			inst = &installations[i]
-			break
-		}
-	}
-	if inst == nil {
-		return nil, false, fmt.Errorf("no GitHub App installation found for owner %q (newly watched in watched_repos) — install the app on %q", owner, owner)
-	}
-
-	newAuth, err := mintAuth(as.appID, inst.ID, as.BotLogin, as.privateKey, as.baseURL)
-	if err != nil {
-		return nil, false, fmt.Errorf("minting installation token for owner %q (installation %d): %w", owner, inst.ID, err)
-	}
-
-	if inst.RepositorySelection == "selected" {
-		if err := checkSelectedRepos(as.baseURL, newAuth.client.Token(), owner, cfg.WatchedRepos); err != nil {
-			return nil, false, err
-		}
-	}
-
-	return newAuth, true, nil
-}
-
-// CommitOwner registers an already-minted Auth (from mintOwnerAuth) for
-// owner into the set: the "commit" half of R5's two-phase split. mintedFresh
-// must be exactly the value mintOwnerAuth returned alongside a — true
-// appends a to auths (so RunRefreshLoops/InstallationCount pick it up);
-// false (the pinned-installation case) does not, since a is always
-// as.auths[0], already present — several new owners sharing the pinned
-// installation in the same reload batch each call CommitOwner with the same
-// *Auth and mintedFresh=false, so it is never appended more than once.
-func (as *AuthSet) CommitOwner(owner string, a *Auth, mintedFresh bool) {
-	as.Clients[owner] = a.client
-	if mintedFresh {
-		as.auths = append(as.auths, a)
-	}
-}
-
-// noLongerWatchedOwners returns the distinct owners present in old's
-// WatchedRepos but absent from cand's, in old's first-seen order — the set
-// a config reload must prune auth/client state for via pruneOwners.
-// Removing one repo under an owner that still has another watched repo
-// never appears here — the mirror image of newlyWatchedOwners.
-func noLongerWatchedOwners(old, cand Config) []string {
-	candOwners := make(map[string]bool)
-	for _, o := range distinctOwners(cand.WatchedRepos) {
-		candOwners[o] = true
-	}
-	var removed []string
-	for _, o := range distinctOwners(old.WatchedRepos) {
-		if !candOwners[o] {
-			removed = append(removed, o)
-		}
-	}
-	return removed
-}
-
-// detachedAuth pairs a pruned owner with the *Auth its token was minted
-// for. Returned by pruneOwners instead of being cancelled there directly —
-// see that method's doc comment for why.
-type detachedAuth struct {
-	owner string
-	auth  *Auth
-}
-
-// pruneOwners removes every owner in removed from as.Clients and, in
-// non-pinned-installation mode, drops the *Auth that owner's installation
-// was minted for from as.auths — but deliberately does NOT cancel its
-// refresh loop itself, returning it as a detachedAuth instead. Cancelling
-// here, synchronously, was the original #1640 fix, but a second review
-// finding caught a real bug in it: an in-flight review dispatched before
-// the reload already holds a *github.Client backed by this exact Auth (see
-// Daemon.executeReview's d.config()/d.client() snapshot-at-dispatch-time
-// design), and cancelling its refresh loop mid-review risks that review's
-// remaining GitHub calls failing with 401 once the token's actual (not
-// margin-adjusted) expiry passes — with no recovery short of a restart,
-// contradicting R3's "a review already running against a removed repo is
-// allowed to finish" and handleReload's own doc comment ("nothing here
-// cancels a running review"). The caller (handleReload) is responsible for
-// only actually stopping the loop once it has separately confirmed no
-// review is still in flight for this owner — see Daemon.drainThenStopAuth.
-//
-// Non-pinned mode maps exactly one owner to one installation — mintOwnerAuth
-// discovers an installation by inst.Account == owner, so each non-pinned
-// *Auth is scoped to exactly the one owner it was minted for. Removing that
-// owner's Clients entry therefore always orphans exactly that Auth; no
-// reference counting across owners is needed.
-//
-// Pinned-installation mode (pinnedInstallationID != 0) is deliberately
-// exempt from detachment/cancellation: every owner there shares the single
-// App-level Auth (as.auths[0]) regardless of watched_repos, so it never
-// accumulates per owner the way non-pinned Auths do. Detaching it on the
-// last pinned owner's removal would strand mintOwnerAuth's pinned-mode
-// short-circuit — which requires len(as.auths) > 0 — for the next owner
-// reload-added under the same pin, including the case where watched_repos
-// briefly has zero entries under that installation.
-func (as *AuthSet) pruneOwners(removed []string) []detachedAuth {
-	if as.pinnedInstallationID != 0 {
-		for _, o := range removed {
-			delete(as.Clients, o)
-		}
-		return nil
-	}
-	var detached []detachedAuth
-	for _, o := range removed {
-		c, ok := as.Clients[o]
-		if !ok {
-			continue
-		}
-		delete(as.Clients, o)
-		for i, a := range as.auths {
-			if a.client != c {
-				continue
-			}
-			detached = append(detached, detachedAuth{owner: o, auth: a})
-			as.auths = append(as.auths[:i], as.auths[i+1:]...)
-			break
-		}
-	}
-	return detached
 }

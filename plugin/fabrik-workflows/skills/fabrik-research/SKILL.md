@@ -29,7 +29,7 @@ Map out everything relevant to the specified feature:
 - **Dependencies** (internal and external) that are affected
 - **Test coverage** of the affected areas
 - **Patterns and conventions** used in similar parts of the codebase
-- **Existing ADRs** in the `adrs/` directory — read these at the start of research. Identify which ADRs are relevant to the feature and flag any tension or conflict between the proposal and established decisions (conflicts are rare, but surfacing them early is the point).
+- **Existing ADRs** in the `adrs/` directory — read these at the start of research. Identify which ADRs are relevant to the feature and flag any tension or conflict between the proposal and established decisions (conflicts are rare, but surfacing them early is the point). Where ADRs carry a `**Level**` field, use it to triage: `Context` and `Container` decisions shape what you can propose, `Component` and `Code` ones mostly matter if you are touching the same module. A mature project can carry hundreds, and reading them undifferentiated is not feasible — see `../../AUTHORED-SPECS.md`.
 - **Cross-repo signals** — file paths or explicit references to other repositories in the spec, code that clearly belongs in a sibling repo, or library/service boundaries that imply multiple repos must change. Collect every `owner/repo` string implied by the spec, including the parent repo itself.
 
 Be thorough. Read the actual code, don't guess from file names. Follow call chains to understand how components connect.
@@ -130,6 +130,8 @@ This paragraph's CI-gating language is generic boilerplate shared across stages:
 
 - **`fabrik:paused` + `fabrik:awaiting-input`** — applied by the engine when you emit `FABRIK_BLOCKED_ON_INPUT`; cleared automatically when the user comments. You never set or remove these yourself.
 - **`model:opus`** — you don't apply this label directly, but the Complexity Assessment below has you *recommend* it as an open question when the issue warrants a more capable model for Implement/Review.
+
+**Name who you are blocked on.** "Blocked" alone is something a human has to triage; "blocked on the product owner — does an expired grant still permit X?" lands in the right lane. Where the project's specifications were authored first, its baselines already group open questions by role, and a block is also evidence the corpus has drifted — see `../../AUTHORED-SPECS.md`.
 
 See `../../LABELS.md` for the full label reference.
 

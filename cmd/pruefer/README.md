@@ -187,45 +187,6 @@ The log file is append-only across restarts — it is never truncated on daemon 
 
 A `warn`-tagged line fires when a review's summary doesn't follow the `PRUEFER_SUMMARY_BEGIN`/`PRUEFER_SUMMARY_END` delimiter contract: either the markers were missing (or malformed) entirely, or a well-formed pair was found but some preamble text ahead of the opening marker had to be discarded. Neither is fatal — the review still submits — but either is a sign the model drifted from the prompt's output contract and is worth a look.
 
-## Config reload (SIGHUP)
-
-Send `SIGHUP` to a running daemon (`kill -HUP <pid>`) to reload `.pruefer/config.yaml` without a restart. Pruefer re-resolves the full flag > environment variable > YAML config file > default precedence chain (the same one `LoadConfig` uses at startup — see [Configuration reference](#configuration-reference)), validates it in full, and applies whichever fields are safe to change on a live daemon. A running review is never cancelled, the Hookdeck WebSocket session (in `event_source: hookdeck` mode) is never dropped, and the dedupe ring is never reset by a reload.
-
-> **This is not the same as Fabrik's own engine `SIGHUP`.** Fabrik's engine treats `SIGHUP` as a request to gracefully restart itself in place (drain in-flight workers, then re-exec) — it picks up new code as well as new config. Pruefer's `SIGHUP` never restarts or re-execs the process; it only ever mutates the running daemon's config in place. If you operate both daemons, don't assume the same signal means the same thing for each.
-
-Every field is classified as either **live** (applied immediately) or **restart-only** (reported in the log, but the running daemon keeps its old value until the next restart):
-
-| YAML key | Reload |
-|---|---|
-| `watched_repos` | Live. Added repos are polled starting the next cycle; removed repos stop being polled starting the next cycle. A review already in flight for a repo removed mid-reload is allowed to finish — it is never cancelled, and its owner's installation token keeps refreshing until it does, so its remaining GitHub API calls never fail with a stale token either. |
-| `poll_interval_seconds` | Live, effective starting the next cycle. |
-| `model` | Live. |
-| `effort` | Live. |
-| `concurrency_cap` | Live. Growing or shrinking the semaphore never disturbs a review already holding a slot — a shrink only reduces future admission, so concurrency can transiently run above the new cap (bounded by the old cap) until the existing holders drain. See [adrs/1640-pruefer-config-reload.md](../../adrs/1640-pruefer-config-reload.md). |
-| `max_diff_bytes` | Live. |
-| `max_wall_time_seconds` | Live. |
-| `excluded_authors` | Live. |
-| `excluded_paths` | Live. |
-| `excluded_labels` | Live. |
-| `request_changes_threshold` | Live. |
-| `auto_upgrade` | Live, effective starting the next poll boundary. |
-| `reconciliation.fallback_interval` | Live (event-driven mode only). |
-| `github_app_id` | Restart-only. |
-| `github_app_private_key_path` | Restart-only. |
-| `github_app_installation_id` | Restart-only. |
-| `tui` | Restart-only — the interactive dashboard is started once, before the daemon begins running. |
-| `log_file` | Restart-only. |
-| `event_source` | Restart-only — switching between `poll` and `hookdeck` means constructing or tearing down a whole event source, including its WebSocket session and dedupe ring. |
-| `hookdeck.api_key_env` | Restart-only. |
-| `hookdeck.webhook_secret_env` | Restart-only. |
-| `reconciliation.startup` | Restart-only — consulted once, before the event-driven run loop starts. |
-
-A restart-only field that changed is always named in the reload's log summary — never silently ignored. A malformed config file leaves the previously running config completely untouched (not partially applied) and logs the parse error; fix the file and send `SIGHUP` again.
-
-**Adding a repo under a new owner** mints that owner's GitHub App installation token as part of the reload. If the owner has no matching installation, the *entire* reload fails with a clear error (not just that one repo) — the running config, including any other change bundled in the same edit, is left untouched. Install the app on the new owner first, then retry the reload.
-
-Every reload — successful or not — logs a diff-style summary to `.pruefer/pruefer.log` (see [Logging](#logging) above): every repo added/removed, every changed field's old → new value, and every restart-only field that was reported but not applied.
-
 ## On-demand re-review
 
 Comment `/pruefer review` on any watched PR to force a fresh review of the current head, even if that SHA was already reviewed. Pruefer acknowledges the command with a 👀 reaction when it picks it up and a 🚀 reaction once the review has been submitted — the same idempotency convention Fabrik uses for its own comment processing.
@@ -257,7 +218,7 @@ A `REQUEST_CHANGES` review blocks merges in repos with branch protection requiri
 
 ## Configuration reference
 
-Precedence, highest to lowest: **flag > environment variable > YAML config file > default.** Most of these fields can also be changed on a running daemon via `SIGHUP` — see [Config reload (SIGHUP)](#config-reload-sighup) for which ones, and what happens to the rest.
+Precedence, highest to lowest: **flag > environment variable > YAML config file > default.**
 
 | Flag | Env var | YAML key | Default | Notes |
 |---|---|---|---|---|

@@ -534,3 +534,43 @@ func TestBuildPRSeedBody_BalancedFencesInPlan(t *testing.T) {
 		t.Errorf("balanced plan should have exactly 2 fence delimiters, got %d in: %q", count, body)
 	}
 }
+
+// A Spec Kit-format issue body has no "## Summary" or "## Problem" section — the
+// motivation lives under "## Background". Before the heading fallback existed, both
+// fields fell back to firstParagraph, which on that shape returns only the
+// "# Feature Specification" heading, seeding the PR with the same line twice.
+func TestBuildPRSeedBodySpecKitFormat(t *testing.T) {
+	issue := `# Feature Specification: Offline capture
+
+**Feature Branch**: ` + "`fabrik/issue-42`" + `
+**Status**: Draft
+
+## Background
+
+Managers lose incident reports when the kitchen has no signal.
+
+## Requirements *(mandatory)*
+
+- **FR-001**: Capture MUST persist locally.
+`
+	body := buildPRSeedBody(issue, "", 42)
+
+	if !strings.Contains(body, "Managers lose incident reports") {
+		t.Errorf("Background was not used as the Problem section:\n%s", body)
+	}
+	if strings.Contains(body, "# Feature Specification: Offline capture") {
+		t.Errorf("fell back to the H1 heading instead of a real section:\n%s", body)
+	}
+	if strings.Count(body, "Managers lose incident reports") != 1 {
+		t.Errorf("same text seeded into both Summary and Problem:\n%s", body)
+	}
+}
+
+// The original Problem/Summary shape must keep working unchanged.
+func TestBuildPRSeedBodyLegacyFormat(t *testing.T) {
+	issue := "## Summary\n\nAdds a widget.\n\n## Problem\n\nThere is no widget.\n"
+	body := buildPRSeedBody(issue, "", 7)
+	if !strings.Contains(body, "Adds a widget.") || !strings.Contains(body, "There is no widget.") {
+		t.Errorf("legacy Problem/Summary extraction regressed:\n%s", body)
+	}
+}

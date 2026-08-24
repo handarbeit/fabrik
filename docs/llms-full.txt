@@ -1011,7 +1011,8 @@ kill_grace:               # Optional. Per-signal grace windows for the kill sequ
                           #   Negative values are rejected at stage-config load time.
 read_only: true           # Optional. Stashes the dirty worktree before Claude runs and
                           #   restores it after. Use for analysis stages that should not
-                          #   modify files (e.g., Specify, Research).
+                          #   modify files (e.g., Research). Note the shipped Specify
+                          #   default is `read_only: false` — it commits a spec file.
 post_to_pr: true          # Optional. Routes detailed Claude output to the linked PR; a
                           #   brief summary is still posted on the issue. Falls back to
                           #   posting on the issue if no linked PR is found.
@@ -1152,11 +1153,41 @@ refines it into a clear, unambiguous spec:
 - Surfaces missing requirements, ambiguities, and edge cases as questions
 - Checks consistency with existing project features and documentation
 - Researches prior art and established patterns on the web
-- Rewrites the issue body with a structured spec
+- Rewrites the issue body with a structured spec, in **GitHub Spec Kit format**
+- Commits that spec to `specs/<issue-number>-<slug>/spec.md` on the issue branch
 
 The user answers questions via comments. Claude incorporates the answers and updates
 the issue body. Once all questions are resolved, the stage completes and the issue is
 ready for Research.
+
+**The issue body is canonical; the committed file is its projection.** The file is written
+on every round that changes the body — not only the round that completes the stage — so
+the two never drift apart. `## Open Questions` appears in the body during clarification
+and is stripped from the file; the file's `**Status**:` field reads `Draft` while any
+question remains and `Specified` once none do. The directory slug is locked at first
+commit, so a title changing mid-clarification does not orphan it.
+
+Downstream stages continue to read `.fabrik-context/issue.md`. The committed spec is for
+human readers and post-merge tracking, not a new input to Research or Plan.
+
+**This requires a write-capable Specify stage, and upgrading will not give you one.** The
+shipped default (`stages/examples/specify.yaml`) now sets `read_only: false` and allows
+`Write`, `Edit`, and the narrow Bash verbs the procedure uses — `Bash(git rev-parse:*)`,
+`Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(gh issue view:*)`,
+`Bash(find:*)`. Note the `:*` suffixes: an entry without one is an exact-string match, so
+`Bash(git add)` would permit only the literal `git add` with no arguments. Your own
+`.fabrik/stages/specify.yaml` is tracked in your repository and is never overwritten, and
+`fabrik refresh-stages` only adds *missing* keys — it will not change a `read_only: true` you
+already have. If your Specify stage predates this, edit it by hand; until you do, Specify keeps
+rewriting the issue body and simply never writes the file.
+
+**Projects whose specifications were authored first work the other way round.** Where
+`.specify/memory/constitution.md` exists, the specifications were written by people
+before any issue existed — in [GitHub Spec Kit](https://github.com/github/spec-kit)
+layout, whichever tool produced it — and Specify **must not rewrite them**. It becomes a
+consistency stage instead, reading the specification, the architecture baseline and the
+decision register and surfacing where they disagree. The two directions never coexist in
+one repository. See `plugin/fabrik-workflows/AUTHORED-SPECS.md`.
 
 ### Steering with Comments
 
@@ -1303,8 +1334,8 @@ The Implement stage creates a **draft PR** linked to the issue when `create_draf
 
 | Section | Source |
 |---------|--------|
-| `## Summary` | Extracted from the issue spec (`.fabrik-context/issue.md`) |
-| `## Problem` | Extracted from the issue spec (`.fabrik-context/issue.md`) |
+| `## Summary` | Extracted from the issue spec (`.fabrik-context/issue.md`) — `## Summary` or `## Overview` |
+| `## Problem` | Extracted from the issue spec — `## Problem`, `## Background` or `## Motivation`, so both the original and Spec Kit issue-body shapes work |
 | `## Approach` | Extracted from the Plan stage output (`.fabrik-context/stage-Plan.md`); falls back to a placeholder if absent |
 | `## Verification` | Placeholder text, auto-replaced by an extracted stage summary when available |
 
@@ -2251,40 +2282,6 @@ When the Fabrik repo ships a newer version of the plugin, refresh your local ins
 ```
 
 Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces tab → select `fabrik` → Enable auto-update. When enabled, Claude Code updates the marketplace and reinstalls the plugin automatically at startup.
-
----
-
-### Entwurf Plugin
-
-The **Entwurf plugin** (`entwurf`) is a separate, optional Claude Code plugin that turns a project into buildable specifications, one expert role at a time. It interviews the three people a project needs — the product owner, the technical architect, and the experience lead — each about their own side of the product, and never asks anyone to answer for a role they don't hold. The product-owner path needs no terminal, git, or technical background. Output is a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
-
-#### Skills
-
-| Skill | Purpose |
-|-------|---------|
-| `onboard` | A 30–45 minute interview about the project as a whole — the problem it solves, who it serves, what's in and out of scope, hard constraints, and domain vocabulary. Writes `.specify/memory/constitution.md`, the ground rules every later spec inherits. Run once at the start of a project. |
-| `write-spec` | Turns a feature described in plain language into a structured spec — user stories, requirements, success criteria, and a graded quality checklist — under `specs/NNN-feature-name/`. |
-| `clarify` | Reads an existing spec, finds what's vague or missing, and asks up to five targeted questions one at a time, writing each answer straight into the document. |
-| `architecture-foundations` | Interviews the architect about what is already fixed — existing systems, regulatory obligations, platform commitments — plus the shared domain model with per-field ownership, interface contracts, shared state vocabularies, and the authority model. Runs early and is re-run as specs accumulate, because a shared model created near the beginning is what stops features drifting apart. |
-| `experience-baseline` | Interviews the experience lead about conditions of use per surface class, the independent status dimensions and their states, the component and content vocabulary, the accessibility floor, and interaction budgets. Decided once for the whole product. |
-| `architecture-baseline` | Converts user-facing guarantees into system guarantees — stack, cross-cutting mechanisms, non-functional budgets, build order, and the fitness functions that make the baseline binding rather than advisory. Ratifies. |
-
-The three baseline skills assume the person being interviewed **is** the expert, so they invert the product-owner rule: rather than avoiding questions only an engineer could answer, they never default a decision inside the expert's own domain, and always flag a default made in a neighbouring one. They write `.specify/memory/architecture.md`, `experience.md`, a decision register, and per-stage quality gates — all additive to upstream Spec Kit's layout (see the plugin's `NOTICE.md`).
-
-#### Install
-
-In an interactive Claude Code session:
-
-```
-/plugin marketplace add handarbeit/fabrik
-/plugin install entwurf@fabrik
-```
-
-The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Entwurf**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/entwurf/GETTING-STARTED.md) for the full non-technical walkthrough.
-
-#### Attribution
-
-The `write-spec` and `clarify` skills are adapted from [github/spec-kit](https://github.com/github/spec-kit) (MIT licensed); `onboard` is a Fabrik-original interview skill mapped onto Spec Kit's constitution output shape. See the plugin's own `NOTICE.md` for the full license text and a detailed account of what was kept, removed, and changed from upstream.
 
 ---
 

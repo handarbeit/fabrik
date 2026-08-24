@@ -40,7 +40,7 @@ func runTUI(ctx context.Context, d *Daemon) error {
 		}
 	}
 
-	tuiModel := ptui.New(d.config().WatchedRepos, time.Now())
+	tuiModel := ptui.New(d.Config.WatchedRepos, time.Now())
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	go func() {
