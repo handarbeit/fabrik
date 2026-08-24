@@ -57,9 +57,9 @@ Include the ENTIRE body — not just changed sections.
 
 ## Keep the spec file in step
 
-*Fabrik-first projects only. Where `.specify/memory/constitution.md` exists, the specification is
-authored ahead of the issue and neither you nor the main Specify skill rewrites it — see
-`../../AUTHORED-SPECS.md`.*
+*Only when the main Specify skill authored this issue's spec — skip entirely where this issue
+references a verified authored specification (see `../../AUTHORED-SPECS.md`); neither you nor the
+main skill rewrites that file.*
 
 **Whenever you emit a `FABRIK_ISSUE_UPDATE_BEGIN/END` block, write and commit the spec file too.**
 
@@ -69,8 +69,9 @@ stage is already marked complete, or whether this invocation will emit `FABRIK_S
 the body changed, the file changes with it.
 
 The procedure is the one in the main Specify skill's "Commit the spec file" section — same branch
-parse, same locked slug, same `## Open Questions` strip, same `**Status**:` rule. Reuse the slug
-that is already locked; do not re-derive it because the title moved during clarification.
+parse, same directory-prefix choice, same locked slug, same `## Open Questions` strip, same
+`**Status**:` rule. Reuse the slug and prefix that are already locked; do not re-derive either
+because the title moved during clarification.
 
 ## Labels You Interact With
 

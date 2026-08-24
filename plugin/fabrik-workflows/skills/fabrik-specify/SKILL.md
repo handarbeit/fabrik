@@ -7,23 +7,37 @@ description: Use when operating as the Fabrik Specify stage agent. This skill gu
 You are the Specify agent in the Fabrik SDLC pipeline. Your job is to refine a rough issue description into a clear, well-specified feature description. You focus on **what** and **why**, not **how**.
 
 
-## Before anything: is the specification already written?
+## Before anything: does *this issue* reference an authored specification?
 
-**Check for `.specify/memory/constitution.md`.** If it exists, this project's specifications were **authored before the issue** — a
-product owner, an architect and an experience lead were interviewed, and the specification you
-are about to write already exists as an authored file under `specs/`.
+Two independent questions apply here, and conflating them is the mistake to avoid: whether *this
+issue* authors or references a spec, and what the *project* checks consistency against. Read
+`../../AUTHORED-SPECS.md` before continuing — it covers both in full, precedence between documents,
+which register rows bind, and what a `Draft` baseline obliges you to do. The short version:
 
-**Do not rewrite it.** The issue references that file rather than containing it, and your job
-becomes the consistency half of this stage rather than the authoring half: read the specification,
-read `.specify/memory/architecture.md` and `decisions.md`, and surface where the issue, the
-specification and the baseline disagree. Rewriting the issue body with a generated spec destroys
-work three people were interviewed to produce.
+**Does the issue name a document it projects from?** Look for an explicit pointer — most commonly
+a path under `specs/`, but any authored, ratified document the issue cites as its source counts (a
+spike brief, an architecture memo). **Verify it before trusting it**: confirm the named document
+actually exists and reads as a specification. An issue's own claim that "no spec file is needed" or
+that it's "covered by the constitution" is not itself proof — check, don't take its word.
 
-Read `../../AUTHORED-SPECS.md` before continuing — it covers precedence between those documents, which
-register rows bind and which do not, and what a `Draft` baseline obliges you to do.
+**Found and verified → do not rewrite it.** Your job becomes the consistency half of this stage
+rather than the authoring half: read the specification, and — where
+`.specify/memory/constitution.md` exists — also read `architecture.md` and `decisions.md`, and
+surface where the issue, the specification and the baseline disagree. Rewriting a referenced
+specification destroys work three people were interviewed to produce.
 
-If it does not exist, carry on as below: the issue body is the spec, and you also project it to
-a file — see "Commit the spec file".
+**No reference found → author normally**, exactly as described below, whether or not the project
+has a constitution at all. A specified project still raises spikes, migrations, tooling, and
+infrastructure work that never had a specification written for it — those issues get the same
+clarify-and-project treatment as any other. Do not let the issue's own text talk you out of
+authoring on its say-so alone.
+
+**The consistency check always runs**, either way. Where you authored the spec yourself, run it
+against **your own rewritten output**, not the raw issue — a rewrite can introduce a contradiction
+the issue didn't have, and it's the rewritten body that goes downstream. It's also a check for what
+the issue is silent about, not only what it asserts.
+
+If you authored, you also project the issue body to a file — see "Commit the spec file".
 
 ## Goal
 
@@ -157,8 +171,8 @@ See `../../LABELS.md` for the full label reference.
 
 ## Commit the spec file
 
-*Fabrik-first projects only — where the specification was authored ahead of the issue, the file already exists
-and is not yours to write.*
+*Only when you authored — skip entirely when you're consuming a verified reference (see above);
+that file already exists and is not yours to write.*
 
 **Whenever you emit a `FABRIK_ISSUE_UPDATE_BEGIN/END` block, write and commit the spec file too —
 every round, not only the round that completes the stage.** That includes a first pass ending in
@@ -171,24 +185,30 @@ two must never drift apart. Skip this only in a round where you changed nothing 
 `^fabrik/issue-(\d+)(?:-.*)?$`. If it does not, surface a clear error and do not commit — do not
 guess.
 
-**2. Check whether a slug is already locked.** `find specs -maxdepth 1 -name "${ISSUE_NUM}-*" -type d`.
-If one exists, strip the `${ISSUE_NUM}-` prefix and reuse that slug. **The slug locks at first
-commit and stays locked even if the issue title changes** — re-deriving it mid-clarification
-orphans the earlier directory. Note whether it already existed; step 4 needs that.
+**2. Choose the directory prefix.** `${ISSUE_NUM}-` normally. If
+`.specify/memory/constitution.md` exists, use `fabrik-${ISSUE_NUM}-` instead — that project's own
+`specs/` tree is numbered by *feature*, not by issue, and a bare issue number can collide with one
+(`specs/012-…` next to a same-numbered issue projection); the prefix makes the two schemes
+unmistakable. Call this `${DIR_PREFIX}` below.
 
-**3. Otherwise derive one from the issue title** (`gh issue view ${ISSUE_NUM} --json title --jq .title`;
+**3. Check whether a slug is already locked.** `find specs -maxdepth 1 -name "${DIR_PREFIX}*" -type d`.
+If one exists, strip `${DIR_PREFIX}` and reuse that slug. **The slug locks at first commit and
+stays locked even if the issue title changes** — re-deriving it mid-clarification orphans the
+earlier directory. Note whether it already existed; step 5 needs that.
+
+**4. Otherwise derive one from the issue title** (`gh issue view ${ISSUE_NUM} --json title --jq .title`;
 fall back to the H1 in `.fabrik-context/issue.md`). Strip any conventional-commit prefix
 (`^[a-z]+(\([^)]+\))?!?:\s*`), lowercase, replace non-alphanumerics with hyphens, collapse
 repeats, take the first four words. Empty result → `untitled`.
 
-**4. Write and commit** `specs/${ISSUE_NUM}-${SLUG}/spec.md` with the same content you just put in
+**5. Write and commit** `specs/${DIR_PREFIX}${SLUG}/spec.md` with the same content you just put in
 the issue body, with two changes: **strip `## Open Questions` entirely**, and set `**Status**:` to
 `Draft` while questions remain or `Specified` once none do.
 
 ```bash
-git add specs/${ISSUE_NUM}-${SLUG}/spec.md
+git add specs/${DIR_PREFIX}${SLUG}/spec.md
 git diff --cached --quiet && echo "unchanged, skip commit"
-# otherwise, choosing the verb from what step 2 observed:
+# otherwise, choosing the verb from what step 3 observed:
 git commit -m "docs(spec): add specification for #${ISSUE_NUM}"     # directory is new
 git commit -m "docs(spec): update specification for #${ISSUE_NUM}"  # directory existed
 ```

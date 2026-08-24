@@ -1183,13 +1183,24 @@ shipped default (`stages/examples/specify.yaml`) now sets `read_only: false` and
 already have. If your Specify stage predates this, edit it by hand; until you do, Specify keeps
 rewriting the issue body and simply never writes the file.
 
-**Projects whose specifications were authored first work the other way round.** Where
-`.specify/memory/constitution.md` exists, the specifications were written by people
-before any issue existed — in [GitHub Spec Kit](https://github.com/github/spec-kit)
-layout, whichever tool produced it — and Specify **must not rewrite them**. It becomes a
-consistency stage instead, reading the specification, the architecture baseline and the
-decision register and surfacing where they disagree. The two directions never coexist in
-one repository. See `plugin/fabrik-workflows/AUTHORED-SPECS.md`.
+**Whether an individual issue authors or references a specification is decided per issue,
+not per project.** If the issue names a document it projects from — most commonly a path
+under `specs/`, but any authored, ratified document counts — and that document actually
+exists, Specify **must not rewrite it**. It becomes a consistency stage instead, reading
+the specification and surfacing where it and the issue disagree. An issue with no such
+reference authors normally, exactly as above, even in a project whose specifications are
+otherwise authored first — a specified project still raises spikes, migrations, and
+infrastructure work nobody wrote a specification for.
+
+**What a project checks consistency against is decided once, per project.** Where
+`.specify/memory/constitution.md` exists — specifications written by people before any
+issue existed, in [GitHub Spec Kit](https://github.com/github/spec-kit) layout, whichever
+tool produced it — Specify also reads the architecture baseline and the decision register,
+on top of the usual project docs. In that case, an issue that authors (because it
+references nothing) projects to `specs/fabrik-<issue-number>-<slug>/spec.md` rather than
+the plain `specs/<issue-number>-<slug>/spec.md` above, so its issue-numbered projection
+can never collide with that project's feature-numbered authored entries. See
+`plugin/fabrik-workflows/AUTHORED-SPECS.md`.
 
 ### Steering with Comments
 
