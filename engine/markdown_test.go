@@ -574,3 +574,22 @@ func TestBuildPRSeedBodyLegacyFormat(t *testing.T) {
 		t.Errorf("legacy Problem/Summary extraction regressed:\n%s", body)
 	}
 }
+
+// TestBuildPRSeedBody_NoRecognizedHeadings pins the deliberate behavior change
+// flagged in review on #1654: with no recognized heading of either vocabulary,
+// the single available paragraph goes under Summary only. Seeding it into both
+// sections — which is what this function did before the Spec Kit heading work —
+// produces a PR whose Summary and Problem are identical, the exact defect the
+// dedupe guard exists to prevent.
+func TestBuildPRSeedBody_NoRecognizedHeadings(t *testing.T) {
+	body := buildPRSeedBody("Just a bare sentence with no headings at all.\n", "", 42)
+	if !strings.Contains(body, "Just a bare sentence with no headings at all.") {
+		t.Error("the only available paragraph was dropped entirely")
+	}
+	if strings.Count(body, "Just a bare sentence with no headings at all.") != 1 {
+		t.Error("paragraph seeded into more than one section; it should appear once")
+	}
+	if !strings.Contains(body, "(no problem description available)") {
+		t.Error("Problem should carry the honest placeholder, not a duplicate of Summary")
+	}
+}

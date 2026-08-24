@@ -140,6 +140,11 @@ func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
 	summary := extractFirstSection(issueContent, "Summary", "Overview")
 	problem := extractFirstSection(issueContent, "Problem", "Background", "Motivation")
 
+	// No recognized heading of either kind: put the one paragraph we have under
+	// Summary and leave Problem honestly empty. This is a deliberate change from
+	// seeding *both* fields with it — a PR whose Summary and Problem are the same
+	// paragraph reads as a templating bug, which is the defect this function
+	// exists to fix. Better one filled section and one honest placeholder.
 	if summary == "" && problem == "" {
 		summary = firstParagraph(issueContent)
 	}
