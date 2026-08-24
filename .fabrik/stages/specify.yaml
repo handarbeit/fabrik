@@ -7,13 +7,23 @@ model: sonnet
 max_turns: 100
 comment_max_turns: 50
 max_wall_time: "30m"
-read_only: true
+read_only: false
 allowed_tools:
   - Read
   - Grep
   - Glob
+  - Write
+  - Edit
   - TodoWrite
   - WebSearch
   - WebFetch
+  # Prefix wildcards, not exact strings: `Bash(git add)` matches only the literal
+  # `git add` with no arguments. Narrow verbs, but each open at the argument.
+  - Bash(git rev-parse:*)
+  - Bash(git add:*)
+  - Bash(git commit:*)
+  - Bash(git diff:*)
+  - Bash(gh issue view:*)
+  - Bash(find:*)
 completion:
   type: claude

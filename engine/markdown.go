@@ -111,6 +111,19 @@ func balanceFences(body string) string {
 	return strings.Join(newLines, "\n")
 }
 
+// extractFirstSection returns the first non-empty section among headings, in order.
+// It exists because a single concept ("the problem this solves") is spelled differently
+// across issue-body formats — "Problem" in Fabrik's original structure, "Background" in
+// GitHub Spec Kit format.
+func extractFirstSection(content string, headings ...string) string {
+	for _, h := range headings {
+		if v := extractMarkdownSection(content, h); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // buildPRSeedBody constructs the structured PR body template from issue and plan context.
 // issueContent is the contents of .fabrik-context/issue.md.
 // planContent is the contents of .fabrik-context/stage-Plan.md (may be empty if missing).
@@ -118,19 +131,25 @@ func balanceFences(body string) string {
 // GitHub's link extractor sees it regardless of code fence issues in the body) and the
 // redundant footer "Closes #N" (after ---, for defense-in-depth).
 func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
-	// Extract Summary from issue; fall back to first paragraph
-	summary := extractMarkdownSection(issueContent, "Summary")
-	if summary == "" {
+	// Extract Summary and Problem from the issue. Two issue-body shapes are in use:
+	// the older Problem/Summary structure, and GitHub Spec Kit format, where the
+	// motivation lives under "## Background" and there is no summary section at all.
+	// Try each shape's headings in turn before falling back to the first paragraph —
+	// on a Spec Kit body that fallback returns only the "# Feature Specification"
+	// heading, which is useless and, worse, identical for both fields.
+	summary := extractFirstSection(issueContent, "Summary", "Overview")
+	problem := extractFirstSection(issueContent, "Problem", "Background", "Motivation")
+
+	if summary == "" && problem == "" {
 		summary = firstParagraph(issueContent)
+	}
+	// Never seed both sections with the same text — a duplicated paragraph reads as a
+	// templating bug to whoever opens the PR.
+	if summary == problem {
+		summary = ""
 	}
 	if summary == "" {
 		summary = "(no summary available)"
-	}
-
-	// Extract Problem from issue; fall back to first paragraph
-	problem := extractMarkdownSection(issueContent, "Problem")
-	if problem == "" {
-		problem = firstParagraph(issueContent)
 	}
 	if problem == "" {
 		problem = "(no problem description available)"

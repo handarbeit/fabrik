@@ -73,6 +73,8 @@ Main may have introduced dependency changes (version bumps, new packages) since 
 3. If `CLAUDE.md` is absent, unreadable, or does not specify a dependency-install command, log `no dependency-install command found in CLAUDE.md; skipping install step` and proceed. Do NOT guess or try multiple commands.
 4. **If the install command fails**, stop immediately — do NOT proceed to testing against stale dependencies. Emit `FABRIK_BLOCKED_ON_INPUT` and report the exact failure output so the operator can investigate.
 
+**Name who you are blocked on.** "Blocked" alone is something a human has to triage; "blocked on the product owner — does an expired grant still permit X?" lands in the right lane. Where the project's specifications were authored first, its baselines already group open questions by role, and a block is also evidence the corpus has drifted — see `../../AUTHORED-SPECS.md`.
+
 ## What You Validate
 
 ### Requirements verification
