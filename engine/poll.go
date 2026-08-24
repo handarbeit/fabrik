@@ -2146,6 +2146,20 @@ func (e *Engine) nonDefaultBaseExclusion(item gh.ProjectItem, repoKey string) (e
 // comments, and Queued items are excluded from deepFetchCandidates), so the
 // label itself — reliably present even on the shallow query — is the
 // idempotency signal here, not a comment-content scan.
+//
+// The label is applied ONLY after the comment is confirmed posted (checking
+// postComment's error, unlike the fire-and-forget postItemComment most call
+// sites use). A transient AddComment failure therefore leaves the label off,
+// so the next poll's filterNonDefaultBaseMembers call reaches this function
+// again and retries the comment — no separate settle scan or awaiting-*
+// marker label is needed, unlike fireRunawayGuard's fabrik:awaiting-runaway-alert
+// (ADR-1533) or closeIssueIfNonDefaultBase's fabrik:awaiting-close (ADR-1097):
+// both of those guard a one-shot terminal transition that is never otherwise
+// re-evaluated, whereas routeQueuedGroup re-evaluates every Queued item's
+// exclusion status every poll for as long as it stays in Queued. Found in
+// review (PR #1652, handarbeit-pruefer): the original unconditional addLabel
+// after a possibly-failed comment could silently and permanently lose R3's
+// one-time explanation for that member, with no retry path.
 func (e *Engine) markNonDefaultBaseExcluded(item gh.ProjectItem, base, def string) {
 	if hasLabel(item.Labels, nonDefaultBaseExcludedLabel) {
 		return
@@ -2154,7 +2168,10 @@ func (e *Engine) markNonDefaultBaseExcluded(item gh.ProjectItem, base, def strin
 		"🏭 **Fabrik — not train-batchable**\n\nIssue #%d carries `base:%s`, which differs from the repository default branch `%s`. The merge train only batches members whose base resolves to the default branch, so this item will not be included in any trial batch — it remains safely in `Queued`, not paused, not failed, not moved. Please merge its PR manually. The `%s` label clears automatically once the resolved base matches the default again.",
 		item.Number, base, def, nonDefaultBaseExcludedLabel,
 	)
-	e.postItemComment(item, comment, false)
+	if _, err := e.postComment(item, comment, false, true); err != nil {
+		// Already logged by postComment. Leave the label off so the next poll retries.
+		return
+	}
 	e.addLabel(item, nonDefaultBaseExcludedLabel)
 }
 

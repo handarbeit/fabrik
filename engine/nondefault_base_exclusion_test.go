@@ -188,6 +188,69 @@ func TestFilterNonDefaultBaseMembers_Idempotent_CommentPostedOnce(t *testing.T) 
 	}
 }
 
+// TestMarkNonDefaultBaseExcluded_CommentFails_LabelNotAppliedRetriesNextPoll is a
+// Review-stage regression test (found by handarbeit-pruefer on PR #1652): the
+// label is the sole idempotency gate for R3's one-time comment (item.Comments
+// isn't reliably populated for Queued items), so applying it unconditionally
+// after a possibly-failed AddComment would silently and permanently lose the
+// explanation for that member — hasLabel would short-circuit every later poll
+// with no retry path. The label must only be applied once the comment is
+// confirmed posted; a failed attempt must leave the label off so the next
+// poll's filterNonDefaultBaseMembers call retries naturally.
+func TestMarkNonDefaultBaseExcluded_CommentFails_LabelNotAppliedRetriesNextPoll(t *testing.T) {
+	var mu sync.Mutex
+	failComment := true
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if failComment {
+				return 0, fmt.Errorf("simulated transient AddComment failure")
+			}
+			return 1, nil
+		},
+	}
+	eng := setupCloseTestRepo(t, client)
+
+	item := gh.ProjectItem{Number: 2, Repo: "owner/repo", Labels: []string{"base:develop"}}
+
+	// First poll: AddComment fails.
+	kept := eng.filterNonDefaultBaseMembers("owner/repo", []gh.ProjectItem{item})
+	if len(kept) != 0 {
+		t.Fatalf("expected #2 still excluded despite the comment failure, got %+v", kept)
+	}
+	client.mu.Lock()
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly one comment attempt after the first (failed) poll, got %d", len(client.addCommentCalls))
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected the label NOT applied after a failed comment post, got %v", client.addLabelCalls)
+	}
+	client.mu.Unlock()
+
+	// Second poll: item.Labels is unchanged (still no exclusion label, since the
+	// first attempt never applied it) — the comment must be retried.
+	mu.Lock()
+	failComment = false
+	mu.Unlock()
+	eng.filterNonDefaultBaseMembers("owner/repo", []gh.ProjectItem{item})
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 2 {
+		t.Errorf("expected the comment retried on the next poll (2 total attempts), got %d", len(client.addCommentCalls))
+	}
+	labeled := false
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 2 && c.labelName == nonDefaultBaseExcludedLabel {
+			labeled = true
+		}
+	}
+	if !labeled {
+		t.Errorf("expected the label applied once the retried comment succeeds, got %v", client.addLabelCalls)
+	}
+}
+
 // TestFilterNonDefaultBaseMembers_SelfClears_WhenBaseNoLongerDiffers covers the
 // self-clearing half of R3: an item previously excluded and labeled whose
 // base: label is later removed (now resolves to the default again) has the

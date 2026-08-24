@@ -133,6 +133,18 @@ The label self-clears (rather than requiring manual removal) because `routeQueue
 every Queued item every poll — no settle scan is needed; the very next poll after a `base:` label
 is removed or its target branch starts existing naturally clears the exclusion.
 
+**Comment-failure retry (found in review, PR #1652, handarbeit-pruefer):** the label being the sole
+idempotency gate means an unconditional `addLabel` after a possibly-failed `AddComment` would
+silently and permanently lose R3's explanation for that member — `hasLabel` would short-circuit
+every later poll with no retry path, unlike `fireRunawayGuard`'s `fabrik:awaiting-runaway-alert`
+(ADR-1533) or `closeIssueIfNonDefaultBase`'s `fabrik:awaiting-close` (ADR-1097), both of which pair
+their marker label with a dedicated settle scan for exactly this failure mode. This label doesn't
+need an equivalent settle scan, though: unlike those two (which guard one-shot terminal transitions
+never otherwise re-evaluated), `routeQueuedGroup` already re-evaluates every Queued item's exclusion
+status every poll. So `markNonDefaultBaseExcluded` simply checks the comment post's own error and
+applies the label only on confirmed success — a failed attempt leaves the label off, and the next
+poll's `filterNonDefaultBaseMembers` call retries the comment for free.
+
 ### Runaway-guard interaction (Hook 2)
 
 `routeQueuedGroup` has a third pre-dispatch interaction the initial implementation missed:
