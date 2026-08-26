@@ -737,6 +737,50 @@ func TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage(t *t
 	}
 }
 
+// TestMintOwnerAuth_TruncatedInstallationsListYieldsAmbiguousError is the
+// regression test for a review finding: unlike Reconcile's own discovery
+// loop (TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage
+// above), MintOwnerAuth's standalone FetchAppInstallations call — used when
+// a live config reload adds a newly-watched owner — had no equivalent
+// pagination-truncation awareness, so a newly-watched owner on a very large
+// App (≥100 installations) could be misreported as having no installation
+// at all (aborting the whole reload) when it's actually just outside the
+// first page.
+func TestMintOwnerAuth_TruncatedInstallationsListYieldsAmbiguousError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	installations := make([]gh.AppInstallation, 100)
+	for i := range installations {
+		installations[i] = gh.AppInstallation{ID: int64(i + 1), Account: fmt.Sprintf("someorg-%03d", i)}
+	}
+	srv, _ := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"someorg-000/repo"}, BaseURL: srv.URL, NoBrowser: true, Logf: func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	_, _, err = r.MintOwnerAuth("newlywatchedowner", []string{"newlywatchedowner/repo"}, func(string, ...any) {})
+	if err == nil {
+		t.Fatal("expected an error minting for an owner not present in the (truncated) installations list")
+	}
+	if !strings.Contains(err.Error(), "100") || !strings.Contains(err.Error(), "pagination") {
+		t.Errorf("error = %q, expected it to flag the 100-result truncation as a possible pagination gap", err)
+	}
+	if strings.Contains(err.Error(), "no GitHub App installation found for owner \"newlywatchedowner\" (newly watched") {
+		t.Errorf("error = %q, should not confidently claim no installation when the result set was truncated", err)
+	}
+}
+
 // TestReconcile_PopulatesInstallationRepoCache is the regression test for
 // the bug an external review found: Credentials.InstallationRepoCache was
 // defined and round-trip tested but never actually populated by Reconcile,
