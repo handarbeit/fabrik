@@ -42,6 +42,46 @@ type Auth struct {
 
 	mu        sync.Mutex
 	expiresAt time.Time
+	// cancel stops this Auth's own RunRefreshLoop goroutine, set by
+	// startRefreshLoop when the loop is started. Read (under mu) by Stop,
+	// which a caller (e.g. Pruefer's Daemon.drainThenStopAuth, ADR-1640)
+	// invokes only once it has confirmed nothing still depends on this
+	// Auth's token — see Reconciler.RemoveOwners' doc comment for why
+	// stopping here is deliberately deferred rather than done eagerly.
+	cancel context.CancelFunc
+}
+
+// startRefreshLoop derives a cancellable context from ctx (recording the
+// resulting cancel func on a, so Stop can later halt just this Auth's loop
+// independently of any other Auth or of ctx itself) and starts
+// RunRefreshLoop in its own goroutine. done, if non-nil, is called when the
+// goroutine returns — Reconciler.RunRefreshLoops uses this to implement its
+// own wait(); a mid-flight caller adding a single owner after startup (e.g.
+// Reconciler.CommitOwnerAuth) passes nil, since nothing needs to block on
+// that one goroutine's exit the way shutdown does on the initial batch.
+func (a *Auth) startRefreshLoop(ctx context.Context, logf func(format string, args ...any), done func()) {
+	loopCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	a.cancel = cancel
+	a.mu.Unlock()
+	go func() {
+		if done != nil {
+			defer done()
+		}
+		a.RunRefreshLoop(loopCtx, logf)
+	}()
+}
+
+// Stop cancels a's refresh loop, if one was ever started (startRefreshLoop
+// records cancel; a zero-value or never-started Auth has none, so this is a
+// safe no-op). Safe to call more than once.
+func (a *Auth) Stop() {
+	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // refresh mints a new installation token, applies it to the client, and

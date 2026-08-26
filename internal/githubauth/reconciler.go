@@ -164,6 +164,27 @@ type Reconciler struct {
 	// re-install detour for a problem a Reconcile retry would likely
 	// resolve on its own).
 	mintErrors map[string]error
+
+	// appID, privateKey, and baseURL are the App-level identity Reconcile
+	// resolves once; MintOwnerAuth reuses them to mint a token for a single
+	// additional owner a caller discovers after Reconcile has already run
+	// (e.g. Pruefer's SIGHUP config-reload handler, ADR-1640), without
+	// re-deriving or re-reading the private key file. This is safe
+	// specifically because a caller's AppID/AppPrivateKeyPath/
+	// AppInstallationID are always restart-only in its own reload
+	// classification (see pruefer/config.go's `reload:"restart"` tags) —
+	// nothing can change the App identity these fields capture without a
+	// full process restart, which re-runs Reconcile from scratch anyway.
+	appID      int64
+	privateKey *rsa.PrivateKey
+	baseURL    string
+	// pinnedInstallationID mirrors Options.AppInstallationID: non-zero means
+	// every owner — including one newly added after Reconcile via
+	// MintOwnerAuth — shares the App's single pinned installation rather
+	// than being resolved via per-owner discovery. Fixed for the
+	// Reconciler's lifetime (restart-only, see above), so this is set once
+	// in Reconcile and never itself changes.
+	pinnedInstallationID int64
 }
 
 // BotLogin returns the App's own identity as it appears as a PR/review
@@ -220,12 +241,172 @@ func (r *Reconciler) RunRefreshLoops(ctx context.Context, logf func(installation
 	for _, a := range auths {
 		installLogf := logf(a.InstallationID)
 		wg.Add(1)
-		go func(a *Auth) {
-			defer wg.Done()
-			a.RunRefreshLoop(ctx, installLogf)
-		}(a)
+		a.startRefreshLoop(ctx, installLogf, wg.Done)
 	}
 	return wg.Wait
+}
+
+// MintOwnerAuth mints a fresh installation token for owner without
+// registering it in the Reconciler — the "mint" half of a two-phase
+// mint-then-commit split a caller uses to add one or more owners to an
+// already-Reconciled set atomically (e.g. Pruefer's SIGHUP config-reload
+// handler, ADR-1640): the caller must call CommitOwnerAuth for every
+// returned *Auth only after every owner in the same batch has minted
+// successfully here, so a later owner's mint failing leaves an earlier
+// one exactly as unregistered as if MintOwnerAuth had never been called
+// for it.
+//
+// watchedRepos is the caller's full, post-change watched-repo list (not
+// just owner's own repos) — passed through unchanged to verifyRepoAccess
+// exactly as Reconcile's own discovery loop does, for a "selected"-mode
+// installation.
+//
+// mintedFresh is false when the Reconciler is in pinned-installation mode
+// (pinnedInstallationID != 0): owner shares the App's single already-minted
+// Auth rather than getting one of its own, so CommitOwnerAuth must register
+// the client mapping without starting a second refresh loop for it. In
+// non-pinned mode mintedFresh is always true.
+func (r *Reconciler) MintOwnerAuth(owner string, watchedRepos []string, logf func(format string, args ...any)) (a *Auth, mintedFresh bool, err error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	r.mu.Lock()
+	pinnedID := r.pinnedInstallationID
+	appID := r.appID
+	privateKey := r.privateKey
+	baseURL := r.baseURL
+	botLogin := r.botLogin
+	var pinnedAuth *Auth
+	if pinnedID != 0 && len(r.auths) > 0 {
+		pinnedAuth = r.auths[0]
+	}
+	r.mu.Unlock()
+
+	if pinnedID != 0 {
+		if pinnedAuth == nil {
+			return nil, false, fmt.Errorf("no pinned installation auth available for owner %q", owner)
+		}
+		return pinnedAuth, false, nil
+	}
+
+	jwt, err := gh.BuildAppJWT(appID, privateKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("building app JWT: %w", err)
+	}
+	installations, err := gh.FetchAppInstallations(baseURL, jwt)
+	if err != nil {
+		return nil, false, fmt.Errorf("discovering app installations: %w", err)
+	}
+	var inst *gh.AppInstallation
+	for i := range installations {
+		if strings.EqualFold(installations[i].Account, owner) {
+			inst = &installations[i]
+			break
+		}
+	}
+	if inst == nil {
+		return nil, false, fmt.Errorf("no GitHub App installation found for owner %q (newly watched in watched_repos) — install the app on %q", owner, owner)
+	}
+
+	newAuth, err := mintAuth(appID, inst.ID, botLogin, privateKey, baseURL)
+	if err != nil {
+		return nil, false, fmt.Errorf("minting installation token for owner %q (installation %d): %w", owner, inst.ID, err)
+	}
+
+	if inst.RepositorySelection == "selected" {
+		// Soft, logged-only verification — matching Reconcile's own
+		// discovery-path convention (see its repoVerifyFailed handling)
+		// rather than the old pruefer/auth.go AuthSet's hard-fail
+		// checkSelectedRepos: a newly-watched owner whose repo-access check
+		// merely fails to verify (transient network error) should not abort
+		// an otherwise-successful reload the way a genuinely missing
+		// installation does.
+		if _, err := verifyRepoAccess(baseURL, newAuth.client.Token(), inst.ID, owner, watchedRepos); err != nil {
+			logf("! verifying repo access for newly-watched owner %q failed: %v", owner, err)
+		}
+	}
+
+	return newAuth, true, nil
+}
+
+// CommitOwnerAuth registers an already-minted *Auth (from MintOwnerAuth)
+// for owner — the "commit" half of the two-phase split. mintedFresh must be
+// exactly the value MintOwnerAuth returned alongside a. When mintedFresh is
+// true, this also starts a's refresh loop under ctx (a pinned-mode Auth
+// already has one running, started by Reconcile/RunRefreshLoops, and must
+// not get a second). Returns the *gh.Client now resolvable via
+// ClientForRepo for owner.
+func (r *Reconciler) CommitOwnerAuth(ctx context.Context, owner string, a *Auth, mintedFresh bool, logf func(format string, args ...any)) *gh.Client {
+	r.mu.Lock()
+	key := strings.ToLower(owner)
+	r.clients[key] = a.client
+	delete(r.mintErrors, key)
+	if mintedFresh {
+		r.auths = append(r.auths, a)
+	}
+	r.mu.Unlock()
+
+	if mintedFresh {
+		a.startRefreshLoop(ctx, logf, nil)
+	}
+	return a.client
+}
+
+// DetachedAuth pairs a removed owner with the *Auth its token was minted
+// for. Returned by RemoveOwners instead of being stopped there directly —
+// see that method's doc comment for why.
+type DetachedAuth struct {
+	Owner string
+	Auth  *Auth
+}
+
+// RemoveOwners removes every owner in removed from the Reconciler's client
+// map and, in non-pinned mode, detaches the *Auth that owner's installation
+// was minted for — but deliberately does NOT stop its refresh loop here,
+// returning it as a DetachedAuth instead. An in-flight review dispatched
+// before the removal may still hold a *gh.Client backed by this exact
+// Auth (see Pruefer's Daemon.executeReview snapshot-at-dispatch-time
+// design); stopping its refresh loop immediately risks that review's
+// remaining GitHub calls failing with 401 once the token's actual expiry
+// passes, with no recovery short of a restart. The caller is responsible
+// for only calling DetachedAuth.Auth.Stop() once it has separately
+// confirmed nothing still depends on it — see Pruefer's
+// Daemon.drainThenStopAuth (ADR-1640).
+//
+// Pinned-installation mode is deliberately exempt from detachment: every
+// owner there shares the single App-level Auth (r.auths[0]) regardless of
+// watched_repos, so it never accumulates per-owner Auths the way non-pinned
+// mode does, and detaching it on the last pinned owner's removal would
+// strand MintOwnerAuth's pinned-mode short-circuit for the next owner added
+// under the same pin.
+func (r *Reconciler) RemoveOwners(removed []string) []DetachedAuth {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pinnedInstallationID != 0 {
+		for _, o := range removed {
+			delete(r.clients, strings.ToLower(o))
+		}
+		return nil
+	}
+	var detached []DetachedAuth
+	for _, o := range removed {
+		key := strings.ToLower(o)
+		c, ok := r.clients[key]
+		if !ok {
+			continue
+		}
+		delete(r.clients, key)
+		delete(r.mintErrors, key)
+		for i, a := range r.auths {
+			if a.client != c {
+				continue
+			}
+			detached = append(detached, DetachedAuth{Owner: o, Auth: a})
+			r.auths = append(r.auths[:i], r.auths[i+1:]...)
+			break
+		}
+	}
+	return detached
 }
 
 // InstallationCount returns the number of distinct installations minted —
@@ -425,7 +606,15 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	botLogin := slug + "[bot]"
 	logf("✓ authenticated as %s", botLogin)
 
-	r := &Reconciler{botLogin: botLogin, clients: map[string]*gh.Client{}, mintErrors: map[string]error{}}
+	r := &Reconciler{
+		botLogin:             botLogin,
+		clients:              map[string]*gh.Client{},
+		mintErrors:           map[string]error{},
+		appID:                appID,
+		privateKey:           privateKey,
+		baseURL:              opts.BaseURL,
+		pinnedInstallationID: opts.AppInstallationID,
+	}
 
 	// A single pass both validates and enumerates — see
 	// distinctOwnersLogging's own doc comment for why this replaced two

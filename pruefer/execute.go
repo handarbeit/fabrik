@@ -28,7 +28,12 @@ func Execute() error {
 		return fmt.Errorf("loading .env: %w", err)
 	}
 
-	cfg, err := LoadConfig(os.Args[1:])
+	// Captured once so a later SIGHUP-triggered reload (handleReload) can
+	// re-run LoadConfig against the same argument list, rather than
+	// re-reading a possibly-stale os.Args.
+	args := os.Args[1:]
+
+	cfg, err := LoadConfig(args)
 	if err != nil {
 		return err
 	}
@@ -194,8 +199,121 @@ func Execute() error {
 			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)
 	}
 
+	// SIGHUP triggers a config reload (ADR-1640) — deliberately a separate
+	// signal channel from the SIGINT/SIGTERM ctx above, not folded into it:
+	// that context's cancellation means shutdown, and a reload must never
+	// be mistaken for one. See handleReload's doc comment for what a
+	// reload does and does not touch.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hupCh:
+				logf(0, "reload", "SIGHUP received — reloading config\n")
+				handleReload(ctx, args, auth, daemon)
+			}
+		}
+	}()
+
 	if useTUI(cfg) {
 		return runTUI(ctx, daemon)
 	}
 	return daemon.Run(ctx)
+}
+
+// handleReload processes one SIGHUP (ADR-1640): re-reads config via
+// LoadConfig(args), merges it against daemon's currently running config
+// (applyConfigReload), mints a token for any newly-watched owner
+// (MintOwnerAuth, all-or-nothing across the whole reload — see that
+// method's doc comment), and only once every step has succeeded does it
+// apply the merged config (and any newly-minted clients) to daemon and log
+// a diff-style summary.
+//
+// A failure at any step — a malformed/invalid config file, or a newly
+// watched owner with no matching App installation — leaves daemon and
+// reconciler completely untouched: nothing is committed until every owner
+// in the batch has minted successfully. Nothing here cancels a running
+// review, drops the Hookdeck EventSource, or resets its dedupe ring — those
+// are untouched by construction, since this function never rebuilds or
+// reaches into any of them. This includes a removed owner's installation
+// token: its refresh loop is only ever stopped once
+// Daemon.drainThenStopAuth (spawned below) has confirmed no review is still
+// in flight for that owner, so an in-flight review's remaining GitHub calls
+// never lose a valid token out from under them.
+func handleReload(ctx context.Context, args []string, reconciler *githubauth.Reconciler, daemon *Daemon) {
+	cand, err := LoadConfig(args)
+	if err != nil {
+		logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
+		return
+	}
+	if cand.VersionRequested {
+		// --version on the original invocation would already have made
+		// Execute print the version and return before a daemon (and thus
+		// this handler) ever existed. Reaching here means the *current*
+		// process wasn't a --version invocation, but re-parsing the same
+		// args produced VersionRequested anyway — LoadConfig re-resolves
+		// the full flag/env/YAML chain every call, so this is defensive,
+		// not expected to fire in practice.
+		logf(0, "reload", "config reload failed: --version is not a reloadable configuration — keeping current config\n")
+		return
+	}
+
+	old := daemon.config()
+	merged, diff := applyConfigReload(old, cand)
+
+	newOwners := newlyWatchedOwners(old, merged)
+	type mintedOwner struct {
+		owner       string
+		auth        *githubauth.Auth
+		mintedFresh bool
+	}
+	minted := make([]mintedOwner, 0, len(newOwners))
+	for _, owner := range newOwners {
+		reloadLogf := func(format string, args ...any) { logf(0, "reload", format+"\n", args...) }
+		a, fresh, err := reconciler.MintOwnerAuth(owner, merged.WatchedRepos, reloadLogf)
+		if err != nil {
+			logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
+			return
+		}
+		minted = append(minted, mintedOwner{owner: owner, auth: a, mintedFresh: fresh})
+	}
+
+	addedClients := make(map[string]GitHubLister, len(minted))
+	for _, m := range minted {
+		installationID := m.auth.InstallationID
+		prefix := fmt.Sprintf("installation %d: ", installationID)
+		client := reconciler.CommitOwnerAuth(ctx, m.owner, m.auth, m.mintedFresh, func(format string, args ...any) {
+			logf(0, "auth", prefix+format, args...)
+		})
+		addedClients[strings.ToLower(m.owner)] = client
+	}
+
+	// Owners no longer present in watched_repos are pruned only now, after
+	// every newly-watched owner in this same batch has already minted
+	// successfully — an earlier prune (e.g. right after computing merged)
+	// would violate atomicity if a later owner's mint then failed and
+	// aborted the whole reload above: the removed owner's client would
+	// already be gone even though the reload as a whole never took effect.
+	// RemoveOwners only detaches each removed (non-pinned) owner's *Auth
+	// from the Reconciler's own bookkeeping — it deliberately does NOT stop
+	// its refresh goroutine yet. That happens below, once
+	// drainThenStopAuth confirms no review is still in flight for the
+	// owner being removed.
+	removedOwners := noLongerWatchedOwners(old, merged)
+	detached := reconciler.RemoveOwners(removedOwners)
+
+	removedLowered := make([]string, len(removedOwners))
+	for i, o := range removedOwners {
+		removedLowered[i] = strings.ToLower(o)
+	}
+	daemon.ApplyReload(merged, addedClients, removedLowered)
+	logReloadSummary(diff)
+
+	for _, d := range detached {
+		go daemon.drainThenStopAuth(ctx, d.Owner, d.Auth)
+	}
 }

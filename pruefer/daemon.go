@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/githubauth"
 	"github.com/handarbeit/fabrik/pruefer/events"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
@@ -49,15 +50,37 @@ type Daemon struct {
 	// failure (see internal/githubauth.Reconcile). An owner present in
 	// Config.WatchedRepos may still be missing an entry — e.g. the App
 	// hasn't been installed on that account yet. Reconcile runs once, at
-	// startup, only — this map is never refreshed afterward — so a missing
-	// entry does not resolve itself; the operator must install the App
-	// (Reconcile logs the guided-install URL) and then restart Pruefer.
-	// See the poll() nil-check below.
+	// startup, but a SIGHUP-triggered reload (ADR-1640) can mint a token
+	// for a newly-watched owner and add it here afterward — see
+	// ApplyReload. A missing entry does not otherwise resolve itself; the
+	// operator must install the App (Reconcile logs the guided-install
+	// URL) and then restart Pruefer or add the owner to watched_repos and
+	// reload. See the poll() nil-check below.
+	//
+	// Config and Clients are read from many goroutines (poll cycles,
+	// event-triggered dispatch, the TUI) and, since ADR-1640, written
+	// concurrently by a SIGHUP-triggered reload — cfgMu below is what makes
+	// that safe. Production code must never read either field directly;
+	// use the config()/client()/clientForOwner() accessors instead.
+	// Construction (a Daemon{} struct literal, in execute.go or a test) may
+	// still set them directly — nothing reads them until Run starts, so no
+	// lock is needed before then.
 	Clients  map[string]GitHubLister
 	Claude   ClaudeInvoker
 	Clone    CloneFunc
 	Config   Config
 	BotLogin string
+
+	// cfgMu guards Config, Clients, and sem together — not three
+	// independent locks — because ApplyReload's owner-addition needs
+	// WatchedRepos and its corresponding Clients entry to become visible as
+	// one atomic unit; two locks would let a reader observe the new repo in
+	// Config.WatchedRepos before its owner's client exists in Clients. sem
+	// is included because its size is derived from Config.ConcurrencyCap
+	// (see semaphore()) and a resize must not race a config read. Zero
+	// value is a ready-to-use, unlocked RWMutex, so a Daemon{} struct
+	// literal (the existing test pattern) needs no change.
+	cfgMu sync.RWMutex
 
 	// FabrikDir is the directory containing .pruefer/pruefer.lock. Defaults
 	// to "." (cwd) when empty.
@@ -101,11 +124,11 @@ type Daemon struct {
 	// dispatch path — poll()'s per-cycle fan-out and event-triggered
 	// ReviewFromEvent (eventsink.go) alike — so Pruefer's one claude
 	// invocation budget is never exceeded regardless of which path
-	// triggered a given review. Lazily built by semaphore() since Daemon
-	// values are constructed as struct literals (execute.go, tests), not
-	// via a constructor that could size it upfront.
-	semOnce sync.Once
-	sem     chan struct{}
+	// triggered a given review. Lazily built (and, since ADR-1640, resized
+	// on a ConcurrencyCap reload) by semaphore(), guarded by cfgMu — see
+	// that method's doc comment for why resizing never disturbs an
+	// already-admitted holder.
+	sem chan struct{}
 
 	// prGates serializes concurrent review dispatch for the same PR across
 	// poll- and event-triggered paths — see acquirePRGate and runReview.
@@ -140,6 +163,8 @@ type Daemon struct {
 // fallback, a casing mismatch drops every event for that owner while
 // isWatchedRepo happily admits it.
 func (d *Daemon) clientForOwner(owner string) (GitHubLister, bool) {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
 	if c, ok := d.Clients[owner]; ok {
 		return c, true
 	}
@@ -149,6 +174,69 @@ func (d *Daemon) clientForOwner(owner string) (GitHubLister, bool) {
 		}
 	}
 	return nil, false
+}
+
+// config returns a snapshot of the daemon's current Config, safe for
+// concurrent use alongside a SIGHUP-triggered ApplyReload. Every production
+// read of Config must go through this (or client()/clientForOwner() for
+// Clients) rather than reading d.Config directly.
+func (d *Daemon) config() Config {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.Config
+}
+
+// client resolves owner's GitHubLister via an exact map lookup, safe for
+// concurrent use alongside ApplyReload. Unlike clientForOwner, this performs
+// no case-insensitive fallback scan — callers that already have an
+// operator-typed (not webhook-payload) owner string, e.g. poll()'s own
+// WatchedRepos iteration, don't need it.
+func (d *Daemon) client(owner string) (GitHubLister, bool) {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	c, ok := d.Clients[owner]
+	return c, ok
+}
+
+// ApplyReload atomically swaps in a freshly reloaded Config, merges
+// addedClients into Clients, and deletes removedOwners from Clients — the
+// write side of the concurrency-safety boundary config()/client()/
+// clientForOwner() read through. Called only from handleReload (execute.go),
+// and only once every newly-watched owner in addedClients has already been
+// fully committed (token minted, refresh goroutine started) by the caller
+// via internal/githubauth.Reconciler's MintOwnerAuth/CommitOwnerAuth:
+// ApplyReload itself starts and mints nothing, so a partial addedClients
+// here would silently leave a new owner without a live refresh loop.
+// removedOwners' Auths are, by design, NOT yet stopped when this runs —
+// only detached from the Reconciler's own bookkeeping by the caller
+// (Reconciler.RemoveOwners) — because a review dispatched before this
+// reload may still be holding a *gh.Client backed by one of them; the
+// caller defers actually stopping each one until Daemon.drainThenStopAuth
+// confirms it's safe (see that method and RemoveOwners' doc comments for
+// why). This method only drops the Daemon-side Clients entry, mirroring the
+// Reconciler-side deletion RemoveOwners already performed — new dispatch
+// can no longer find the removed owner's client here regardless of when
+// its Auth actually stops refreshing. Config and Clients change together
+// under one write-lock acquisition so no reader can observe the new repo in
+// Config.WatchedRepos before its owner's client exists in Clients, nor a
+// removed repo's owner still resolvable via client() after its Clients
+// entry should be gone.
+func (d *Daemon) ApplyReload(merged Config, addedClients map[string]GitHubLister, removedOwners []string) {
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	d.Config = merged
+	for _, owner := range removedOwners {
+		delete(d.Clients, owner)
+	}
+	if len(addedClients) == 0 {
+		return
+	}
+	if d.Clients == nil {
+		d.Clients = make(map[string]GitHubLister, len(addedClients))
+	}
+	for owner, c := range addedClients {
+		d.Clients[owner] = c
+	}
 }
 
 // prGate is one PR's dispatch gate, plus the reference count that decides
@@ -197,12 +285,89 @@ func (d *Daemon) acquirePRGate(owner, repo string, prNumber int) (*prGate, func(
 	}
 }
 
+// ownerDrainPollInterval is how often drainThenStopAuth re-checks whether a
+// removed owner's in-flight reviews have finished. Var (not const) so tests
+// aren't forced to wait on it.
+var ownerDrainPollInterval = 2 * time.Second
+
+// ownerReviewsInFlight reports whether any review is currently dispatched
+// for a repo under owner — i.e. holds an entry in prGates keyed
+// "owner/repo#pr" (see acquirePRGate). Matching is case-insensitive for the
+// same reason isWatchedRepo's is: owner here may be operator-typed config
+// casing, while a given prGates key may have been built from a webhook
+// payload's casing.
+func (d *Daemon) ownerReviewsInFlight(owner string) bool {
+	prefix := strings.ToLower(owner) + "/"
+	d.prGatesMu.Lock()
+	defer d.prGatesMu.Unlock()
+	for key := range d.prGates {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// drainThenStopAuth waits until no review is in flight for owner, then
+// stops a's refresh loop (a.Stop()). Meant to run in its own goroutine,
+// spawned once per owner Reconciler.RemoveOwners detaches (see handleReload
+// in execute.go) — the deferred half of ADR-1640's fix: cancelling a's
+// refresh loop immediately, at reload time, could invalidate the token
+// backing a review dispatched before the reload and still running against
+// owner's repos, since executeReview's *gh.Client reference outlives the
+// reload that removed its owner (a review already running against a
+// removed repo is allowed to finish, not merely allowed to keep running for
+// a while).
+//
+// ctx is the same long-lived context Execute threads through the whole
+// SIGHUP-handling goroutine and every refresh loop; if it's cancelled (the
+// daemon is shutting down) there's nothing left to defer for, so this
+// returns without calling Stop.
+func (d *Daemon) drainThenStopAuth(ctx context.Context, owner string, a *githubauth.Auth) {
+	for d.ownerReviewsInFlight(owner) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(ownerDrainPollInterval):
+		}
+	}
+	a.Stop()
+}
+
 // semaphore returns the daemon's shared concurrency-capped semaphore,
-// building it on first use.
+// building it on first use and resizing it whenever ApplyReload has changed
+// ConcurrencyCap since it was last built (or first built).
+//
+// Resizing never disturbs an already-admitted holder: reviewOne captures
+// the channel value returned by this method locally, once, at dispatch
+// time — it never re-reads d.sem afterward — so a goroutine already
+// dispatched keeps acquiring/releasing on the channel it captured
+// regardless of what this method swaps d.sem to for the next dispatch.
+// Shrinking therefore reduces future admission only; it cannot forcibly
+// evict current holders. During a shrink, total in-flight concurrency can
+// transiently be as high as old_cap + new_cap until the old holders drain —
+// bounded and self-correcting.
+//
+// Double-checked locking: the common case (no resize needed) only takes a
+// read lock, so concurrent dispatch from poll() and event-triggered
+// ReviewFromEvent calls don't serialize against each other on every single
+// dispatch — only the rare reload-triggered rebuild takes the write lock.
 func (d *Daemon) semaphore() chan struct{} {
-	d.semOnce.Do(func() {
-		d.sem = make(chan struct{}, d.effectiveConcurrency())
-	})
+	d.cfgMu.RLock()
+	want := d.effectiveConcurrencyLocked()
+	if d.sem != nil && cap(d.sem) == want {
+		sem := d.sem
+		d.cfgMu.RUnlock()
+		return sem
+	}
+	d.cfgMu.RUnlock()
+
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	want = d.effectiveConcurrencyLocked()
+	if d.sem == nil || cap(d.sem) != want {
+		d.sem = make(chan struct{}, want)
+	}
 	return d.sem
 }
 
@@ -377,12 +542,9 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 // event_source: poll's entire behavior — the default, and what makes that
 // default "byte-for-byte unchanged" from before this issue.
 func (d *Daemon) runPollOnly(ctx context.Context) error {
-	interval := d.Config.PollInterval
-	if interval <= 0 {
-		interval = DefaultPollInterval
-	}
+	initial := d.config()
 	logf(0, "poll", "pruefer starting: watching %d repo(s), poll interval %s, concurrency %d\n",
-		len(d.Config.WatchedRepos), interval, d.effectiveConcurrency())
+		len(initial.WatchedRepos), pollInterval(initial), d.effectiveConcurrency())
 
 	// lastUpgradeCheck is local to Run, not a Daemon field: Run is the sole
 	// sequential caller (both TUI and headless modes call d.Run), so there's
@@ -392,6 +554,12 @@ func (d *Daemon) runPollOnly(ctx context.Context) error {
 
 	for {
 		d.poll(ctx)
+
+		// cfg is re-read every iteration (not captured once before the
+		// loop) so a SIGHUP-triggered reload of PollInterval/AutoUpgrade
+		// takes effect starting with the very next cycle, rather than only
+		// after a restart (ADR-1640).
+		cfg := d.config()
 
 		// The upgrade check runs after poll() returns — poll() already calls
 		// wg.Wait() before returning, so the in-flight review set is
@@ -414,7 +582,7 @@ func (d *Daemon) runPollOnly(ctx context.Context) error {
 		// below, silently discarding the shutdown request. Mirrors
 		// engine/poll.go's equivalent guard on its own checkAndUpgrade call
 		// sites.
-		if d.Config.AutoUpgrade && ctx.Err() == nil && time.Since(lastUpgradeCheck) >= upgradeCheckInterval {
+		if cfg.AutoUpgrade && ctx.Err() == nil && time.Since(lastUpgradeCheck) >= upgradeCheckInterval {
 			lastUpgradeCheck = time.Now()
 			d.checkAndUpgrade()
 		}
@@ -422,14 +590,23 @@ func (d *Daemon) runPollOnly(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(interval):
+		case <-time.After(pollInterval(cfg)):
 		}
 	}
 }
 
+// pollInterval returns cfg.PollInterval, falling back to
+// DefaultPollInterval for an absent/non-positive value.
+func pollInterval(cfg Config) time.Duration {
+	if cfg.PollInterval > 0 {
+		return cfg.PollInterval
+	}
+	return DefaultPollInterval
+}
+
 func (d *Daemon) reconciliationFallbackInterval() time.Duration {
-	if d.Config.ReconciliationFallbackInterval > 0 {
-		return d.Config.ReconciliationFallbackInterval
+	if v := d.config().ReconciliationFallbackInterval; v > 0 {
+		return v
 	}
 	return DefaultReconciliationFallbackInterval
 }
@@ -444,11 +621,12 @@ func (d *Daemon) reconciliationFallbackInterval() time.Duration {
 // returns early anyway: the fallback ticker keeps polling regardless, so a
 // dead event source degrades to poll-only rather than crashing the daemon.
 func (d *Daemon) runEventDriven(ctx context.Context) error {
+	initial := d.config()
 	fallback := d.reconciliationFallbackInterval()
 	logf(0, "poll", "pruefer starting: watching %d repo(s) in event-driven mode, reconciliation fallback %s, concurrency %d\n",
-		len(d.Config.WatchedRepos), fallback, d.effectiveConcurrency())
+		len(initial.WatchedRepos), fallback, d.effectiveConcurrency())
 
-	if d.Config.ReconciliationStartup {
+	if initial.ReconciliationStartup {
 		logf(0, "poll", "running startup reconciliation poll\n")
 		d.poll(ctx)
 	}
@@ -464,6 +642,13 @@ func (d *Daemon) runEventDriven(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			// ReconciliationFallbackInterval is reload-live (ADR-1640): if a
+			// SIGHUP changed it since the ticker was created (or last
+			// reset), pick that up now rather than only after a restart.
+			if next := d.reconciliationFallbackInterval(); next != fallback {
+				fallback = next
+				ticker.Reset(fallback)
+			}
 			// Route through triggerReconciliationPoll rather than calling
 			// d.poll directly: triggerReconciliationPoll documents "only one
 			// poll runs at a time", and calling poll here bypassed the
@@ -594,6 +779,16 @@ func (d *Daemon) SignatureDriftHandler() func(bool) {
 }
 
 func (d *Daemon) effectiveConcurrency() int {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.effectiveConcurrencyLocked()
+}
+
+// effectiveConcurrencyLocked is effectiveConcurrency's lock-free core,
+// callable by semaphore() which already holds cfgMu (read or write) itself
+// — effectiveConcurrency taking its own read lock around this would
+// deadlock against semaphore()'s write-lock path.
+func (d *Daemon) effectiveConcurrencyLocked() int {
 	if d.Config.ConcurrencyCap > 0 {
 		return d.Config.ConcurrencyCap
 	}
@@ -627,14 +822,15 @@ func (d *Daemon) triggerReconciliationPoll(ctx context.Context) {
 // subscription shared across every watched repo, not one per repo.
 func (d *Daemon) poll(ctx context.Context) {
 	var wg sync.WaitGroup
+	cfg := d.config()
 
-	for _, repoSpec := range d.Config.WatchedRepos {
+	for _, repoSpec := range cfg.WatchedRepos {
 		owner, repo, ok := splitOwnerRepo(repoSpec)
 		if !ok {
 			logf(0, "warn", "skipping malformed watched repo %q (want owner/repo)\n", repoSpec)
 			continue
 		}
-		client, ok := d.Clients[strings.ToLower(owner)]
+		client, ok := d.client(strings.ToLower(owner))
 		if !ok {
 			// Expected when an owner has no resolved App installation (see
 			// internal/githubauth.Reconcile, which already logged a guided-
@@ -660,8 +856,8 @@ func (d *Daemon) poll(ctx context.Context) {
 	}
 	wg.Wait()
 
-	for _, owner := range distinctOwners(d.Config.WatchedRepos) {
-		client, ok := d.Clients[strings.ToLower(owner)]
+	for _, owner := range distinctOwners(cfg.WatchedRepos) {
+		client, ok := d.client(strings.ToLower(owner))
 		if !ok {
 			continue
 		}
@@ -735,7 +931,10 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 	repoName := owner + "/" + repo
 	startedAt := time.Now()
 	d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
-	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.Config, d.BotLogin, owner, repo, pr)
+	// d.config() (not d.Config directly): review dispatch can run
+	// concurrently with a SIGHUP-triggered ApplyReload (ADR-1640) writing
+	// Config under cfgMu — see that field's own doc comment.
+	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.config(), d.BotLogin, owner, repo, pr)
 	if outcome.Err != nil {
 		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
 	}
@@ -770,7 +969,7 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 // rename, would otherwise silently drop every event for that repo.
 func (d *Daemon) isWatchedRepo(owner, repo string) bool {
 	target := owner + "/" + repo
-	for _, spec := range d.Config.WatchedRepos {
+	for _, spec := range d.config().WatchedRepos {
 		if strings.EqualFold(spec, target) {
 			return true
 		}
@@ -816,4 +1015,43 @@ func distinctOwners(watchedRepos []string) []string {
 		owners = append(owners, owner)
 	}
 	return owners
+}
+
+// newlyWatchedOwners returns the distinct owners present in cand's
+// WatchedRepos but absent from old's, in cand's first-seen order — the set
+// a config reload must mint a token for before it can be applied
+// (ADR-1640). Adding a repo under an already-watched owner never appears
+// here. Comparison is case-insensitive, matching distinctOwners' own dedup.
+func newlyWatchedOwners(old, cand Config) []string {
+	oldOwners := make(map[string]bool)
+	for _, o := range distinctOwners(old.WatchedRepos) {
+		oldOwners[strings.ToLower(o)] = true
+	}
+	var added []string
+	for _, o := range distinctOwners(cand.WatchedRepos) {
+		if !oldOwners[strings.ToLower(o)] {
+			added = append(added, o)
+		}
+	}
+	return added
+}
+
+// noLongerWatchedOwners returns the distinct owners present in old's
+// WatchedRepos but absent from cand's, in old's first-seen order — the set
+// a config reload must prune auth/client state for via
+// internal/githubauth.Reconciler.RemoveOwners. Removing one repo under an
+// owner that still has another watched repo never appears here — the
+// mirror image of newlyWatchedOwners.
+func noLongerWatchedOwners(old, cand Config) []string {
+	candOwners := make(map[string]bool)
+	for _, o := range distinctOwners(cand.WatchedRepos) {
+		candOwners[strings.ToLower(o)] = true
+	}
+	var removed []string
+	for _, o := range distinctOwners(old.WatchedRepos) {
+		if !candOwners[strings.ToLower(o)] {
+			removed = append(removed, o)
+		}
+	}
+	return removed
 }
