@@ -52,7 +52,12 @@ assert_eq() {
 # to shadow both.
 FAKE_BIN_DIR="$(mktemp -d)"
 MARKER_FILE="$(mktemp)"
-trap 'rm -rf "$FAKE_BIN_DIR" "$MARKER_FILE"' EXIT
+# DIRTY_TREE_FILE: an untracked scratch file used by Case 6 below to make
+# $REPO_ROOT's working tree dirty without touching any tracked file. Declared
+# here (not created yet) so the EXIT trap can unconditionally clean it up
+# even if a later case is added between here and Case 6 and aborts first.
+DIRTY_TREE_FILE="$REPO_ROOT/.pregate_test_dirty_tree_scratch"
+trap 'rm -rf "$FAKE_BIN_DIR" "$MARKER_FILE" "$DIRTY_TREE_FILE"' EXIT
 
 cat > "$FAKE_BIN_DIR/go" <<'EOF'
 #!/usr/bin/env bash
@@ -95,6 +100,42 @@ reset_marker
 rc=$?
 assert_eq "sim-layer failure exits PREGATE_FAILED_EXIT (5)" "5" "$rc"
 assert_eq "sim-layer failure stops after exactly one go call (github tests never run)" "1" "$(marker_count)"
+
+# --- Case 4 (R5, #1624): FABRIK_PREGATE_VERIFIED_SHA matching the current
+# HEAD skips the pre-gate entirely — zero go calls, exit 0 — even though the
+# fake go is scripted to fail, proving the skip really does short-circuit
+# before either layer runs rather than merely tolerating a pass. ---
+reset_marker
+CURRENT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+( FAKE_GO_EXIT=1 FABRIK_PREGATE_VERIFIED_SHA="$CURRENT_SHA" run_pregate ) >/dev/null 2>&1
+rc=$?
+assert_eq "matching FABRIK_PREGATE_VERIFIED_SHA exits 0" "0" "$rc"
+assert_eq "matching FABRIK_PREGATE_VERIFIED_SHA makes no go call" "0" "$(marker_count)"
+
+# --- Case 5 (R5, #1624): a stale/mismatched FABRIK_PREGATE_VERIFIED_SHA falls
+# through to the full pre-gate, same as if it had never been set — never a
+# silent false skip. ---
+reset_marker
+( FAKE_GO_EXIT=0 FABRIK_PREGATE_VERIFIED_SHA="0000000000000000000000000000000000000dead" run_pregate ) >/dev/null 2>&1
+rc=$?
+assert_eq "mismatched FABRIK_PREGATE_VERIFIED_SHA exits 0 (full pre-gate ran and passed)" "0" "$rc"
+assert_eq "mismatched FABRIK_PREGATE_VERIFIED_SHA runs the full pre-gate (2 go calls)" "2" "$(marker_count)"
+
+# --- Case 6 (R5, #1624 — found during Review): a matching
+# FABRIK_PREGATE_VERIFIED_SHA does NOT skip the pre-gate if the working tree
+# has picked up an uncommitted change since the SHA was captured — a HEAD
+# match alone can't detect that (a real gap: cut-release.sh's own step 4 can
+# rewrite plugin/known_embedded_versions.go on disk between capturing the SHA
+# and this check running). An untracked scratch file is enough to make the
+# tree dirty without touching anything tracked. ---
+reset_marker
+: > "$DIRTY_TREE_FILE"
+CURRENT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+( FAKE_GO_EXIT=0 FABRIK_PREGATE_VERIFIED_SHA="$CURRENT_SHA" run_pregate ) >/dev/null 2>&1
+rc=$?
+rm -f "$DIRTY_TREE_FILE"
+assert_eq "matching SHA + dirty tree exits 0 (full pre-gate ran and passed)" "0" "$rc"
+assert_eq "matching SHA + dirty tree runs the full pre-gate (2 go calls), not a skip" "2" "$(marker_count)"
 
 # --- Structural check: run_pregate must precede prepare_bed_and_reset inside
 # the dispatch guard, textually — this is what makes "no live call is made"

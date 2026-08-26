@@ -9,7 +9,7 @@ A **spec** is a written description of what a piece of software should do and wh
 In the Claude desktop app, click **Cowork**, then **Customize** in the sidebar and open **Plugins**.
 
 1. Select **Add marketplace** and enter: `handarbeit/fabrik`
-2. Find **Fabrik Project Onboarding** in the list and click **Install**.
+2. Find **Entwurf** in the list and click **Install**.
 
 You don't need a GitHub account for this — it's a public repository, so it just loads.
 

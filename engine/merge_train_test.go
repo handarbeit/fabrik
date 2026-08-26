@@ -4631,6 +4631,32 @@ func TestIsTrainPR(t *testing.T) {
 	}
 }
 
+// TestShouldCloseStaleTrainPR covers R8's independent re-check (#1622): the
+// identity guard reconstructTrainState's stale-PR sweep re-confirms immediately
+// before its destructive CloseIssue call. Deliberately mirrors TestIsTrainPR's
+// cases, including the exact #1615 shape (a non-train head ref whose body quotes
+// the batch marker) — that case must return false regardless of body content, so
+// deleting shouldCloseStaleTrainPR's identity check turns this test red (AC1).
+func TestShouldCloseStaleTrainPR(t *testing.T) {
+	cases := []struct {
+		name string
+		pr   gh.PRDetails
+		want bool
+	}{
+		{"marker in body alone, non-train branch — must NOT match (the #1615 shape)", gh.PRDetails{Body: "before " + mergeTrainBatchMarker + " after", HeadRefName: "fabrik/issue-1615"}, false},
+		{"marker in body alone, empty head ref — must NOT match", gh.PRDetails{Body: mergeTrainBatchMarker}, false},
+		{"non-train head ref, plain body", gh.PRDetails{Body: "just a normal PR", HeadRefName: "fabrik/issue-42"}, false},
+		{"train head branch, no marker (draft CI PR)", gh.PRDetails{HeadRefName: "fabrik/merge-train/merge-train-main-1"}, true},
+		{"train head branch with marker (landing PR)", gh.PRDetails{Body: mergeTrainBatchMarker, HeadRefName: "fabrik/merge-train/x"}, true},
+		{"empty", gh.PRDetails{}, false},
+	}
+	for _, tc := range cases {
+		if got := shouldCloseStaleTrainPR(tc.pr); got != tc.want {
+			t.Errorf("shouldCloseStaleTrainPR(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestTrialNameFromBranch verifies stripping the fabrik/merge-train/ prefix from a
 // head ref, and the empty return for non-train branches.
 func TestTrialNameFromBranch(t *testing.T) {

@@ -822,6 +822,13 @@ func (d *Daemon) triggerReconciliationPoll(ctx context.Context) {
 // subscription shared across every watched repo, not one per repo.
 func (d *Daemon) poll(ctx context.Context) {
 	var wg sync.WaitGroup
+
+	// One snapshot for the whole cycle: WatchedRepos is read exactly once
+	// here rather than once per loop iteration, so a reload that lands
+	// mid-cycle can't make this loop observe a different repo list than it
+	// started with. A repo removed mid-cycle is simply not polled on the
+	// *next* cycle — this one still runs against the set it started with,
+	// including finishing any review it already dispatched (ADR-1640's R3).
 	cfg := d.config()
 
 	for _, repoSpec := range cfg.WatchedRepos {
@@ -931,9 +938,12 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 	repoName := owner + "/" + repo
 	startedAt := time.Now()
 	d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
-	// d.config() (not d.Config directly): review dispatch can run
-	// concurrently with a SIGHUP-triggered ApplyReload (ADR-1640) writing
-	// Config under cfgMu — see that field's own doc comment.
+	// d.config() is read once, by value, here at dispatch time — the copy
+	// ReviewPR receives is what the in-flight review actually uses from
+	// this point on, so it is naturally isolated from any config swap that
+	// happens after dispatch (ADR-1640's R3). The only thing that needs
+	// protecting is this read itself, against a concurrent ApplyReload
+	// write.
 	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.config(), d.BotLogin, owner, repo, pr)
 	if outcome.Err != nil {
 		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)

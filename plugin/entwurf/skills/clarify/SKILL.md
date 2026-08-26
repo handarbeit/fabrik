@@ -13,7 +13,7 @@ The person answering is a product manager, business owner, or domain expert — 
 
 **Never invent a specific number, threshold, name, or percentage they haven't given you.** Turning a vague adjective into a number is the single most valuable thing this skill does — but the number has to come from them. Proposing "under two seconds" to someone with no target in mind produces agreement, not information, and a figure you made up is then indistinguishable in the spec from one the business actually committed to. Ask what they'd expect, or what they measure today; if they genuinely don't know, record the shape and leave the figure as `[NEEDS BASELINE]`.
 
-`[NEEDS BASELINE]` is a sanctioned marker meaning "not currently measured", written by this skill and by write-spec. Resolve it only with a figure the person supplies. Never fill one in yourself, and never treat one as a lingering vague placeholder to be cleaned up.
+`[NEEDS BASELINE]` is a sanctioned marker meaning "not currently measured", written by this skill and by write-spec. It is the legacy spelling of `[NEEDS MEASUREMENT]`, defined canonically in `../../CONVENTIONS.md`; treat the two as identical and never rewrite an existing one. Resolve it only with a figure the person supplies. Never fill one in yourself, and never treat one as a lingering vague placeholder to be cleaned up.
 
 ## Find the spec
 

@@ -31,9 +31,13 @@ type fakeLister struct {
 	// listOpenPRsCalls counts ListOpenPRs invocations; listOpenPRsBlock,
 	// when non-nil, is received from before each call returns — letting a
 	// test hold a poll cycle open long enough to observe reconciliation-poll
-	// coalescing.
-	listOpenPRsCalls int
-	listOpenPRsBlock <-chan struct{}
+	// coalescing. listOpenPRsHistory records the "owner/repo" key of every
+	// call in order, so a test can assert which specific repos were (or
+	// were not) polled in a given cycle — e.g. a reload-removed repo must
+	// not appear in the next cycle's history (#1640, AC2).
+	listOpenPRsCalls   int
+	listOpenPRsBlock   <-chan struct{}
+	listOpenPRsHistory []string
 }
 
 func newFakeLister() *fakeLister {
@@ -50,6 +54,7 @@ func (f *fakeLister) ListOpenPRs(owner, repo string) ([]gh.PRDetails, error) {
 	key := owner + "/" + repo
 	f.mu.Lock()
 	f.listOpenPRsCalls++
+	f.listOpenPRsHistory = append(f.listOpenPRsHistory, key)
 	block := f.listOpenPRsBlock
 	err := f.listErrByRepo[key]
 	prs := f.prsByRepo[key]
@@ -67,6 +72,16 @@ func (f *fakeLister) listOpenPRsCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.listOpenPRsCalls
+}
+
+// listOpenPRsHistorySnapshot returns a copy of every "owner/repo" key
+// ListOpenPRs has been called with, in order.
+func (f *fakeLister) listOpenPRsHistorySnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.listOpenPRsHistory))
+	copy(out, f.listOpenPRsHistory)
+	return out
 }
 
 // FetchPRDetails returns the PR configured via detailsByKey for

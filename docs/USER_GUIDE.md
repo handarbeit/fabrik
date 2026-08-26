@@ -2256,9 +2256,9 @@ Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces 
 
 ---
 
-### Fabrik Project Onboarding Plugin
+### Entwurf Plugin
 
-The **Fabrik Project Onboarding plugin** (`fabrik-project-onboarding`) is a separate, optional Claude Code plugin aimed at a product manager or business owner, not the engineer — no terminal, git, or technical background needed. It interviews you about a project and its features, then writes the result as a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
+The **Entwurf plugin** (`entwurf`) is a separate, optional Claude Code plugin that turns a project into buildable specifications, one expert role at a time. It interviews the three people a project needs — the product owner, the technical architect, and the experience lead — each about their own side of the product, and never asks anyone to answer for a role they don't hold. The product-owner path needs no terminal, git, or technical background. Output is a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
 
 #### Skills
 
@@ -2267,6 +2267,11 @@ The **Fabrik Project Onboarding plugin** (`fabrik-project-onboarding`) is a sepa
 | `onboard` | A 30–45 minute interview about the project as a whole — the problem it solves, who it serves, what's in and out of scope, hard constraints, and domain vocabulary. Writes `.specify/memory/constitution.md`, the ground rules every later spec inherits. Run once at the start of a project. |
 | `write-spec` | Turns a feature described in plain language into a structured spec — user stories, requirements, success criteria, and a graded quality checklist — under `specs/NNN-feature-name/`. |
 | `clarify` | Reads an existing spec, finds what's vague or missing, and asks up to five targeted questions one at a time, writing each answer straight into the document. |
+| `architecture-foundations` | Interviews the architect about what is already fixed — existing systems, regulatory obligations, platform commitments — plus the shared domain model with per-field ownership, interface contracts, shared state vocabularies, and the authority model. Runs early and is re-run as specs accumulate, because a shared model created near the beginning is what stops features drifting apart. |
+| `experience-baseline` | Interviews the experience lead about conditions of use per surface class, the independent status dimensions and their states, the component and content vocabulary, the accessibility floor, and interaction budgets. Decided once for the whole product. |
+| `architecture-baseline` | Converts user-facing guarantees into system guarantees — stack, cross-cutting mechanisms, non-functional budgets, build order, and the fitness functions that make the baseline binding rather than advisory. Ratifies. |
+
+The three baseline skills assume the person being interviewed **is** the expert, so they invert the product-owner rule: rather than avoiding questions only an engineer could answer, they never default a decision inside the expert's own domain, and always flag a default made in a neighbouring one. They write `.specify/memory/architecture.md`, `experience.md`, a decision register, and per-stage quality gates — all additive to upstream Spec Kit's layout (see the plugin's `NOTICE.md`).
 
 #### Install
 
@@ -2274,10 +2279,10 @@ In an interactive Claude Code session:
 
 ```
 /plugin marketplace add handarbeit/fabrik
-/plugin install fabrik-project-onboarding@fabrik
+/plugin install entwurf@fabrik
 ```
 
-The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Fabrik Project Onboarding**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/fabrik-project-onboarding/GETTING-STARTED.md) for the full non-technical walkthrough.
+The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Entwurf**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/entwurf/GETTING-STARTED.md) for the full non-technical walkthrough.
 
 #### Attribution
 
@@ -2462,14 +2467,14 @@ The `fabrik:yolo` label means Fabrik will pick it up automatically and run it th
 
 Claude Code's `/plugin update` detects a new plugin release by comparing the cached `plugin.json` `version` field against the version at `ref: main` in `marketplace.json` — same version number means no refresh fires, even if the plugin's source changed. To prevent users from getting stuck on stale cached content, `cut-release.sh` may commit a version bump to `plugin/fabrik/.claude-plugin/plugin.json` before it tags the release:
 
-- **When it fires**: after the release-notes commit is pushed and before the tag is created, the script diffs `plugin/fabrik` (excluding the manifest itself) against the previous release tag. If anything changed, it patch-bumps `plugin.json`'s `version` field (e.g. `0.2.0` → `0.2.1`) and commits it as `@arbeithand`, in a separate commit alongside an appended changelog line in that release's `release-notes/<version>.md`, e.g.:
+- **When it fires**: after the release-notes commit is pushed and before the tag is created, the script diffs each plugin listed in `marketplace.json` (excluding its own manifest) against the previous release tag. For each one that changed, it patch-bumps that `plugin.json`'s `version` field (e.g. `0.2.0` → `0.2.1`) and commits it as `@arbeithand`, in a separate commit alongside an appended changelog line in that release's `release-notes/<version>.md`, e.g.:
 
   ```
   - Auto-bumped fabrik plugin to 0.2.1 (source changed since v0.0.75)
   ```
 
 - **When it doesn't fire**: if `plugin/fabrik`'s source is unchanged since the previous tag, or there is no previous tag (first-ever release), no extra commit is made and nothing is appended to the release notes.
-- **Scope**: only `plugin/fabrik` (the one plugin listed in `marketplace.json`) is bumped. `plugin/fabrik-workflows` is embedded directly into the Fabrik binary and distributed via `fabrik init`/`fabrik upgrade`; it uses independent content-hash-based change detection and is not affected by the `/plugin update` staleness issue this bump exists to fix.
+- **Scope**: every plugin listed in `marketplace.json` with a `git-subdir` source is bumped — the list is derived from that file rather than hardcoded, so listing a plugin is all that is needed to include it. All bumped manifests land in one commit, each with its own changelog line. `plugin/fabrik-workflows` is out of scope: it is embedded directly into the Fabrik binary and distributed via `fabrik init`/`fabrik upgrade`, uses independent content-hash-based change detection, and is not affected by the `/plugin update` staleness issue this bump exists to fix.
 - **Bump type**: patch-only. Minor/major version bumps for `plugin/fabrik` remain a manual responsibility.
 - **Escape hatch**: pass `--no-plugin-bump` to skip this step entirely, e.g. for a hotfix release where you don't want the extra commit:
 

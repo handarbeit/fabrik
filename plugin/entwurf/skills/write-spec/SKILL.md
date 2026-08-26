@@ -157,7 +157,7 @@ When a success criterion needs a figure nobody has supplied, write the *shape* o
 
 > Reduces food waste across sites by [NEEDS BASELINE]% within [NEEDS BASELINE] months *(not currently measured)*
 
-`[NEEDS BASELINE]` is not a `[NEEDS CLARIFICATION]` marker: it doesn't count against the cap of three, it doesn't block the *"No [NEEDS CLARIFICATION] markers remain"* item, and a criterion carrying one still satisfies *"Success criteria are measurable"* as long as the shape is measurable.
+`[NEEDS BASELINE]` is this plugin's legacy spelling of `[NEEDS MEASUREMENT]`; the two are identical and the canonical definition lives in `../../CONVENTIONS.md`. It is not a `[NEEDS CLARIFICATION]` marker: it doesn't count against the cap of three, it doesn't block the *"No [NEEDS CLARIFICATION] markers remain"* item, and a criterion carrying one still satisfies *"Success criteria are measurable"* as long as the shape is measurable.
 
 ### 4. Handle genuine unknowns
 

@@ -5,7 +5,7 @@
 #   scripts/cut-release.sh v0.0.67
 #   scripts/cut-release.sh v0.0.67 --skip-tests       # skip race-tested suite (last-resort)
 #   scripts/cut-release.sh v0.0.67 --no-doc-issue     # skip filing the doc-update issue
-#   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the plugin/fabrik version auto-bump
+#   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the marketplace plugin version auto-bumps
 #   scripts/cut-release.sh v0.0.67 --skip-integration=<reason>
 #       # Skip the mandatory live e2e integration gate (step 5 below). This is
 #       # a LOUD, RECORDED escape hatch, not a quiet default — see step 5's own
@@ -24,7 +24,9 @@
 # What it does:
 #   1. Pre-flight: branch, clean tree, ff-pull, release-notes heading match
 #   2. PAT identity check (must be arbeithand)
-#   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454)
+#   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454).
+#      Exports FABRIK_PREGATE_VERIFIED_SHA on success so step 5 doesn't pay for the
+#      identical pre-gate a second time (R5, #1624) — see export_pregate_verified_sha.
 #   4. go build + go test -race (skippable with --skip-tests; the pre-gate above never is)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
 #      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454).
@@ -34,9 +36,9 @@
 #      "Fidelity-drift policy" section). This is a release-checklist step, not
 #      something left to memory.
 #   6. Commit release-notes.md (if dirty) as arbeithand
-#   6b. If plugin/fabrik's source changed since the previous tag, patch-bump
-#       plugin/fabrik/.claude-plugin/plugin.json and commit as arbeithand
-#       (skippable with --no-plugin-bump)
+#   6b. For each plugin listed in .claude-plugin/marketplace.json whose source
+#       changed since the previous tag, patch-bump its .claude-plugin/plugin.json
+#       and commit them together as arbeithand (skippable with --no-plugin-bump)
 #   7. Tag, push tag with credential helpers nuked + PAT-in-URL
 #   8. Watch the release workflow run; fail loudly on non-success
 #   9. Verify the published release author and discussion author are both arbeithand
@@ -111,6 +113,29 @@ insert_notes_line() {
   fi
 }
 
+# export_pregate_verified_sha exports FABRIK_PREGATE_VERIFIED_SHA as the
+# exact commit this invocation's own sim + wire-contract pre-gate (step 3,
+# below) just verified. Called right after that step passes, while HEAD is
+# still guaranteed unchanged (this script commits nothing until step 6, well
+# after step 5's live e2e gate runs) — so the value names the exact tree
+# that was checked, not merely "some release."
+#
+# scripts/e2e/run.sh's own pre-gate (run_pregate) checks this against a
+# freshly-resolved `git rev-parse HEAD` of its own before deciding whether
+# to re-run the identical sim + wire-contract checks (R5, #1624) — see that
+# function's own comment. An exported env var, not a file marker: run.sh is
+# invoked as this script's direct child process (step 5), so there is no
+# on-disk staleness/cleanup concern, and the value is naturally scoped to
+# exactly this invocation (env vars do not outlive the child process) —
+# unlike E2E_SKIP_PREGATE, a blanket opt-out this script deliberately never
+# sets (see step 5's own comment), this is a narrow, tree-scoped signal that
+# a standalone `scripts/e2e/run.sh` invocation never sees and so still pays
+# the full pre-gate price, exactly as before this existed.
+export_pregate_verified_sha() {
+  FABRIK_PREGATE_VERIFIED_SHA="$(git rev-parse HEAD)"
+  export FABRIK_PREGATE_VERIFIED_SHA
+}
+
 # interpret_e2e_exit_code prints the operator-facing message for a given
 # scripts/e2e/run.sh exit code ($1) and returns 0 if that code means success,
 # 1 otherwise — main() calls `ok`/`die` with the result accordingly. Extracted
@@ -136,7 +161,7 @@ interpret_e2e_exit_code() {
       echo "live e2e integration suite aborted: bed preflight failed (exit 4) inside scripts/e2e/run.sh — the suite never ran. This is an infrastructure problem (stuck lock, unreachable SSH remote, dirty tracked files in the bed checkout, etc.), NOT a regression and NOT a fidelity-drift case — see scripts/e2e/run.sh's own preflight_bed output above for the specific cause, fix it, and re-run scripts/cut-release.sh $VERSION."
       ;;
     5)
-      echo "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected, since this script's own pre-gate step (step 3) already passed against the same tree — investigate the discrepancy (different ref? dirty tree in the bed?) before retrying."
+      echo "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected: this script's own pre-gate step (step 3) already passed against the same tree, and R5's FABRIK_PREGATE_VERIFIED_SHA (#1624) should have made run.sh skip re-running it rather than fail it a second time — investigate the discrepancy (different ref? dirty tree in the bed? the SHA guard itself misfiring) before retrying."
       ;;
     *)
       echo "live e2e integration suite FAILED (exit $rc) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
@@ -198,8 +223,11 @@ BRANCH="$(git branch --show-current)"
 ok "on main"
 
 # Allow uncommitted release-notes/<version>.md, plugin/known_embedded_versions.go,
-# and plugin/fabrik/.claude-plugin/plugin.json (all three are updated by this
-# script itself, after the build step and in step 6b).
+# and any plugin/*/.claude-plugin/plugin.json (all are updated by this script
+# itself, after the build step and in step 6b). The manifest pattern is
+# deliberately not pinned to one plugin: step 6b bumps every marketplace-listed
+# plugin, so a run that dies partway through can leave any of them modified but
+# uncommitted, and a retry must not abort on the mess its own predecessor made.
 #
 # Allowlist disposition (reviewed for #1070, extended for #816): all three
 # files are committed by this script's own step 6 / step 6b, *before* the tag
@@ -209,7 +237,7 @@ ok "on main"
 # does not need to be tightened; the built-artifact VCS check lives in
 # .goreleaser.yaml/release.yml instead (see
 # adrs/071-release-artifact-vcs-verification.md).
-DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$| M plugin/fabrik/\.claude-plugin/plugin\.json$|^M  plugin/fabrik/\.claude-plugin/plugin\.json$" || true)
+DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$| M plugin/[^/]+/\.claude-plugin/plugin\.json$|^M  plugin/[^/]+/\.claude-plugin/plugin\.json$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
 ok "working tree acceptable"
@@ -270,6 +298,12 @@ ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 # total per tests/sim/README.md), so making it unconditional costs nothing
 # real while removing an entire class of "the live suite failed for a
 # reason the sim would have caught for free" incidents.
+#
+# Once this passes, export_pregate_verified_sha (R5, #1624) records HEAD so
+# step 5's invocation of scripts/e2e/run.sh can skip re-running the
+# identical checks against the same, unchanged tree — see that function's
+# own comment. This does NOT weaken the check: it still runs here, in full,
+# exactly as before; it only stops step 5 from paying for it a second time.
 step "Sim + wire-contract pre-gate"
 if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
   die "sim suite failed — fix it before cutting a release (scripts/sim/run.sh --all to reproduce)"
@@ -280,6 +314,7 @@ if ! go test -race -count=1 ./github/... >/tmp/cut-release-pregate-test.log 2>&1
   die "github wire-contract tests failed (full log: /tmp/cut-release-pregate-test.log)"
 fi
 ok "github wire-contract tests passed"
+export_pregate_verified_sha
 
 # ─── 4. build + test ──────────────────────────────────────────────────────────
 step "Build"
@@ -390,42 +425,78 @@ else
   ok "release-notes commit pushed"
 fi
 
-# ─── 6b. auto-bump plugin/fabrik version if source changed ───────────────────
+# ─── 6b. auto-bump marketplace plugin versions if source changed ─────────────
 # Claude Code's /plugin update compares plugin.json's version field against
-# marketplace.json@main; same version number means no refresh fires even if
-# the plugin's source changed. Patch-bump plugin/fabrik's manifest whenever
-# its source changed since the previous tag, so users always get fresh
-# content. plugin/fabrik-workflows is out of scope — it's not listed in
-# marketplace.json and has its own content-hash-based change detection.
+# marketplace.json@main; same version number means no refresh fires even if the
+# plugin's source changed. Patch-bump the manifest of every plugin whose source
+# changed since the previous tag, so users always get fresh content.
+#
+# The plugin list is derived from marketplace.json rather than hardcoded: a
+# plugin listed there is bumpable from that moment on, with no matching edit
+# here. That coupling is deliberate — marketplace.json membership is exactly
+# what makes /plugin update's version comparison apply to a plugin, so the two
+# cannot drift apart. plugin/fabrik-workflows is out of scope for the same
+# reason: it isn't listed, isn't served by /plugin update, and has its own
+# content-hash-based change detection.
 step "Plugin version bump"
-PLUGIN_MANIFEST="plugin/fabrik/.claude-plugin/plugin.json"
 if [ "$NO_PLUGIN_BUMP" -eq 1 ]; then
-  warn "--no-plugin-bump was passed; skipping plugin/fabrik version bump"
+  warn "--no-plugin-bump was passed; skipping plugin version bumps"
 elif [ -z "$PREV_TAG" ]; then
-  warn "no previous release tag found — skipping plugin/fabrik version bump (first release?)"
+  warn "no previous release tag found — skipping plugin version bumps (first release?)"
 else
-  if ! BUMP_OUTPUT="$(go run ./tools/bump-plugin-version/ plugin/fabrik "$PLUGIN_MANIFEST" "$PREV_TAG")"; then
-    die "bump-plugin-version failed for plugin/fabrik (prev tag: $PREV_TAG)"
+  MARKETPLACE_JSON=".claude-plugin/marketplace.json"
+  [ -f "$MARKETPLACE_JSON" ] || die "$MARKETPLACE_JSON not found"
+
+  # Only git-subdir entries carry a source.path pointing at a directory in this
+  # repo; any other source type is distributed from elsewhere and is not ours to
+  # bump. Enumerated by a Go helper rather than jq, so the release path depends
+  # on nothing the repo doesn't already require.
+  if ! PLUGIN_DIRS="$(go run ./tools/list-marketplace-plugins/ "$MARKETPLACE_JSON")"; then
+    die "failed to enumerate plugins from $MARKETPLACE_JSON"
   fi
-  if [ -z "$BUMP_OUTPUT" ]; then
-    ok "plugin/fabrik unchanged since $PREV_TAG — no bump needed"
-  else
+
+  BUMPED_MANIFESTS=""
+  BUMPED_SUMMARY=""
+
+  for PLUGIN_DIR in $PLUGIN_DIRS; do
+    PLUGIN_MANIFEST="$PLUGIN_DIR/.claude-plugin/plugin.json"
+    [ -f "$PLUGIN_MANIFEST" ] \
+      || die "$PLUGIN_MANIFEST not found (listed in $MARKETPLACE_JSON)"
+
+    if ! BUMP_OUTPUT="$(go run ./tools/bump-plugin-version/ "$PLUGIN_DIR" "$PLUGIN_MANIFEST" "$PREV_TAG")"; then
+      die "bump-plugin-version failed for $PLUGIN_DIR (prev tag: $PREV_TAG)"
+    fi
+    if [ -z "$BUMP_OUTPUT" ]; then
+      ok "$PLUGIN_DIR unchanged since $PREV_TAG — no bump needed"
+      continue
+    fi
+
     OLD_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f1)"
     NEW_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f2)"
-    ok "bumped plugin/fabrik $OLD_PLUGIN_VER -> $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+    PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
+    ok "bumped $PLUGIN_DIR $OLD_PLUGIN_VER -> $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
 
-    # Append a changelog line so the version bump is visible in the GitHub
-    # Release notes. release-notes/<version>.md was already committed and
-    # pushed above, so this lands in a second commit alongside the manifest
-    # bump rather than amending the already-pushed one.
-    insert_notes_line "$NOTES_FILE" "- Auto-bumped fabrik plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+    BUMPED_MANIFESTS="$BUMPED_MANIFESTS $PLUGIN_MANIFEST"
+    BUMPED_SUMMARY="$BUMPED_SUMMARY $PLUGIN_NAME@$NEW_PLUGIN_VER"
 
-    git add "$PLUGIN_MANIFEST" "$NOTES_FILE"
+    # Append a changelog line so each bump is visible in the GitHub Release
+    # notes. release-notes/<version>.md was already committed and pushed above,
+    # so this lands in a later commit alongside the manifest bumps rather than
+    # amending the already-pushed one.
+    insert_notes_line "$NOTES_FILE" "- Auto-bumped $PLUGIN_NAME plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
+  done
+
+  if [ -z "$BUMPED_MANIFESTS" ]; then
+    ok "no marketplace plugin source changed since $PREV_TAG — nothing to bump"
+  else
+    # Intentionally unquoted: BUMPED_MANIFESTS is a space-separated path list.
+    # Plugin paths come from marketplace.json and contain no spaces.
+    git add $BUMPED_MANIFESTS "$NOTES_FILE"
     GIT_AUTHOR_NAME="$BOT_LOGIN" \
     GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
     GIT_COMMITTER_NAME="$BOT_LOGIN" \
     GIT_COMMITTER_EMAIL="$BOT_EMAIL" \
-    git commit -m "Bump fabrik plugin to $NEW_PLUGIN_VER" --quiet
+    git commit -m "Bump plugin versions:$BUMPED_SUMMARY" --quiet
     COMMIT_AUTHOR="$(git log -1 --pretty=format:'%an <%ae>')"
     [ "$COMMIT_AUTHOR" = "$BOT_LOGIN <$BOT_EMAIL>" ] \
       || die "plugin-bump commit author wrong (got: $COMMIT_AUTHOR)"
