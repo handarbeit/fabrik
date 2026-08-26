@@ -80,6 +80,62 @@ func TestRunManifestCallbackServer_HappyPath(t *testing.T) {
 	}
 }
 
+// TestRunManifestCallbackServer_StartNotReservedAfterCallbackDelivered is
+// the regression test for a review finding: unlike /callback, /start had no
+// guard against being re-requested after the flow already concluded — a
+// stale browser tab reloading /start (or a second tab left open on the same
+// startURL) after the real GitHub redirect had already been received would
+// be served the same auto-submitting manifest form again, letting it
+// re-POST to GitHub's manifest-create page for a flow this process is no
+// longer waiting on. Confirms /start instead serves a plain "already
+// concluded" message — with no auto-submitting <form> in the body — once
+// the single result has been delivered.
+func TestRunManifestCallbackServer_StartNotReservedAfterCallbackDelivered(t *testing.T) {
+	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	if err != nil {
+		t.Fatalf("runManifestCallbackServer: %v", err)
+	}
+	defer shutdown()
+
+	state := fetchStartAndExtractState(t, startURL)
+	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state + "&code=testcode123"
+	resp, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case res := <-results:
+		if res.err != nil {
+			t.Fatalf("unexpected callback error: %v", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for callback result")
+	}
+
+	// The real flow has concluded (callback delivered) — a stale reload of
+	// /start must no longer serve the auto-submitting form.
+	resp2, err := http.Get(startURL)
+	if err != nil {
+		t.Fatalf("GET %s (after delivery): %v", startURL, err)
+	}
+	defer resp2.Body.Close()
+	body, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("reading second start page body: %v", err)
+	}
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("second GET /start status = %d, want 200", resp2.StatusCode)
+	}
+	if manifestActionRe.MatchString(string(body)) {
+		t.Errorf("second GET /start still served the auto-submitting manifest form: %s", body)
+	}
+	if !strings.Contains(string(body), "already concluded") {
+		t.Errorf("second GET /start body = %q, want an \"already concluded\" message", body)
+	}
+}
+
 // TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult is the
 // regression test for a review finding: a /callback hit with a
 // wrong-but-non-empty state (e.g. a different local process trying to

@@ -297,6 +297,13 @@ func (r *Reconciler) MintOwnerAuth(owner string, watchedRepos []string, logf fun
 	if err != nil {
 		return nil, false, fmt.Errorf("discovering app installations: %w", err)
 	}
+	// Mirrors Reconcile's own discovery loop: FetchAppInstallations caps at
+	// 100 results, so a hit at exactly that count means owner's actual
+	// installation could be sitting just past the first page rather than
+	// genuinely missing — a newly-watched owner on a very large App must
+	// not be misreported (and the whole reload aborted on) a pagination
+	// gap it never had.
+	installationsTruncated := len(installations) == 100
 	var inst *gh.AppInstallation
 	for i := range installations {
 		if strings.EqualFold(installations[i].Account, owner) {
@@ -305,6 +312,9 @@ func (r *Reconciler) MintOwnerAuth(owner string, watchedRepos []string, logf fun
 		}
 	}
 	if inst == nil {
+		if installationsTruncated {
+			return nil, false, fmt.Errorf("no GitHub App installation found for owner %q in the first 100 installations returned (newly watched in watched_repos) — the App may have ≥100 installations, so this could be a pagination gap rather than a genuinely missing installation; retry the reload to confirm before installing the app on %q", owner, owner)
+		}
 		return nil, false, fmt.Errorf("no GitHub App installation found for owner %q (newly watched in watched_repos) — install the app on %q", owner, owner)
 	}
 
@@ -391,12 +401,21 @@ func (r *Reconciler) RemoveOwners(removed []string) []DetachedAuth {
 	var detached []DetachedAuth
 	for _, o := range removed {
 		key := strings.ToLower(o)
+		// Delete mintErrors unconditionally, before the clients lookup
+		// below: an owner whose installation was found but whose token
+		// mint failed (Reconcile's discovery loop, or a prior reload's
+		// MintOwnerAuth) never gets a clients entry, so gating this
+		// deletion on the clients ok-check would leave that stale error
+		// behind forever once the owner is removed from watched_repos —
+		// silently mis-explaining a later ClientForRepo miss for a
+		// completely different, since-removed owner if the lower-cased
+		// key were ever reused.
+		delete(r.mintErrors, key)
 		c, ok := r.clients[key]
 		if !ok {
 			continue
 		}
 		delete(r.clients, key)
-		delete(r.mintErrors, key)
 		for i, a := range r.auths {
 			if a.client != c {
 				continue

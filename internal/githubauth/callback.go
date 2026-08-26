@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -126,6 +127,21 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	// any later call to Do returns, so reading it after once.Do here is
 	// race-free without its own lock.
 	var firstDeliveryErr error
+	// resultDelivered mirrors "once has already fired" for /start's benefit
+	// (see its handler below) — distinct from the co-resident-attacker
+	// window /start's own comment discusses, which is about state secrecy
+	// *before* any result exists. This guards a later window: once the
+	// real GitHub redirect has already been received (success or failure),
+	// re-serving formHTML lets a stale tab/reload re-submit the manifest to
+	// GitHub a second time — an explicit further "Create GitHub App" click
+	// on GitHub's own confirmation page would still be needed to actually
+	// create a second App, but there is no reason to hand out a live
+	// auto-submitting form for a flow that has already concluded. atomic
+	// rather than reusing once.Do's own completion (there is no built-in
+	// "has Do already run" query) or firstDeliveryErr's happens-before
+	// (that's only established once callbackResult itself is safe to read,
+	// which /start's handler has no other reason to synchronize with).
+	var resultDelivered atomic.Bool
 	mux := http.NewServeMux()
 	// /start (and therefore state, embedded in formHTML's form-action URL)
 	// is served to any requester that can reach this loopback port, not just
@@ -152,6 +168,16 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	// complexity for a race that stays exploitable either way under this
 	// threat model.
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		if resultDelivered.Load() {
+			// The flow already concluded (success or failure) — serving
+			// formHTML again would auto-submit a second, redundant
+			// manifest to GitHub for a flow this process is no longer
+			// waiting on. Mirrors /callback's own "already completed"
+			// messaging below.
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			fmt.Fprintln(w, "Pruefer setup already concluded for this run — you can close this tab.")
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, formHTML)
 	})
@@ -194,6 +220,7 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 		delivered := false
 		once.Do(func() {
 			delivered = true
+			resultDelivered.Store(true)
 			if cbErr != nil {
 				firstDeliveryErr = cbErr
 				w.WriteHeader(http.StatusBadRequest)

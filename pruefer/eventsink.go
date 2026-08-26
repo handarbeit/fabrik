@@ -117,11 +117,17 @@ var reviewTriggerActions = map[string]bool{
 
 // installEventTypes are GitHub webhook event types signaling an
 // installation/repo-selection change. These trigger a full reconciliation
-// poll rather than a single-PR review: Daemon.Clients is owner-keyed and
-// fixed at startup (see execute.go's githubauth.Reconcile/ClientForRepo
-// wiring), so dynamically discovering a new installation mid-run is out of
-// scope — re-checking GitHub state via a poll sweep satisfies "webhooks are
-// triggers, GitHub is truth" without inventing new auth machinery.
+// poll rather than a single-PR review: Daemon.Clients is owner-keyed
+// (execute.go's githubauth.Reconcile/ClientForRepo wiring), and while a
+// SIGHUP-triggered config reload (ADR-1640) can now dynamically mint an
+// Auth for an owner newly added to watched_repos
+// (Reconciler.MintOwnerAuth/CommitOwnerAuth), that path is driven by a
+// config change, not by these installation-scoped webhook events — an
+// existing owner gaining/losing repos under an installation, or an
+// installation appearing for an owner not yet in watched_repos, has no
+// config change to react to here. Re-checking GitHub state via a poll
+// sweep satisfies "webhooks are triggers, GitHub is truth" without
+// inventing new auth machinery for this narrower case.
 var installEventTypes = map[string]bool{
 	"installation":              true,
 	"installation_repositories": true,

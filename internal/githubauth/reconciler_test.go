@@ -473,6 +473,58 @@ func TestReconcile_MintFailure_ClientForRepoDistinguishesFromMissingInstallation
 	}
 }
 
+// TestReconciler_RemoveOwners_ClearsMintErrorEvenWithoutClientEntry covers
+// an owner whose token mint failed during Reconcile (or a prior reload's
+// MintOwnerAuth): that owner has a mintErrors entry but never gets a
+// clients entry, so RemoveOwners's clients-lookup early-continue must not
+// gate the mintErrors deletion — otherwise the stale mint error survives
+// the owner's removal from watched_repos indefinitely, ready to
+// mis-explain a ClientForRepo miss for a completely different owner if the
+// lower-cased key is ever reused.
+func TestReconciler_RemoveOwners_ClearsMintErrorEvenWithoutClientEntry(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "flaky"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failMint = func(instID int64) bool { return instID == 222 }
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik", "flaky/otherrepo"}, BaseURL: srv.URL, Logf: func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail when one owner's mint fails, got: %v", err)
+	}
+
+	// Precondition: "flaky" has a mintErrors entry but no clients entry —
+	// confirmed via ClientForRepo returning the mint-failure-specific
+	// message, not the generic missing-installation one.
+	if _, err := r.ClientForRepo(context.Background(), "flaky", "otherrepo"); err == nil ||
+		!strings.Contains(err.Error(), "not a missing-installation problem") {
+		t.Fatalf("precondition failed: expected flaky to have a mint error before removal, got: %v", err)
+	}
+
+	r.RemoveOwners([]string{"flaky"})
+
+	_, err = r.ClientForRepo(context.Background(), "flaky", "otherrepo")
+	if err == nil {
+		t.Fatal("expected flaky to still have no client after removal")
+	}
+	if strings.Contains(err.Error(), "not a missing-installation problem") {
+		t.Errorf("RemoveOwners left a stale mintErrors entry for a removed owner: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no authorized GitHub App installation") {
+		t.Errorf("expected the generic missing-installation message after removal, got: %v", err)
+	}
+}
+
 func TestReconcile_MissingOwnerInstallation_NoBrowserSkipsOpen(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
