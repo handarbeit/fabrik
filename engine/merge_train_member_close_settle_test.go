@@ -313,9 +313,9 @@ func TestLandMergeTrainBatch_MemberIssueCloseFailure_DoesNotMarkOutstanding(t *t
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()

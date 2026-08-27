@@ -1,9 +1,19 @@
 # ADR 1647: Exclude Non-Default-Base Merge-Train Members at Pre-Dispatch Selection
 
 **Date**: 2026-08-24
-**Status**: Accepted
+**Status**: Superseded by [ADR-1648](1648-merge-train-per-base-partitioning.md)
 **Issue**: #1647 — fix(merge-train): exclude non-default-base members from batching instead of
 silently mis-basing them (from community report #1646)
+
+> **Superseded**: this ADR's exclusion (`nonDefaultBaseExclusion`/`filterNonDefaultBaseMembers`/
+> `markNonDefaultBaseExcluded`, `fabrik:non-default-base-excluded`) made the train *safe* on
+> `base:<branch>` members without making it *capable* — such members were skipped, not batched,
+> and had to be merged by hand. #1648 removes this exclusion entirely and replaces it with
+> per-(repo, base) partitioning: every distinct resolved base gets its own independent train
+> instead of the single default partition being kept and everything else excluded. This document
+> is retained for its historical rationale (why the exclusion lived where it did, and the
+> `nonDefaultBaseExclusion` placement analysis that ADR-1648 builds on directly) but no longer
+> describes current behavior — see ADR-1648.
 
 ## Context
 

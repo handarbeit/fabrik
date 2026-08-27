@@ -3418,6 +3418,125 @@ func TestGroupQueuedByRepo_ExcludesPausedAndClosed(t *testing.T) {
 	}
 }
 
+// TestGroupQueuedByRepoAndBase_TwoBasesProduceTwoPartitions is the AC1 regression guard:
+// two Queued members resolving to different base branches in the same repo must produce
+// two independent (repo,base) partitions — one for the implicit default (main), one for
+// the explicit base:maint/1.x label — each with its own base/trainKey. Non-vacuous per
+// TestGroupQueuedByRepoAndBase_CollapsedPartition_MisBasesAgain below, which shows what
+// happens without this partitioning (the pre-#1648, #1646 bug this issue fixes).
+func TestGroupQueuedByRepoAndBase_TwoBasesProduceTwoPartitions(t *testing.T) {
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+	// Mirrors setupCloseTestRepo's approach (close_nondefault_base_test.go): manufacture
+	// refs/remotes/origin/maint/1.x directly in the bare clone so resolveBaseLabelBranch's
+	// first (local, no-network) check finds it, without needing a real remote round-trip.
+	sha := strings.TrimSpace(gitOutputDir(t, wm.baseDir, "rev-parse", "HEAD"))
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/maint/1.x", sha)
+
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},                                     // implicit default
+		{Number: 2, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:maint/1.x"}}, // explicit non-default
+		{Number: 3, Status: "BatchHold", Repo: "owner/repo"},                                     // implicit default
+	}
+
+	groups := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 partitions (AC1), got %d: %+v", len(groups), groups)
+	}
+	defaultGroup, maintGroup := groups[0], groups[1]
+	if defaultGroup.base != defaultPartitionBase {
+		t.Errorf("expected first partition's base to be the default sentinel %q, got %q", defaultPartitionBase, defaultGroup.base)
+	}
+	if len(defaultGroup.items) != 2 || defaultGroup.items[0].Number != 1 || defaultGroup.items[1].Number != 3 {
+		t.Errorf("expected default partition to contain #1 and #3, got %+v", defaultGroup.items)
+	}
+	if maintGroup.base != "maint/1.x" {
+		t.Errorf("expected second partition's base to be %q, got %q", "maint/1.x", maintGroup.base)
+	}
+	if len(maintGroup.items) != 1 || maintGroup.items[0].Number != 2 {
+		t.Errorf("expected maint/1.x partition to contain only #2, got %+v", maintGroup.items)
+	}
+	if defaultGroup.trainKey == maintGroup.trainKey {
+		t.Errorf("expected distinct trainKeys per partition, both got %q", defaultGroup.trainKey)
+	}
+	wantMaintKey := mergeTrainKey("owner/repo", "maint/1.x")
+	if maintGroup.trainKey != wantMaintKey {
+		t.Errorf("maint partition trainKey = %q, want %q", maintGroup.trainKey, wantMaintKey)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_CollapsedPartition_MisBasesAgain is the non-vacuity proof
+// AC1 explicitly asks for: collapsing back to the pre-#1648 grouping (groupQueuedByRepo,
+// unchanged and still used for the repo-only pass) on the same items shows they land in
+// ONE combined group — meaning a train built directly from that collapsed grouping would
+// batch the base:maint/1.x member (#2) alongside the default-base members, reproducing
+// #1646's mis-basing bug. groupQueuedByRepoAndBase's split above is what prevents this.
+func TestGroupQueuedByRepoAndBase_CollapsedPartition_MisBasesAgain(t *testing.T) {
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},
+		{Number: 2, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:maint/1.x"}},
+		{Number: 3, Status: "BatchHold", Repo: "owner/repo"},
+	}
+	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected the collapsed (pre-partitioning) grouping to produce exactly 1 group, got %d", len(groups))
+	}
+	if len(groups[0].items) != 3 {
+		t.Fatalf("expected the collapsed group to contain all 3 members (including the non-default #2) — got %+v", groups[0].items)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_DefaultOnly_MatchesPreExclusionShape is an AC4 guard: a
+// repo whose Queued column carries only default-base members produces exactly one
+// partition, keyed by the defaultPartitionBase sentinel and containing every member — the
+// same shape (and same zero-git-touch cost, since no item here carries a base: label) as
+// groupQueuedByRepo alone would produce, so default-only behavior is unaffected.
+func TestGroupQueuedByRepoAndBase_DefaultOnly_MatchesPreExclusionShape(t *testing.T) {
+	// Deliberately NOT registering any WorktreeManager: the zero-cost path for
+	// no-label items must never need one, so this must still succeed.
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},
+		{Number: 2, Status: "BatchHold", Repo: "owner/repo"},
+	}
+	groups := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected exactly 1 partition for an all-default-base repo, got %d: %+v", len(groups), groups)
+	}
+	if groups[0].base != defaultPartitionBase {
+		t.Errorf("expected the default sentinel base, got %q", groups[0].base)
+	}
+	if len(groups[0].items) != 2 {
+		t.Errorf("expected both members in the single default partition, got %+v", groups[0].items)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_LabeledItem_NoRegisteredWM_ExcludedNotDropped verifies the
+// fail-closed posture for a base:-labeled item when its repo's WorktreeManager isn't
+// registered yet (the narrow same-poll cold-start window): that ONE item is excluded from
+// batching this poll, but a sibling default-base member in the same repo is unaffected —
+// unlike the pre-#1648 exclusion path, this is scoped to the specific item, not the whole
+// repo group, since the default partition never needed the WorktreeManager in the first place.
+func TestGroupQueuedByRepoAndBase_LabeledItem_NoRegisteredWM_ExcludedNotDropped(t *testing.T) {
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},
+		{Number: 2, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:maint/1.x"}},
+	}
+	groups := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected only the default partition to survive, got %d: %+v", len(groups), groups)
+	}
+	if len(groups[0].items) != 1 || groups[0].items[0].Number != 1 {
+		t.Errorf("expected only #1 (default) in the surviving partition, got %+v", groups[0].items)
+	}
+}
+
 // ── #1216: review gate armed at the landing decision ─────────────────────────
 
 // reviewGateLandingClient builds a mock board where a single Validate item sits in

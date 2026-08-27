@@ -3,6 +3,7 @@ package itemstate
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,8 +48,12 @@ type Store struct {
 	// repoWorkers tracks repo-scoped (as opposed to per-(Repo,Number)) worker
 	// liveness — currently just merge-train workers, which operate on a batch
 	// spanning multiple issue numbers and have no single natural item home.
-	// Keyed by "owner/repo". Presence means a worker is in flight for that repo.
-	// Mutated via EnterRepoWorker/ExitRepoWorker; read via RepoWorkerActive and
+	// Keyed by a trainKey ("owner/repo:baseBranch", engine's mergeTrainKey —
+	// since #1648, one entry per independently-dispatched (repo,base) partition;
+	// was bare "owner/repo" before). Presence means a worker is in flight for
+	// that partition. Mutated via EnterRepoWorker/ExitRepoWorker; read via
+	// RepoWorkerActive (exact key), RepoWorkerActiveForAnyBase (repo-wide prefix
+	// scan, for a caller that only knows the repo, not the base), and
 	// HasInFlightWorker. Guarded by mu, same as items.
 	repoWorkers map[string]struct{}
 
@@ -976,15 +981,19 @@ func (s *Store) All() []Snapshot {
 	return snaps
 }
 
-// EnterRepoWorker marks repoKey ("owner/repo") as having an active repo-scoped
-// worker (currently: a merge-train worker spanning a batch of items). Idempotent.
+// EnterRepoWorker marks key as having an active repo-scoped worker (currently:
+// a merge-train worker spanning a batch of items). Idempotent. Since #1648, key
+// is typically a per-(repo, base) composite ("owner/repo:baseBranch", see
+// engine's mergeTrainKey) rather than a bare "owner/repo" — this map doesn't
+// care about key shape, it just needs the caller to be consistent between
+// Enter/Exit/RepoWorkerActive for the same logical worker.
 func (s *Store) EnterRepoWorker(repoKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.repoWorkers[repoKey] = struct{}{}
 }
 
-// ExitRepoWorker clears the repo-scoped worker marker for repoKey. Safe to call
+// ExitRepoWorker clears the repo-scoped worker marker for key. Safe to call
 // even if no marker is set (no-op).
 func (s *Store) ExitRepoWorker(repoKey string) {
 	s.mu.Lock()
@@ -993,12 +1002,39 @@ func (s *Store) ExitRepoWorker(repoKey string) {
 }
 
 // RepoWorkerActive reports whether a repo-scoped worker is currently marked
-// in-flight for repoKey ("owner/repo").
+// in-flight for the exact key given (typically a per-(repo,base) composite
+// key since #1648 — see EnterRepoWorker).
 func (s *Store) RepoWorkerActive(repoKey string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.repoWorkers[repoKey]
 	return ok
+}
+
+// RepoWorkerActiveForAnyBase reports whether any repo-scoped worker is active
+// for repoKey ("owner/repo"), regardless of which base branch partition it was
+// dispatched for. Since #1648 a single repo can have several concurrent
+// merge-train workers registered under composite keys ("owner/repo:base1",
+// "owner/repo:base2", ...); callers that only know the repo (not which base a
+// particular item resolves to — e.g. a stranded closed item being rescued out
+// of a holding stage) need this repo-wide "is anything live" answer instead of
+// an exact-key lookup. Matches any key equal to repoKey itself (the bare,
+// pre-#1648 key shape, kept for defense-in-depth) or prefixed with
+// repoKey+":" — mirrors the repo-prefix-scan precedent already used by
+// resetTrialCounter over mergeTrainRunawayAlerted.
+func (s *Store) RepoWorkerActiveForAnyBase(repoKey string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.repoWorkers[repoKey]; ok {
+		return true
+	}
+	prefix := repoKey + ":"
+	for k := range s.repoWorkers {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasInFlightWorker reports whether any worker — per-item (WorkerEntered on a

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func skipIfNoGit(t *testing.T) {
@@ -245,6 +246,44 @@ func TestResolveBaseLabelBranch_Absent(t *testing.T) {
 
 	if wm.resolveBaseLabelBranch("nonexistent-anywhere", 1) {
 		t.Error("expected absent branch to resolve false")
+	}
+}
+
+// TestFetchOrigin_SerializedUnderMu is a direct regression guard (found in review,
+// #1648) for a newly-introduced race: since #1648, worktreesFor(repoKey) returns the
+// SAME *WorktreeManager for every base partition of a repo, so two sibling-base
+// merge-train workers now share one wm.baseDir. Every other mutation of that shared
+// directory (resolveBaseLabelBranch, EnsureWorktree, PushBranch,
+// ensureTrainWorktreeFromRef, ...) already serializes under wm.mu; FetchOrigin must
+// too, or two concurrent sibling-base workers' fetches (or a fetch racing a
+// worktree-creation call) can run against the bare clone unguarded. This test proves
+// FetchOrigin actually blocks on wm.mu rather than merely documenting that it should:
+// it holds the lock itself, launches FetchOrigin in a goroutine, and confirms the
+// call does not return until the lock is released.
+func TestFetchOrigin_SerializedUnderMu(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	wm.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		wm.FetchOrigin()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("FetchOrigin returned before wm.mu was released — it is not serialized under wm.mu")
+	case <-time.After(150 * time.Millisecond):
+		// Still blocked, as expected.
+	}
+
+	wm.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("FetchOrigin did not complete after wm.mu was released")
 	}
 }
 

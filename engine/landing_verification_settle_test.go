@@ -537,9 +537,9 @@ func TestLandMergeTrainBatch_AlreadyDoneMember_StillMarkedForVerification(t *tes
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
