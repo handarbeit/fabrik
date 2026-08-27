@@ -35,6 +35,13 @@ type fakeReviewer struct {
 	// continues to exercise the R3 absent-file path unmodified.
 	repoConfigData []byte
 	repoConfigErr  error
+	// repoConfigOnlyAtRef, when non-empty, restricts repoConfigData to being
+	// returned only when the requested ref exactly matches — every other
+	// ref (e.g. the PR's head SHA) sees gh.ErrNotFound, simulating a
+	// .pruefer/config.yaml present at one ref and absent at another. Used
+	// by the AC2 base-ref regression test: a config "present" only at the
+	// head must have zero effect on the review.
+	repoConfigOnlyAtRef string
 
 	mu             sync.Mutex
 	submitCalls    []submitCall
@@ -62,6 +69,9 @@ func (f *fakeReviewer) FetchFileAtRef(owner, repo, path, ref string) ([]byte, er
 	f.mu.Unlock()
 	if f.repoConfigErr != nil {
 		return nil, f.repoConfigErr
+	}
+	if f.repoConfigOnlyAtRef != "" && ref != f.repoConfigOnlyAtRef {
+		return nil, gh.ErrNotFound
 	}
 	if f.repoConfigData == nil {
 		return nil, gh.ErrNotFound
@@ -760,6 +770,84 @@ func TestReviewPR_ExcludedAuthor_Skipped(t *testing.T) {
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedAuthor {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedAuthor", outcome)
+	}
+}
+
+// TestReviewPR_ResolvesRepoConfigAtBaseRef_NotHead is the #1642 AC2
+// regression test, mirroring the #1446-style base-ref invariant: a
+// .pruefer/config.yaml present only at the PR's head SHA — never at its
+// base ref — must have zero effect on the review, and the fetch itself
+// must be requested at the base ref. This must fail if resolution were
+// ever moved to the head.
+func TestReviewPR_ResolvesRepoConfigAtBaseRef_NotHead(t *testing.T) {
+	client := newFakeReviewer()
+	// A repo config attempting to exclude the PR's author is "present" only
+	// at the head SHA, not at the base ref the PR actually targets.
+	client.repoConfigData = []byte("excluded_authors:\n  - alice\n")
+	client.repoConfigOnlyAtRef = "head-sha-only"
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha-only", BaseRef: "main"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true — a repo config present only at the head must have no effect", outcome)
+	}
+
+	calls := client.fileAtRefCallArgs()
+	if len(calls) != 1 {
+		t.Fatalf("FetchFileAtRef called %d times, want 1", len(calls))
+	}
+	if calls[0].ref != "main" {
+		t.Errorf("FetchFileAtRef called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", calls[0].ref, "main")
+	}
+	if calls[0].path != DefaultConfigPath {
+		t.Errorf("FetchFileAtRef called with path = %q, want %q", calls[0].path, DefaultConfigPath)
+	}
+}
+
+// TestReviewPR_OperatorScopedKeyInRepoConfig_HasNoEffect is the #1642 AC4
+// test: a repo config naming operator-scoped keys (including #1641's
+// max_derived_repos/repo_rederivation_interval) at the PR's own base ref
+// must be ignored — asserted against the constructed ReviewRequest and the
+// operator's own Config, not the log.
+func TestReviewPR_OperatorScopedKeyInRepoConfig_HasNoEffect(t *testing.T) {
+	client := newFakeReviewer()
+	client.repoConfigData = []byte(`
+model: opus
+effort: max
+watched_repos:
+  - evil/repo
+max_derived_repos: 999999
+repo_rederivation_interval: 1s
+`)
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", BaseRef: "main"}
+	operatorCfg := Config{Model: "sonnet", Effort: "high", WatchedRepos: []string{"owner/repo"}, MaxDerivedRepos: 200}
+	outcome := ReviewPR(context.Background(), client, claude, clone, operatorCfg, "pruefer-bot[bot]", "owner", "repo", pr)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
+	}
+	calls := claude.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("claude called %d times, want 1", len(calls))
+	}
+	if calls[0].Model != "sonnet" {
+		t.Errorf("ReviewRequest.Model = %q, want unaffected operator value %q", calls[0].Model, "sonnet")
+	}
+	if calls[0].Effort != "high" {
+		t.Errorf("ReviewRequest.Effort = %q, want unaffected operator value %q", calls[0].Effort, "high")
+	}
+	// operatorCfg itself is passed by value into ReviewPR, so it cannot have
+	// been mutated by the call — this reasserts that guarantee explicitly
+	// for the fields a malicious repo config targeted above.
+	if operatorCfg.Model != "sonnet" || operatorCfg.Effort != "high" || operatorCfg.MaxDerivedRepos != 200 ||
+		!equalStrings(operatorCfg.WatchedRepos, []string{"owner/repo"}) {
+		t.Errorf("operator Config was mutated: %+v", operatorCfg)
 	}
 }
 
