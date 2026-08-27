@@ -41,6 +41,7 @@ type mockGitHubClient struct {
 	getPRBaseFn                   func(owner, repo string, prNumber int) (string, error)
 	updatePRBaseFn                func(owner, repo string, prNumber int, newBase string) error
 	mergePRFn                     func(owner, repo string, prNumber int) error
+	mergePRAtHeadSHAFn            func(owner, repo string, prNumber int, expectedHeadSHA string) error
 	closeIssueFn                  func(owner, repo string, issueNumber int) error
 	reopenIssueFn                 func(owner, repo string, issueNumber int) error
 	rateLimitStatsFn              func() (gh.RateLimitStats, gh.RateLimitStats)
@@ -99,6 +100,7 @@ type mockGitHubClient struct {
 	updateCommentCalls               []updateCommentCall
 	updateStatusCalls                []updateStatusCall
 	mergePRCalls                     []mergePRCall
+	mergePRAtHeadSHACalls            []mergePRAtHeadSHACall
 	closeIssueCalls                  []closeIssueCall
 	reopenIssueCalls                 []reopenIssueCall
 	markPRReadyCalls                 []markPRReadyCall
@@ -187,6 +189,12 @@ type updatePRBaseCall struct {
 type mergePRCall struct {
 	owner, repo string
 	prNumber    int
+}
+
+type mergePRAtHeadSHACall struct {
+	owner, repo     string
+	prNumber        int
+	expectedHeadSHA string
 }
 
 type closeIssueCall struct {
@@ -493,6 +501,17 @@ func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, prNumber)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error {
+	m.mu.Lock()
+	m.mergePRAtHeadSHACalls = append(m.mergePRAtHeadSHACalls, mergePRAtHeadSHACall{owner, repo, prNumber, expectedHeadSHA})
+	fn := m.mergePRAtHeadSHAFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber, expectedHeadSHA)
 	}
 	return nil
 }

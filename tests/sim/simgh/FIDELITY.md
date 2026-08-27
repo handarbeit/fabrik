@@ -108,22 +108,38 @@ Two consequences, and they differ in direction:
   Real GitHub re-enforces branch protection server-side at merge time and would
   refuse.
 
-**Decision: document, do not model.** Closing this gap would mean modelling
-GitHub's server-side re-check — the sim recomputing `mergeable_state`
-atomically at merge time the way GitHub's merge endpoint does. That is a
-deliberate non-goal, not an oversight: **this mirrors production's own
-exposure.** `github.Client.MergePR` (`github/prs.go:1114`) reads `mergeable`,
-then `FetchPRMergeableFields`, then `PUT .../merge` with only a `merge_method`
-— GitHub's merge endpoint accepts an optional `sha` for exactly this
-compare-and-swap and production does not send one. So the engine's gate verdict
-is equally stale against real GitHub; what saves it there is GitHub's own
-server-side re-check, which the sim has no equivalent of. Making the sim stricter
-would model a guarantee production does not actually have, which would make it
-*less* faithful, not more — the same reasoning applied to the recompute-window
+**Decision: document, do not model — for `MergePR`.** Closing this gap would
+mean modelling GitHub's server-side re-check — the sim recomputing
+`mergeable_state` atomically at merge time the way GitHub's merge endpoint
+does. That is a deliberate non-goal for the unpinned path, not an oversight:
+**this mirrors production's own exposure.** `github.Client.MergePR`
+(`github/prs.go`) reads `mergeable`, then `FetchPRMergeableFields`, then `PUT
+.../merge` with only a `merge_method` — GitHub's merge endpoint accepts an
+optional `sha` for exactly this compare-and-swap and `MergePR` does not send
+one. So the engine's gate verdict is equally stale against real GitHub for this
+call; what saves it there is GitHub's own server-side re-check, which the sim
+has no equivalent of. Making the sim stricter here would model a guarantee
+production does not actually have for `MergePR`, which would make it *less*
+faithful, not more — the same reasoning applied to the recompute-window
 double-drain below. If a future scenario genuinely needs "a required check went
 red mid-merge" modelled (#1452's own authorship is the most likely source), that
 is new work to scope separately, not a silent reopening of this decision. See
 #1498.
+
+**Except for `MergePRAtHeadSHA` (#1644).** This sibling method *does* send the
+expected head SHA, and both production and the sim reject the merge
+(`gh.ErrConflict`, from GitHub's real 409) if the live head no longer matches
+by the time the merge runs — closing exactly the "contents changed underneath
+the gate" half of this gap for callers that opt into it. It does not close the
+CI-half gap in general: a required check going red *without* the head moving
+is still not caught by either implementation (that is the residual gap the
+paragraph above describes), but a check seeded against a *new* head SHA is
+caught, because the SHA compare itself fails first. `MergePRAtHeadSHA` exists
+specifically because merge-train's singleton fast path (`trySingletonFastPath`,
+`engine/merge_train.go`) is the first caller to merge an externally-writable PR
+branch — every other `MergePR` caller merges a Fabrik-owned trial/integration/
+landing branch nobody else pushes to, where this residual exposure was never
+reachable in practice.
 
 **Risk:** low, and bounded by construction — the window only exists for a
 scenario that mutates a repo concurrently with its own `MergePR` call. A
@@ -189,7 +205,13 @@ mergeability cannot be computed without one.
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —
 commits on the base that the head lacks. This matches production, which reads
 `behind_by` from the REST compare endpoint (`compare/base...head`,
-`github/prs.go`).
+`github/prs.go`). `base`/`head` each accept either a branch name or a raw
+commit SHA (`resolveCompareRef`, `git.go`) — mirroring the real endpoint's ref
+grammar, which accepts a branch, tag, or SHA on either side. Before #1644 this
+resolved branch names only; #1644's singleton fast path compares the pinned
+base commit SHA against a member's head SHA (R3 — never a live branch read),
+which is the first production caller to pass a raw SHA rather than a branch
+name, and surfaced the gap.
 
 ### Head SHAs — **Modelled**
 

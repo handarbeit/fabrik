@@ -1386,7 +1386,44 @@ func mergeMethodAttemptOrder(strategy string) []string {
 // does not allow that method (405), it falls back through the remaining
 // methods (merge, squash, rebase, minus the one already tried) until one
 // succeeds or a non-405 error occurs.
+//
+// Every existing caller merges a Fabrik-owned branch (a trial, integration,
+// or landing PR nobody else pushes to), so a plain re-read of mergeable/
+// mergeable_state immediately before merging is sufficient staleness
+// protection. See MergePRAtHeadSHA for the externally-writable case.
 func (c *Client) MergePR(owner, repo string, prNumber int) error {
+	return c.mergePR(owner, repo, prNumber, "")
+}
+
+// MergePRAtHeadSHA merges pull request prNumber only if its head is still
+// exactly expectedHeadSHA, closing a TOCTOU gap plain MergePR cannot: MergePR's
+// own self-gate re-reads mergeable/mergeable_state live right before merging,
+// but never confirms the head is still the same commit some earlier,
+// separate check validated. That distinction is immaterial for MergePR's
+// existing callers (all merge a Fabrik-owned branch nobody else can push to),
+// but not for #1644's merge-train singleton fast path: singletonFastPathEligible
+// classifies CI completeness (ADR-1153/ADR-1441) against one specific head SHA
+// on the member's own, externally-writable PR branch, and a commit landing
+// there between that classification and the merge call would otherwise be
+// merged having never been validated by this code path — the exact false
+// positive R2/AC4 require failing closed on.
+//
+// GitHub's merge endpoint accepts the same expected-head-SHA contract natively
+// (the request's "sha" field): a request whose live head no longer matches is
+// rejected with 409, mapped here to ErrConflict, instead of silently merging
+// whatever is actually there. expectedHeadSHA must be non-empty — use MergePR
+// for the unpinned case.
+func (c *Client) MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error {
+	if expectedHeadSHA == "" {
+		return fmt.Errorf("MergePRAtHeadSHA: expectedHeadSHA must not be empty")
+	}
+	return c.mergePR(owner, repo, prNumber, expectedHeadSHA)
+}
+
+// mergePR is the shared implementation behind MergePR and MergePRAtHeadSHA.
+// expectedHeadSHA == "" means unpinned (MergePR's historical behavior);
+// non-empty pins the merge request to that head via GitHub's own "sha" field.
+func (c *Client) mergePR(owner, repo string, prNumber int, expectedHeadSHA string) error {
 	// Check PR state and mergeable status.
 	prURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
 	var prData struct {
@@ -1421,10 +1458,22 @@ func (c *Client) MergePR(owner, repo string, prNumber int) error {
 	}
 
 	for _, method := range mergeMethodAttemptOrder(c.MergeStrategy()) {
-		err = c.restPutWithResponse(mergeURL, map[string]interface{}{"merge_method": method}, &mergeResult)
+		body := map[string]interface{}{"merge_method": method}
+		if expectedHeadSHA != "" {
+			body["sha"] = expectedHeadSHA
+		}
+		err = c.restPutWithResponse(mergeURL, body, &mergeResult)
 		if err == nil {
 			logf(0, "merge", "PR #%d/%s/%s: merged using method %q\n", prNumber, owner, repo, method)
 			return nil
+		}
+		if errors.Is(err, ErrConflict) {
+			// The head moved out from under an expected-SHA merge — never a
+			// fallback-and-retry-another-method case, since a different merge
+			// method would hit the identical mismatch. Surface it as-is so the
+			// caller re-reads and decides afresh, exactly as it would for a
+			// mergeable_state that moved.
+			return fmt.Errorf("merging PR at expected head %s: %w", expectedHeadSHA, err)
 		}
 		if !errors.Is(err, ErrMethodNotAllowed) {
 			return fmt.Errorf("merging PR: %w", err)

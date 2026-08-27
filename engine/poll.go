@@ -692,6 +692,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:clear-claude-limit",
 	"fabrik:api-key-helper-detected",
 	"fabrik:tools-denied",
+	"fabrik:non-default-base-excluded",
 }
 
 // gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
@@ -2015,7 +2016,7 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 // one internal-train batch (per repo) dispatched to a single worker. Runs in the poll
 // goroutine; the enqueue is a per-item GitHub mutation idempotent via fabrik:auto-merge-enabled.
 func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []gh.ProjectItem, projectID string) {
-	var trainItems []gh.ProjectItem
+	var trainCandidates []gh.ProjectItem
 	for _, item := range items {
 		// Precedence rule 1 (FR-3): native merge queue present → ADR-058 enqueue path.
 		if e.cfg.MergeQueue != "off" && item.LinkedPRIsMergeQueueEnabled {
@@ -2038,12 +2039,22 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 			continue
 		}
 		// Precedence rule 2 (FR-3): else the internal merge train.
-		trainItems = append(trainItems, item)
+		trainCandidates = append(trainCandidates, item)
 	}
 
-	if len(trainItems) == 0 {
+	// #1647: exclude any member whose resolved base branch differs from the
+	// repository default before the batch cap and before dispatch ever snapshots
+	// batchNumbers — see filterNonDefaultBaseMembers and ADR-1647. Keep the
+	// pre-cap result (filteredTrainItems) separate from the post-cap trainItems
+	// below: the runaway-guard branch needs to know exactly which members this
+	// call excluded for a non-default base, not which members the batch cap
+	// additionally dropped.
+	filteredTrainItems := e.filterNonDefaultBaseMembers(repoKey, trainCandidates)
+
+	if len(filteredTrainItems) == 0 {
 		return
 	}
+	trainItems := filteredTrainItems
 	// FR-4: cap the internal-train batch to the first N items by entry order (ADR-059 D2),
 	// applied PER repo group. Log the truncation explicitly so operators can see it — never silent.
 	if maxBatch := e.effectiveMaxBatchSize(); len(trainItems) > maxBatch {
@@ -2052,11 +2063,17 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 	}
 	// Hook 2: pre-dispatch runaway guard check (ADR-059 D8). Handles beyond-cap Queued
 	// members that the in-flight worker couldn't reach during Hook 1 (one-poll-cycle gap).
-	// Uses the uncapped `items` slice so all Queued members are paused, not just the batch cap.
+	// Uses the uncapped `items` slice so all Queued members are paused, not just the batch cap
+	// — except any member filterNonDefaultBaseMembers just excluded this poll (#1647):
+	// markNonDefaultBaseExcluded's own comment promises such a member "remains safely in
+	// Queued, not paused, not failed, not moved," so it must never be swept into this
+	// unrelated safety pause. Batch-cap-overflow members are unaffected — they were never
+	// excluded by filterNonDefaultBaseMembers, so they remain in the pause set as before.
 	if count, tripped := e.isRunawayTripped(repoKey); tripped {
 		owner, repo := parseOwnerRepo(repoKey)
-		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(items))
-		e.fireRunawayGuard(ctx, owner, repo, items, count)
+		pauseItems := excludeNonDefaultBaseExclusions(items, trainCandidates, filteredTrainItems)
+		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(pauseItems))
+		e.fireRunawayGuard(ctx, owner, repo, pauseItems, count)
 		return
 	}
 	// Log the batch snapshot only when its composition changed since the last emission
@@ -2073,6 +2090,174 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 		e.mergeTrainBatchSnapshotSeen.Store(repoKey, sig)
 	}
 	e.dispatchMergeTrainWorker(ctx, trainItems, projectID)
+}
+
+// nonDefaultBaseExcludedLabel marks a Queued member excluded from merge-train
+// batching because its base:<branch> label resolves to something other than the
+// repository default (#1647/#1646). See markNonDefaultBaseExcluded and ADR-1647.
+const nonDefaultBaseExcludedLabel = "fabrik:non-default-base-excluded"
+
+// nonDefaultBaseExclusion resolves whether item should be excluded from merge-train
+// batching because its resolved base branch (via baseBranchForItem) differs from
+// the repository default. Returns (exclude, base, def, resolved):
+//
+//   - No base: label at all -> (false, "", "", true). Zero-cost — no WorktreeManager
+//     lookup, no git call — so R5 ("zero behaviour change for members on the default
+//     base") is free for the overwhelming common case.
+//   - base: label present but repoKey's WorktreeManager isn't registered yet (a
+//     narrow same-poll cold-start window) -> (true, "", "", false). Fail-closed
+//     rather than probabilistically included: AC1 requires a non-default-base
+//     member is "never included in a trial batch," not merely usually excluded.
+//     resolved=false suppresses the R3 comment — the true base is still unknown.
+//   - base: label present and resolves cleanly -> (base != def, base, def, true).
+//     baseBranchForItem itself falls back to the default (with its own one-time
+//     warning comment) when the labeled branch doesn't exist on the remote, so
+//     that case naturally resolves to exclude=false here — matching the Prior Art
+//     note that an unresolvable base: label must NOT be excluded.
+func (e *Engine) nonDefaultBaseExclusion(item gh.ProjectItem, repoKey string) (exclude bool, base, def string, resolved bool) {
+	if !itemHasBaseLabel(item) {
+		return false, "", "", true
+	}
+
+	e.mu.Lock()
+	wm, ok := e.worktreeManagers[repoKey]
+	e.mu.Unlock()
+	if !ok {
+		return true, "", "", false
+	}
+
+	resolvedBase, err := e.baseBranchForItem(item, wm)
+	if err != nil {
+		e.logf(item.Number, "warn", "merge-train: could not resolve base branch for #%d: %v — excluding from batching this poll\n", item.Number, err)
+		return true, "", "", false
+	}
+	resolvedDef, err := wm.DefaultBaseBranch()
+	if err != nil {
+		e.logf(item.Number, "warn", "merge-train: could not resolve default branch for #%d: %v — excluding from batching this poll\n", item.Number, err)
+		return true, "", "", false
+	}
+	return resolvedBase != resolvedDef, resolvedBase, resolvedDef, true
+}
+
+// markNonDefaultBaseExcluded posts the R3 explanatory comment and applies
+// nonDefaultBaseExcludedLabel, gated on the label's own prior absence — the
+// "fabrik:awaiting-ci non-spamming convention" R3 names. item.Comments is not
+// reliably populated for Queued items (FetchProjectBoard's shallow query omits
+// comments, and Queued items are excluded from deepFetchCandidates), so the
+// label itself — reliably present even on the shallow query — is the
+// idempotency signal here, not a comment-content scan.
+//
+// The label is applied ONLY after the comment is confirmed posted (checking
+// postComment's error, unlike the fire-and-forget postItemComment most call
+// sites use). A transient AddComment failure therefore leaves the label off,
+// so the next poll's filterNonDefaultBaseMembers call reaches this function
+// again and retries the comment — no separate settle scan or awaiting-*
+// marker label is needed, unlike fireRunawayGuard's fabrik:awaiting-runaway-alert
+// (ADR-1533) or closeIssueIfNonDefaultBase's fabrik:awaiting-close (ADR-1097):
+// both of those guard a one-shot terminal transition that is never otherwise
+// re-evaluated, whereas routeQueuedGroup re-evaluates every Queued item's
+// exclusion status every poll for as long as it stays in Queued. Found in
+// review (PR #1652, handarbeit-pruefer): the original unconditional addLabel
+// after a possibly-failed comment could silently and permanently lose R3's
+// one-time explanation for that member, with no retry path.
+func (e *Engine) markNonDefaultBaseExcluded(item gh.ProjectItem, base, def string) {
+	if hasLabel(item.Labels, nonDefaultBaseExcludedLabel) {
+		return
+	}
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — not train-batchable**\n\nIssue #%d carries `base:%s`, which differs from the repository default branch `%s`. The merge train only batches members whose base resolves to the default branch, so this item will not be included in any trial batch — it remains safely in `Queued`, not paused, not failed, not moved. Please merge its PR manually. The `%s` label clears automatically once the resolved base matches the default again.",
+		item.Number, base, def, nonDefaultBaseExcludedLabel,
+	)
+	if _, err := e.postComment(item, comment, false, true); err != nil {
+		// Already logged by postComment. Leave the label off so the next poll retries.
+		return
+	}
+	// Use the error-surfacing addLabelChecked, not addLabel: this function's own
+	// idempotency gate (the hasLabel check above) is keyed on the label actually
+	// having landed, not merely attempted. addLabel swallows AddLabelToIssue's
+	// error (log-and-continue, the right default for most call sites), which
+	// would leave the gate open forever on a transient failure here — the same
+	// comment would be reposted on every subsequent poll for as long as the
+	// label add keeps failing, undercutting R3's "post exactly once" contract.
+	// Flagged in review (PR #1652, handarbeit-pruefer) as the same class of gap
+	// this function's comment-failure handling above already closes.
+	if err := e.addLabelChecked(item, nonDefaultBaseExcludedLabel); err != nil {
+		e.logf(item.Number, "warn", "merge-train: could not add label %q for #%d after posting exclusion comment: %v — next poll will repost the comment\n", nonDefaultBaseExcludedLabel, item.Number, err)
+	}
+}
+
+// filterNonDefaultBaseMembers narrows items to only those whose resolved base
+// branch matches the repository default (#1647/#1646): the merge train's
+// single-base-per-batch design cannot correctly land a member targeting a
+// different base, so such members are excluded from batching entirely (R1)
+// instead of being silently mis-based against the default (the bug this issue
+// fixes). Called from routeQueuedGroup before the batch cap and before
+// dispatchMergeTrainWorker ever snapshots batchNumbers, so an excluded item
+// never occupies a batch-cap slot (no starvation of default-base siblings) and
+// is never part of any worker's "safe upper bound" set that
+// settleQueuedReviewFindings (ADR-1208) relies on. See ADR-1647.
+func (e *Engine) filterNonDefaultBaseMembers(repoKey string, items []gh.ProjectItem) []gh.ProjectItem {
+	var kept []gh.ProjectItem
+	for _, item := range items {
+		exclude, base, def, resolved := e.nonDefaultBaseExclusion(item, repoKey)
+		if !exclude {
+			// Previously excluded, now resolves to default again (base: label
+			// removed/changed, or the branch now exists) — self-clear, per R3's
+			// "clears automatically" wording.
+			if resolved && hasLabel(item.Labels, nonDefaultBaseExcludedLabel) {
+				e.removeLabel(item, nonDefaultBaseExcludedLabel)
+			}
+			kept = append(kept, item)
+			continue
+		}
+		if !resolved {
+			// True base not yet knowable this poll (WorktreeManager not registered,
+			// or a transient resolution error) — exclude defensively (fail-closed,
+			// AC1) but don't post the R3 comment: the condition may clear on its own
+			// next poll once the WorktreeManager is registered.
+			e.logf(item.Number, "merge-train", "base branch not yet resolvable for #%d — excluding from batching this poll, will retry\n", item.Number)
+			continue
+		}
+		// R2: log the exclusion with the member number and both branch names.
+		e.logf(item.Number, "merge-train", "excluding #%d from merge-train batching: base %q != default %q\n", item.Number, base, def)
+		e.markNonDefaultBaseExcluded(item, base, def)
+	}
+	return kept
+}
+
+// excludeNonDefaultBaseExclusions filters items to drop any member present in
+// trainCandidates but absent from filteredTrainItems — i.e. any member
+// filterNonDefaultBaseMembers just excluded this poll for a non-default base
+// (#1647). Used ahead of the runaway guard's pause+alert (routeQueuedGroup),
+// which otherwise sweeps the full uncapped items slice: without this, a
+// member markNonDefaultBaseExcluded just told "remains safely in Queued, not
+// paused" could still be paused and alerted in the very same poll cycle if
+// the runaway guard trips concurrently. Queue-enabled members (never in
+// trainCandidates at all) and batch-cap overflow (dropped only after
+// filteredTrainItems is computed, so never counted as "excluded" here) both
+// pass through unaffected — this narrows only the base-exclusion category.
+func excludeNonDefaultBaseExclusions(items, trainCandidates, filteredTrainItems []gh.ProjectItem) []gh.ProjectItem {
+	kept := make(map[int]bool, len(filteredTrainItems))
+	for _, ti := range filteredTrainItems {
+		kept[ti.Number] = true
+	}
+	excluded := make(map[int]bool)
+	for _, tc := range trainCandidates {
+		if !kept[tc.Number] {
+			excluded[tc.Number] = true
+		}
+	}
+	if len(excluded) == 0 {
+		return items
+	}
+	out := make([]gh.ProjectItem, 0, len(items))
+	for _, it := range items {
+		if excluded[it.Number] {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 // mergeTrainBatchSignature returns an order-independent signature for a Queued batch's

@@ -159,10 +159,13 @@ func (e *Engine) addLabel(item gh.ProjectItem, label string) {
 // site wants. Same three-beat idiom as applyLabelAdd (always echoing, like
 // addLabel), but AddLabelToIssue's error is returned instead of swallowed.
 //
-// Sole caller today is markCreditedLanding (landing_verification_settle.go),
-// where a silently-dropped fabrik:credited-pr:<N> write would let the settle
-// scan misread a merge-train member's own closed-not-merged PR as the credited
-// one — see that function's doc comment.
+// Callers today: markCreditedLanding (landing_verification_settle.go), where a
+// silently-dropped fabrik:credited-pr:<N> write would let the settle scan
+// misread a merge-train member's own closed-not-merged PR as the credited one
+// — see that function's doc comment; and markNonDefaultBaseExcluded (poll.go),
+// where a silently-dropped fabrik:non-default-base-excluded write would leave
+// its idempotency gate open forever, reposting the same explanatory comment
+// every poll (#1647) — see that function's doc comment.
 func (e *Engine) addLabelChecked(item gh.ProjectItem, label string) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
