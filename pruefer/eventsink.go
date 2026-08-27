@@ -116,18 +116,15 @@ var reviewTriggerActions = map[string]bool{
 }
 
 // installEventTypes are GitHub webhook event types signaling an
-// installation/repo-selection change. These trigger a full reconciliation
-// poll rather than a single-PR review: Daemon.Clients is owner-keyed
-// (execute.go's githubauth.Reconcile/ClientForRepo wiring), and while a
-// SIGHUP-triggered config reload (ADR-1640) can now dynamically mint an
-// Auth for an owner newly added to watched_repos
-// (Reconciler.MintOwnerAuth/CommitOwnerAuth), that path is driven by a
-// config change, not by these installation-scoped webhook events — an
-// existing owner gaining/losing repos under an installation, or an
-// installation appearing for an owner not yet in watched_repos, has no
-// config change to react to here. Re-checking GitHub state via a poll
-// sweep satisfies "webhooks are triggers, GitHub is truth" without
-// inventing new auth machinery for this narrower case.
+// installation/repo-selection change. These trigger a full re-derivation
+// (daemon.triggerRederivation, #1641/R2) rather than a single-PR review:
+// installing/uninstalling the App, or changing its repository selection,
+// must be picked up without a restart — Reconciler.Derive re-fetches every
+// installation's current grant live, mints a client for any newly-installed
+// owner, and detaches one that lost its installation, satisfying AC3's
+// "repo added becomes pollable, repo removed stops being polled, no
+// restart" requirement directly, rather than only re-listing PRs against an
+// unchanged repo set the way a plain reconciliation poll would.
 var installEventTypes = map[string]bool{
 	"installation":              true,
 	"installation_repositories": true,
@@ -157,12 +154,12 @@ type daemonEventSink struct {
 //
 // The pull_request branch dispatches via its own `go`, since
 // ReviewFromEvent itself blocks (on the semaphore, then optionally the PR
-// lock). The install-event branch calls triggerReconciliationPoll directly,
-// not via `go` — that's still non-blocking, but by triggerReconciliationPoll's
-// own construction (an atomic CompareAndSwap guard around an internally
-// spawned goroutine), not because this call site wraps it. If
-// triggerReconciliationPoll ever grew blocking work ahead of that
-// CompareAndSwap, this call site would need its own `go` too.
+// lock). The install-event branch calls triggerRederivation directly, not
+// via `go` — that's still non-blocking, but by triggerRederivation's own
+// construction (an atomic CompareAndSwap guard around an internally spawned
+// goroutine, mirroring triggerReconciliationPoll's own shape), not because
+// this call site wraps it. If triggerRederivation ever grew blocking work
+// ahead of that CompareAndSwap, this call site would need its own `go` too.
 //
 // This makes the per-event goroutine count itself uncapped — a burst of
 // legitimate events across many distinct PRs can pile up more goroutines
@@ -184,7 +181,7 @@ func (s *daemonEventSink) Handle(ctx context.Context, ev events.GitHubEvent) {
 		}
 		go s.daemon.ReviewFromEvent(ctx, ev.Owner, ev.Repo, prNumber)
 	case installEventTypes[ev.EventType]:
-		logf(0, "poll", "installation change event (%s) — triggering a reconciliation poll\n", ev.EventType)
-		s.daemon.triggerReconciliationPoll(ctx)
+		logf(0, "poll", "installation change event (%s) — re-deriving the repo set\n", ev.EventType)
+		s.daemon.triggerRederivation(ctx)
 	}
 }

@@ -289,21 +289,28 @@ func TestDaemon_OwnerReviewsInFlight(t *testing.T) {
 // internal/githubauth's own unexported test helpers, since this test lives
 // in a different package). ---
 
-// fakeReloadAppServer is a minimal httptest server covering exactly the
-// three GitHub App endpoints Reconcile/MintOwnerAuth need: app identity
-// (/app), installation discovery (/app/installations), and token minting
-// (/app/installations/{id}/access_tokens). Unlike internal/githubauth's own
-// fakeAppServer, this never needs to serve the manifest-exchange endpoint —
-// every test here starts from an already-bootstrapped App (an explicit
-// AppID + on-disk PEM), never the first-run flow.
+// fakeReloadAppServer is a minimal httptest server covering the GitHub App
+// endpoints Reconcile/Derive need: app identity (/app), installation
+// discovery (/app/installations), token minting
+// (/app/installations/{id}/access_tokens), and installation repo
+// enumeration (/installation/repositories) — since #1641, Derive calls the
+// latter unconditionally for every installation. Unlike internal/githubauth's
+// own fakeAppServer, this never needs to serve the manifest-exchange
+// endpoint — every test here starts from an already-bootstrapped App (an
+// explicit AppID + on-disk PEM), never the first-run flow.
 type fakeReloadAppServer struct {
-	mu        sync.Mutex
-	mintCalls map[int64]int
+	mu               sync.Mutex
+	mintCalls        map[int64]int
+	installTokenToID map[string]int64
+	// selectedRepos maps an installation ID to the repos it grants access
+	// to — populated by tests that need the derived (reviewed) set to
+	// actually contain repos, not just resolve a client per owner.
+	selectedRepos map[int64][]string
 }
 
 func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppInstallation) (*httptest.Server, *fakeReloadAppServer) {
 	t.Helper()
-	fake := &fakeReloadAppServer{mintCalls: map[int64]int{}}
+	fake := &fakeReloadAppServer{mintCalls: map[int64]int{}, installTokenToID: map[string]int64{}, selectedRepos: map[int64][]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -311,6 +318,10 @@ func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppIns
 	})
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
+			w.Write([]byte("[]"))
+			return
+		}
 		w.Write([]byte("["))
 		for i, inst := range installations {
 			if i > 0 {
@@ -335,9 +346,31 @@ func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppIns
 		fmt.Sscanf(trimmed, "%d", &instID)
 		fake.mu.Lock()
 		fake.mintCalls[instID]++
+		token := fmt.Sprintf("tok-%d-%d", instID, fake.mintCalls[instID])
+		fake.installTokenToID[token] = instID
 		fake.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"token": "tok-%d", "expires_at": %q}`, instID, time.Now().Add(time.Hour).Format(time.RFC3339))
+		fmt.Fprintf(w, `{"token": %q, "expires_at": %q}`, token, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		fake.mu.Lock()
+		instID, ok := fake.installTokenToID[auth]
+		repos := fake.selectedRepos[instID]
+		fake.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"repositories": [`))
+		for i, r := range repos {
+			if i > 0 {
+				w.Write([]byte(","))
+			}
+			fmt.Fprintf(w, `{"full_name": %q}`, r)
+		}
+		w.Write([]byte("]}"))
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -352,9 +385,10 @@ func (f *fakeReloadAppServer) mintCountFor(installationID int64) int {
 
 // setupReloadDaemon writes the given initial YAML, reconciles auth and
 // builds a Daemon against it via the real LoadConfig/githubauth.Reconcile/
-// NewDaemon production path, and returns the pieces handleReload needs.
-// args is the flag slice a later call to handleReload should reuse,
-// mirroring Execute()'s own single `args` capture.
+// NewDaemon production path (including the initial derivation, wired via
+// Daemon.Reconciler/ApplyDerivedRepos exactly as Execute does), and returns
+// the pieces handleReload needs. args is the flag slice a later call to
+// handleReload should reuse, mirroring Execute()'s own single `args` capture.
 func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.AppInstallation) (args []string, reconciler *githubauth.Reconciler, daemon *Daemon, srv *httptest.Server, fake *fakeReloadAppServer, closeLog func() error) {
 	t.Helper()
 	srv, fake = newFakeReloadAppServer(t, "pruefer-bot", installations)
@@ -372,22 +406,43 @@ func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.App
 		AppPrivateKeyPath: cfg.AppPrivateKeyPath,
 		AppStatePath:      filepath.Join(dir, "app-state.json"),
 		WatchedRepos:      cfg.WatchedRepos,
+		MaxDerivedRepos:   cfg.MaxDerivedRepos,
 		BaseURL:           srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	cfg.AppStatePath = filepath.Join(dir, "app-state.json")
+	derived := reconciler.LastDerived()
 	clients := map[string]GitHubLister{}
-	for _, owner := range distinctOwners(cfg.WatchedRepos) {
-		c, err := reconciler.ClientForRepo(context.Background(), owner, "")
+	for _, inst := range derived.Installations {
+		c, err := reconciler.ClientForRepo(context.Background(), inst.Account, "")
 		if err != nil {
 			continue
 		}
-		clients[strings.ToLower(owner)] = c
+		clients[strings.ToLower(inst.Account)] = c
 	}
 	daemon, closeLog = NewDaemon(cfg, clients, &RealClaudeInvoker{}, nil, reconciler.BotLogin())
+	daemon.Reconciler = reconciler
+	daemon.ApplyDerivedRepos(derived, clients)
 	return args, reconciler, daemon, srv, fake, closeLog
+}
+
+// waitForRederivation polls until cond is true or timeout elapses, for tests
+// that trigger an async re-derivation (daemon.triggerRederivation, invoked
+// from handleReload) and need to observe its effect.
+func waitForRederivation(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatalf("condition not met within %s", timeout)
+	}
 }
 
 // captureLogf swaps in a capturing Logf for the duration of the test and
