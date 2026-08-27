@@ -238,6 +238,52 @@ func TestUpdate_LogEvent_IssueZero_StatusLine(t *testing.T) {
 	}
 }
 
+// TestUpdate_LogEvent_IssueZero_RepoEmpty_StillHeader is a regression guard
+// for R6/AC5: non-train IssueNumber==0 lines ([poll]/[cache]/[webhook], with
+// Repo left unset) must continue to update the header status line unchanged,
+// and must not be routed to the active pane, now that a Repo-bearing
+// IssueNumber==0 event (the merge-train case) routes elsewhere.
+func TestUpdate_LogEvent_IssueZero_RepoEmpty_StillHeader(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width = 80
+	m.height = 24
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Repo: "", Tag: "cache", Message: "reconciled\n"})
+	nm := next.(Model)
+	if nm.header.statusLine != "[cache] reconciled" {
+		t.Errorf("statusLine = %q, want %q", nm.header.statusLine, "[cache] reconciled")
+	}
+	if len(nm.active.active) != 0 {
+		t.Errorf("expected active pane untouched, got %d entries", len(nm.active.active))
+	}
+}
+
+// TestUpdate_LogEvent_IssueZero_RepoSet_RoutesToActive proves the new fork:
+// an IssueNumber==0 event carrying a Repo (the merge-train case) routes to
+// the active pane, not the header — updating the train row's last line
+// rather than clobbering the single-line header status.
+func TestUpdate_LogEvent_IssueZero_RepoSet_RoutesToActive(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width = 80
+	m.height = 24
+	m.header.statusLine = "[poll] previous status"
+	keyTrain := activeJobKey("owner/repo", 0)
+	m.active.active[keyTrain] = &activeJob{Repo: "owner/repo", StageName: "Merge Train", StartedAt: time.Now()}
+
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Repo: "owner/repo", Tag: "merge-train", Message: "assembling trial\n"})
+	nm := next.(Model)
+
+	if nm.header.statusLine != "[poll] previous status" {
+		t.Errorf("statusLine = %q, want unchanged %q", nm.header.statusLine, "[poll] previous status")
+	}
+	job, ok := nm.active.active[keyTrain]
+	if !ok {
+		t.Fatal("train row missing from active")
+	}
+	if job.LastLine != "assembling trial" {
+		t.Errorf("LastLine = %q, want 'assembling trial'", job.LastLine)
+	}
+}
+
 func TestUpdate_QKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	key42 := activeJobKey("", 42)

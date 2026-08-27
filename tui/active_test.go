@@ -79,6 +79,59 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	}
 }
 
+// TestUpdate_MergeTrainRow_NonVacuous proves AC1: a merge-train job row is
+// present only when a JobStartedEvent for it has actually arrived — suppressing
+// the event (simply never sending it, since Go has no way to "not call" a
+// function conditionally in a unit test) leaves the row absent, and sending it
+// makes the row appear with the expected stage name and title. Also covers
+// AC3: a subsequent JobCompletedEvent removes the row again.
+func TestUpdate_MergeTrainRow_NonVacuous(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	keyTrain := activeJobKey("owner/repo", 0)
+
+	// Before any JobStartedEvent, the row does not exist.
+	if _, ok := m.active.active[keyTrain]; ok {
+		t.Fatal("train row present before JobStartedEvent — test setup is wrong")
+	}
+	if m.active.ActiveCount() != 0 {
+		t.Fatalf("ActiveCount() = %d before any event, want 0", m.active.ActiveCount())
+	}
+
+	start := time.Now()
+	next, _ := m.Update(JobStartedEvent{
+		IssueNumber: 0,
+		Repo:        "owner/repo",
+		Title:       "2 member(s): #1 #2",
+		StageName:   "Merge Train",
+		StartedAt:   start,
+	})
+	nm := next.(Model)
+
+	job, ok := nm.active.active[keyTrain]
+	if !ok {
+		t.Fatal("expected train row present after JobStartedEvent")
+	}
+	if job.StageName != "Merge Train" {
+		t.Errorf("StageName = %q, want %q", job.StageName, "Merge Train")
+	}
+	if job.Title != "2 member(s): #1 #2" {
+		t.Errorf("Title = %q, want %q", job.Title, "2 member(s): #1 #2")
+	}
+
+	// AC3: JobCompletedEvent removes the row.
+	next2, _ := nm.Update(JobCompletedEvent{
+		IssueNumber: 0,
+		Repo:        "owner/repo",
+		StageName:   "Merge Train",
+		Skipped:     true,
+	})
+	nm2 := next2.(Model)
+	if _, ok := nm2.active.active[keyTrain]; ok {
+		t.Error("expected train row removed after JobCompletedEvent")
+	}
+}
+
 func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	key7 := activeJobKey("", 7)
@@ -97,6 +150,86 @@ func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 	}
 	if job.LastLine != "running prompt" {
 		t.Errorf("LastLine = %q, want 'running prompt' (trailing newline stripped)", job.LastLine)
+	}
+}
+
+func TestUpdate_LogEvent_UpdatesTrainRow(t *testing.T) {
+	// A repo-level LogEvent (IssueNumber==0, Repo set) must route directly
+	// to that repo's train row via activeJobKey(Repo, 0), not through
+	// activeNumToKey (which is keyed only by issue number and would
+	// collide across concurrent trains — AC4).
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	keyTrain := activeJobKey("owner/repo", 0)
+	m.active.active[keyTrain] = &activeJob{Repo: "owner/repo", StageName: "Merge Train", StartedAt: time.Now()}
+
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Repo: "owner/repo", Tag: "merge-train", Message: "assembling trial\n"})
+	nm := next.(Model)
+
+	job, ok := nm.active.active[keyTrain]
+	if !ok {
+		t.Fatal("train row missing from active")
+	}
+	if job.LastTag != "merge-train" {
+		t.Errorf("LastTag = %q, want merge-train", job.LastTag)
+	}
+	if job.LastLine != "assembling trial" {
+		t.Errorf("LastLine = %q, want 'assembling trial' (trailing newline stripped)", job.LastLine)
+	}
+}
+
+func TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk(t *testing.T) {
+	// AC4: two concurrent trains (different repos, both IssueNumber==0)
+	// must never steal each other's log lines.
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	keyA := activeJobKey("owner/repo-a", 0)
+	keyB := activeJobKey("owner/repo-b", 0)
+	m.active.active[keyA] = &activeJob{Repo: "owner/repo-a", StageName: "Merge Train", StartedAt: time.Now()}
+	m.active.active[keyB] = &activeJob{Repo: "owner/repo-b", StageName: "Merge Train", StartedAt: time.Now()}
+
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Repo: "owner/repo-a", Tag: "merge-train", Message: "landing batch A\n"})
+	nm := next.(Model)
+
+	jobA := nm.active.active[keyA]
+	jobB := nm.active.active[keyB]
+	if jobA.LastLine != "landing batch A" {
+		t.Errorf("repo-a LastLine = %q, want 'landing batch A'", jobA.LastLine)
+	}
+	if jobB.LastLine != "" {
+		t.Errorf("repo-b LastLine = %q, want empty (untouched by repo-a's event)", jobB.LastLine)
+	}
+}
+
+// TestUpdate_JobStarted_ConcurrentTrainsDoNotShareActiveNumToKey guards
+// against a regression class distinct from TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk
+// above: that test pre-seeds a.active directly and never exercises the
+// JobStartedEvent handler itself. Two real trains both emit
+// JobStartedEvent{IssueNumber: 0}, and activeNumToKey is keyed only by
+// issue number — without a guard, the second train's JobStartedEvent would
+// clobber the first train's entry at activeNumToKey[0]. Nothing currently
+// reads activeNumToKey[0] (repo-level LogEvent routing goes through
+// activeJobKey(Repo, 0) directly against a.active — see the LogEvent case in
+// active.go), so this guard is defense-in-depth: it keeps activeNumToKey's
+// invariant ("keyed by real issue number") intact so a future per-issue
+// event type added to that map's read side can't silently misattribute
+// across two concurrent trains.
+func TestUpdate_JobStarted_ConcurrentTrainsDoNotShareActiveNumToKey(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+
+	next, _ := m.Update(JobStartedEvent{IssueNumber: 0, Repo: "owner/repo-a", StageName: "Merge Train", StartedAt: time.Now()})
+	nm := next.(Model)
+	next2, _ := nm.Update(JobStartedEvent{IssueNumber: 0, Repo: "owner/repo-b", StageName: "Merge Train", StartedAt: time.Now()})
+	nm2 := next2.(Model)
+
+	if key, ok := nm2.active.activeNumToKey[0]; ok {
+		t.Errorf("activeNumToKey[0] = %q, want no entry — repo-level rows must not populate this issue-number-keyed map", key)
+	}
+	// Both rows must still exist independently, keyed by their own composite key.
+	if _, ok := nm2.active.active[activeJobKey("owner/repo-a", 0)]; !ok {
+		t.Error("expected owner/repo-a train row present")
+	}
+	if _, ok := nm2.active.active[activeJobKey("owner/repo-b", 0)]; !ok {
+		t.Error("expected owner/repo-b train row present")
 	}
 }
 

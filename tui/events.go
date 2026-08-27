@@ -17,6 +17,7 @@ type Event interface {
 // LogEvent carries a single log line emitted by the engine.
 type LogEvent struct {
 	IssueNumber int
+	Repo        string // "owner/repo" — set for repo-level lines (e.g. merge-train), empty otherwise. Never empty for merge-train events, since repoKey always has a fallback via defaultRepo().
 	Tag         string
 	Message     string
 }
