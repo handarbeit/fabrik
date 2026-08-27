@@ -77,6 +77,8 @@ ADR-1233 Decision 5's `checkSelectedRepos` hard-errored bootstrap entirely when 
 
 The reconciler reports progress via a plain `func(format string, args ...any)` callback (`Options.Logf`), matching every other package's `logf` convention in this codebase, which `pruefer/execute.go` wires to Pruefer's existing console/structured logging. Piping progress into `pruefer/tui`'s `ptui.Event` channel instead would require `internal/githubauth` to import `pruefer/tui`, inverting the intended dependency direction (Decision 1) for a one-time startup sequence the TUI doesn't otherwise model. The issue's own example output (`✓ handarbeit/fabrik authorized` / `! shadoworg has no installation → ...`) is console-shaped, not a TUI mockup — flagged as a reasonable follow-up, not required here.
 
+**Narrow exception (2026-08-27, #1641):** the reconciliation-*progress* boundary above is unchanged — `internal/githubauth` still never imports `pruefer/tui`. But #1641's R4 ("make the derived set observable... in the log and the TUI") requires the *result* of reconciliation/derivation — which repos, from which installation — to reach the TUI, not just its progress log lines. That data crosses the boundary the same way every other daemon-observable fact already does: `pruefer/daemon.go` (which already imports both `internal/githubauth` and `pruefer/tui`) reads `githubauth.DerivedRepoSet` after a `Derive` call and re-expresses it as a plain `ptui.DerivedRepoSetEvent`/`ptui.DerivedInstallationSummary`/`ptui.DerivedRepoEntry` — the identical "re-express as a dependency-free plain type" pattern `ReviewCompletedEvent.Reason` already established for `pruefer.SkipReason`. `internal/githubauth` itself remains fully unaware the TUI exists.
+
 ### Addendum (2026-08-26): SIGHUP reload ported onto the Reconciler
 
 ADR-1640 (#1640) landed SIGHUP-triggered config reload on `main` while this branch had already deleted the `pruefer/auth.go`/`AuthSet` model that ADR-1640's original implementation was built against — a genuine modify/delete collision at merge time, not a stylistic conflict. Rather than pick a side (either would have silently dropped working functionality — reload support, or this issue's reconciler), the reload behavior was **ported** onto `internal/githubauth.Reconciler`, since the enabling fact that made this tractable is narrow: of `pruefer.Config`'s fields, only `WatchedRepos` and a couple of poll/reconciliation-interval fields are `reload:"live"` (see ADR-1640); `AppID`/`AppPrivateKeyPath`/`AppInstallationID` are all `reload:"restart"`. A reload therefore never needs to re-run manifest bootstrap or re-validate the App's identity against GitHub — it only ever needs to dynamically mint or detach per-*owner* `Auth`s under the App identity `Reconcile` already resolved once at startup.
@@ -88,6 +90,37 @@ ADR-1640 (#1640) landed SIGHUP-triggered config reload on `main` while this bran
 - `RemoveOwners(removed []string) []DetachedAuth` — detaches a removed owner's `Auth` from `Reconciler` state without stopping its refresh loop; the caller (`Daemon.drainThenStopAuth`) defers the actual stop until no review is in flight for that owner, matching ADR-1640's drain-before-cancel requirement.
 
 `pruefer/daemon.go` gained a `cfgMu sync.RWMutex` guarding `Config`/`Clients`/the concurrency semaphore together, `config()`/`client()` read accessors, and `ApplyReload` — the same shape ADR-1640 specifies, just reading through `Reconciler`'s new methods instead of `AuthSet`'s. This closes Decision 1's and Decision 5's original "no live trigger, no live-reload capability" premise: `daemon.go`'s poll loop is no longer untouched by config reload, though the *manifest/bootstrap/discovery* portions of `Reconcile` genuinely are — reload never re-enters them, by construction, since none of the fields that would require it are `reload:"live"`.
+
+### Addendum (2026-08-27, #1641): SIGHUP `watched_repos` reload no longer mints or removes owner auth
+
+#1641 inverted `Reconcile`'s discovery direction (see
+[adrs/1641-pruefer-installation-derived-repo-discovery.md](1641-pruefer-installation-derived-repo-discovery.md)):
+every installation of the operator's own App is now minted unconditionally by the new
+`Reconciler.Derive`, regardless of whether `watched_repos` names its owner. This makes
+the addendum above's premise — that a SIGHUP `watched_repos` edit needs `MintOwnerAuth`/
+`CommitOwnerAuth`/`RemoveOwners` to add or drop an owner's `Auth` — no longer true: by
+the time any reload runs, every owner the operator could possibly add to `watched_repos`
+already has a client if their installation exists at all (`Derive` doesn't consult
+`watched_repos` to decide *whom* to mint). A `watched_repos` change now only needs to
+re-intersect the (unwidened) filter against the installation grant — `pruefer/daemon.go`'s
+`triggerRederivation` calls `Derive` again (which is safe and cheap to repeat — see
+ADR-1641), rather than `handleReload` computing an owner diff and driving the two-phase
+mint/commit or detach/drain sequence itself.
+
+Concretely, `handleReload` (`pruefer/execute.go`) no longer calls `MintOwnerAuth`,
+`CommitOwnerAuth`, or `RemoveOwners` at all — those three methods remain on `Reconciler`,
+still correct, but are now exercised only via `Derive`'s own internal use of
+`RemoveOwners` (for the genuinely new installation-driven trigger, not a config-driven
+one). `Derive` does **not** call `CommitOwnerAuth` for a newly-discovered owner —
+it registers the new `Auth` via a lower-level `registerOwnerAuth` helper instead, and
+starts its refresh loop itself only when appropriate (see ADR-1641 Decision 1's
+`startLoopsForNewOwners` note: `Reconcile`'s own first call defers loop-starting to its
+caller's subsequent `RunRefreshLoops`, to avoid starting the same installation's refresh
+loop twice). `MintOwnerAuth` and `internal/githubauth/installations.go`'s
+`verifyRepoAccess` have no remaining caller in the non-test code path as of this change;
+they are deliberately left in place (not deleted) as a scoped, explicitly-noted
+deferral — see ADR-1641's own trade-offs section for why immediate removal was not
+worth the additional churn in this same change.
 
 ## Consequences
 
@@ -108,6 +141,7 @@ ADR-1640 (#1640) landed SIGHUP-triggered config reload on `main` while this bran
 - ADR-1233 (`adrs/1233-pruefer-multi-installation-auth.md`) — the owner-derived multi-installation routing (`AuthSet`/`BootstrapMulti`) this ADR's reconciler subsumes; Decisions 4 (pinned-installation compat) and 5 (`selected`-mode check, now generalized to a soft status per Decision 7 above) both carry forward.
 - ADR-1196 (`adrs/1196-extract-self-upgrade-package.md`) — the `internal/selfupgrade` engine-independence precedent `internal/githubauth`'s package boundary mirrors.
 - ADR-1640 (`adrs/1640-pruefer-config-reload.md`, #1640) — SIGHUP config reload; landed on `main` against the pre-reconciler `AuthSet` model, ported onto `internal/githubauth.Reconciler` on 2026-08-26 (see the addendum after Decision 8 above). That ADR's design rationale (the `reload:"live"|"restart"|"skip"` tag scheme, the drain-before-cancel requirement, the all-or-nothing multi-owner reload batch) is unchanged by the port — only which package implements the per-owner mint/detach primitives changed.
+- ADR-1641 (`adrs/1641-pruefer-installation-derived-repo-discovery.md`, #1641) — inverts `Reconcile`'s discovery direction (installations are now the desired state, `watched_repos` an optional filter) via the new `Reconciler.Derive`; supersedes the 2026-08-26 SIGHUP addendum's mint/remove behavior (see the 2026-08-27 addendum above) and adds the narrow TUI exception noted after Decision 8.
 - `cmd/pruefer/README.md` — Setup section rewritten in the same change to document the manifest flow as the default first-run path, with the manual registration flow kept as documented compat mode, plus new config reference rows for `github_app_state_path`/`no_browser`.
 
 **References:** [cmd/pruefer/README.md](../cmd/pruefer/README.md)

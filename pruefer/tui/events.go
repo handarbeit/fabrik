@@ -102,6 +102,54 @@ type DropEvent struct {
 
 func (DropEvent) tuiEvent() {}
 
+// DerivedInstallationSummary is one installation's contribution to a
+// DerivedRepoSetEvent — a plain re-expression of
+// internal/githubauth.DerivedInstallation, kept dependency-free the same
+// way ReviewCompletedEvent.Reason re-expresses pruefer.SkipReason as a
+// string, so this package never imports internal/githubauth.
+type DerivedInstallationSummary struct {
+	Account             string
+	InstallationID      int64
+	RepositorySelection string
+	RepoCount           int
+}
+
+// DerivedRepoEntry pairs one derived repo with the installation ID that
+// granted it — the per-repo half of R4's "exactly which repos it derived
+// and from which installation" requirement (DerivedInstallationSummary
+// above is the per-installation half).
+type DerivedRepoEntry struct {
+	Repo           string // "owner/repo"
+	InstallationID int64
+}
+
+// DerivedRepoSetEvent is emitted whenever the daemon re-derives its repo
+// set from the App's installations (#1641/R4) — at startup and on every
+// subsequent re-derivation trigger (an installation webhook event or the
+// periodic ticker). Repos is the final, filtered (watched_repos), capped
+// (max_derived_repos) set actually being reviewed; Installations describes
+// every installation found regardless of whether any of its repos survived
+// filtering/capping, so an operator can tell "no installation found" apart
+// from "installation found, but every repo was filtered/capped out."
+type DerivedRepoSetEvent struct {
+	Repos         []DerivedRepoEntry
+	Installations []DerivedInstallationSummary
+	// FilteredOut lists watched_repos entries not covered by any
+	// installation's grant (R3/AC4) — reported, not silently dropped.
+	FilteredOut []string
+	// Truncated is true when a pagination ceiling was hit while enumerating
+	// installations or an installation's accessible repos — the grant may
+	// be larger than what was actually derived.
+	Truncated bool
+	// Capped is true when max_derived_repos (R5) trimmed the union; CapApplied
+	// is the cap value in effect when Capped is true.
+	Capped     bool
+	CapApplied int
+	At         time.Time
+}
+
+func (DerivedRepoSetEvent) tuiEvent() {}
+
 // SignatureDriftEvent reports a transition in whether an event source's
 // signature verification is currently failing on every delivery over a
 // sustained window — see hookdeck.Config.OnSignatureDrift and ADR-1563.

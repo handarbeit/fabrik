@@ -71,16 +71,46 @@ type Daemon struct {
 	Config   Config
 	BotLogin string
 
-	// cfgMu guards Config, Clients, and sem together — not three
-	// independent locks — because ApplyReload's owner-addition needs
-	// WatchedRepos and its corresponding Clients entry to become visible as
-	// one atomic unit; two locks would let a reader observe the new repo in
-	// Config.WatchedRepos before its owner's client exists in Clients. sem
-	// is included because its size is derived from Config.ConcurrencyCap
-	// (see semaphore()) and a resize must not race a config read. Zero
-	// value is a ready-to-use, unlocked RWMutex, so a Daemon{} struct
-	// literal (the existing test pattern) needs no change.
+	// Reconciler is the installation-derived discovery engine (#1641):
+	// rederiveRepos calls its Derive method to re-fetch the App's current
+	// installation grant and re-populate derived/Clients below. nil (only
+	// possible in a hand-built test Daemon{} literal that never wires one,
+	// or a pinned-AppInstallationID compat deployment where re-derivation
+	// is a documented no-op — see Derive's own doc comment) makes
+	// rederiveRepos a no-op; production construction (execute.go) always
+	// sets it.
+	Reconciler *githubauth.Reconciler
+
+	// derived is the result of the most recent rederiveRepos call — the
+	// installation-derived, watched_repos-filtered, max_derived_repos-capped
+	// repo set poll()/isWatchedRepo actually consume, replacing
+	// Config.WatchedRepos as of #1641 (which is now only an input to
+	// derivation, an optional intersection filter — see Config.WatchedRepos'
+	// own doc comment). Guarded by cfgMu alongside Config/Clients: a reader
+	// must never observe a derived repo whose owner's Clients entry hasn't
+	// been committed in the same update, exactly the same invariant
+	// ApplyReload already established for Config.WatchedRepos/Clients.
+	derived githubauth.DerivedRepoSet
+
+	// cfgMu guards Config, Clients, derived, and sem together — not
+	// independent locks — because a re-derivation's owner addition needs
+	// derived and its corresponding Clients entry to become visible as one
+	// atomic unit; two locks would let a reader observe a new repo in
+	// derived before its owner's client exists in Clients. sem is included
+	// because its size is derived from Config.ConcurrencyCap (see
+	// semaphore()) and a resize must not race a config read. Zero value is
+	// a ready-to-use, unlocked RWMutex, so a Daemon{} struct literal (the
+	// existing test pattern) needs no change.
 	cfgMu sync.RWMutex
+
+	// rederiveInFlight coalesces concurrent re-derivation triggers (an
+	// installation webhook event racing the periodic ticker, or a burst of
+	// installation_repositories events) — mirrors pollInFlight's own
+	// CompareAndSwap-guarded shape below. A trigger arriving while one is
+	// already in flight is dropped: the in-flight call already re-derives
+	// current GitHub state, and any further change is still covered by the
+	// next ticker tick or the next webhook event.
+	rederiveInFlight atomic.Bool
 
 	// FabrikDir is the directory containing .pruefer/pruefer.lock. Defaults
 	// to "." (cwd) when empty.
@@ -186,6 +216,17 @@ func (d *Daemon) config() Config {
 	return d.Config
 }
 
+// derivedSet returns a snapshot of the daemon's current
+// githubauth.DerivedRepoSet, safe for concurrent use alongside a
+// rederiveRepos-triggered ApplyDerivedRepos. Every production read of the
+// effective (installation-derived, filtered, capped) repo set must go
+// through this — poll() and isWatchedRepo below are the two consumers.
+func (d *Daemon) derivedSet() githubauth.DerivedRepoSet {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.derived
+}
+
 // client resolves owner's GitHubLister via an exact map lookup, safe for
 // concurrent use alongside ApplyReload. Unlike clientForOwner, this performs
 // no case-insensitive fallback scan — callers that already have an
@@ -237,6 +278,26 @@ func (d *Daemon) ApplyReload(merged Config, addedClients map[string]GitHubLister
 	for owner, c := range addedClients {
 		d.Clients[owner] = c
 	}
+}
+
+// ApplyDerivedRepos atomically swaps in a freshly derived repo set and
+// rebuilds Clients wholesale from clients — the installation-derived analog
+// of ApplyReload (#1641), sharing its concurrency-safety shape: a reader can
+// never observe a repo in derived whose owner's Clients entry isn't there
+// yet. Unlike ApplyReload's incremental addedClients/removedOwners merge,
+// this replaces Clients wholesale rather than diffing — installation counts
+// for one operator's own dedicated App are small (their own orgs/repos, not
+// a shared-App fleet), so a full rebuild on every re-derivation is cheap and
+// avoids an entire class of incremental-diff bugs (see ADR-1641). Called
+// only from rederiveRepos, after githubauth.Reconciler.Derive has already
+// minted/committed every new owner's auth and detached every owner that lost
+// its installation (the detach-then-drain half is the caller's
+// responsibility — see RemoveOwners' doc comment, mirrored by rederiveRepos).
+func (d *Daemon) ApplyDerivedRepos(set githubauth.DerivedRepoSet, clients map[string]GitHubLister) {
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	d.derived = set
+	d.Clients = clients
 }
 
 // prGate is one PR's dispatch gate, plus the reference count that decides
@@ -531,6 +592,17 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 		}()
 	}
 
+	// The periodic re-derivation ticker (#1641/R2) runs uniformly in both
+	// poll-mode and event-driven mode — a poll-mode deployment has no
+	// installation webhook event to react to at all, and event-driven mode
+	// gets this as a low-frequency safety net alongside its own
+	// event-triggered re-derivation. Started here, before either mode's own
+	// loop, so it's running for the daemon's whole lifetime; it exits on
+	// its own once ctx is cancelled, with nothing else to join it against
+	// (mirroring the refresh-loop goroutines' own unmanaged-but-ctx-scoped
+	// lifecycle in internal/githubauth.Reconciler.RunRefreshLoops).
+	go d.runRederivationTicker(ctx)
+
 	if d.EventSource != nil {
 		return d.runEventDriven(ctx)
 	}
@@ -544,7 +616,7 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 func (d *Daemon) runPollOnly(ctx context.Context) error {
 	initial := d.config()
 	logf(0, "poll", "pruefer starting: watching %d repo(s), poll interval %s, concurrency %d\n",
-		len(initial.WatchedRepos), pollInterval(initial), d.effectiveConcurrency())
+		len(d.derivedSet().Repos), pollInterval(initial), d.effectiveConcurrency())
 
 	// lastUpgradeCheck is local to Run, not a Daemon field: Run is the sole
 	// sequential caller (both TUI and headless modes call d.Run), so there's
@@ -624,7 +696,7 @@ func (d *Daemon) runEventDriven(ctx context.Context) error {
 	initial := d.config()
 	fallback := d.reconciliationFallbackInterval()
 	logf(0, "poll", "pruefer starting: watching %d repo(s) in event-driven mode, reconciliation fallback %s, concurrency %d\n",
-		len(initial.WatchedRepos), fallback, d.effectiveConcurrency())
+		len(d.derivedSet().Repos), fallback, d.effectiveConcurrency())
 
 	if initial.ReconciliationStartup {
 		logf(0, "poll", "running startup reconciliation poll\n")
@@ -816,61 +888,243 @@ func (d *Daemon) triggerReconciliationPoll(ctx context.Context) {
 	}()
 }
 
-// poll runs one polling cycle across every watched repo, dispatching
+// repoRederivationInterval returns Config.RepoRederivationInterval, falling
+// back to DefaultRepoRederivationInterval for an absent/non-positive value —
+// mirrors pollInterval/reconciliationFallbackInterval's own fallback
+// convention.
+func (d *Daemon) repoRederivationInterval() time.Duration {
+	if v := d.config().RepoRederivationInterval; v > 0 {
+		return v
+	}
+	return DefaultRepoRederivationInterval
+}
+
+// rederiveRepos is the single entry point every re-derivation trigger
+// (startup, an installation/installation_repositories webhook event, and
+// the periodic ticker below) converges on (#1641/R2): it re-fetches the
+// App's current installation grant via Reconciler.Derive, resolves a
+// GitHubLister for every installation found, and atomically applies both to
+// the daemon via ApplyDerivedRepos. A nil Reconciler (only possible in a
+// hand-built test Daemon{} literal that never wires one) makes this a no-op
+// — production construction (execute.go) always sets it.
+//
+// Derive's own maxRepos<=0 "no cap" convention means Config.MaxDerivedRepos
+// is passed straight through with no additional fallback here — unlike
+// PollInterval/ConcurrencyCap's zero-means-default convention, MaxDerivedRepos'
+// own doc comment documents zero/negative as an explicit operator opt-out
+// (R5), and LoadConfig has already resolved "unset" to DefaultMaxDerivedRepos
+// by the time Config reaches here — see that field's doc comment.
+func (d *Daemon) rederiveRepos(ctx context.Context) {
+	if d.Reconciler == nil {
+		return
+	}
+	cfg := d.config()
+	set, detached, err := d.Reconciler.Derive(ctx, cfg.WatchedRepos, cfg.MaxDerivedRepos, func(format string, args ...any) {
+		logf(0, "derive", format+"\n", args...)
+	})
+	if err != nil {
+		logf(0, "warn", "re-deriving repo set from installations: %v — keeping the previous derived set\n", err)
+		return
+	}
+
+	// Resolve one GitHubLister per installation Derive found — regardless
+	// of whether any of its repos survived the watched_repos filter/cap, so
+	// an owner whose repos are all filtered out today can still be minted
+	// and ready the moment the filter changes (e.g. a SIGHUP watched_repos
+	// edit, which triggers this same rederiveRepos call — see execute.go's
+	// handleReload — not a local re-intersection against a cached result).
+	clients := make(map[string]GitHubLister, len(set.Installations))
+	for _, inst := range set.Installations {
+		client, err := d.Reconciler.ClientForRepo(ctx, inst.Account, "")
+		if err != nil {
+			logf(0, "warn", "no client for installed owner %q after derivation: %v\n", inst.Account, err)
+			continue
+		}
+		clients[strings.ToLower(inst.Account)] = client
+	}
+
+	d.ApplyDerivedRepos(set, clients)
+	logRederivedRepos(set)
+	d.emit(ptui.DerivedRepoSetEvent{
+		Repos:         derivedRepoEntries(set),
+		Installations: derivedInstallationSummaries(set),
+		FilteredOut:   append([]string(nil), set.FilteredOut...),
+		Truncated:     set.Truncated,
+		Capped:        set.Capped,
+		CapApplied:    set.CapApplied,
+		At:            time.Now(),
+	})
+
+	// Owners that lost their installation between this and the previous
+	// derivation are drained-then-stopped exactly like a SIGHUP-removed
+	// owner (ADR-1640) — an in-flight review dispatched before this
+	// re-derivation may still hold a *gh.Client backed by one of these
+	// Auths, so it must be allowed to finish before the refresh loop stops.
+	for _, det := range detached {
+		go d.drainThenStopAuth(ctx, det.Owner, det.Auth)
+	}
+}
+
+// logRederivedRepos logs the derived set's contents and provenance (R4) —
+// the failure mode this prevents is a repo silently joining or leaving the
+// review set with no record (the same class of invisibility as #1428/#1563).
+func logRederivedRepos(set githubauth.DerivedRepoSet) {
+	for _, inst := range set.Installations {
+		if inst.MintError != "" {
+			logf(0, "derive", "installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
+			continue
+		}
+		logf(0, "derive", "installation %d (%s, repository_selection=%s): %d repo(s) accessible\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
+	}
+	suffix := ""
+	if set.Capped {
+		suffix = fmt.Sprintf(" (capped from %d by max_derived_repos=%d)", set.PreCapCount, set.CapApplied)
+	}
+	if set.Truncated {
+		suffix += " — WARNING: a pagination ceiling was hit while enumerating installations/repos; the actual grant may be larger than shown"
+	}
+	logf(0, "derive", "derived %d repo(s) to review across %d installation(s)%s\n", len(set.Repos), len(set.Installations), suffix)
+	for _, f := range set.FilteredOut {
+		logf(0, "derive", "watched_repos entry %q is not covered by any installation's grant — excluded\n", f)
+	}
+}
+
+// derivedRepoNames extracts set.Repos' "owner/repo" names, for
+// ptui.DerivedRepoSetEvent — kept a plain []string (rather than exposing
+// githubauth.DerivedRepo to the tui package) so pruefer/tui stays free of a
+// dependency on internal/githubauth, mirroring ReviewCompletedEvent.Reason's
+// existing "re-express as a plain type" convention.
+func derivedRepoNames(set githubauth.DerivedRepoSet) []string {
+	out := make([]string, len(set.Repos))
+	for i, dr := range set.Repos {
+		out[i] = dr.Repo
+	}
+	return out
+}
+
+// derivedRepoEntries re-expresses set.Repos as ptui.DerivedRepoEntry —
+// "owner/repo" paired with its granting installation ID — the per-repo half
+// of R4's "exactly which repos it derived and from which installation"
+// requirement DerivedRepoSetEvent carries (derivedRepoNames above discards
+// that pairing; it exists only for tui.New's plain-name seed).
+func derivedRepoEntries(set githubauth.DerivedRepoSet) []ptui.DerivedRepoEntry {
+	out := make([]ptui.DerivedRepoEntry, len(set.Repos))
+	for i, dr := range set.Repos {
+		out[i] = ptui.DerivedRepoEntry{Repo: dr.Repo, InstallationID: dr.InstallationID}
+	}
+	return out
+}
+
+// derivedInstallationSummaries re-expresses set.Installations as
+// ptui.DerivedInstallationSummary, for the same reason derivedRepoNames
+// re-expresses set.Repos.
+func derivedInstallationSummaries(set githubauth.DerivedRepoSet) []ptui.DerivedInstallationSummary {
+	out := make([]ptui.DerivedInstallationSummary, len(set.Installations))
+	for i, inst := range set.Installations {
+		out[i] = ptui.DerivedInstallationSummary{
+			Account: inst.Account, InstallationID: inst.InstallationID,
+			RepositorySelection: inst.RepositorySelection, RepoCount: inst.RepoCount,
+		}
+	}
+	return out
+}
+
+// triggerRederivation re-derives the repo set (see rederiveRepos) and then
+// triggers a follow-up reconciliation poll — so a repo an installation
+// event just added becomes pollable promptly, in the same cycle, rather
+// than only on the next fallback-interval tick (AC3) — coalescing
+// concurrent triggers via rederiveInFlight exactly as triggerReconciliationPoll
+// coalesces concurrent polls.
+func (d *Daemon) triggerRederivation(ctx context.Context) {
+	if !d.rederiveInFlight.CompareAndSwap(false, true) {
+		logf(0, "derive", "re-derivation already in flight — coalescing this trigger\n")
+		return
+	}
+	go func() {
+		defer d.rederiveInFlight.Store(false)
+		d.rederiveRepos(ctx)
+		d.triggerReconciliationPoll(ctx)
+	}()
+}
+
+// runRederivationTicker periodically calls triggerRederivation on
+// RepoRederivationInterval, independent of any installation webhook event —
+// the R2 mechanism poll-mode deployments need (no webhook event to react to
+// at all) and a low-frequency safety net for event-driven mode alongside its
+// own event-triggered re-derivation. One uniform ticker for both modes,
+// started unconditionally by Run, rather than two mode-specific mechanisms.
+func (d *Daemon) runRederivationTicker(ctx context.Context) {
+	interval := d.repoRederivationInterval()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if next := d.repoRederivationInterval(); next != interval {
+				interval = next
+				ticker.Reset(interval)
+			}
+			d.triggerRederivation(ctx)
+		}
+	}
+}
+
+// poll runs one polling cycle across every derived repo, dispatching
 // eligible PRs to ReviewPR through a concurrency-capped semaphore shared
 // across the whole cycle (not per-repo) — Pruefer's claude capacity is one
 // subscription shared across every watched repo, not one per repo.
 func (d *Daemon) poll(ctx context.Context) {
 	var wg sync.WaitGroup
 
-	// One snapshot for the whole cycle: WatchedRepos is read exactly once
-	// here rather than once per loop iteration, so a reload that lands
-	// mid-cycle can't make this loop observe a different repo list than it
-	// started with. A repo removed mid-cycle is simply not polled on the
-	// *next* cycle — this one still runs against the set it started with,
-	// including finishing any review it already dispatched (ADR-1640's R3).
-	cfg := d.config()
+	// One snapshot for the whole cycle: the derived set is read exactly once
+	// here rather than once per loop iteration, so a re-derivation that
+	// lands mid-cycle can't make this loop observe a different repo list
+	// than it started with. A repo removed mid-cycle is simply not polled
+	// on the *next* cycle — this one still runs against the set it started
+	// with, including finishing any review it already dispatched
+	// (ADR-1640's R3, unchanged by #1641's derivation source swap).
+	derived := d.derivedSet()
 
-	for _, repoSpec := range cfg.WatchedRepos {
-		owner, repo, ok := splitOwnerRepo(repoSpec)
+	for _, dr := range derived.Repos {
+		client, ok := d.client(strings.ToLower(dr.Owner))
 		if !ok {
-			logf(0, "warn", "skipping malformed watched repo %q (want owner/repo)\n", repoSpec)
+			// Expected when an owner's installation was found but minting
+			// failed this round (see Reconciler.Derive's mintErrors). Not
+			// transient in general: it recurs every poll cycle until the
+			// next successful re-derivation. Skip rather than panic.
+			logf(0, "warn", "no client for owner %q (repo %s) — skipping this repo until the next re-derivation succeeds\n", dr.Owner, dr.Repo)
 			continue
 		}
-		client, ok := d.client(strings.ToLower(owner))
-		if !ok {
-			// Expected when an owner has no resolved App installation (see
-			// internal/githubauth.Reconcile, which already logged a guided-
-			// install URL for this owner at startup). Reconcile does not
-			// re-run after startup, so this is not transient: it recurs
-			// every poll cycle until the operator installs the App and
-			// restarts Pruefer. Skip rather than panic.
-			logf(0, "warn", "no client for owner %q (repo %s) — install the GitHub App on %q, then restart Pruefer to pick it up; skipping this repo until then\n", owner, repoSpec, owner)
-			continue
-		}
-		repoName := owner + "/" + repo
 		pollAt := time.Now()
-		prs, err := client.ListOpenPRs(owner, repo)
+		prs, err := client.ListOpenPRs(dr.Owner, dr.RepoName)
 		if err != nil {
-			logf(0, "warn", "listing open PRs for %s/%s: %v — skipping this repo this cycle\n", owner, repo, err)
-			d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, Err: err.Error()})
+			logf(0, "warn", "listing open PRs for %s: %v — skipping this repo this cycle\n", dr.Repo, err)
+			d.emit(ptui.RepoPollEvent{Repo: dr.Repo, At: pollAt, Err: err.Error()})
 			continue
 		}
-		d.emit(ptui.RepoPollEvent{Repo: repoName, At: pollAt, PRCount: len(prs)})
+		d.emit(ptui.RepoPollEvent{Repo: dr.Repo, At: pollAt, PRCount: len(prs)})
 		for _, pr := range prs {
-			d.reviewOne(ctx, &wg, client, owner, repo, pr)
+			d.reviewOne(ctx, &wg, client, dr.Owner, dr.RepoName, pr)
 		}
 	}
 	wg.Wait()
 
-	for _, owner := range distinctOwners(cfg.WatchedRepos) {
-		client, ok := d.client(strings.ToLower(owner))
+	seenOwner := make(map[string]bool, len(derived.Repos))
+	for _, dr := range derived.Repos {
+		key := strings.ToLower(dr.Owner)
+		if seenOwner[key] {
+			continue
+		}
+		seenOwner[key] = true
+		client, ok := d.client(key)
 		if !ok {
 			continue
 		}
 		if reporter, ok := client.(RateLimitReporter); ok {
 			rest, _ := reporter.RateLimitStats()
-			d.emit(ptui.RateLimitSnapshotEvent{Owner: owner, Stats: rest})
+			d.emit(ptui.RateLimitSnapshotEvent{Owner: dr.Owner, Stats: rest})
 		}
 	}
 }
@@ -960,108 +1214,32 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 	})
 }
 
-// isWatchedRepo reports whether owner/repo is one of Config.WatchedRepos.
-// poll() never needs this check — it only ever iterates WatchedRepos in the
-// first place — but event-triggered dispatch (ReviewFromEvent) must check
-// explicitly: Daemon.Clients is owner-keyed, not repo-keyed, and an owner's
-// installation token can plausibly cover repos beyond what Pruefer is
-// configured to watch. In particular, the Hookdeck adapter creates its
-// session with webhook_ids: [] (see hookdeck/client.go's createSession) —
-// "every connection visible to this API key," not scoped to watched repos —
-// so a webhook event for an unwatched repo under a watched owner is a
-// plausible real delivery, not just a hypothetical one.
+// isWatchedRepo reports whether owner/repo is one of the daemon's currently
+// derived repos (#1641 — was Config.WatchedRepos directly, pre-derivation).
+// poll() never needs this check — it only ever iterates the derived set in
+// the first place — but event-triggered dispatch (ReviewFromEvent) must
+// check explicitly: Daemon.Clients is owner-keyed, not repo-keyed, and an
+// owner's installation token can plausibly cover repos beyond the derived
+// (filtered/capped) set Pruefer is actually reviewing. In particular, the
+// Hookdeck adapter creates its session with webhook_ids: [] (see
+// hookdeck/client.go's createSession) — "every connection visible to this
+// API key," not scoped to the derived set — so a webhook event for a
+// covered-but-unreviewed repo under a watched owner is a plausible real
+// delivery, not just a hypothetical one.
 // Matching is case-insensitive: GitHub treats owner and repository names as
 // case-insensitive, and the two sides of this comparison have different
 // provenance — `owner`/`repo` come from the webhook payload's
 // `repository.owner.login`/`repository.name` (GitHub's canonical casing at
-// delivery time), while WatchedRepos is hand-typed config. A casing
-// divergence between them, including one introduced by a later owner or repo
-// rename, would otherwise silently drop every event for that repo.
+// delivery time), while the derived set's Repo field comes from whatever
+// casing FetchInstallationRepositories/the watched_repos filter used. A
+// casing divergence between them, including one introduced by a later owner
+// or repo rename, would otherwise silently drop every event for that repo.
 func (d *Daemon) isWatchedRepo(owner, repo string) bool {
 	target := owner + "/" + repo
-	for _, spec := range d.config().WatchedRepos {
-		if strings.EqualFold(spec, target) {
+	for _, dr := range d.derivedSet().Repos {
+		if strings.EqualFold(dr.Repo, target) {
 			return true
 		}
 	}
 	return false
-}
-
-// splitOwnerRepo splits "owner/repo" into its two parts. Returns ok=false
-// for anything else (missing/extra slash, empty parts).
-func splitOwnerRepo(spec string) (owner, repo string, ok bool) {
-	parts := strings.Split(spec, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
-}
-
-// distinctOwners returns the distinct owners of every well-formed
-// "owner/repo" entry in watchedRepos, in first-seen order. Malformed entries
-// are skipped here — poll() already logs and skips them independently.
-//
-// Dedup is case-insensitive (keyed on the lower-cased owner, keeping the
-// first-seen literal casing in the result), mirroring
-// internal/githubauth's distinctOwnersLogging: GitHub org/user logins are
-// case-insensitive, so "MyOrg/repo1" and "myorg/repo2" name the same
-// account. d.Clients (built by execute.go from this same function) is
-// itself keyed by lower-cased owner for the same reason — an exact-case
-// dedup here would produce a second "distinct" owner with no corresponding
-// d.Clients entry, silently dropping that repo from every poll cycle.
-func distinctOwners(watchedRepos []string) []string {
-	seen := make(map[string]bool)
-	var owners []string
-	for _, spec := range watchedRepos {
-		owner, _, ok := splitOwnerRepo(spec)
-		if !ok {
-			continue
-		}
-		key := strings.ToLower(owner)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		owners = append(owners, owner)
-	}
-	return owners
-}
-
-// newlyWatchedOwners returns the distinct owners present in cand's
-// WatchedRepos but absent from old's, in cand's first-seen order — the set
-// a config reload must mint a token for before it can be applied
-// (ADR-1640). Adding a repo under an already-watched owner never appears
-// here. Comparison is case-insensitive, matching distinctOwners' own dedup.
-func newlyWatchedOwners(old, cand Config) []string {
-	oldOwners := make(map[string]bool)
-	for _, o := range distinctOwners(old.WatchedRepos) {
-		oldOwners[strings.ToLower(o)] = true
-	}
-	var added []string
-	for _, o := range distinctOwners(cand.WatchedRepos) {
-		if !oldOwners[strings.ToLower(o)] {
-			added = append(added, o)
-		}
-	}
-	return added
-}
-
-// noLongerWatchedOwners returns the distinct owners present in old's
-// WatchedRepos but absent from cand's, in old's first-seen order — the set
-// a config reload must prune auth/client state for via
-// internal/githubauth.Reconciler.RemoveOwners. Removing one repo under an
-// owner that still has another watched repo never appears here — the
-// mirror image of newlyWatchedOwners.
-func noLongerWatchedOwners(old, cand Config) []string {
-	candOwners := make(map[string]bool)
-	for _, o := range distinctOwners(cand.WatchedRepos) {
-		candOwners[strings.ToLower(o)] = true
-	}
-	var removed []string
-	for _, o := range distinctOwners(old.WatchedRepos) {
-		if !candOwners[strings.ToLower(o)] {
-			removed = append(removed, o)
-		}
-	}
-	return removed
 }

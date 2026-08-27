@@ -135,6 +135,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repos = comp.(RepoPaneComponent)
 		return m, nil
 
+	case DerivedRepoSetEvent:
+		comp, _ := m.repos.Update(msg)
+		m.repos = comp.(RepoPaneComponent)
+		return m, nil
+
 	case ReviewStartedEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)

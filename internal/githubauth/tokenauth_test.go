@@ -65,6 +65,16 @@ type fakeAppServer struct {
 	// request (simulating a transient listing failure) without affecting
 	// installation-token minting.
 	failRepoList func(installationID int64) bool
+	// neverShortPage, when true, makes both /app/installations and
+	// /installation/repositories ignore the requested page and always
+	// return their full item list — simulating a server that never returns
+	// a short page, i.e. forcing FetchAppInstallations/
+	// FetchInstallationRepositories to hit their pagination ceiling
+	// (truncated=true). false (the default, and what every existing test
+	// wants) instead returns the full list on page 1 and an empty page
+	// thereafter, so real pagination terminates after exactly one request —
+	// matching this fake server's pre-pagination behavior.
+	neverShortPage bool
 
 	mintCount atomic.Int32
 
@@ -85,6 +95,10 @@ func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpi
 		json.NewEncoder(w).Encode(map[string]interface{}{"slug": f.slug, "id": 1})
 	})
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		if !f.neverShortPage && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+			return
+		}
 		raw := make([]map[string]interface{}, len(f.installations))
 		for i, inst := range f.installations {
 			raw[i] = map[string]interface{}{
@@ -132,6 +146,10 @@ func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpi
 		if f.failRepoList != nil && f.failRepoList(instID) {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"message":"simulated repo-list failure"}`))
+			return
+		}
+		if !f.neverShortPage && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []map[string]interface{}{}})
 			return
 		}
 		repos := f.selectedRepos[instID]

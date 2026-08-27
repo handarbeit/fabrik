@@ -44,10 +44,12 @@ func Execute() error {
 	// Deliberately no cfg.AppID == 0 hard error here (unlike pre-#1253
 	// behavior): a fresh install with no App ID yet is exactly what
 	// githubauth.Reconcile's manifest bootstrap flow below handles — see
-	// adrs/1253-github-app-manifest-auth-reconciler.md.
-	if len(cfg.WatchedRepos) == 0 {
-		return fmt.Errorf("no watched repos configured (set watched_repos, PRUEFER_REPOS, or --repos)")
-	}
+	// adrs/1253-github-app-manifest-auth-reconciler.md. Nor is there a
+	// cfg.WatchedRepos == 0 hard error (unlike pre-#1641 behavior): with no
+	// watched_repos configured, the daemon now derives its repo set
+	// entirely from the App's installations (AC1) — WatchedRepos is an
+	// optional narrowing filter (R3), not a required primary input. See
+	// ADR-1641.
 
 	// Wire the package-level Logf hook (per cfg.LogFile/useTUI) before
 	// anything below logs a line — including githubauth.Reconcile's own
@@ -113,6 +115,7 @@ func Execute() error {
 		AppPrivateKeyPath: cfg.AppPrivateKeyPath,
 		AppStatePath:      cfg.AppStatePath,
 		WatchedRepos:      cfg.WatchedRepos,
+		MaxDerivedRepos:   cfg.MaxDerivedRepos,
 		NoBrowser:         cfg.NoBrowser,
 		Logf:              func(format string, args ...any) { logf(0, "auth", format+"\n", args...) },
 	})
@@ -128,17 +131,20 @@ func Execute() error {
 		}
 	})
 
-	clients := make(map[string]GitHubLister, len(distinctOwners(cfg.WatchedRepos)))
-	for _, owner := range distinctOwners(cfg.WatchedRepos) {
-		client, err := auth.ClientForRepo(ctx, owner, "")
+	// Reconcile has already performed the initial derivation (its own call
+	// to Derive) — build the daemon's initial Clients/derived state from
+	// that result (auth.LastDerived()) rather than deriving a second time
+	// here, and log the repo set/provenance it found (R4).
+	initialDerived := auth.LastDerived()
+	logRederivedRepos(initialDerived)
+	clients := make(map[string]GitHubLister, len(initialDerived.Installations))
+	for _, inst := range initialDerived.Installations {
+		client, err := auth.ClientForRepo(ctx, inst.Account, "")
 		if err != nil {
-			logf(0, "warn", "no authorized client for owner %q yet — repos under it will be skipped until reconciled: %v\n", owner, err)
+			logf(0, "warn", "no authorized client for owner %q yet — repos under it will be skipped until the next re-derivation: %v\n", inst.Account, err)
 			continue
 		}
-		// Keyed by lower-cased owner — see daemon.go's distinctOwners and
-		// poll()'s d.Clients lookups, which both normalize case the same
-		// way for this exact reason.
-		clients[strings.ToLower(owner)] = client
+		clients[strings.ToLower(inst.Account)] = client
 	}
 
 	// NewDaemon's own wireLogf call is a no-op here (Logf was already wired
@@ -146,6 +152,8 @@ func Execute() error {
 	// favor of the one already captured, which is what actually owns the
 	// open log file.
 	daemon, _ := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, auth.BotLogin())
+	daemon.Reconciler = auth
+	daemon.ApplyDerivedRepos(initialDerived, clients)
 	// waitRefreshLoops must run before closeLog: the refresh-loop goroutines
 	// spawned above are unmanaged by Daemon.Run's own lifecycle (unlike its
 	// internal poll/review goroutines, which Run joins before returning), so
@@ -214,7 +222,7 @@ func Execute() error {
 				return
 			case <-hupCh:
 				logf(0, "reload", "SIGHUP received — reloading config\n")
-				handleReload(ctx, args, auth, daemon)
+				handleReload(ctx, args, daemon)
 			}
 		}
 	}()
@@ -227,24 +235,22 @@ func Execute() error {
 
 // handleReload processes one SIGHUP (ADR-1640): re-reads config via
 // LoadConfig(args), merges it against daemon's currently running config
-// (applyConfigReload), mints a token for any newly-watched owner
-// (MintOwnerAuth, all-or-nothing across the whole reload — see that
-// method's doc comment), and only once every step has succeeded does it
-// apply the merged config (and any newly-minted clients) to daemon and log
-// a diff-style summary.
+// (applyConfigReload), and applies the merged config to daemon.
 //
-// A failure at any step — a malformed/invalid config file, or a newly
-// watched owner with no matching App installation — leaves daemon and
-// reconciler completely untouched: nothing is committed until every owner
-// in the batch has minted successfully. Nothing here cancels a running
-// review, drops the Hookdeck EventSource, or resets its dedupe ring — those
-// are untouched by construction, since this function never rebuilds or
-// reaches into any of them. This includes a removed owner's installation
-// token: its refresh loop is only ever stopped once
-// Daemon.drainThenStopAuth (spawned below) has confirmed no review is still
-// in flight for that owner, so an in-flight review's remaining GitHub calls
-// never lose a valid token out from under them.
-func handleReload(ctx context.Context, args []string, reconciler *githubauth.Reconciler, daemon *Daemon) {
+// Since #1641, this no longer mints or removes any owner's installation
+// auth itself: every installation of the operator's own App is already
+// minted unconditionally by Reconciler.Derive (called from rederiveRepos),
+// regardless of whether watched_repos names it — a watched_repos edit only
+// changes which of those already-authorized repos are *reviewed*, not which
+// owners have a client. So a changed WatchedRepos or MaxDerivedRepos
+// triggers a fresh re-derivation (daemon.triggerRederivation) instead: this
+// does still make a live call to re-list each installation's accessible
+// repos (a WatchedRepos-only edit doesn't strictly need to re-mint any
+// token, since Derive reuses an already-known owner's client unchanged —
+// see its own doc comment), but requires no bespoke owner-diff/mint/detach
+// logic here, reusing the exact same re-derivation path installation events
+// and the periodic ticker already use.
+func handleReload(ctx context.Context, args []string, daemon *Daemon) {
 	cand, err := LoadConfig(args)
 	if err != nil {
 		logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
@@ -264,56 +270,23 @@ func handleReload(ctx context.Context, args []string, reconciler *githubauth.Rec
 
 	old := daemon.config()
 	merged, diff := applyConfigReload(old, cand)
-
-	newOwners := newlyWatchedOwners(old, merged)
-	type mintedOwner struct {
-		owner       string
-		auth        *githubauth.Auth
-		mintedFresh bool
-	}
-	minted := make([]mintedOwner, 0, len(newOwners))
-	for _, owner := range newOwners {
-		reloadLogf := func(format string, args ...any) { logf(0, "reload", format+"\n", args...) }
-		a, fresh, err := reconciler.MintOwnerAuth(owner, merged.WatchedRepos, reloadLogf)
-		if err != nil {
-			logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
-			return
-		}
-		minted = append(minted, mintedOwner{owner: owner, auth: a, mintedFresh: fresh})
-	}
-
-	addedClients := make(map[string]GitHubLister, len(minted))
-	for _, m := range minted {
-		installationID := m.auth.InstallationID
-		prefix := fmt.Sprintf("installation %d: ", installationID)
-		client := reconciler.CommitOwnerAuth(ctx, m.owner, m.auth, m.mintedFresh, func(format string, args ...any) {
-			logf(0, "auth", prefix+format, args...)
-		})
-		addedClients[strings.ToLower(m.owner)] = client
-	}
-
-	// Owners no longer present in watched_repos are pruned only now, after
-	// every newly-watched owner in this same batch has already minted
-	// successfully — an earlier prune (e.g. right after computing merged)
-	// would violate atomicity if a later owner's mint then failed and
-	// aborted the whole reload above: the removed owner's client would
-	// already be gone even though the reload as a whole never took effect.
-	// RemoveOwners only detaches each removed (non-pinned) owner's *Auth
-	// from the Reconciler's own bookkeeping — it deliberately does NOT stop
-	// its refresh goroutine yet. That happens below, once
-	// drainThenStopAuth confirms no review is still in flight for the
-	// owner being removed.
-	removedOwners := noLongerWatchedOwners(old, merged)
-	detached := reconciler.RemoveOwners(removedOwners)
-
-	removedLowered := make([]string, len(removedOwners))
-	for i, o := range removedOwners {
-		removedLowered[i] = strings.ToLower(o)
-	}
-	daemon.ApplyReload(merged, addedClients, removedLowered)
+	daemon.ApplyReload(merged, nil, nil)
 	logReloadSummary(diff)
 
-	for _, d := range detached {
-		go daemon.drainThenStopAuth(ctx, d.Owner, d.Auth)
+	if len(diff.ReposAdded) > 0 || len(diff.ReposRemoved) > 0 || fieldChanged(diff.FieldsChanged, "MaxDerivedRepos") {
+		logf(0, "reload", "watched_repos/max_derived_repos changed — re-deriving the effective repo set\n")
+		daemon.triggerRederivation(ctx)
 	}
+}
+
+// fieldChanged reports whether changes contains an entry for the named
+// Config field — used by handleReload to decide whether a reload should
+// trigger a fresh re-derivation.
+func fieldChanged(changes []FieldChange, name string) bool {
+	for _, c := range changes {
+		if c.Field == name {
+			return true
+		}
+	}
+	return false
 }

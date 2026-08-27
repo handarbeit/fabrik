@@ -84,6 +84,20 @@ func TestModel_RepoPollEventRoutesToRepoPane(t *testing.T) {
 	}
 }
 
+// TestModel_DerivedRepoSetEventRoutesToRepoPane covers #1641/R4's TUI
+// plumbing: a DerivedRepoSetEvent must reach the repos pane through the
+// same Model.Update dispatch every other daemon event uses.
+func TestModel_DerivedRepoSetEventRoutesToRepoPane(t *testing.T) {
+	m := New(nil, time.Now())
+	next, _ := m.Update(DerivedRepoSetEvent{
+		Repos: []DerivedRepoEntry{{Repo: "handarbeit/fabrik", InstallationID: 111}},
+	})
+	m = next.(Model)
+	if _, ok := m.repos.repos["handarbeit/fabrik"]; !ok {
+		t.Fatalf("repos pane = %+v, want handarbeit/fabrik present after DerivedRepoSetEvent", m.repos.repos)
+	}
+}
+
 func TestModel_ReviewLifecycleRoutesToActiveHistoryAndFooter(t *testing.T) {
 	m := New(nil, time.Now())
 	start := time.Now()
