@@ -280,6 +280,16 @@ and should recognize.
   automatically once the permission configuration is fixed and a later
   invocation isn't denied — no manual removal needed. The outcome is
   identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`.
+- **`fabrik:non-default-base-excluded`** — Set on a Queued merge-train
+  member whose `base:<branch>` label resolves to something other than
+  the repository default, excluding it from internal-train batching
+  entirely (the train has no way to correctly land a member targeting a
+  different base than the rest of the batch). The member is left
+  untouched in `Queued` for a manual merge — never paused, never
+  failed, never moved. Clears automatically once the resolved base
+  matches the default again (the `base:` label removed or changed) —
+  `routeQueuedGroup` re-evaluates every Queued item every poll, so no
+  settle scan is needed. See ADR-1647.
 
 ## Notes for skill authors
 
