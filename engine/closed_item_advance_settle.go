@@ -51,8 +51,11 @@ import (
 // closed item stranded there — whatever the cause (a merge-train batch member
 // closed by a human merge outside the train, or a pre-#1072 stray item from the
 // old holding-stage-blind NextStage) — is rescued exactly like any other stage,
-// UNLESS a merge-train worker is currently in flight for that item's repo
-// (mergeTrainWorkerActive). That guard is the one real race here: an item can
+// UNLESS a merge-train worker is currently in flight for that item's repo, for
+// any base partition (mergeTrainWorkerActiveForRepo — this item's own resolved
+// base partition isn't known here, so #1648 makes this a repo-wide "is
+// anything live" check rather than an exact-partition lookup). That guard is
+// the one real race here: an item can
 // be closed-without-merging while it is still a live batch member mid-assembly
 // or mid-bisection, and this scan must not yank it out from under the worker.
 // Once the worker exits, finishTrain clears the marker and the item is safe to
@@ -95,7 +98,7 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 			if stage.CleanupWorktree || stage.Name == "Validate" {
 				continue
 			}
-			if stage.HoldingStage && e.mergeTrainWorkerActive(itemOwnerRepoString(item, e.defaultRepo())) {
+			if stage.HoldingStage && e.mergeTrainWorkerActiveForRepo(itemOwnerRepoString(item, e.defaultRepo())) {
 				continue
 			}
 		}

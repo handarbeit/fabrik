@@ -8,8 +8,9 @@ import (
 // per-poll detector of unresolved review-thread feedback arriving on a Queued
 // merge-train member's linked PR while it sits out of reach of the ordinary
 // review-reinvoke path (#1208). Sourced directly from board.Items via
-// groupQueuedByRepo — the same holding-stage-column filter and closed/fabrik:paused
-// exclusion handleMergeTrainBatch's routeQueuedGroup already applies — rather than
+// groupQueuedByRepoAndBase — the same holding-stage-column filter, closed/fabrik:paused
+// exclusion, and (since #1648) per-(repo,base) partitioning handleMergeTrainBatch's
+// routeQueuedGroup already applies — rather than
 // deepFetchCandidates: itemMayNeedWork unconditionally excludes HoldingStage items
 // from that path, so a Queued member's reviewThreads are never populated by the
 // normal poll pipeline at all. This scan calls FetchItemDetails itself, exactly as
@@ -52,8 +53,8 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 	if hs == nil {
 		return
 	}
-	for _, g := range groupQueuedByRepo(board.Items, hs.Name, e.defaultRepo()) {
-		batchNumbers, _ := e.mergeTrainBatchMembers(g.repoKey)
+	for _, g := range e.groupQueuedByRepoAndBase(board.Items, hs.Name, e.defaultRepo()) {
+		batchNumbers, _ := e.mergeTrainBatchMembers(g.trainKey)
 		for _, item := range g.items {
 			// Precedence rule 1 (FR-3, mirrors routeQueuedGroup): a native-merge-queue
 			// member is not an internal-train member — ejectMember has no meaning here.
@@ -95,11 +96,11 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 			}
 
 			if batchNumbers[item.Number] {
-				e.logf(item.Number, "queued-review-settle", "%d unresolved review-thread finding(s) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(findings), item.Number, g.repoKey)
+				e.logf(item.Number, "queued-review-settle", "%d unresolved review-thread finding(s) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(findings), item.Number, g.trainKey)
 				e.markPendingReviewEject(g.repoKey, item.Number, len(findings))
 				continue
 			}
-			e.logf(item.Number, "queued-review-settle", "%d unresolved review-thread finding(s) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(findings), item.Number, g.repoKey)
+			e.logf(item.Number, "queued-review-settle", "%d unresolved review-thread finding(s) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(findings), item.Number, g.trainKey)
 			e.ejectQueuedMemberForReviewFindings(board.ProjectID, item, len(findings))
 		}
 	}
