@@ -303,7 +303,10 @@ func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
 	}
 
 	d := &Daemon{
-		Clients: map[string]GitHubLister{"ownerA": clientA, "ownerB": clientB},
+		// Clients is keyed by lower-cased owner — see distinctOwners' and
+		// poll()'s doc comments for why (execute.go, the real caller,
+		// always lower-cases when populating this map).
+		Clients: map[string]GitHubLister{"ownera": clientA, "ownerb": clientB},
 		Claude:  claude,
 		Clone:   clone,
 		Config: Config{
@@ -429,6 +432,19 @@ func TestSplitOwnerRepo(t *testing.T) {
 	}
 }
 
+func TestDistinctOwners(t *testing.T) {
+	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
+	want := []string{"a", "b"}
+	if len(got) != len(want) {
+		t.Fatalf("distinctOwners = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("distinctOwners[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	dir := t.TempDir()
 	client := newFakeLister()
@@ -456,6 +472,74 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first Daemon.Run did not exit after context cancellation")
 	}
+}
+
+// TestDaemonRun_PreAcquiredLockNotReacquiredOrReleased covers the hand-off
+// execute.go relies on: it acquires the lock itself (mirroring Execute's
+// call to acquireLock before githubauth.Reconcile), hands it to Daemon via
+// preAcquiredLock, and confirms Run neither tries to acquire its own lock
+// (which would fail — flock is per-open-file-description, so a second
+// os.OpenFile+Flock from the same process on the same path blocks/fails
+// exactly as it would from a second process) nor releases the caller's
+// lock when it returns (releasing it is the caller's responsibility, since
+// the caller may need the lock to stay held past Run's own lifetime — e.g.
+// Execute's defer runs after Run returns). Without this, a Daemon built the
+// way Execute builds it (preAcquiredLock set) could either fail to start
+// (if Run ignored the field) or leave the lock unexpectedly released out
+// from under a caller still relying on it.
+func TestDaemonRun_PreAcquiredLockNotReacquiredOrReleased(t *testing.T) {
+	dir := t.TempDir()
+	lockFile, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+	defer func() {
+		if lockFile != nil {
+			releaseLock(lockFile)
+		}
+	}()
+
+	client := newFakeLister()
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	d := &Daemon{
+		Clients:         map[string]GitHubLister{"owner": client},
+		Claude:          claude,
+		Clone:           clone,
+		Config:          Config{PollInterval: time.Hour},
+		FabrikDir:       dir,
+		preAcquiredLock: lockFile,
+	}
+
+	// Cancelled up front rather than after a sleep: Run's own loop calls
+	// poll() once synchronously before ever reaching its ctx.Done() select,
+	// so if Run wrongly tried to reacquire the lock we already hold, it
+	// would fail immediately inside that first call — no warm-up delay is
+	// needed to observe that failure, and this avoids depending on an
+	// arbitrary sleep duration being "long enough."
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run with a pre-acquired lock returned an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit after context cancellation")
+	}
+
+	// The lock must still be held by us — Run must not have released it.
+	if !lockHeld(t, d.lockPath()) {
+		t.Error("lock was released by Run, but releasing a preAcquiredLock is the caller's responsibility")
+	}
+
+	if err := releaseLock(lockFile); err != nil {
+		t.Fatalf("releaseLock: %v", err)
+	}
+	lockFile = nil // released; skip the deferred double-release
 }
 
 // lockHeld reports whether some other process/goroutine currently holds an

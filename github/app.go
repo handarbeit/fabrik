@@ -9,11 +9,21 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 )
+
+// ErrAppUnauthorized is returned by appRequest when GitHub responds 401 or
+// 403 to an App-JWT-authenticated call: the JWT was rejected outright,
+// distinct from a transient network failure or 5xx. Together with
+// ErrNotFound (rest.go, reused here for 404), callers can use errors.Is to
+// distinguish "the App's identity was actively rejected" — worth treating as
+// a sign the App may have been deleted — from a transient failure that
+// merely warrants a retry.
+var ErrAppUnauthorized = errors.New("app unauthorized")
 
 // appHTTPTimeout bounds every GitHub App auth-bootstrap HTTP call (JWT-based
 // installation discovery and token minting). These are small, infrequent
@@ -140,6 +150,12 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 		return fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		switch resp.StatusCode {
+		case 401, 403:
+			return fmt.Errorf("GitHub App API returned %d: %s%s: %w", resp.StatusCode, string(body), authErrorHint(resp.StatusCode), ErrAppUnauthorized)
+		case 404:
+			return fmt.Errorf("GitHub App API returned 404: %s: %w", string(body), ErrNotFound)
+		}
 		return fmt.Errorf("GitHub App API returned %d: %s%s", resp.StatusCode, string(body), authErrorHint(resp.StatusCode))
 	}
 	if result == nil {
@@ -156,6 +172,15 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 // installation discovery: Pruefer watches whatever repos the App is
 // installed on, so adding a repo requires only a GitHub-side installation
 // change, not a Pruefer config or code change (see ADR-1113).
+//
+// Capped at 100 results (GitHub's max per_page, requested explicitly —
+// GitHub's own default is only 30) rather than following the Link header to
+// fetch further pages; a warning is logged (not silently truncated) when
+// exactly 100 are returned, since more installations may exist. Matches the
+// same convention as ListOpenPRs (prs.go): a self-hosted App realistically
+// has far fewer installations than this cap, so full pagination isn't
+// warranted, but silently truncating past it would make an owner beyond
+// page 1 look uninstalled and trigger a spurious guided-install prompt.
 func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, error) {
 	var raw []struct {
 		ID      int64 `json:"id"`
@@ -164,8 +189,11 @@ func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, error) {
 		} `json:"account"`
 		RepositorySelection string `json:"repository_selection"`
 	}
-	if err := appRequest("GET", baseURL, "/app/installations", jwt, &raw); err != nil {
+	if err := appRequest("GET", baseURL, "/app/installations?per_page=100", jwt, &raw); err != nil {
 		return nil, fmt.Errorf("fetching app installations: %w", err)
+	}
+	if len(raw) == 100 {
+		logf(0, "app", "FetchAppInstallations: received exactly 100 results — more installations may exist (pagination not implemented)\n")
 	}
 	out := make([]AppInstallation, len(raw))
 	for i, inst := range raw {
@@ -182,14 +210,28 @@ func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, error) {
 // enumerate. Unlike the App-JWT-authenticated calls above, this endpoint is
 // scoped to the installation's own identity: it must be authenticated with
 // that installation's access token, not the App's JWT.
+//
+// Capped at 100 results (GitHub's max per_page, requested explicitly —
+// GitHub's own default is only 30) rather than following the Link header to
+// fetch further pages; a warning is logged (not silently truncated) when
+// exactly 100 are returned, since more accessible repositories may exist —
+// see FetchAppInstallations' doc comment for the same convention and its
+// rationale. Unlike installation counts, a "selected"-mode installation
+// granting more than 100 repos is plausible for a larger org, so a missed
+// repo beyond page 1 would be reported by verifyRepoAccess as unauthorized
+// even though access is actually granted; the warning at least surfaces
+// that the result may be incomplete instead of failing silently.
 func FetchInstallationRepositories(baseURL, installationToken string) ([]string, error) {
 	var result struct {
 		Repositories []struct {
 			FullName string `json:"full_name"`
 		} `json:"repositories"`
 	}
-	if err := appRequest("GET", baseURL, "/installation/repositories", installationToken, &result); err != nil {
+	if err := appRequest("GET", baseURL, "/installation/repositories?per_page=100", installationToken, &result); err != nil {
 		return nil, fmt.Errorf("fetching installation repositories: %w", err)
+	}
+	if len(result.Repositories) == 100 {
+		logf(0, "app", "FetchInstallationRepositories: received exactly 100 results — more accessible repositories may exist (pagination not implemented)\n")
 	}
 	out := make([]string, len(result.Repositories))
 	for i, r := range result.Repositories {
