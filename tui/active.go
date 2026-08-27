@@ -51,7 +51,15 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			IsComment:   ev.IsComment,
 			StartedAt:   ev.StartedAt,
 		}
-		a.activeNumToKey[ev.IssueNumber] = key
+		// activeNumToKey is keyed only by issue number, so it must stay
+		// unpopulated for repo-level rows (IssueNumber==0, e.g. the merge
+		// train) — two concurrent trains would otherwise clobber each
+		// other's entry at key 0. Repo-level lookups go through
+		// activeJobKey(ev.Repo, 0) directly against a.active instead (see
+		// the LogEvent case below).
+		if ev.IssueNumber != 0 {
+			a.activeNumToKey[ev.IssueNumber] = key
+		}
 		delete(a.blocked, key)
 
 	case IssueBlockedEvent:
@@ -110,6 +118,16 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 					job.LastLine = strings.TrimRight(ev.Message, "\n")
 				}
 			}
+		} else if ev.Repo != "" {
+			// Repo-level lines (e.g. merge-train) route directly via the
+			// (Repo, 0) composite key, bypassing activeNumToKey — that map
+			// is keyed only by issue number and would collide across two
+			// concurrent trains, which both use IssueNumber 0 (AC4).
+			key := activeJobKey(ev.Repo, 0)
+			if job, ok := a.active[key]; ok {
+				job.LastTag = ev.Tag
+				job.LastLine = strings.TrimRight(ev.Message, "\n")
+			}
 		}
 
 	case tea.KeyMsg:
@@ -129,7 +147,12 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		case "l":
 			keys := a.sortedActiveKeys()
 			if a.activeIdx < len(keys) {
-				if job, ok := a.active[keys[a.activeIdx]]; ok {
+				if job, ok := a.active[keys[a.activeIdx]]; ok && job.IssueNumber != 0 {
+					// job.IssueNumber==0 is the merge train's row (#1661) — there's
+					// no per-issue worktree to watch, so openWatchInlineCmd would
+					// shell out to `fabrik watch ... 0` for a worktree that was
+					// never created. Silently no-op, matching this switch's
+					// existing "not present" guards above.
 					return a, openWatchInlineCmd(job.IssueNumber, job.Repo)
 				}
 			}
