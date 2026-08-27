@@ -100,6 +100,52 @@ func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 	}
 }
 
+func TestUpdate_LogEvent_UpdatesTrainRow(t *testing.T) {
+	// A repo-level LogEvent (IssueNumber==0, Repo set) must route directly
+	// to that repo's train row via activeJobKey(Repo, 0), not through
+	// activeNumToKey (which is keyed only by issue number and would
+	// collide across concurrent trains — AC4).
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	keyTrain := activeJobKey("owner/repo", 0)
+	m.active.active[keyTrain] = &activeJob{Repo: "owner/repo", StageName: "Merge Train", StartedAt: time.Now()}
+
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Repo: "owner/repo", Tag: "merge-train", Message: "assembling trial\n"})
+	nm := next.(Model)
+
+	job, ok := nm.active.active[keyTrain]
+	if !ok {
+		t.Fatal("train row missing from active")
+	}
+	if job.LastTag != "merge-train" {
+		t.Errorf("LastTag = %q, want merge-train", job.LastTag)
+	}
+	if job.LastLine != "assembling trial" {
+		t.Errorf("LastLine = %q, want 'assembling trial' (trailing newline stripped)", job.LastLine)
+	}
+}
+
+func TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk(t *testing.T) {
+	// AC4: two concurrent trains (different repos, both IssueNumber==0)
+	// must never steal each other's log lines.
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	keyA := activeJobKey("owner/repo-a", 0)
+	keyB := activeJobKey("owner/repo-b", 0)
+	m.active.active[keyA] = &activeJob{Repo: "owner/repo-a", StageName: "Merge Train", StartedAt: time.Now()}
+	m.active.active[keyB] = &activeJob{Repo: "owner/repo-b", StageName: "Merge Train", StartedAt: time.Now()}
+
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Repo: "owner/repo-a", Tag: "merge-train", Message: "landing batch A\n"})
+	nm := next.(Model)
+
+	jobA := nm.active.active[keyA]
+	jobB := nm.active.active[keyB]
+	if jobA.LastLine != "landing batch A" {
+		t.Errorf("repo-a LastLine = %q, want 'landing batch A'", jobA.LastLine)
+	}
+	if jobB.LastLine != "" {
+		t.Errorf("repo-b LastLine = %q, want empty (untouched by repo-a's event)", jobB.LastLine)
+	}
+}
+
 func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 	// LogEvent for an issue not in active map should not panic
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
