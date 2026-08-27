@@ -1255,7 +1255,7 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	eng.webhookMgr = wm
 
 	member := makeTrainItem(7, "Runaway Issue")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 20)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 20)
 
 	labels, err := cache.FetchLabels("owner", "repo", 7)
 	if err != nil {
@@ -1738,10 +1738,10 @@ func TestDispatchMergeTrainWorker_SkipsWhenAlreadyAssembling(t *testing.T) {
 
 	// Pre-populate in-flight state.
 	existingState := &mergeTrainWorkerState{assembling: true, trialName: "existing"}
-	eng.mergeTrainInFlight.Store("owner/repo", existingState)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), existingState)
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
-	eng.dispatchMergeTrainWorker(context.Background(), batch, "")
+	eng.dispatchMergeTrainWorker(context.Background(), batch, "", "main")
 
 	// No goroutine should have been launched (wg count stays 0).
 	done := make(chan struct{})
@@ -1764,11 +1764,11 @@ func TestDispatchMergeTrainWorker_LogsGreenState(t *testing.T) {
 
 	// Pre-populate with green CI result.
 	existingState := &mergeTrainWorkerState{assembling: false, prNum: 99, CIResult: TrainCIGreen}
-	eng.mergeTrainInFlight.Store("owner/repo", existingState)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), existingState)
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	// Just verify it doesn't panic or launch a worker.
-	eng.dispatchMergeTrainWorker(context.Background(), batch, "")
+	eng.dispatchMergeTrainWorker(context.Background(), batch, "", "main")
 }
 
 func TestDispatchMergeTrainWorker_EmptyBatch_NoOp(t *testing.T) {
@@ -1776,8 +1776,8 @@ func TestDispatchMergeTrainWorker_EmptyBatch_NoOp(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
-	eng.dispatchMergeTrainWorker(context.Background(), nil, "")
-	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{}, "")
+	eng.dispatchMergeTrainWorker(context.Background(), nil, "", "main")
+	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{}, "", "main")
 	// Should not panic or store anything.
 }
 
@@ -1795,6 +1795,88 @@ func TestSanitizeBranchName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("sanitizeBranchName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestTrialBelongsToBase_RejectsPrefixCollision is a direct regression guard (found in
+// review, #1648) for a bare strings.HasPrefix match on "merge-train-<sanitized>-": a base
+// whose sanitized name is itself a hyphen-prefix of a different base's sanitized name (e.g.
+// "main" vs "main-hotfix") must NOT be reported as belonging to the shorter base — the
+// unix-timestamp segment always starts immediately after the true prefix, so the character
+// right after the matched prefix must be a digit. Without this, reconstructTrainState's
+// stale-open-PR-close and orphan-branch-sweep paths (the safety-critical gate this function
+// exists for) would wrongly treat a sibling partition's live trial for "main-hotfix" as
+// belonging to "main" and destroy it — exactly the cross-partition destruction #1648 added
+// this function to prevent.
+func TestTrialBelongsToBase_RejectsPrefixCollision(t *testing.T) {
+	// A genuine "main-hotfix" trial must not be reported as belonging to "main".
+	hotfixTrial := "fabrik/merge-train/merge-train-main-hotfix-1787790738"
+	if trialBelongsToBase(hotfixTrial, "main") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false (prefix collision: this trial belongs to \"main-hotfix\", not \"main\")", hotfixTrial, "main")
+	}
+	if !trialBelongsToBase(hotfixTrial, "main-hotfix") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (exact match)", hotfixTrial, "main-hotfix")
+	}
+
+	// A true "main" trial must still match "main", including a bisection sub-trial suffix.
+	mainTrial := "fabrik/merge-train/merge-train-main-1787790738"
+	if !trialBelongsToBase(mainTrial, "main") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true", mainTrial, "main")
+	}
+	mainSubTrial := "fabrik/merge-train/merge-train-main-1787790738-t1"
+	if !trialBelongsToBase(mainSubTrial, "main") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (bisection sub-trial)", mainSubTrial, "main")
+	}
+
+	// Not a merge-train branch at all → never belongs to any base.
+	if trialBelongsToBase("refs/heads/unrelated-branch", "main") {
+		t.Error("trialBelongsToBase on a non-merge-train branch = true, want false")
+	}
+}
+
+// TestTrialBelongsToBase_RejectsDigitSuffixCollision is a direct regression guard
+// (found in review, #1648, second pass) for a gap the first-character-only digit
+// check (TestTrialBelongsToBase_RejectsPrefixCollision's fix) left open: a sibling
+// base whose name is a hyphen-prefix of another AND whose own suffix segment
+// happens to start with a digit. Real bases "release" and "release-2": a trial
+// for "release-2" checked against "release" leaves a remainder of "2-<ts>", whose
+// first character is a digit but which is not actually a valid "<unix-ts>[-t<n>]"
+// suffix — it must still be rejected. The fix matches the remainder against the
+// exact end-anchored grammar nextTrialName produces, not just its first byte.
+func TestTrialBelongsToBase_RejectsDigitSuffixCollision(t *testing.T) {
+	// A genuine "release-2" trial must not be reported as belonging to "release".
+	release2Trial := "fabrik/merge-train/merge-train-release-2-1787790738"
+	if trialBelongsToBase(release2Trial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false (digit-suffix collision: this trial belongs to \"release-2\", not \"release\")", release2Trial, "release")
+	}
+	if !trialBelongsToBase(release2Trial, "release-2") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (exact match)", release2Trial, "release-2")
+	}
+
+	// A true "release" trial (and its bisection sub-trial) must still match "release".
+	releaseTrial := "fabrik/merge-train/merge-train-release-1787790738"
+	if !trialBelongsToBase(releaseTrial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true", releaseTrial, "release")
+	}
+	releaseSubTrial := "fabrik/merge-train/merge-train-release-1787790738-t1"
+	if !trialBelongsToBase(releaseSubTrial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (bisection sub-trial)", releaseSubTrial, "release")
+	}
+
+	// A base literally containing a "-tN"-shaped segment as part of its own real
+	// name must not be mistaken for a shorter base's bisection sub-trial: the
+	// grammar match is end-anchored, so trailing content after "-t<n>" (the real
+	// trial's own timestamp) correctly disqualifies both the wrong shorter-base
+	// hypotheses.
+	weirdTrial := "fabrik/merge-train/merge-train-release-5-t2-1787790738"
+	if trialBelongsToBase(weirdTrial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false", weirdTrial, "release")
+	}
+	if trialBelongsToBase(weirdTrial, "release-5") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false", weirdTrial, "release-5")
+	}
+	if !trialBelongsToBase(weirdTrial, "release-5-t2") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (exact match)", weirdTrial, "release-5-t2")
 	}
 }
 
@@ -1968,12 +2050,12 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	n := len(createdPRs)
@@ -1988,10 +2070,10 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	mu.Unlock()
 
 	// Landing runs on TrainCIGreen and clears the in-flight entry when done.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after landing completes")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared after landing completes")
 	}
 	if state.CIResult != TrainCIGreen {
@@ -2050,7 +2132,7 @@ func TestMergeTrainWorker_TUIJobRow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", defaultPartitionBase, batch)
 
 	events := collectEvents(ch, 20*time.Millisecond)
 
@@ -2159,8 +2241,8 @@ func TestMergeTrainWorker_TwoRepos_EventsDoNotCrossTalk(t *testing.T) {
 	// TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk in tui/active_test.go.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, stateA, "owner-a", "repo-a", []gh.ProjectItem{itemA})
-	eng.runMergeTrainWorker(ctx, stateB, "owner-b", "repo-b", []gh.ProjectItem{itemB})
+	eng.runMergeTrainWorker(ctx, stateA, "owner-a", "repo-a", defaultPartitionBase, []gh.ProjectItem{itemA})
+	eng.runMergeTrainWorker(ctx, stateB, "owner-b", "repo-b", defaultPartitionBase, []gh.ProjectItem{itemB})
 
 	events := collectEvents(ch, 20*time.Millisecond)
 
@@ -2263,12 +2345,12 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// #1 must have been rerouted off Queued (the ejection), not landed.
 	if len(client.updateStatusCalls) == 0 {
@@ -2303,10 +2385,10 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 
 	// The worker must have re-formed and landed #2 normally — trainInFlight/store
 	// liveness clears only once the (re-formed) train actually finishes.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared once the re-formed train finishes")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared once the re-formed train finishes")
 	}
 
@@ -2380,11 +2462,11 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 	// Since both modify counter.txt, the first merge goes in, second conflicts.
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	prs := createdPRs
@@ -2461,12 +2543,12 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	prs := createdPRs
@@ -2490,10 +2572,10 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 		t.Error("expected account-wide Claude suspension to be active after the usage-limit hit")
 	}
 	// In-flight entry must still be cleared despite the fatal error (ADR-067).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after fatal assembly error")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared after fatal assembly error")
 	}
 }
@@ -2531,12 +2613,12 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	prs := createdPRs
@@ -2546,10 +2628,10 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 		t.Errorf("expected 0 draft PRs for zero-survivor batch, got %d", prs)
 	}
 	// In-flight entry must be cleared (FR-6: no silent abandonment).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after zero-survivor batch")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared after zero-survivor batch")
 	}
 }
@@ -2626,11 +2708,11 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	n := len(createdPRs)
@@ -2672,18 +2754,18 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
-	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", batch)
+	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", "main", batch)
 	if ok {
 		t.Fatal("expected prepareTrainWorker to fail with no holding stage configured")
 	}
 
-	if _, found := eng.mergeTrainInFlight.Load("owner/repo"); found {
+	if _, found := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); found {
 		t.Error("expected mergeTrainInFlight cleared by prepareTrainWorker's own-failure defer")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness cleared by prepareTrainWorker's own-failure defer")
 	}
 
@@ -2745,7 +2827,7 @@ func TestPrepareTrainWorker_SemaphoreWait_LogsWaitingMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, _, ok := eng.prepareTrainWorker(ctx, state, "owner", "repo", batch)
+	_, _, ok := eng.prepareTrainWorker(ctx, state, "owner", "repo", defaultPartitionBase, batch)
 	if ok {
 		t.Fatal("expected prepareTrainWorker to fail — the semaphore was never freed")
 	}
@@ -2946,9 +3028,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 		trialName: "merge-train-main-12345",
 		projectID: "PVT_test",
 	}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// FR-1 + connectivity: integration PR created with correct title, the batch
 	// marker, AND a Closes #N per member issue (auto-closes them on merge, linking
@@ -3058,9 +3140,9 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	if createPRCalled {
 		t.Error("CreatePR must not be called when an existing integration PR is found (FR-1 skip)")
@@ -3111,9 +3193,9 @@ func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	if createPRCalled {
 		t.Error("CreatePR must not be called — the draft CI PR must be reused (regression: 422 collision)")
@@ -3169,9 +3251,9 @@ func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// FR-2 skip: MergePR must not be called.
 	if mergePRCalled {
@@ -3222,9 +3304,9 @@ func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// Only the Queued member should be advanced; the Done member must be skipped.
 	client.mu.Lock()
@@ -3283,9 +3365,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	advanced := len(client.updateStatusCalls)
@@ -3936,12 +4018,12 @@ func TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPat
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -4006,12 +4088,12 @@ func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *test
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -4080,9 +4162,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	advanced := len(client.updateStatusCalls)
@@ -4136,7 +4218,7 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	// Pre-seed stale ejection counts from a prior train.
 	eng.mergeTrainEjectionsMu.Lock()
@@ -4144,7 +4226,7 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 	eng.mergeTrainEjectionCounts["owner/repo#2"] = 1
 	eng.mergeTrainEjectionsMu.Unlock()
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// After landing, both counters must be zeroed.
 	eng.mergeTrainEjectionsMu.Lock()
@@ -4226,9 +4308,9 @@ func TestLandMergeTrainBatch_ClosedUnmergedTrialPR_EscalatesInsteadOfLanding(t *
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	if mergeCalled {
 		t.Error("MergePR must never be called for a closed-unmerged trial PR (R2/R5)")
@@ -4329,9 +4411,9 @@ func TestLandMergeTrainBatch_DroppedMemberNotInBatchBody_EscalatesThatMemberOnly
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	updateStatus := append([]updateStatusCall(nil), client.updateStatusCalls...)
@@ -4555,11 +4637,11 @@ func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	if got := rv.count(); got != 1 {
 		t.Errorf("green common path must cost exactly 1 combined validation (zero bisection), got %d", got)
@@ -4575,7 +4657,7 @@ func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
 	if merges != 1 {
 		t.Errorf("expected the integration PR to be merged once (batch landed), got %d", merges)
 	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight cleared after green landing")
 	}
 }
@@ -4590,11 +4672,11 @@ func TestMergeTrainBisect_SinglePoisoner(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// #3 ejected exactly once.
 	if c := ejectionCommentCount(client, 3); c != 1 {
@@ -4640,11 +4722,11 @@ func TestMergeTrainBisect_RepeatedEjectionPauses(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	paused, awaiting := false, false
@@ -4679,11 +4761,11 @@ func TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	comments := ejectionCommentBodies(client, 3)
 	if len(comments) != 1 {
@@ -4753,11 +4835,11 @@ func TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	comments := ejectionCommentBodies(client, 3)
 	if len(comments) != 1 {
@@ -4786,11 +4868,11 @@ func TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	comments := ejectionCommentBodies(client, 3)
 	if len(comments) != 1 {
@@ -4826,11 +4908,11 @@ func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// AC1: handleRedBatch (multi-member bisection machinery) must never be reached.
 	if redBatchHookCalls != 0 {
@@ -4908,11 +4990,11 @@ func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	if got := rv.count(); got != 1 {
 		t.Fatalf("expected exactly 1 validation trial after the first episode, got %d", got)
@@ -5266,11 +5348,11 @@ func TestMergeTrainBisect_PauseCommentNamesCause(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	var pauseBody string
@@ -5303,12 +5385,12 @@ func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
 
 	batch := makeSeamBatch(4)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	if !strings.Contains(out, "cost cap") {
@@ -5348,12 +5430,12 @@ func TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition(t *testing.T) {
 
 	batch := makeSeamBatch(4)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	if !strings.Contains(out, "one-at-a-time") {
@@ -5411,12 +5493,12 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 
 	batch := makeSeamBatch(4)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	// Fell back to one-at-a-time (not a bespoke isolation path).
@@ -5475,12 +5557,12 @@ func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testi
 
 	batch := makeSeamBatch(2)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	if !strings.Contains(out, "one-at-a-time") {
@@ -5722,7 +5804,7 @@ func TestDissolveBatch(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
 	members := []gh.ProjectItem{makeTrainItem(1, "One"), makeTrainItem(2, "Two")}
@@ -5764,7 +5846,7 @@ func TestDissolveBatch_NoPR(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
 
 	eng.dissolveBatch(state, p, 0, "merge-train-main-1", []gh.ProjectItem{makeTrainItem(1, "One")}, "orphan")
@@ -5814,7 +5896,7 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 
 	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -5868,8 +5950,8 @@ func TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLandi
 
 	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
 
 	// Flag #1 for a pending review-finding eject — simulates settleQueuedReviewFindings
@@ -5930,7 +6012,7 @@ func TestLandGreenBatch_ExhaustionDissolves(t *testing.T) {
 
 	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -5979,7 +6061,7 @@ func TestReconstructTrainState_Fresh(t *testing.T) {
 	client := &mockGitHubClient{listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil }}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{assembling: true}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2)) {
 		t.Error("reconstructTrainState with no durable artifacts should return false (fresh)")
@@ -6004,7 +6086,7 @@ func TestReconstructTrainState_ResumeOpenPR(t *testing.T) {
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{openPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
 	if !handled {
@@ -6043,7 +6125,7 @@ func TestReconstructTrainState_CompleteDeferredLanding(t *testing.T) {
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{mergedPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
 	if !handled {
@@ -6087,7 +6169,7 @@ func TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
 	if !handled {
@@ -6136,7 +6218,7 @@ func TestReconstructTrainState_HistoricalMergedPR_ProceedsFresh(t *testing.T) {
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{historicalPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	// Today's fresh Queued batch — disjoint from the historical PR's members.
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
@@ -6176,7 +6258,7 @@ func TestReconstructTrainState_StaleOpenPR_ClosedAndProceedsFresh(t *testing.T) 
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{staleOpenPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
 	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
@@ -6230,7 +6312,7 @@ func TestReconstructTrainState_MarkerOnlyNonTrainBranchPR_NeverClosed(t *testing
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{unrelatedPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
 	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
@@ -6267,7 +6349,7 @@ func TestReconstructTrainState_OrphanedBranchNoPR_ProceedsFresh(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
 
@@ -6288,6 +6370,95 @@ func TestReconstructTrainState_OrphanedBranchNoPR_ProceedsFresh(t *testing.T) {
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("orphaned-branch cleanup must not touch member status, got %d update(s)", len(client.updateStatusCalls))
 	}
+}
+
+// TestReconstructTrainState_StaleOpenPR_SiblingBase_NeverClosed is the #1648 restart-
+// during-two-bases regression guard for Route 1/2's stale-open-PR-close sub-branch: an
+// open PR with no members from THIS worker's batch might still be a sibling partition's
+// live, healthy trial PR rather than a genuinely stale remnant — trialBelongsToBase must
+// gate this close, exactly as it gates the orphan-branch sweep below. Without it, a
+// "maint/1.x" worker's reconstruction could close a live "main" partition's own
+// integration/CI PR purely because its own batch doesn't mention that PR's members.
+func TestReconstructTrainState_StaleOpenPR_SiblingBase_NeverClosed(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	siblingPR := gh.PRDetails{
+		Number:      500,
+		State:       "open",
+		Merged:      false,
+		HeadRefName: "fabrik/merge-train/merge-train-main-1",
+		Body:        "batch: #10, #11\n" + mergeTrainBatchMarker,
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{siblingPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "maint/1.x"), state)
+
+	// This worker's own batch (#20) shares no members with the sibling PR's (#10, #11)
+	// — but the sibling PR belongs to the "main" partition, not "maint/1.x".
+	p := reconstructParams(wm)
+	p.baseBranch = "maint/1.x"
+	batch := []gh.ProjectItem{makeTrainItem(20, "Twenty")}
+
+	if eng.reconstructTrainState(context.Background(), state, p, batch) {
+		t.Fatal("no relevant PR for this partition — reconstruct should return false (fresh)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected the sibling main-partition's open PR #500 to be left alone, got closes: %v", client.closeIssueCalls)
+	}
+	if len(client.mergePRCalls) != 0 || rv.count() != 0 || len(client.updateStatusCalls) != 0 {
+		t.Errorf("sibling-base PR must not resume/land: merges=%d validations=%d advances=%d", len(client.mergePRCalls), rv.count(), len(client.updateStatusCalls))
+	}
+}
+
+// TestReconstructTrainState_OrphanedBranch_SiblingBase_LeftAlone is the #1648 restart-
+// during-two-bases regression guard for Route 3's orphan-branch sweep: a trial branch
+// belonging to a DIFFERENT (sibling) base partition must never be swept as an "orphan"
+// just because the calling worker's own batch doesn't mention its members — it may be a
+// sibling partition's live, healthy trial. Without trialBelongsToBase's gate, this sweep
+// would delete it purely because it isn't recognized as belonging to *this* batch.
+func TestReconstructTrainState_OrphanedBranch_SiblingBase_LeftAlone(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+	// A live trial branch that genuinely belongs to the "main" partition.
+	siblingBranch := "fabrik/merge-train/merge-train-main-9"
+	mustGit(t, srcDir, "branch", siblingBranch)
+
+	client := &mockGitHubClient{
+		listPRsFn:    func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "maint/1.x"), state)
+
+	// This worker is dispatched for the "maint/1.x" partition — a different base than
+	// the sibling branch above, and its own batch shares no members with it.
+	p := reconstructParams(wm)
+	p.baseBranch = "maint/1.x"
+	batch := []gh.ProjectItem{makeTrainItem(20, "Twenty")}
+
+	if eng.reconstructTrainState(context.Background(), state, p, batch) {
+		t.Fatal("no relevant PR/branch for this partition — reconstruct should return false (fresh)")
+	}
+
+	// The sibling partition's branch must still exist on origin (srcDir, the remote
+	// wm.baseDir's own ls-remote queries — see setupTrainRepo) — never swept.
+	if !branchExistsOnOrigin(t, srcDir, siblingBranch) {
+		t.Error("expected the sibling main-partition's trial branch to be left alone, but it was deleted")
+	}
+}
+
+// branchExistsOnOrigin reports whether branch exists as a ref in dir.
+func branchExistsOnOrigin(t *testing.T, dir, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "refs/heads/"+branch)
+	cmd.Dir = dir
+	return cmd.Run() == nil
 }
 
 // TestDispatchMergeTrainWorker_DifferentReposConcurrent verifies FR-3: the per-repo
@@ -6356,8 +6527,8 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemA}, "")
-	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemB}, "")
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemA}, "", "main")
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemB}, "", "main")
 
 	done := make(chan struct{})
 	go func() { eng.wg.Wait(); close(done) }()
@@ -6375,6 +6546,115 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 	}
 }
 
+// TestDispatchMergeTrainWorker_SameRepoTwoBasesConcurrent is the AC3/#1648 direct
+// regression guard: two trains dispatched for the SAME repo but different base
+// partitions ("main" and "maint/1.x") must run concurrently — neither in-flight guard
+// may cross-block the other — and each must land its own integration PR targeting its
+// own base, proving findIntegrationPR/branch identity never cross-contaminates (the
+// #1617/#1614 shape this issue's R4 preserves).
+func TestDispatchMergeTrainWorker_SameRepoTwoBasesConcurrent(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Manufacture refs/remotes/origin/maint/1.x directly (see
+	// TestGroupQueuedByRepoAndBase_TwoBasesProduceTwoPartitions for why) — unused here
+	// since dispatchMergeTrainWorker takes partitionBase directly, but harmless.
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	bothArrived := make(chan struct{})
+	var once sync.Once
+	var createdPRs []struct{ head, base string }
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 1000 + n, HeadSHA: fmt.Sprintf("sha-%d", n), State: "open"}, nil
+		},
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			mu.Lock()
+			createdPRs = append(createdPRs, struct{ head, base string }{head, base})
+			n := len(createdPRs)
+			mu.Unlock()
+			return 900 + n, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+
+	eng.trainValidateFn = func(_ context.Context, _ []trainMember) (TrainCIResult, *trainCIDiagnostic) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		reached := inFlight == 2
+		mu.Unlock()
+		if reached {
+			once.Do(func() { close(bothArrived) })
+		}
+		select {
+		case <-bothArrived:
+		case <-time.After(5 * time.Second):
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return TrainCIGreen, nil
+	}
+
+	itemMain := gh.ProjectItem{Number: 1, Repo: "owner/repo", Status: "Queued", ItemID: "m1"}
+	itemMaint := gh.ProjectItem{Number: 2, Repo: "owner/repo", Status: "Queued", ItemID: "m2", Labels: []string{"base:maint/1.x"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemMain}, "", "main")
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemMaint}, "", "maint/1.x")
+
+	done := make(chan struct{})
+	go func() { eng.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("workers did not finish — same-repo cross-base guard likely cross-blocked the two partitions")
+	}
+
+	mu.Lock()
+	got := maxInFlight
+	prs := append([]struct{ head, base string }(nil), createdPRs...)
+	mu.Unlock()
+	if got != 2 {
+		t.Errorf("expected both same-repo, different-base trains to validate concurrently, observed max concurrency %d", got)
+	}
+	if len(prs) != 2 {
+		t.Fatalf("expected 2 independent integration PRs (one per base), got %d: %+v", len(prs), prs)
+	}
+	bases := map[string]bool{prs[0].base: true, prs[1].base: true}
+	if !bases["main"] || !bases["maint/1.x"] {
+		t.Errorf("expected one integration PR targeting main and one targeting maint/1.x, got bases %+v", prs)
+	}
+	if prs[0].head == prs[1].head {
+		t.Errorf("expected distinct trial branches per base, both got %q", prs[0].head)
+	}
+
+	// Both partitions' guards must be independently cleared — no cross-key leakage.
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
+		t.Error("expected the main partition's in-flight marker cleared after landing")
+	}
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "maint/1.x")); ok {
+		t.Error("expected the maint/1.x partition's in-flight marker cleared after landing")
+	}
+}
+
 // TestDispatchMergeTrainWorker_SameRepoSuppressedDurably verifies FR-1: while a train
 // is in flight for a repo (in-memory marker present), a second dispatch for the SAME
 // repo does not launch another worker.
@@ -6382,10 +6662,12 @@ func TestDispatchMergeTrainWorker_SameRepoSuppressedDurably(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 
-	// Simulate an in-flight train (e.g. resumed after reconstruction).
-	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{assembling: true, trialName: "merge-train-main-1"})
+	// Simulate an in-flight train (e.g. resumed after reconstruction). Keyed on the
+	// (repo,base) trainKey (#1648) matching the "main" partitionBase dispatched below —
+	// a bare "owner/repo" key would silently fail to suppress the duplicate dispatch.
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), &mergeTrainWorkerState{assembling: true, trialName: "merge-train-main-1"})
 
-	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{makeTrainItem(1, "One")}, "")
+	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{makeTrainItem(1, "One")}, "", "main")
 
 	done := make(chan struct{})
 	go func() { eng.wg.Wait(); close(done) }()
@@ -6510,11 +6792,11 @@ func TestRunawayGuard_Fires(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6549,8 +6831,65 @@ func TestRunawayGuard_Fires(t *testing.T) {
 	}
 
 	// mergeTrainInFlight must be cleared after the guard fires.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight cleared after runaway guard fires")
+	}
+}
+
+// TestRunawayGuard_Fires_DefaultPartition_UsesUnkeyedTrainKey is a direct regression guard
+// (found in review, #1648) for Hook 1's two fireRunawayGuard call sites inside
+// runMergeTrainWorker: they must key the alert on partitionBase (defaultPartitionBase, "",
+// for the default/unlabeled partition), never on p.baseBranch (the real resolved git branch
+// name, which is never empty). Dispatching with partitionBase="main" (as
+// TestRunawayGuard_Fires and most other tests here do) cannot catch this bug, because in
+// that case partitionBase == p.baseBranch already — this test dispatches with the true
+// default-sentinel partitionBase to distinguish the two. Before the fix, the alert map key
+// was "owner/repo:main#N" instead of the correct "owner/repo#N", desyncing Hook 1's alert
+// idempotency from Hook 2's (routeQueuedGroup, which always passed g.base correctly) and
+// from mergeTrainKeyForItem's settle-scan reconstruction for the same unlabeled item.
+func TestRunawayGuard_Fires_DefaultPartition_UsesUnkeyedTrainKey(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Always red — no member ever lands.
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return true })
+	eng.cfg.MaxTrainTrialsPerWindow = 2
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	batch := makeSeamBatch(3)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	wantKey := mergeTrainKey("owner/repo", defaultPartitionBase)
+	eng.mergeTrainInFlight.Store(wantKey, state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// partitionBase is the true default-sentinel value, exactly as
+	// dispatchMergeTrainWorker passes for an unlabeled Queued member.
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", defaultPartitionBase, batch)
+
+	if wantKey != "owner/repo" {
+		t.Fatalf("sanity: expected the default partition's trainKey to be the bare repoKey, got %q", wantKey)
+	}
+
+	client.mu.Lock()
+	hasAlert := false
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 && strings.Contains(c.body, "runaway guard") {
+			hasAlert = true
+			if strings.Contains(c.body, "owner/repo:") {
+				t.Errorf("default-partition runaway alert comment wrongly names a composite key, got: %s", c.body)
+			}
+		}
+	}
+	client.mu.Unlock()
+	if !hasAlert {
+		t.Fatal("expected a runaway guard alert comment on member #1")
+	}
+
+	eng.mergeTrainRunawayMu.Lock()
+	_, ok := eng.mergeTrainRunawayAlerted[wantKey+"#1"]
+	eng.mergeTrainRunawayMu.Unlock()
+	if !ok {
+		t.Errorf("expected mergeTrainRunawayAlerted keyed on the bare repoKey (%q#1) — Hook 1 must not have used p.baseBranch to compute a different composite key", wantKey)
 	}
 }
 
@@ -6568,11 +6907,11 @@ func TestRunawayGuard_NormalBisectionNotTripped(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6628,11 +6967,11 @@ func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// Non-vacuity: the raw trial count must actually exceed the threshold — this is what
 	// makes the test meaningful (fixed code completes all 6 raw trials since bisection is
@@ -6678,6 +7017,74 @@ func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
 	}
 }
 
+// TestRunawayGuard_PerBasePartition_SiblingBaseUnaffected is the AC5 regression guard:
+// the runaway guard must trip independently per (repo,base) partition — a base whose
+// trial counter has reached the threshold must not pause or block a healthy sibling
+// base's members in the same repo. Exercises routeQueuedGroup's Hook 2 pre-dispatch
+// check directly, since that's where the pause decision is actually made.
+func TestRunawayGuard_PerBasePartition_SiblingBaseUnaffected(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+	eng.cfg.MaxTrainTrialsPerWindow = 1
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	// Trip only the "main" partition's counter.
+	mainKey := mergeTrainKey("owner/repo", "main")
+	eng.recordTrial(mainKey)
+	if _, tripped := eng.isRunawayTripped(mainKey); !tripped {
+		t.Fatal("expected the main partition's counter to be tripped")
+	}
+
+	// The sibling "maint/1.x" partition has recorded zero trials — must be unaffected.
+	maintKey := mergeTrainKey("owner/repo", "maint/1.x")
+	if _, tripped := eng.isRunawayTripped(maintKey); tripped {
+		t.Fatal("expected the maint/1.x partition's counter to be untouched by the main partition's trip")
+	}
+
+	mainMember := makeTrainItem(1, "Main Member")
+	maintMember := makeTrainItem(2, "Maint Member")
+	maintMember.Labels = []string{"base:maint/1.x"}
+
+	mainGroup := queuedRepoGroup{repoKey: "owner/repo", base: "main", trainKey: mainKey, items: []gh.ProjectItem{mainMember}}
+	maintGroup := queuedRepoGroup{repoKey: "owner/repo", base: "maint/1.x", trainKey: maintKey, items: []gh.ProjectItem{maintMember}}
+
+	eng.routeQueuedGroup(context.Background(), mainGroup, "PVT_test")
+	eng.routeQueuedGroup(context.Background(), maintGroup, "PVT_test")
+
+	// The maint/1.x group's healthy path dispatches a real worker goroutine (which then
+	// fails fast against the non-git WorktreeManager) — wait for it so the assertions
+	// below observe its complete, settled effect rather than racing it.
+	done := make(chan struct{})
+	go func() { eng.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("maint/1.x worker did not finish")
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	mainPaused, maintPaused := false, false
+	for _, c := range client.addLabelCalls {
+		if c.labelName != "fabrik:paused" {
+			continue
+		}
+		switch c.issueNumber {
+		case 1:
+			mainPaused = true
+		case 2:
+			maintPaused = true
+		}
+	}
+	if !mainPaused {
+		t.Error("expected the tripped main partition's member to be paused")
+	}
+	if maintPaused {
+		t.Error("expected the healthy maint/1.x partition's member NOT to be paused by the main partition's runaway trip")
+	}
+}
+
 // ── #1533 fireRunawayGuard atomicity/idempotency ────────────────────────────
 
 // TestFireRunawayGuard_IdempotentAcrossTwoFirings covers R2/A3: a member appearing in two
@@ -6692,8 +7099,8 @@ func TestFireRunawayGuard_IdempotentAcrossTwoFirings(t *testing.T) {
 	memberA := makeTrainItem(1, "Member One") // present in both firings
 	memberB := makeTrainItem(2, "Member Two") // only in the second firing
 
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA}, 6)
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA, memberB}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{memberA}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{memberA, memberB}, 6)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6732,11 +7139,11 @@ func TestFireRunawayGuard_ReAlertsAfterOperatorResumeRaisesCount(t *testing.T) {
 	member := makeTrainItem(3, "Resumed Member")
 
 	// First trip: fires at count 6, alerts and pauses the member.
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 	// A second, genuinely new trip: count is now 8, not 6 — only possible if new trials ran
 	// after an operator resumed the member (no resetTrialCounter call in between here, exactly
 	// mirroring the recovery path's own behavior).
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 8)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 8)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6764,7 +7171,7 @@ func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(9, "Flaky Member")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 
 	client.mu.Lock()
 	paused, marker, commentAttempts := false, false, 0
@@ -6810,7 +7217,7 @@ func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
 	// Not marked alerted: a second firing for the same member within the same episode
 	// must retry the comment, not skip it as already-delivered.
 	client.addCommentFn = nil // succeeds this time
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6834,9 +7241,9 @@ func TestResetTrialCounter_ClearsRunawayAlertedIdempotency(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(4, "Repeat Offender")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
-	eng.resetTrialCounter("owner/repo")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
+	eng.resetTrialCounter(mergeTrainKey("owner/repo", "main"))
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6863,14 +7270,15 @@ func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
 	eng.cfg.TrainTrialWindowDuration = time.Hour
 
 	repoKey := "owner/repo"
-	eng.recordTrial(repoKey) // trips the counter (threshold 1)
+	trainKey := mergeTrainKey(repoKey, "main")
+	eng.recordTrial(trainKey) // trips the counter (threshold 1)
 
 	items := []gh.ProjectItem{
 		makeTrainItem(1, "Member One"),
 		makeTrainItem(2, "Member Two"),
 	}
 
-	eng.routeQueuedGroup(context.Background(), repoKey, items, "PVT_test")
+	eng.routeQueuedGroup(context.Background(), queuedRepoGroup{repoKey: repoKey, base: "main", trainKey: trainKey, items: items}, "PVT_test")
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6896,7 +7304,7 @@ func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
 	}
 
 	// routeQueuedGroup must return immediately after firing the guard — no worker dispatched.
-	if _, ok := eng.mergeTrainInFlight.Load(repoKey); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(trainKey); ok {
 		t.Error("expected no worker dispatched when the runaway guard is already tripped")
 	}
 }
@@ -6935,9 +7343,15 @@ func TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert(t *testi
 	// settleRunawayGuardAlert always re-derives its own count live (#1533 review, finding
 	// 2), so fireRunawayGuard must be given the same live count here rather than an
 	// arbitrary literal — otherwise the two calls would (correctly, but irrelevantly to
-	// this test) disagree on whether the other's alert is fresh enough to skip.
-	eng.recordTrial("owner/repo")
-	count, tripped := eng.isRunawayTripped("owner/repo")
+	// this test) disagree on whether the other's alert is fresh enough to skip. Keyed on
+	// defaultPartitionBase (#1648): member carries no base: label, so
+	// settleRunawayGuardAlert's own mergeTrainKeyForItem derives this same sentinel-based
+	// trainKey — fireRunawayGuard must be given the matching partition here too, or the
+	// two racing calls would target different trainKeys and this test's premise (a genuine
+	// race for the same alertKey) would be vacuous.
+	trainKey := mergeTrainKey("owner/repo", defaultPartitionBase)
+	eng.recordTrial(trainKey)
+	count, tripped := eng.isRunawayTripped(trainKey)
 	if !tripped {
 		t.Fatalf("expected the seeded trial to trip the guard (count=%d)", count)
 	}
@@ -6946,7 +7360,7 @@ func TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert(t *testi
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, count)
+		eng.fireRunawayGuard(context.Background(), "owner", "repo", defaultPartitionBase, []gh.ProjectItem{member}, count)
 	}()
 	go func() {
 		defer wg.Done()
@@ -6974,12 +7388,12 @@ func TestMergeTrainRunawayGuard(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	// Guard must fire within the configured trial bound.
@@ -7031,7 +7445,7 @@ func TestMergeTrainRunawayGuard(t *testing.T) {
 	}
 
 	// mergeTrainInFlight must be cleared.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("e2e: expected mergeTrainInFlight cleared after runaway guard fires")
 	}
 }

@@ -182,6 +182,34 @@ func QueueMember(t *testing.T, env *Env, repo, baseBranch, marker, path, content
 	return num, prNum
 }
 
+// QueueMemberOnBase is QueueMember for a non-default baseBranch (#1648): it additionally
+// applies the base:<branch> label to the issue itself, ensuring the label exists first
+// (gh issue create --label requires a pre-existing label, unlike the engine's own
+// AddLabel path). This label is what the engine's own partitioning
+// (groupQueuedByRepoAndBase/baseBranchForItem) reads to resolve the member's base — the
+// PR's own actual base ref (set by CreateMemberPR) is not itself sufficient, since
+// itemHasBaseLabel/baseBranchForItem look at the issue's labels, not the PR. QueueMember
+// itself is left untouched for its many existing main-only callers (R1/AC4: default-base
+// behavior must stay byte-identical).
+func QueueMemberOnBase(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (int, int) {
+	t.Helper()
+	baseLabel := "base:" + baseBranch
+	ensureLabelExists(t, env, repo, baseLabel)
+
+	stamp := time.Now().UTC().Format("150405.000")
+	title := fmt.Sprintf("e2e merge-train member %s (%s)", marker, stamp)
+	num := FileIssue(t, env, repo, title,
+		fmt.Sprintf("e2e merge-train member. marker=%s", marker), baseLabel)
+	itemID := AddIssueToProject(t, env, repo, num)
+	uPath := uniqueMemberPath(path, num)
+	branch := fmt.Sprintf("fabrik/issue-%d", num)
+	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
+	LinkedPRNumber(t, env, repo, num)
+	SetIssueStatus(t, env, itemID, "Queued")
+	t.Logf("queued member on base %q: issue #%d (label %s), PR #%d, at Status=Queued", baseBranch, num, baseLabel, prNum)
+	return num, prNum
+}
+
 // WaitForIntegrationPR polls the repo for the merge-train integration PR (head
 // branch carries the "merge-train-" prefix), up to timeout. Returns the number of
 // the most recently created one.

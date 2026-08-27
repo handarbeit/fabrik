@@ -63,11 +63,11 @@ func TestSettleQueuedReviewFindings_PendingFlag_WorkerActive(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", defaultPartitionBase))
 	// #1 must be part of the live worker's dispatched batch — mergeTrainBatchMembers
 	// is what settleQueuedReviewFindings now consults to route to the pending-signal
 	// path, not repo-level activity alone (see the batch-cap overflow test below).
-	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", defaultPartitionBase), &mergeTrainWorkerState{
 		projectID:    "PVT_1",
 		batchNumbers: map[int]bool{1: true},
 	})
@@ -109,8 +109,8 @@ func TestSettleQueuedReviewFindings_DirectEject_WorkerActiveButMemberBeyondBatch
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
-	eng.store.EnterRepoWorker("owner/repo")
-	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", defaultPartitionBase))
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", defaultPartitionBase), &mergeTrainWorkerState{
 		projectID:    "PVT_1",
 		batchNumbers: map[int]bool{1: true}, // #2 is excluded — beyond the batch cap
 	})

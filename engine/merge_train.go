@@ -231,7 +231,9 @@ func renderBatchContext(otherMembers []trainMember, isolated int) string {
 }
 
 // mergeTrainWorkerState tracks an in-flight or completed merge-train worker.
-// Stored in Engine.mergeTrainInFlight keyed by "owner/repo".
+// Stored in Engine.mergeTrainInFlight keyed by trainKey ("owner/repo:baseBranch",
+// mergeTrainKey — since #1648, one entry per independently-dispatched (repo,base)
+// partition, not one per repo).
 // mu guards all fields that the poll loop reads while the goroutine writes them.
 type mergeTrainWorkerState struct {
 	mu         sync.RWMutex
@@ -260,6 +262,106 @@ type mergeTrainWorkerState struct {
 // as the suffix of the trial branch name.
 func sanitizeBranchName(s string) string {
 	return strings.ReplaceAll(s, "/", "-")
+}
+
+// defaultPartitionBase is the sentinel "base" value groupQueuedByRepoAndBase
+// assigns to a Queued member with no base: label (#1648) — the common-case
+// bucket, deliberately never resolved via wm.DefaultBaseBranch()/git at
+// grouping time (see that function's and trialParams's doc comments for why).
+// Every code path that reconstructs a trainKey for a no-label item (the
+// runaway-alert settle scan's mergeTrainKeyForItem, most notably) must use
+// this same sentinel, or its reconstructed key will silently disagree with
+// the one the item was actually dispatched/paused under.
+const defaultPartitionBase = ""
+
+// mergeTrainKey returns the composite key identifying one merge-train
+// partition: one independent train per (repo, resolved base branch), per
+// #1648. repoKey is the usual "owner/repo" string every call site already
+// computes. baseBranch is defaultPartitionBase ("") for the common default-base
+// partition, or the real resolved branch name otherwise — see trialParams's doc
+// comment in this file for the full partitionBase-vs-baseBranch distinction.
+//
+// For the default partition (baseBranch == defaultPartitionBase) this returns
+// repoKey unchanged — no colon appended — rather than the theoretically-more-
+// "consistent" "owner/repo:". This is deliberate, not an oversight: it makes
+// the default partition's key byte-identical to the pre-#1648 bare-repoKey
+// form everywhere that key is also used in a human-facing log line or alert
+// comment (AC4), avoiding a confusing trailing "owner/repo:" that names no
+// base at all. It's also collision-safe by construction: a real resolved
+// branch name from baseBranchForItem is never empty, so "owner/repo" (no
+// colon) can only ever mean the default partition, never collide with an
+// explicit "owner/repo:somebranch" key.
+//
+// For every other baseBranch, the delimiter is ':' — illegal in both a GitHub
+// "owner/repo" string and in any valid git ref name (git check-ref-format
+// forbids a bare ':'), so the two components can never collide by
+// construction; no sanitizeBranchName-style escaping of the key itself is
+// needed. This key replaces the bare "owner/repo" string as the guard key for
+// mergeTrainInFlight, the runaway guard's mergeTrainTrials/mergeTrainRunawayAlerted,
+// store.repoWorkers (EnterRepoWorker/ExitRepoWorker/RepoWorkerActive), and
+// mergeTrainBatchSnapshotSeen — every registry that must not let one base's
+// train block, cancel, alert on, or be mistaken for another base's train in
+// the same repo (R2). Registries that are deliberately NOT re-keyed
+// (queuedReviewEjects, mergeTrainCloneSkipCounts, mergeTrainEjectionCounts)
+// keep using the bare "owner/repo" (or "owner/repo#N") form — see their own
+// doc comments for why.
+func mergeTrainKey(repoKey, baseBranch string) string {
+	if baseBranch == defaultPartitionBase {
+		return repoKey
+	}
+	return repoKey + ":" + baseBranch
+}
+
+// trialBelongsToBase reports whether headRef — a "fabrik/merge-train/<trialName>"
+// branch or PR head ref — was formed for baseBranch, by checking the base
+// segment baseTrialName already embeds in every trial name
+// ("merge-train-<sanitizeBranchName(baseBranch)>-<unix-ts>[-t<n>]"). Before #1648
+// at most one merge-train worker could ever be live per repo, so
+// reconstructTrainState's stale-open-PR-close and orphan-branch-sweep paths could
+// safely treat any unrecognized "fabrik/merge-train/*" artifact as belonging to no
+// live batch and therefore safe to close/delete. With concurrent per-base workers
+// now a normal occurrence, those two paths must additionally confirm an unmatched
+// artifact isn't simply a sibling partition's live trial before destroying it —
+// this is the check that closes that gap (see ADR-1648). headRef that isn't a
+// merge-train branch at all (trialNameFromBranch returns "") never belongs to
+// any base.
+//
+// A bare strings.HasPrefix match on "merge-train-<sanitized>-" is not enough: a
+// sanitized base name that is itself a hyphen-prefix of a different base's
+// sanitized name would match it too (e.g. base "main" wrongly matches a sibling
+// trial "merge-train-main-hotfix-<ts>", whose real base is "main-hotfix", not
+// "main" — found in review, #1648).
+//
+// Requiring only that the remainder *begin* with a digit is still not enough:
+// it closes the word-suffix collision above but not a digit-suffix one. If base
+// "release-2" is itself a real sibling base, its trial "merge-train-release-2-
+// <ts>" checked against base "release" leaves a remainder of "2-<ts>", whose
+// first character is a digit — a first-character-only check wrongly accepts it
+// (found in review, #1648, second pass). The fix is to match the remainder
+// against nextTrialName's exact, end-anchored grammar — "<unix-ts>" or
+// "<unix-ts>-t<n>", both pure-digit runs joined only by the literal "-t"
+// bisection marker — rather than merely checking its first character. "2-<ts>"
+// fails this: after the digit run "2" comes "-<ts>", which is neither
+// end-of-string nor the literal "-t" marker, so it is correctly rejected no
+// matter how digit-like the trailing content looks. A residual, narrower
+// ambiguity remains when two distinct real branch names sanitize to the
+// identical string (e.g. "release/1.x" and "release-1.x" both become
+// "release-1.x") — accepted as a pre-existing, documented limitation of
+// sanitizeBranchName rather than a new one introduced here; resolving it would
+// require a broader trial-naming redesign, out of scope for this fix.
+var trialSuffixPattern = regexp.MustCompile(`^[0-9]+(-t[0-9]+)?$`)
+
+func trialBelongsToBase(headRef, baseBranch string) bool {
+	trialName := trialNameFromBranch(headRef)
+	if trialName == "" {
+		return false
+	}
+	want := "merge-train-" + sanitizeBranchName(baseBranch) + "-"
+	rest, ok := strings.CutPrefix(trialName, want)
+	if !ok || rest == "" {
+		return false
+	}
+	return trialSuffixPattern.MatchString(rest)
 }
 
 // ceilLog2 returns ⌈log₂(n)⌉ for n ≥ 1 and 0 for n ≤ 1. It is the number of
@@ -322,15 +424,23 @@ func capBatch(items []gh.ProjectItem, max int) []gh.ProjectItem {
 }
 
 // dispatchMergeTrainWorker checks whether a train worker is already in-flight for
-// the batch's repo and, if not, starts one. Safe to call from the poll goroutine.
-// projectID is the GitHub project board ID, threaded so landMergeTrainBatch can
-// call advanceToNextStage without fetching the board again.
-func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.ProjectItem, projectID string) {
+// the batch's (repo, base) partition and, if not, starts one. Safe to call from
+// the poll goroutine. projectID is the GitHub project board ID, threaded so
+// landMergeTrainBatch can call advanceToNextStage without fetching the board
+// again. partitionBase is this batch's partition-grouping key (#1648 R1),
+// supplied by routeQueuedGroup — the empty string for the default-base partition
+// (a deliberate zero-git-touch sentinel, never resolved via wm.DefaultBaseBranch()
+// at grouping time — see trialParams's doc comment for why), or the real resolved
+// branch name for a base:<branch> partition. The worker never re-resolves this
+// value independently, so it can never disagree with the partition that
+// dispatched it; prepareTrainWorker resolves the real git branch name from it.
+func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.ProjectItem, projectID string, partitionBase string) {
 	if len(batch) == 0 {
 		return
 	}
 	owner, repo := itemOwnerRepo(batch[0], e.defaultRepo())
 	repoKey := owner + "/" + repo
+	trainKey := mergeTrainKey(repoKey, partitionBase)
 
 	batchNumbers := make(map[int]bool, len(batch))
 	for _, item := range batch {
@@ -339,8 +449,10 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 
 	// Use LoadOrStore so the check-and-register is atomic: two concurrent callers
 	// can never both pass the "not loaded" path and launch duplicate workers.
+	// Keyed on trainKey (repo, base), not bare repoKey (#1648 R2): two different
+	// bases in the same repo must be able to have independent in-flight workers.
 	candidate := &mergeTrainWorkerState{assembling: true, projectID: projectID, batchNumbers: batchNumbers}
-	existing, loaded := e.mergeTrainInFlight.LoadOrStore(repoKey, candidate)
+	existing, loaded := e.mergeTrainInFlight.LoadOrStore(trainKey, candidate)
 	if loaded {
 		state := existing.(*mergeTrainWorkerState)
 		state.mu.RLock()
@@ -351,36 +463,36 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 		state.mu.RUnlock()
 		switch {
 		case assembling:
-			e.logfRepo(repoKey, "merge-train", "train worker already assembling for %s — skipping\n", repoKey)
+			e.logfRepo(repoKey, "merge-train", "train worker already assembling for %s — skipping\n", trainKey)
 		case bisecting:
-			e.logfRepo(repoKey, "merge-train", "train worker bisecting red batch for %s — skipping\n", repoKey)
+			e.logfRepo(repoKey, "merge-train", "train worker bisecting red batch for %s — skipping\n", trainKey)
 		default:
 			switch ciResult {
 			case TrainCIGreen:
-				e.logfRepo(repoKey, "merge-train", "train CI green for %s (PR #%d) — awaiting landing step\n", repoKey, prNum)
+				e.logfRepo(repoKey, "merge-train", "train CI green for %s (PR #%d) — awaiting landing step\n", trainKey, prNum)
 			case TrainCIRed:
-				e.logfRepo(repoKey, "merge-train", "train CI red for %s (PR #%d) — needs attention\n", repoKey, prNum)
+				e.logfRepo(repoKey, "merge-train", "train CI red for %s (PR #%d) — needs attention\n", trainKey, prNum)
 			default:
-				e.logfRepo(repoKey, "merge-train", "train CI pending for %s (PR #%d) — still polling\n", repoKey, prNum)
+				e.logfRepo(repoKey, "merge-train", "train CI pending for %s (PR #%d) — still polling\n", trainKey, prNum)
 			}
 		}
 		return
 	}
 
 	// candidate was atomically stored — mark it live in the single liveness
-	// registry the idle guard and mergeTrainWorkerActive both read (FR-2), then
+	// registry the idle guard and mergeTrainWorkerActiveForRepo both read (FR-2), then
 	// launch the worker. Doing this synchronously, before the goroutine even
 	// starts, also closes the same-cycle gap: dispatchCandidates never counts
 	// merge-train dispatch in `dispatched`, so without this the very poll cycle
 	// that just launched this worker would still see zero in-flight workers.
-	e.store.EnterRepoWorker(repoKey)
+	e.store.EnterRepoWorker(trainKey)
 
 	state := candidate
 	e.wg.Add(1)
 
 	go func() {
 		defer e.wg.Done()
-		e.runMergeTrainWorker(ctx, state, owner, repo, batch)
+		e.runMergeTrainWorker(ctx, state, owner, repo, partitionBase, batch)
 	}()
 }
 
@@ -388,9 +500,27 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 // assemble / bisect / land helpers so their signatures stay manageable. baseSHA is
 // pinned once at batch start (ADR-059 D-b) and is only re-pinned deliberately, per
 // singleton, inside landOneAtATime (the sequential-land base advance).
+//
+// baseBranch vs. trainKey (#1648): baseBranch is always the real, git-resolved
+// target branch name (e.g. "main", "maint/1.x") — used for every git operation
+// (SHA pinning, trial naming, PR targeting, trialBehind comparisons). trainKey is
+// the composite (repo,partition) guard key this worker was dispatched under
+// (mergeTrainKey(repoKey, partitionBase)) and is fixed for the worker's entire
+// lifetime — used for every guard/counter operation (mergeTrainInFlight,
+// mergeTrainTrials/isRunawayTripped/recordTrial/resetTrialCounter,
+// mergeTrainRunawayAlerted via fireRunawayGuard). The two deliberately diverge for
+// the common default-base case: partitionBase (and therefore the "base" segment of
+// trainKey) is the empty-string sentinel for a Queued member with no base: label —
+// this is what keeps grouping/dispatch a zero-git-touch, zero-cost path for the
+// overwhelming common case (R5) — while baseBranch is only resolved from
+// wm.DefaultBaseBranch() once prepareTrainWorker actually needs a real branch name
+// to do git work. Every guard/counter site MUST key on trainKey, never on
+// mergeTrainKey(repoKey, baseBranch) — the latter would silently disagree with the
+// key dispatchMergeTrainWorker registered under for any default-base partition.
 type trialParams struct {
 	owner, repo      string
 	baseBranch       string
+	trainKey         string
 	baseSHA          string
 	wm               *WorktreeManager
 	holdingStg       *stages.Stage
@@ -413,34 +543,43 @@ func (p trialParams) repoKey() string {
 // defer) never need to coordinate. Any new early-return path added to the
 // runMergeTrainWorker call graph must rely on one of those two defers rather
 // than clearing either marker directly — see ADR-067.
-func (e *Engine) finishTrain(repoKey string) {
-	e.mergeTrainInFlight.Delete(repoKey)
-	e.store.ExitRepoWorker(repoKey)
+func (e *Engine) finishTrain(trainKey string) {
+	e.mergeTrainInFlight.Delete(trainKey)
+	e.store.ExitRepoWorker(trainKey)
 }
 
-// mergeTrainWorkerActive reports whether a merge-train worker is currently in
-// flight for repoKey ("owner/repo") — from dispatchMergeTrainWorker's
-// EnterRepoWorker call through the goroutine's exit, when finishTrain clears
-// the marker (see ADR-067). This is broader than "assembling": it also covers
-// bisecting and the post-CI landing window, since the marker isn't cleared
-// until the worker goroutine fully exits. Used by settleClosedItemsToDone to
-// avoid racing a live batch member that was closed without merging.
-func (e *Engine) mergeTrainWorkerActive(repoKey string) bool {
-	return e.store.RepoWorkerActive(repoKey)
+// mergeTrainWorkerActiveForRepo reports whether a merge-train worker is
+// currently in flight for repoKey ("owner/repo"), for ANY of its base-branch
+// partitions — from dispatchMergeTrainWorker's EnterRepoWorker call through
+// the goroutine's exit, when finishTrain clears the marker (see ADR-067).
+// This is broader than "assembling": it also covers bisecting and the
+// post-CI landing window, since the marker isn't cleared until the worker
+// goroutine fully exits. Used by settleClosedItemsToDone to avoid racing a
+// live batch member that was closed without merging — that caller only knows
+// the item's repo, not which base partition it belongs to, so this is
+// deliberately a repo-wide "is anything live" answer (RepoWorkerActiveForAnyBase's
+// prefix scan), not an exact trainKey lookup. Renamed from mergeTrainWorkerActive
+// (#1648): since a repo can now have several concurrent per-base workers, the old
+// name's implied "the one worker for this repo" no longer holds.
+func (e *Engine) mergeTrainWorkerActiveForRepo(repoKey string) bool {
+	return e.store.RepoWorkerActiveForAnyBase(repoKey)
 }
 
 // mergeTrainBatchMembers returns the dispatched-batch issue-number set of the
-// in-flight worker for repoKey (its immutable batchNumbers, see
+// in-flight worker for trainKey (its immutable batchNumbers, see
 // mergeTrainWorkerState's doc comment), or (nil, false) if no worker is currently
-// registered for repoKey in mergeTrainInFlight. Used by settleQueuedReviewFindings
+// registered for trainKey in mergeTrainInFlight. Used by settleQueuedReviewFindings
 // (#1208) to distinguish a Queued member the live worker actually owns from one
-// merely Queued in the same repo but excluded by the batch cap (effectiveMaxBatchSize)
-// — the latter is safe to eject directly even while a worker is active for the repo,
-// since the worker never looks at it. A nil/false result (no worker registered, e.g.
-// a narrow race with the worker's own exit) is treated by the caller as "not owned by
-// any live batch," which is always safe to eject directly.
-func (e *Engine) mergeTrainBatchMembers(repoKey string) (map[int]bool, bool) {
-	v, ok := e.mergeTrainInFlight.Load(repoKey)
+// merely Queued in the same partition but excluded by the batch cap (effectiveMaxBatchSize)
+// — the latter is safe to eject directly even while a worker is active for the
+// partition, since the worker never looks at it. A nil/false result (no worker
+// registered, e.g. a narrow race with the worker's own exit) is treated by the
+// caller as "not owned by any live batch," which is always safe to eject directly.
+// Since #1648 trainKey is a per-(repo,base) composite key (mergeTrainKey), not a
+// bare "owner/repo" — an issue belongs to exactly one partition's live batch at a
+// time, so an exact-key lookup here (rather than a repo-wide scan) is correct.
+func (e *Engine) mergeTrainBatchMembers(trainKey string) (map[int]bool, bool) {
+	v, ok := e.mergeTrainInFlight.Load(trainKey)
 	if !ok {
 		return nil, false
 	}
@@ -467,9 +606,16 @@ func mergeTrainMaxTurnsOverride(holdingStg *stages.Stage, extendTurns bool) int 
 }
 
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
-// acquisition, repo readiness, base-branch resolution, holding-stage lookup,
-// extend-turns computation, trialParams construction, restart-time state
-// reconstruction (ADR-059 D5, FR-1/FR-4), base-SHA pinning, and member resolution.
+// acquisition, repo readiness, holding-stage lookup, extend-turns computation,
+// trialParams construction, restart-time state reconstruction (ADR-059 D5,
+// FR-1/FR-4), base-SHA pinning, and member resolution. partitionBase is this
+// worker's partition-grouping key (#1648 R1) — the empty-string sentinel for the
+// default-base partition (never resolved via git at grouping time, so grouping
+// stays zero-cost for the common case — see trialParams's doc comment), or the
+// real resolved branch name for a base:<branch> partition. trainKey
+// (mergeTrainKey(repoKey, partitionBase)) is fixed here for the worker's entire
+// lifetime and is what every guard/counter operation below and in every nested
+// helper must key on — never the real git branch name resolved a few lines down.
 //
 // On success (ok=true) it returns the assembled trialParams and members with the
 // semaphore still held — the caller (runMergeTrainWorker) owns releasing it and
@@ -477,8 +623,9 @@ func mergeTrainMaxTurnsOverride(holdingStg *stages.Stage, extendTurns bool) int 
 //
 // On failure (ok=false) it has already released the semaphore (if acquired) and
 // cleared the in-flight marker via finishTrain; the caller must simply return.
-func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) (p trialParams, members []trainMember, ok bool) {
+func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo, partitionBase string, batch []gh.ProjectItem) (p trialParams, members []trainMember, ok bool) {
 	repoKey := owner + "/" + repo
+	trainKey := mergeTrainKey(repoKey, partitionBase)
 
 	// The row already exists at this point (JobStartedEvent fires before
 	// prepareTrainWorker is even called — see runMergeTrainWorker and
@@ -491,12 +638,12 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	select {
 	case e.sem <- struct{}{}:
 	default:
-		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for %s\n", repoKey)
+		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for %s\n", trainKey)
 		select {
 		case e.sem <- struct{}{}:
 		case <-ctx.Done():
-			e.logfRepo(repoKey, "merge-train", "context cancelled before semaphore acquired for %s\n", repoKey)
-			e.finishTrain(repoKey)
+			e.logfRepo(repoKey, "merge-train", "context cancelled before semaphore acquired for %s\n", trainKey)
+			e.finishTrain(trainKey)
 			return trialParams{}, nil, false
 		}
 	}
@@ -508,11 +655,14 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	defer func() {
 		if !ok {
 			<-e.sem
-			e.finishTrain(repoKey)
+			e.finishTrain(trainKey)
 		}
 	}()
 
-	// Use batch[0] as the repo anchor for ensureRepoReady.
+	// Use batch[0] as the repo anchor for ensureRepoReady. Repo readiness (the
+	// bare clone) is shared across every base partition of this repo, so this
+	// stays keyed on repoKey, not trainKey (see mergeTrainCloneSkipCounts's doc
+	// comment on engine.go).
 	if err := e.ensureRepoReady(ctx, batch[0]); err != nil {
 		if errors.Is(err, ErrSkipItem) {
 			e.recordMergeTrainCloneSkip(repoKey, batch[0])
@@ -524,10 +674,21 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	e.resetMergeTrainCloneSkip(repoKey)
 
 	wm := e.worktreesFor(repoKey)
-	baseBranch, err := wm.DefaultBaseBranch()
-	if err != nil {
-		e.logfRepo(repoKey, "merge-train", "cannot determine base branch for %s: %v\n", repoKey, err)
-		return trialParams{}, nil, false
+
+	// Resolve the real git branch name now — the one and only place this happens
+	// for the default-base sentinel ("" partitionBase), mirroring exactly the
+	// unconditional wm.DefaultBaseBranch() call this function made before #1648
+	// (byte-identical timing/cost for AC4). A non-default partition already
+	// carries its real resolved name (groupQueuedByRepoAndBase resolved it once,
+	// via baseBranchForItem, when forming the partition), so it's used as-is.
+	baseBranch := partitionBase
+	if baseBranch == "" {
+		var err error
+		baseBranch, err = wm.DefaultBaseBranch()
+		if err != nil {
+			e.logfRepo(repoKey, "merge-train", "cannot determine base branch for %s: %v\n", repoKey, err)
+			return trialParams{}, nil, false
+		}
 	}
 
 	holdingStg := holdingStage(e.cfg)
@@ -564,6 +725,7 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 		owner:            owner,
 		repo:             repo,
 		baseBranch:       baseBranch,
+		trainKey:         trainKey,
 		wm:               wm,
 		holdingStg:       holdingStg,
 		maxTurnsOverride: maxTurnsOverride,
@@ -581,11 +743,11 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// bisection sub-trial — forks off the same base and a red result is attributable to
 	// member composition, not a moving base branch. Skipped under the test seam (no git).
 	if e.trainValidateFn == nil {
-		fetchCmd := exec.Command("git", "fetch", "origin")
-		fetchCmd.Dir = wm.baseDir
-		fetchCmd.Env = nonInteractiveGitEnv()
-		if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
-			e.logfRepo(repoKey, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(string(out)))
+		// FetchOrigin (not a raw exec.Command) — serialized under wm.mu, since #1648
+		// this WorktreeManager is shared by every base partition of this repo (found
+		// in review, #1648).
+		if out, ferr := wm.FetchOrigin(); ferr != nil {
+			e.logfRepo(repoKey, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(out))
 		}
 		baseSHA, perr := gitRevParse(wm.baseDir, "refs/remotes/origin/"+baseBranch)
 		if perr != nil {
@@ -739,18 +901,36 @@ func trainBatchTitle(batch []gh.ProjectItem) string {
 //
 // Emits a JobStartedEvent/JobCompletedEvent pair around the whole batch lifecycle
 // (#1661) so the train has a TUI job row for its entire run, keyed by (Repo,
-// IssueNumber=0) — the same composite key activeJobKey already supports, and unique
-// since there is at most one train per repo. Deliberately emitted here, before
-// prepareTrainWorker runs — not after it succeeds — so prepareTrainWorker's own
-// diagnostic log lines (repo-not-ready, cannot pin base SHA, no holding stage
-// configured) land in a visible row instead of nowhere; the accepted cost is a rare
-// flash-then-vanish row if prepareTrainWorker fails immediately (e.g. context
-// cancelled before the semaphore is acquired) — see adrs/1661-*.md. The completed
-// event always carries Skipped: true (there is no per-train equivalent of
-// InvocationObserver), so the row is simply removed, never added to history.
-func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) {
+// IssueNumber=0) — the same composite key activeJobKey already supports.
+// Deliberately emitted here, before prepareTrainWorker runs — not after it
+// succeeds — so prepareTrainWorker's own diagnostic log lines (repo-not-ready,
+// cannot pin base SHA, no holding stage configured) land in a visible row instead
+// of nowhere; the accepted cost is a rare flash-then-vanish row if
+// prepareTrainWorker fails immediately (e.g. context cancelled before the
+// semaphore is acquired) — see adrs/1661-*.md. The completed event always carries
+// Skipped: true (there is no per-train equivalent of InvocationObserver), so the
+// row is simply removed, never added to history.
+//
+// The row stays keyed on repoKey, NOT trainKey, even though #1648 makes several
+// concurrent per-base trains per repo normal: every repo-level log line in this
+// file routes by repoKey (logfRepo → the LogEvent case in tui/active.go), so
+// keying the row on trainKey would leave a non-default partition's row
+// permanently blank while its lines went nowhere. The known cost of the repoKey
+// keying is display-only and confined to the multi-partition case: sibling
+// partitions share one row, so the later JobStarted overwrites the earlier one's
+// title and the first JobCompleted removes the row while the sibling is still
+// running (its subsequent lines then have no row to land in). Engine behaviour is
+// unaffected — no guard, counter, or landing decision reads this row. To make the
+// shared row at least self-identifying, a non-default partition's title names its
+// base; the default partition's title is unchanged (partitionBase is the empty
+// sentinel there), so single-base repos render byte-identically to pre-#1648 (AC4).
+func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo, partitionBase string, batch []gh.ProjectItem) {
 	repoKey := owner + "/" + repo
+	trainKey := mergeTrainKey(repoKey, partitionBase)
 	title := trainBatchTitle(batch)
+	if partitionBase != defaultPartitionBase {
+		title = fmt.Sprintf("[%s] %s", partitionBase, title)
+	}
 
 	e.emitStructural(tui.JobStartedEvent{
 		IssueNumber: 0,
@@ -767,17 +947,17 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		Skipped:     true,
 	})
 
-	p, current, ok := e.prepareTrainWorker(ctx, state, owner, repo, batch)
+	p, current, ok := e.prepareTrainWorker(ctx, state, owner, repo, partitionBase, batch)
 	if !ok {
 		return
 	}
 	defer func() { <-e.sem }()
-	defer e.finishTrain(repoKey)
+	defer e.finishTrain(trainKey)
 
 	// Re-form loop: validate, land-on-green, or bisect-eject-reform on red.
 	for {
 		if len(current) == 0 {
-			e.logfRepo(repoKey, "merge-train", "no survivors remaining for %s — train complete with nothing to land\n", repoKey)
+			e.logfRepo(repoKey, "merge-train", "no survivors remaining for %s — train complete with nothing to land\n", trainKey)
 			return
 		}
 
@@ -799,7 +979,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			// `current` empty, so `continue` re-enters the loop and the
 			// top-of-loop zero-survivors check returns.
 			if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, current); ejectedCount > 0 {
-				e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings before the singleton fast path — re-forming for %s\n", ejectedCount, repoKey)
+				e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings before the singleton fast path — re-forming for %s\n", ejectedCount, trainKey)
 				current = remaining
 				continue
 			}
@@ -816,21 +996,25 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 
 		survivors, result, prNum, diag, aerr := e.assembleAndValidate(ctx, p, current, trialName)
 		if aerr != nil {
-			e.logfRepo(repoKey, "merge-train", "assemble/validate failed for %s: %v\n", repoKey, aerr)
+			e.logfRepo(repoKey, "merge-train", "assemble/validate failed for %s: %v\n", trainKey, aerr)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			return
 		}
 		if len(survivors) == 0 {
 			// Every member was ejected during assembly (unresolvable conflicts).
-			e.logfRepo(repoKey, "merge-train", "entire batch ejected during assembly for %s\n", repoKey)
+			e.logfRepo(repoKey, "merge-train", "entire batch ejected during assembly for %s\n", trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			return
 		}
 
 		// Hook 1: check runaway guard after the initial re-form trial (ADR-059 D8).
-		if count, tripped := e.isRunawayTripped(repoKey); tripped {
+		// partitionBase (this function's own parameter, sentinel-aware), not
+		// p.baseBranch (the real resolved branch name, never empty) — the latter
+		// would desync this call's trainKey from the trainKey local var used for
+		// isRunawayTripped just above (found in review, #1648).
+		if count, tripped := e.isRunawayTripped(trainKey); tripped {
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
-			e.fireRunawayGuard(ctx, p.owner, p.repo, membersToItems(current), count)
+			e.fireRunawayGuard(ctx, p.owner, p.repo, partitionBase, membersToItems(current), count)
 			return
 		}
 
@@ -842,7 +1026,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		// `remaining` falls through to continue and is caught by the top-of-loop
 		// zero-survivors return, so no special-casing is needed here.
 		if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
-			e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings mid-trial — discarding trial and re-forming for %s\n", ejectedCount, repoKey)
+			e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings mid-trial — discarding trial and re-forming for %s\n", ejectedCount, trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			current = remaining
 			continue
@@ -859,11 +1043,11 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			// D-d hard invariant: a green batch lands immediately, zero bisection.
 			// landGreenBatch adds the D5 main-moved landing gate (behind → rebase →
 			// revalidate → dissolve-on-exhaustion) around landMergeTrainBatch.
-			e.logfRepo(repoKey, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", repoKey, len(survivors))
+			e.logfRepo(repoKey, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", trainKey, len(survivors))
 			e.landGreenBatch(ctx, state, p, survivors)
 			return
 		case TrainCIPending:
-			e.logfRepo(repoKey, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", repoKey)
+			e.logfRepo(repoKey, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			return
 		default: // TrainCIRed
@@ -873,12 +1057,12 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// the cost of the misleading "isolated by halving bisection" / "different
 				// composition" ejection wording. Short-circuit straight to the dedicated
 				// singleton disposition instead of calling handleRedBatch at all.
-				e.logf(survivors[0].item.Number, "merge-train", "combined Validate RED for %s with a single member (#%d) — no poisoner to isolate; disposing as a red singleton\n", repoKey, survivors[0].item.Number)
+				e.logf(survivors[0].item.Number, "merge-train", "combined Validate RED for %s with a single member (#%d) — no poisoner to isolate; disposing as a red singleton\n", trainKey, survivors[0].item.Number)
 				e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 				e.ejectRedSingleton(state.projectID, p.owner, p.repo, survivors[0], diag)
 				return
 			}
-			e.logfRepo(repoKey, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", repoKey, len(survivors))
+			e.logfRepo(repoKey, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", trainKey, len(survivors))
 			// The red trial's artifacts are unneeded; bisection sub-trials build fresh.
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			state.mu.Lock()
@@ -889,9 +1073,10 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			state.bisecting = false
 			state.mu.Unlock()
 			if runaway {
-				// Runaway guard fired inside bisect or landOneAtATime.
-				count, _ := e.isRunawayTripped(repoKey)
-				e.fireRunawayGuard(ctx, p.owner, p.repo, membersToItems(survivors), count)
+				// Runaway guard fired inside bisect or landOneAtATime. partitionBase
+				// (sentinel-aware), not p.baseBranch — see the Hook 1 call above.
+				count, _ := e.isRunawayTripped(trainKey)
+				e.fireRunawayGuard(ctx, p.owner, p.repo, partitionBase, membersToItems(survivors), count)
 				return
 			}
 			if fellBack {
@@ -1067,7 +1252,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
 	survivors, result, prNum, diag, err := e.assembleAndValidateInner(ctx, p, members, trialName)
 	if result != TrainCIGreen {
-		e.recordTrial(p.owner + "/" + p.repo)
+		e.recordTrial(p.trainKey)
 	}
 	return survivors, result, prNum, diag, err
 }
@@ -1145,7 +1330,8 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 		return &red[0], diag, false, false
 	}
 
-	repoKey := p.owner + "/" + p.repo
+	repoKey := p.repoKey()
+	trainKey := p.trainKey
 	mid := len(red) / 2
 	for _, half := range [][]trainMember{red[:mid], red[mid:]} {
 		if *used >= costCap {
@@ -1158,12 +1344,12 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 		e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 		if err != nil {
 			e.logfRepo(repoKey, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
-			if _, tripped := e.isRunawayTripped(repoKey); tripped {
+			if _, tripped := e.isRunawayTripped(trainKey); tripped {
 				return nil, nil, false, true
 			}
 			return nil, nil, true, false
 		}
-		if _, tripped := e.isRunawayTripped(repoKey); tripped {
+		if _, tripped := e.isRunawayTripped(trainKey); tripped {
 			return nil, nil, false, true
 		}
 		if result == TrainCIRed && len(survivors) > 0 {
@@ -1232,14 +1418,15 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 // landOneAtATime note in docs/state-machine.md).
 func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerState, p trialParams, members []trainMember) bool {
 	repoKey := p.owner + "/" + p.repo
+	trainKey := p.trainKey
 	e.logfRepo(repoKey, "merge-train", "one-at-a-time fallback: processing %d member(s) as singleton batches\n", len(members))
 	for _, m := range members {
 		if e.trainValidateFn == nil {
-			// Re-pin the base to current origin/<base> so a prior singleton's land is seen.
-			fetchCmd := exec.Command("git", "fetch", "origin")
-			fetchCmd.Dir = p.wm.baseDir
-			fetchCmd.Env = nonInteractiveGitEnv()
-			fetchCmd.CombinedOutput() // best-effort
+			// Re-pin the base to current origin/<base> so a prior singleton's land is
+			// seen. FetchOrigin (not a raw exec.Command) — serialized under wm.mu, since
+			// this WorktreeManager is shared by every base partition of this repo
+			// (found in review, #1648).
+			p.wm.FetchOrigin() // best-effort
 			if sha, rerr := gitRevParse(p.wm.baseDir, "refs/remotes/origin/"+p.baseBranch); rerr == nil {
 				p.baseSHA = sha // local copy; persists across this loop, does not leak to caller
 			}
@@ -1250,12 +1437,12 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		if err != nil || len(survivors) == 0 {
 			e.logf(m.item.Number, "merge-train", "could not assemble #%d in isolation: %v — leaving in Queued\n", m.item.Number, err)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
-			if _, tripped := e.isRunawayTripped(repoKey); tripped {
+			if _, tripped := e.isRunawayTripped(trainKey); tripped {
 				return true
 			}
 			continue
 		}
-		if _, tripped := e.isRunawayTripped(repoKey); tripped {
+		if _, tripped := e.isRunawayTripped(trainKey); tripped {
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			return true
 		}
@@ -1400,7 +1587,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
-	e.resetTrialCounter(p.owner + "/" + p.repo)
+	e.resetTrialCounter(p.trainKey)
 }
 
 // singletonFastPathEligible decides whether trainMember m can be landed directly
@@ -1530,7 +1717,7 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
-	e.resetTrialCounter(p.owner + "/" + p.repo)
+	e.resetTrialCounter(p.trainKey)
 }
 
 // trySingletonFastPath is runMergeTrainWorker's re-form-loop guard (#1644),
@@ -2609,19 +2796,21 @@ func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
 	return count, count >= n
 }
 
-// resetTrialCounter clears the trial counter for repoKey after a successful landing,
+// resetTrialCounter clears the trial counter for trainKey after a successful landing,
 // so normal poison bisection (where survivors do land) never accumulates toward the cap.
 // This is also the runaway guard's own "episode ends" signal: a successful land can only
 // happen once the guard is no longer tripped, so it doubles as the boundary at which
-// mergeTrainRunawayAlerted's per-member idempotency entries for repoKey are cleared —
+// mergeTrainRunawayAlerted's per-member idempotency entries for trainKey are cleared —
 // the next trip starts a fresh episode where every member is eligible for a fresh alert
-// (#1533).
-func (e *Engine) resetTrialCounter(repoKey string) {
+// (#1533). Since #1648 trainKey is the per-(repo,base) composite key (mergeTrainKey), so
+// a landing on one base never clears a sibling base's still-accumulating trial counter or
+// alert idempotency entries in the same repo.
+func (e *Engine) resetTrialCounter(trainKey string) {
 	e.mergeTrainTrialsMu.Lock()
-	delete(e.mergeTrainTrials, repoKey)
+	delete(e.mergeTrainTrials, trainKey)
 	e.mergeTrainTrialsMu.Unlock()
 
-	prefix := repoKey + "#"
+	prefix := trainKey + "#"
 	e.mergeTrainRunawayMu.Lock()
 	for key := range e.mergeTrainRunawayAlerted {
 		if strings.HasPrefix(key, prefix) {
@@ -2634,8 +2823,10 @@ func (e *Engine) resetTrialCounter(repoKey string) {
 // runawayGuardAlertMessage builds the explanatory alert comment posted (or retried) for a
 // single runaway-guard-paused member. Extracted from fireRunawayGuard so
 // settleRunawayGuardAlertScan's retry and escalateRunawayAlertFailure's fallback comment can
-// share the identical wording (#1533).
-func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) string {
+// share the identical wording (#1533). trainKey (since #1648, a per-(repo,base) composite
+// key) is shown as-is so the alert names exactly which base's train ran out of successful
+// landings.
+func runawayGuardAlertMessage(count int, trainKey string, window time.Duration) string {
 	return fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
 		"The merge-train has run **%d trial(s)** for `%s` within the last %s "+
 		"with **zero successful landings**. This indicates a persistent infra failure "+
@@ -2646,25 +2837,32 @@ func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) s
 		"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
 		"2. Resolve the underlying issue.\n"+
 		"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
-		count, repoKey, window)
+		count, trainKey, window)
 }
 
 // fireRunawayGuard pauses every member in items and posts an alert comment on each, once per
 // member per guard episode. Called from three independent sites — twice inside
 // runMergeTrainWorker (Hook 1, the worker goroutine) and once from routeQueuedGroup (Hook 2,
 // the poll goroutine) — whenever the trial counter reaches the runaway threshold (ADR-059
-// D8). Each call site constructs its own, possibly-overlapping items slice from whatever
-// local state it holds, and nothing prevents Hook 1 and Hook 2 from running concurrently for
-// the same repoKey once the shared counter trips (the poll loop does not check whether a
-// worker is mid-firing).
+// D8). partitionBase identifies which (repo, base) partition tripped and MUST be the same
+// sentinel-aware value dispatchMergeTrainWorker/routeQueuedGroup use everywhere else
+// (defaultPartitionBase, "", for the default partition — never p.baseBranch, the real
+// resolved git branch name, which is never empty and would desync this call's trainKey from
+// every other guard/counter for the same worker run — found in review, #1648). #1648 R2/AC5
+// requires this guard to fire per partition, not repo-wide, so one base's runaway must never
+// pause a healthy sibling base's members. Each call site constructs its own, possibly-overlapping
+// items slice from whatever local state it holds, and nothing prevents Hook 1 and Hook 2
+// from running concurrently for the same trainKey once the shared counter trips (the poll
+// loop does not check whether a worker is mid-firing).
 //
 // The whole pause+alert sequence is therefore a single critical section, serialized by
 // mergeTrainRunawayMu, so two concurrent calls can never interleave their loops. Within that
-// section, mergeTrainRunawayAlerted (keyed "owner/repo#N") makes re-encountering a member
-// already alerted this episode a no-op — the pause labels were applied then too — so a
-// member appearing in two racing calls' items slices is never double-alerted (R2/A3).
-// mergeTrainRunawayAlerted is cleared per-repo by resetTrialCounter, the guard's own "episode
-// ends" signal (a successful land) — the next trip starts a fresh episode.
+// section, mergeTrainRunawayAlerted (keyed "trainKey#N", trainKey a per-(repo,base)
+// composite since #1648) makes re-encountering a member already alerted this episode a
+// no-op — the pause labels were applied then too — so a member appearing in two racing
+// calls' items slices is never double-alerted (R2/A3). mergeTrainRunawayAlerted is cleared
+// per-trainKey by resetTrialCounter, the guard's own "episode ends" signal (a successful
+// land) — the next trip starts a fresh episode.
 //
 // Episode-scoping also has to survive the *other* documented "episode ends" path: the alert
 // text itself instructs operators to manually remove fabrik:paused/fabrik:awaiting-input to
@@ -2701,17 +2899,18 @@ func runawayGuardAlertMessage(count int, repoKey string, window time.Duration) s
 // most a few seconds in the worst case, versus the real complexity of a keyed-mutex-with-
 // cleanup scheme a per-repo/sync.Map-of-mutexes approach would require. See ADR-1533's
 // "Rejected alternatives" section.
-func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items []gh.ProjectItem, count int) {
+func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, partitionBase string, items []gh.ProjectItem, count int) {
 	_, window := e.effectiveTrialWindow()
 	repoKey := owner + "/" + repo
+	trainKey := mergeTrainKey(repoKey, partitionBase)
 	e.logfRepo(repoKey, "merge-train", "runaway guard fired for %s: %d trial(s) with zero successful lands within %s — pausing %d Queued member(s)\n",
-		repoKey, count, window, len(items))
+		trainKey, count, window, len(items))
 
 	e.mergeTrainRunawayMu.Lock()
 	defer e.mergeTrainRunawayMu.Unlock()
 
 	for _, item := range items {
-		alertKey := repoKey + "#" + strconv.Itoa(item.Number)
+		alertKey := trainKey + "#" + strconv.Itoa(item.Number)
 		if recordedCount, ok := e.mergeTrainRunawayAlerted[alertKey]; ok && count <= recordedCount {
 			// Already paused and alerted this episode by an earlier call (Hook 1 or
 			// Hook 2, racing for the same member) at this or a higher trial count —
@@ -2731,7 +2930,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 		e.addLabel(item, "fabrik:paused")
 		e.addLabel(item, "fabrik:awaiting-input")
 
-		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, repoKey, window), false, true); commentErr != nil {
+		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, trainKey, window), false, true); commentErr != nil {
 			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
 			e.markRunawayAlertOutstanding(item, owner, repo)
 		} else {
@@ -3132,8 +3331,15 @@ func (e *Engine) escalateClosedUnmergedTrial(projectID, owner, repo string, prNu
 // landMergeTrainBatch executes FR-1 through FR-5 after a green CI result:
 // opens (or finds) the integration PR, polls until mergeable, merges, advances
 // each member to Done and closes their PRs, then cleans up trial artifacts.
-// baseBranch is the target branch for the integration PR (already known from runMergeTrainWorker).
-func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo, baseBranch string, survivors []trainMember, wm *WorktreeManager) {
+// baseBranch is the target branch for the integration PR (already known from
+// runMergeTrainWorker) — the real git branch name, used for the PR itself.
+// trainKey (#1648) is the worker's fixed (repo,partition) guard key (p.trainKey at
+// every call site) — used only for resetTrialCounter below, and deliberately NOT
+// derived from baseBranch here: for a default-base partition baseBranch is a real
+// resolved name (e.g. "main") but trainKey's own base segment is the empty-string
+// sentinel groupQueuedByRepoAndBase never resolves via git — see trialParams's doc
+// comment for why the two must never be conflated.
+func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo, baseBranch, trainKey string, survivors []trainMember, wm *WorktreeManager) {
 	repoKey := owner + "/" + repo
 	trialName := state.trialName
 
@@ -3313,8 +3519,8 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// from earlier trains must not count toward the pause cap on future trains.
 		e.resetEjectionCount(owner, repo, m.item.Number)
 	}
-	e.resetTrialCounter(repoKey)
-	e.logfRepo(repoKey, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", repoKey, integrationPRNum, len(survivors))
+	e.resetTrialCounter(trainKey)
+	e.logfRepo(repoKey, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", trainKey, integrationPRNum, len(survivors))
 }
 
 // dissolveBatch tears down an in-flight batch and returns every member to the
@@ -3394,7 +3600,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 
 		if !e.trialBehind(p.owner, p.repo, p.baseBranch, trialBranch) {
 			// Up to date: land via the unchanged terminal path (clears the map).
-			e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
+			e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, p.trainKey, survivors, p.wm)
 			return
 		}
 
@@ -3408,12 +3614,12 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		e.logfRepo(p.repoKey(), "merge-train", "trial %s is behind %s (main moved) — rebasing off the new base (cycle %d/%d)\n", trialName, p.baseBranch, cycles, maxCycles)
 
 		// Re-pin the base to the current origin/<base> so the re-assembly forks off
-		// the advanced main (skipped under the test seam — no real git).
+		// the advanced main (skipped under the test seam — no real git). FetchOrigin
+		// (not a raw exec.Command) — serialized under wm.mu, since this
+		// WorktreeManager is shared by every base partition of this repo (found in
+		// review, #1648).
 		if e.trainValidateFn == nil {
-			fetchCmd := exec.Command("git", "fetch", "origin")
-			fetchCmd.Dir = p.wm.baseDir
-			fetchCmd.Env = nonInteractiveGitEnv()
-			fetchCmd.CombinedOutput() // best-effort
+			p.wm.FetchOrigin() // best-effort
 			if sha, rerr := gitRevParse(p.wm.baseDir, "refs/remotes/origin/"+p.baseBranch); rerr == nil {
 				p.baseSHA = sha // local copy; the loop reuses it, no leak to caller
 			}
@@ -3540,6 +3746,18 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 				e.logfRepo(repoKey, "merge-train", "reconstruct: skipping PR #%d (state=open, no members still Queued) — head ref %q is not a train branch, not closing\n", prs[i].Number, prs[i].HeadRefName)
 				continue
 			}
+			// #1648: an open train PR with no members still Queued *for this
+			// worker's own batch* is only safe to treat as a stale remnant if it
+			// also belongs to this worker's own base partition. Since concurrent
+			// per-base workers are now normal (not just a post-restart scenario —
+			// this function runs on every fresh dispatch), an unmatched PR could
+			// equally be a sibling partition's live, healthy trial — closing it
+			// here would be exactly the cross-partition destruction R4/AC3 guard
+			// against. Skip and leave it for its own partition's worker to manage.
+			if !trialBelongsToBase(prs[i].HeadRefName, p.baseBranch) {
+				e.logfRepo(repoKey, "merge-train", "reconstruct: skipping PR #%d (state=open, no members still Queued) — head ref %q belongs to a different base partition, not %s — not closing\n", prs[i].Number, prs[i].HeadRefName, p.baseBranch)
+				continue
+			}
 			e.logfRepo(repoKey, "merge-train", "reconstruct: closing stale open train PR #%d (no members still Queued) for %s\n", prs[i].Number, repoKey)
 			if cerr := e.client.CloseIssue(p.owner, p.repo, prs[i].Number); cerr != nil {
 				e.logfRepo(repoKey, "merge-train", "warn: could not close stale train PR #%d: %v\n", prs[i].Number, cerr)
@@ -3590,11 +3808,23 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 	// would post confusing "batch dissolved" comments on unrelated fresh Queued items,
 	// and returning true would abort today's batch. Returning false lets the current
 	// batch form on this poll (a fresh trial gets a new, unique branch name — no clash).
+	//
+	// #1648: only sweep branches belonging to this worker's own base partition
+	// (trialBelongsToBase) — an unmatched branch for a different base is not an
+	// orphan at all, it may be a sibling partition's live trial (concurrent
+	// per-base workers are now normal, not just a post-restart scenario). Deleting
+	// it here would be exactly the cross-partition destruction R4/AC3 guards against.
 	for _, b := range originBranches {
-		if tn := trialNameFromBranch(b); tn != "" {
-			e.logfRepo(repoKey, "merge-train", "reconstruct: cleaning up orphaned trial branch %s for %s\n", tn, repoKey)
-			e.cleanupTrialArtifacts(p.repoKey(), p.wm, tn)
+		tn := trialNameFromBranch(b)
+		if tn == "" {
+			continue
 		}
+		if !trialBelongsToBase(b, p.baseBranch) {
+			e.logfRepo(repoKey, "merge-train", "reconstruct: leaving trial branch %s alone for %s — belongs to a different base partition, not %s\n", tn, repoKey, p.baseBranch)
+			continue
+		}
+		e.logfRepo(repoKey, "merge-train", "reconstruct: cleaning up orphaned trial branch %s for %s\n", tn, repoKey)
+		e.cleanupTrialArtifacts(p.repoKey(), p.wm, tn)
 	}
 	return false
 }
@@ -3630,7 +3860,7 @@ func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainW
 	// defer once this whole call chain unwinds (this function is only reached via
 	// reconstructTrainState returning true, which prepareTrainWorker treats as
 	// ok=false) — see ADR-067.
-	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
+	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, p.trainKey, survivors, p.wm)
 }
 
 // resumeTrain re-establishes an in-flight batch from an open train PR after a

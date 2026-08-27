@@ -254,3 +254,56 @@ func TestEscalateRunawayAlertFailure_FallbackAlsoFails_MarkerStaysAndNotAlerted(
 		t.Error("did not expect the member recorded as alerted while the fallback comment is also failing")
 	}
 }
+
+// TestSettleRunawayGuardAlert_UnresolvableBase_RetriesWithoutPosting verifies #1648's new
+// failure mode: for a member carrying an explicit base: label whose repo has no registered
+// WorktreeManager (mergeTrainKeyForItem cannot reconstruct the trainKey), the settle scan
+// must retry via the normal counter rather than crash, post no alert, and leave the marker
+// untouched for a later poll once the WorktreeManager becomes available. A no-label item
+// would take mergeTrainKeyForItem's zero-cost defaultPartitionBase path and never hit this
+// failure mode at all — this test exists specifically to cover the labeled-item path, which
+// does need the WorktreeManager.
+func TestSettleRunawayGuardAlert_UnresolvableBase_RetriesWithoutPosting(t *testing.T) {
+	client := &mockGitHubClient{}
+	// Plain testEngine (no WorktreeManager registered — Config.Repo/Owner is
+	// empty here so NewWithDeps registers nothing) so mergeTrainKeyForItem
+	// cannot find a repo entry at all.
+	eng := NewWithDeps(Config{ProjectNum: 1, User: "testuser", Token: "token", MaxConcurrent: 5, Stages: testStages()}, client, &mockClaudeInvoker{}, nil)
+
+	item := gh.ProjectItem{
+		Number: 20, Repo: "owner/repo",
+		Labels: []string{runawayAlertMarkerLabel, "fabrik:paused", "base:maint/1.x"},
+	}
+
+	eng.settleRunawayGuardAlert(item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected no alert comment when the base branch can't be resolved, got %v", client.addCommentCalls)
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == runawayAlertMarkerLabel {
+			t.Error("did not expect the marker removed when the base branch can't be resolved")
+		}
+	}
+}
+
+// TestMergeTrainKeyForItem_NoLabel_ZeroCostSentinel verifies the #1648 zero-cost path: an
+// item with no base: label reconstructs to defaultPartitionBase without needing (or
+// touching) a registered WorktreeManager at all — this must agree exactly with
+// groupQueuedByRepoAndBase's own bucketing rule for the same item shape, or the runaway
+// guard's alert idempotency silently breaks for the overwhelmingly common default-base case.
+func TestMergeTrainKeyForItem_NoLabel_ZeroCostSentinel(t *testing.T) {
+	eng := NewWithDeps(Config{ProjectNum: 1, User: "testuser", Token: "token", MaxConcurrent: 5, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+
+	item := gh.ProjectItem{Number: 21, Repo: "owner/repo"}
+	key, err := eng.mergeTrainKeyForItem(item)
+	if err != nil {
+		t.Fatalf("expected no error for a no-label item even with no registered WorktreeManager, got %v", err)
+	}
+	want := mergeTrainKey("owner/repo", defaultPartitionBase)
+	if key != want {
+		t.Errorf("mergeTrainKeyForItem() = %q, want %q", key, want)
+	}
+}

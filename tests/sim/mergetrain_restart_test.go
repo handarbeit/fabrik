@@ -53,7 +53,15 @@ func TestMergeTrainRestart_OrphanedTrialBranchCleanedUp(t *testing.T) {
 	t.Parallel()
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
 
-	const orphanBranch = "fabrik/merge-train/merge-train-main-crashed-orphan"
+	// Shaped like a real trial name (merge-train-<base>-<unix-ts>, baseTrialName's
+	// exact format for a batch's first trial) rather than a descriptive placeholder:
+	// trialBelongsToBase (engine/merge_train.go) requires a digit immediately after
+	// the "merge-train-<base>-" prefix to reject an unrelated sibling-base trial
+	// whose sanitized name happens to be a hyphen-prefix of this one (e.g. "main" vs
+	// "main-hotfix" — found in review, #1648); a non-numeric suffix like the
+	// previous "...-crashed-orphan" would (correctly, post-fix) no longer be
+	// recognized as belonging to base "main" at all.
+	const orphanBranch = "fabrik/merge-train/merge-train-main-1690000000"
 	env.Sim.Sim().SeedCommitFrom(env.OwnerRepo, orphanBranch, "main",
 		map[string]string{"orphan.txt": "leftover from a simulated crash\n"},
 		"orphan trial branch (simulated crash before CreateDraftPR)")
@@ -67,7 +75,7 @@ func TestMergeTrainRestart_OrphanedTrialBranchCleanedUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTrainBranchesOnOrigin (before): %v", err)
 	}
-	if !containsBranchName(before, "fabrik/merge-train/merge-train-main-crashed-orphan") {
+	if !containsBranchName(before, orphanBranch) {
 		t.Fatalf("orphan branch not present on origin before restart — seeding failed to land where the engine would look: %v", before)
 	}
 
@@ -82,7 +90,7 @@ func TestMergeTrainRestart_OrphanedTrialBranchCleanedUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTrainBranchesOnOrigin (after): %v", err)
 	}
-	if containsBranchName(after, "fabrik/merge-train/merge-train-main-crashed-orphan") {
+	if containsBranchName(after, orphanBranch) {
 		t.Errorf("orphan trial branch still present on origin after restart+poll — Route 3 cleanup did not run: %v", after)
 	}
 

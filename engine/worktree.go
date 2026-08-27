@@ -610,6 +610,31 @@ func (wm *WorktreeManager) resolveBaseLabelBranch(candidate string, issueNumber 
 	return wm.branchExists(ref)
 }
 
+// FetchOrigin runs `git fetch origin` against the shared bare clone (wm.baseDir),
+// serialized under wm.mu exactly like every other mutation of that directory
+// (resolveBaseLabelBranch above, EnsureWorktree, PushBranch,
+// ensureTrainWorktreeFromRef, PushTrainBranch, CleanupWorktree/CleanupTrainWorktree)
+// — a bare-clone fetch writes shared refs (FETCH_HEAD, refs/remotes/origin/*) exactly
+// as those other operations write shared worktree/branch/config state, and is not
+// safe to run unguarded. Before #1648 this needed no lock: at most one merge-train
+// worker could ever be live per repo. Since #1648, worktreesFor(repoKey) returns the
+// SAME *WorktreeManager for every base partition of a repo, so two sibling-base
+// workers now share this directory and can call this concurrently with each other
+// and with any other wm.mu-guarded operation — found in review, #1648 (three call
+// sites in merge_train.go previously ran this fetch unguarded). Best-effort: returns
+// the command's combined output and error for the caller to log; callers already
+// treat a fetch failure as non-fatal (a stale local ref falls back to gitRevParse's
+// own local-ref path).
+func (wm *WorktreeManager) FetchOrigin() (string, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	cmd := exec.Command("git", "fetch", "origin")
+	cmd.Dir = wm.baseDir
+	cmd.Env = nonInteractiveGitEnv()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // updateWorktreeFromMain fetches latest origin and rebases the worktree branch
 // onto origin/main. This ensures stages start from an up-to-date base without
 // creating noise merge commits that confuse Claude on retries.
