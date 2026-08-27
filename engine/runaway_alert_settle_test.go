@@ -45,7 +45,7 @@ func TestSettleRunawayGuardAlert_RetrySucceeds(t *testing.T) {
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:#10"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#10"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if !alerted {
 		t.Error("expected the member recorded as alerted after a successful retry")
@@ -80,7 +80,7 @@ func TestSettleRunawayGuardAlert_RetryFails_MarkerStays(t *testing.T) {
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:#11"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#11"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if alerted {
 		t.Error("did not expect the member recorded as alerted after a failed retry")
@@ -195,7 +195,7 @@ func TestEscalateRunawayAlertFailure_FallbackSucceeds_MarkerRemovedAndAlerted(t 
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:#15"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#15"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if !alerted {
 		t.Error("expected the member recorded as alerted once the fallback comment succeeds")
@@ -248,7 +248,7 @@ func TestEscalateRunawayAlertFailure_FallbackAlsoFails_MarkerStaysAndNotAlerted(
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:#14"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#14"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if alerted {
 		t.Error("did not expect the member recorded as alerted while the fallback comment is also failing")

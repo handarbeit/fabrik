@@ -279,13 +279,25 @@ const defaultPartitionBase = ""
 // computes. baseBranch is defaultPartitionBase ("") for the common default-base
 // partition, or the real resolved branch name otherwise — see trialParams's doc
 // comment in this file for the full partitionBase-vs-baseBranch distinction.
-// The delimiter is ':' — illegal in both a GitHub "owner/repo" string and in
-// any valid git ref name (git check-ref-format forbids a bare ':'), so the two
-// components can never collide by construction; no sanitizeBranchName-style
-// escaping of the key itself is needed. This key replaces the bare
-// "owner/repo" string as the guard key for mergeTrainInFlight, the runaway
-// guard's mergeTrainTrials/mergeTrainRunawayAlerted, store.repoWorkers
-// (EnterRepoWorker/ExitRepoWorker/RepoWorkerActive), and
+//
+// For the default partition (baseBranch == defaultPartitionBase) this returns
+// repoKey unchanged — no colon appended — rather than the theoretically-more-
+// "consistent" "owner/repo:". This is deliberate, not an oversight: it makes
+// the default partition's key byte-identical to the pre-#1648 bare-repoKey
+// form everywhere that key is also used in a human-facing log line or alert
+// comment (AC4), avoiding a confusing trailing "owner/repo:" that names no
+// base at all. It's also collision-safe by construction: a real resolved
+// branch name from baseBranchForItem is never empty, so "owner/repo" (no
+// colon) can only ever mean the default partition, never collide with an
+// explicit "owner/repo:somebranch" key.
+//
+// For every other baseBranch, the delimiter is ':' — illegal in both a GitHub
+// "owner/repo" string and in any valid git ref name (git check-ref-format
+// forbids a bare ':'), so the two components can never collide by
+// construction; no sanitizeBranchName-style escaping of the key itself is
+// needed. This key replaces the bare "owner/repo" string as the guard key for
+// mergeTrainInFlight, the runaway guard's mergeTrainTrials/mergeTrainRunawayAlerted,
+// store.repoWorkers (EnterRepoWorker/ExitRepoWorker/RepoWorkerActive), and
 // mergeTrainBatchSnapshotSeen — every registry that must not let one base's
 // train block, cancel, alert on, or be mistaken for another base's train in
 // the same repo (R2). Registries that are deliberately NOT re-keyed
@@ -293,6 +305,9 @@ const defaultPartitionBase = ""
 // keep using the bare "owner/repo" (or "owner/repo#N") form — see their own
 // doc comments for why.
 func mergeTrainKey(repoKey, baseBranch string) string {
+	if baseBranch == defaultPartitionBase {
+		return repoKey
+	}
 	return repoKey + ":" + baseBranch
 }
 
