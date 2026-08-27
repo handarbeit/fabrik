@@ -3140,6 +3140,23 @@ func TestSingletonFastPathEligible_AncestorGreenMergeable_ReturnsTrue(t *testing
 	}
 }
 
+// greenCompletedCheckRunFn is the "member's own CI already ran and passed"
+// fixture shared by the isolation tests below: every _FallsThrough/
+// _FailsClosed test that targets an *earlier* condition in
+// singletonFastPathEligible's chain (head-SHA, pinned-base-SHA, ancestry,
+// mergeable_state) must supply this so that, were the guard under test
+// deleted, execution would reach classifyLandingCI and observe green —
+// i.e. so the specific mutation the test exists to catch actually flips
+// the result, rather than the test passing anyway via the unrelated
+// zero-check-runs rejection arm (see the review finding on #1644 this
+// fixture was added to close: TestSingletonFastPathEligible_
+// BaseNotAncestor_FallsThrough passed even with its own `behind > 0`
+// rejection deleted, masked by every one of these mocks' unset
+// fetchCheckRunsFn defaulting to zero check runs).
+func greenCompletedCheckRunFn(owner, repo, sha string) ([]gh.CheckRun, error) {
+	return []gh.CheckRun{{Name: "build", Status: "completed", Conclusion: "success"}}, nil
+}
+
 // TestSingletonFastPathEligible_HeadSHAMismatch_FallsThrough is the TOCTOU
 // guard: the member's PR was re-pushed after batch formation, so the cached
 // headSHA snapshot no longer reflects what's actually on the PR. Must fall
@@ -3153,7 +3170,7 @@ func TestSingletonFastPathEligible_HeadSHAMismatch_FallsThrough(t *testing.T) {
 		},
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
 			checksCalled = true
-			return nil, nil
+			return greenCompletedCheckRunFn(owner, repo, sha)
 		},
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
@@ -3167,19 +3184,30 @@ func TestSingletonFastPathEligible_HeadSHAMismatch_FallsThrough(t *testing.T) {
 	if behindCalled || checksCalled {
 		t.Error("expected the TOCTOU check to short-circuit before any ancestry/CI API call")
 	}
-	if reason == "" {
-		t.Error("expected a non-empty reason (R4 — the specific unmet condition must be logged)")
+	if !strings.Contains(reason, "no longer matches the batch-formation snapshot") {
+		t.Errorf("expected the head-SHA-mismatch reason, got %q", reason)
 	}
 }
 
+// TestSingletonFastPathEligible_NoPinnedBaseSHA_FallsClosed isolates the
+// "no pinned base SHA" guard: ancestry and CI fixtures are both green so
+// that deleting the guard under test would flip the result to eligible,
+// not merely fall through via a different arm (see greenCompletedCheckRunFn).
 func TestSingletonFastPathEligible_NoPinnedBaseSHA_FallsClosed(t *testing.T) {
-	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn:     greenCompletedCheckRunFn,
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	p, m, pr := singletonFastPathTestSetup(eng)
 	p.baseSHA = ""
 
-	eligible, _ := eng.singletonFastPathEligible(p, m, pr)
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
 	if eligible {
 		t.Fatal("expected ineligible with no pinned base SHA available")
+	}
+	if !strings.Contains(reason, "no pinned base SHA") {
+		t.Errorf("expected the no-pinned-base-SHA reason, got %q", reason)
 	}
 }
 
@@ -3187,11 +3215,20 @@ func TestSingletonFastPathEligible_NoPinnedBaseSHA_FallsClosed(t *testing.T) {
 // base has moved past the member's head since pinning, so the merge would not
 // be a fast-forward — the combination is genuinely untested and the fast path
 // must not fire.
+//
+// The CI fixture is green and complete (greenCompletedCheckRunFn) so that
+// this test actually exercises the ancestry rejection: reviewed and found
+// vacuous without it — deleting the `behind > 0` check left this test green,
+// masked by fetchCheckRunsFn defaulting to zero check runs (a mock left
+// unset here originally), which rejects via its own, unrelated arm
+// regardless of ancestry. AC7 proves the fix: deleting the ancestry
+// rejection now turns this test red, since the CI fixture no longer masks it.
 func TestSingletonFastPathEligible_BaseNotAncestor_FallsThrough(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
 			return 3, nil // pinned base is 3 commits ahead of the member's head
 		},
+		fetchCheckRunsFn: greenCompletedCheckRunFn,
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	p, m, pr := singletonFastPathTestSetup(eng)
@@ -3200,22 +3237,30 @@ func TestSingletonFastPathEligible_BaseNotAncestor_FallsThrough(t *testing.T) {
 	if eligible {
 		t.Fatal("expected ineligible when the pinned base is not an ancestor of the member's head")
 	}
-	if reason == "" {
-		t.Error("expected a non-empty reason")
+	if !strings.Contains(reason, "not a fast-forward") {
+		t.Errorf("expected the ancestry rejection reason, got %q", reason)
 	}
 }
 
+// TestSingletonFastPathEligible_MergeableStateDirty_FallsThrough isolates the
+// mergeable_state guard with a green, complete CI fixture — see
+// greenCompletedCheckRunFn's doc comment for why this is required for the
+// test to actually exercise the condition it names.
 func TestSingletonFastPathEligible_MergeableStateDirty_FallsThrough(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
+		fetchCheckRunsFn:     greenCompletedCheckRunFn,
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	p, m, pr := singletonFastPathTestSetup(eng)
 	pr.MergeableState = "dirty"
 
-	eligible, _ := eng.singletonFastPathEligible(p, m, pr)
+	eligible, reason := eng.singletonFastPathEligible(p, m, pr)
 	if eligible {
 		t.Fatal("expected ineligible for a dirty (conflicting) mergeable_state")
+	}
+	if !strings.Contains(reason, "mergeable_state") {
+		t.Errorf("expected the mergeable_state rejection reason, got %q", reason)
 	}
 }
 
@@ -3236,8 +3281,8 @@ func TestSingletonFastPathEligible_CheckRunInProgress_FallsThrough(t *testing.T)
 	if eligible {
 		t.Fatal("expected ineligible for an in-progress (incomplete) check run")
 	}
-	if reason == "" {
-		t.Error("expected a non-empty reason")
+	if !strings.Contains(reason, "CI not confirmed green and complete") {
+		t.Errorf("expected the CI-not-green-and-complete reason, got %q", reason)
 	}
 }
 
@@ -3272,8 +3317,8 @@ func TestSingletonFastPathEligible_ZeroCheckRuns_FallsThrough(t *testing.T) {
 	if eligible {
 		t.Fatal("expected ineligible with zero check runs, even with an accepted mergeable_state — absence of CI data is not positive evidence")
 	}
-	if reason == "" {
-		t.Error("expected a non-empty reason")
+	if !strings.Contains(reason, "zero check runs") {
+		t.Errorf("expected the zero-check-runs reason, got %q", reason)
 	}
 }
 
@@ -3282,11 +3327,22 @@ func TestSingletonFastPathEligible_ZeroCheckRuns_FallsThrough(t *testing.T) {
 // error is ambiguity, never positive evidence — both must fall through to the
 // trial, never be treated as "assume up to date"/"assume green" the way
 // trialBehind's unrelated, lower-stakes decision does on error.
+//
+// Both supply a green, complete CI fixture (or, for the FetchCheckRuns case,
+// a non-empty check-run slice alongside the error) so the error-handling
+// branch under test is what's actually exercised: reviewed and found that
+// simply deleting either `if err != nil { return false, ... }` still passed
+// both tests unmodified, because the zero value each mock returns alongside
+// its error (0 for FetchCommitsBehind, nil for FetchCheckRuns) is itself
+// indistinguishable from — or, for FetchCheckRuns, is a nil slice that
+// triggers — a *different*, unrelated rejection arm (ancestor-passes /
+// zero-check-runs) regardless of whether the error is checked at all.
 func TestSingletonFastPathEligible_FetchCommitsBehindError_FailsClosed(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
 			return 0, fmt.Errorf("network error")
 		},
+		fetchCheckRunsFn: greenCompletedCheckRunFn,
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	p, m, pr := singletonFastPathTestSetup(eng)
@@ -3295,8 +3351,8 @@ func TestSingletonFastPathEligible_FetchCommitsBehindError_FailsClosed(t *testin
 	if eligible {
 		t.Fatal("expected ineligible on a FetchCommitsBehind error — ambiguity must fail closed (R2)")
 	}
-	if reason == "" {
-		t.Error("expected a non-empty reason")
+	if !strings.Contains(reason, "could not confirm pinned base is an ancestor") {
+		t.Errorf("expected the FetchCommitsBehind-error reason, got %q", reason)
 	}
 }
 
@@ -3304,7 +3360,13 @@ func TestSingletonFastPathEligible_FetchCheckRunsError_FailsClosed(t *testing.T)
 	client := &mockGitHubClient{
 		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) { return 0, nil },
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, fmt.Errorf("network error")
+			// Non-empty and green alongside the error: if the error check
+			// were deleted, this slice would classify as TrainCIGreen and
+			// the function would wrongly return eligible — proving this
+			// test actually exercises the error branch, not the (also
+			// rejecting, but unrelated) zero-check-runs arm a nil slice
+			// would otherwise mask it behind.
+			return []gh.CheckRun{{Name: "build", Status: "completed", Conclusion: "success"}}, fmt.Errorf("network error")
 		},
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
@@ -3314,8 +3376,8 @@ func TestSingletonFastPathEligible_FetchCheckRunsError_FailsClosed(t *testing.T)
 	if eligible {
 		t.Fatal("expected ineligible on a FetchCheckRuns error — ambiguity must fail closed (R2)")
 	}
-	if reason == "" {
-		t.Error("expected a non-empty reason")
+	if !strings.Contains(reason, "could not fetch check runs") {
+		t.Errorf("expected the FetchCheckRuns-error reason, got %q", reason)
 	}
 }
 
