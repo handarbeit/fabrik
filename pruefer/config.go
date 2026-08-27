@@ -100,11 +100,13 @@ type Config struct {
 	// in applyConfigReload — it's diffed and applied specially (diffRepos)
 	// so the reload summary can name individual repos added/removed rather
 	// than a single before/after slice dump. A SIGHUP-triggered change to
-	// this field no longer mints or removes any owner's installation
-	// auth (unlike pre-#1641): every installation is already minted
-	// unconditionally by Derive, so a filter edit only needs to
-	// re-intersect against the already-known installation grant
-	// (Reconciler.LastDerived()) — see execute.go's handleReload.
+	// this field triggers a fresh, live re-derivation (daemon.rederiveRepos,
+	// via execute.go's handleReload) rather than minting or removing any
+	// owner's installation auth itself: every installation is already
+	// minted unconditionally by Derive, so re-deriving after a filter edit
+	// never needs a new token for an already-known owner — but it is a live
+	// call to GitHub (re-listing every installation's accessible repos),
+	// not a local re-intersection against a cached result.
 	WatchedRepos   []string      `reload:"live"` // "owner/repo"
 	PollInterval   time.Duration `reload:"live"`
 	Model          string        `reload:"live"`

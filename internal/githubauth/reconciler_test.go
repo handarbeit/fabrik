@@ -502,6 +502,34 @@ func TestReconcile_MintFailure_ClientForRepoDistinguishesFromMissingInstallation
 	if !found {
 		t.Errorf("expected a log line about the failed mint for flaky, got: %v", lines())
 	}
+
+	// Regression: a mint failure must not be indistinguishable from a
+	// genuinely missing installation. Before MintError existed, an
+	// installation whose mint failed was omitted from
+	// DerivedRepoSet.Installations entirely — the same shape as an owner
+	// with no installation at all — so guideMissingInstallations couldn't
+	// tell them apart and misreported "flaky has no installation", which
+	// (absent -no-browser) also popped open a browser for what's usually a
+	// transient error a reconciliation retry would clear on its own.
+	for _, l := range lines() {
+		if strings.Contains(l, "flaky") && strings.Contains(l, "has no installation") {
+			t.Errorf("mint failure misreported as a missing installation (would trigger guided-install/browser-open for a transient error): %s", l)
+		}
+	}
+	derived := r.LastDerived()
+	foundFlaky := false
+	for _, inst := range derived.Installations {
+		if inst.Account != "flaky" {
+			continue
+		}
+		foundFlaky = true
+		if inst.MintError == "" {
+			t.Error("expected flaky's DerivedInstallation to carry a non-empty MintError")
+		}
+	}
+	if !foundFlaky {
+		t.Error("expected flaky to still appear in DerivedRepoSet.Installations (found, but not mintable this round) rather than being omitted like a genuinely missing installation")
+	}
 }
 
 // TestReconciler_RemoveOwners_ClearsMintErrorEvenWithoutClientEntry covers
@@ -1976,6 +2004,70 @@ func TestReconcile_NoWatchedRepos_DerivesFromInstallations(t *testing.T) {
 	derived := r.LastDerived()
 	if len(derived.Repos) != 2 {
 		t.Errorf("LastDerived().Repos = %v, want both of handarbeit's accessible repos with no filter applied", derived.Repos)
+	}
+}
+
+// TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops is the
+// regression test for a review finding: Derive's own mint+commit path
+// (invoked internally by Reconcile's non-pinned discovery) used to start a
+// refresh loop for every newly-discovered installation immediately, using
+// whatever ctx Reconcile itself was called with. Every production caller
+// (execute.go) then calls Reconciler.RunRefreshLoops right after Reconcile
+// returns, expecting to be the *sole* starter of the initial batch's
+// refresh loops — so this doubled every installation's refresh-loop
+// goroutine (and its GitHub App token-mint API traffic), and the second
+// start silently overwrote Auth.cancel, permanently orphaning the first
+// loop with no way to ever stop it (not even via Auth.Stop/
+// drainThenStopAuth/RemoveOwners) short of a process restart.
+//
+// This test passes Reconcile and RunRefreshLoops two INDEPENDENT contexts
+// specifically to make the bug observable deterministically: reconcileCtx
+// is never cancelled, so if Derive had started a loop under it, that loop
+// would keep refreshing forever regardless of what happens to runCtx.
+// Cancelling only runCtx and then confirming refreshing has genuinely
+// stopped (no further mints after a full refresh interval) is proof no
+// second, reconcileCtx-rooted loop is still running.
+func TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	oldMargin, oldRetry := tokenRefreshMargin, tokenRefreshRetryDelay
+	tokenRefreshMargin = 30 * time.Millisecond
+	tokenRefreshRetryDelay = 20 * time.Millisecond
+	defer func() { tokenRefreshMargin, tokenRefreshRetryDelay = oldMargin, oldRetry }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(60 * time.Millisecond) })
+	defer srv.Close()
+
+	reconcileCtx := context.Background() // deliberately never cancelled
+	r, err := Reconcile(reconcileCtx, Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	wait := r.RunRefreshLoops(runCtx, func(int64) func(string, ...any) { return func(string, ...any) {} })
+
+	// Let at least one refresh cycle happen under runCtx, then stop it.
+	time.Sleep(80 * time.Millisecond)
+	cancelRun()
+	wait()
+
+	countAtStop := fake.mintCountFor(111)
+	// If Derive had also started a loop under reconcileCtx, it would keep
+	// refreshing on its own schedule — give it a full refresh interval's
+	// worth of time to prove it, then check the count didn't move.
+	time.Sleep(3 * (tokenRefreshMargin + tokenRefreshRetryDelay))
+	if countAfterWait := fake.mintCountFor(111); countAfterWait != countAtStop {
+		t.Errorf("mint count for installation 111 grew from %d to %d after RunRefreshLoops' own loop was stopped — a second refresh loop (started by Reconcile/Derive under a context that's never cancelled) is still running, meaning Auth.Stop/drainThenStopAuth/RemoveOwners can never actually silence this installation short of a process restart", countAtStop, countAfterWait)
 	}
 }
 

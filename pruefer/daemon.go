@@ -931,7 +931,8 @@ func (d *Daemon) rederiveRepos(ctx context.Context) {
 	// of whether any of its repos survived the watched_repos filter/cap, so
 	// an owner whose repos are all filtered out today can still be minted
 	// and ready the moment the filter changes (e.g. a SIGHUP watched_repos
-	// edit re-intersecting against Reconciler.LastDerived()).
+	// edit, which triggers this same rederiveRepos call — see execute.go's
+	// handleReload — not a local re-intersection against a cached result).
 	clients := make(map[string]GitHubLister, len(set.Installations))
 	for _, inst := range set.Installations {
 		client, err := d.Reconciler.ClientForRepo(ctx, inst.Account, "")
@@ -969,6 +970,10 @@ func (d *Daemon) rederiveRepos(ctx context.Context) {
 // review set with no record (the same class of invisibility as #1428/#1563).
 func logRederivedRepos(set githubauth.DerivedRepoSet) {
 	for _, inst := range set.Installations {
+		if inst.MintError != "" {
+			logf(0, "derive", "installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
+			continue
+		}
 		logf(0, "derive", "installation %d (%s, repository_selection=%s): %d repo(s) accessible\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 	}
 	suffix := ""

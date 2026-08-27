@@ -228,7 +228,7 @@ func (r *Reconciler) ClientForRepo(ctx context.Context, owner, repo string) (*gh
 		if mintErr, ok := r.mintErrors[strings.ToLower(owner)]; ok {
 			return nil, fmt.Errorf("owner %q has an App installation, but minting a token for it failed during the last reconciliation: %w — this is not a missing-installation problem; retry Reconcile (e.g. restart Pruefer)", owner, mintErr)
 		}
-		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — if it's already in watched_repos, install the App on %q (Reconcile logs the install URL at startup); otherwise add it to watched_repos and restart to trigger reconciliation", owner, owner)
+		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — install the App on %q (Reconcile logs the guided-install URL at startup, or on the next re-derivation if it's still missing); this is picked up automatically within repo_rederivation_interval, or immediately on the next installation webhook event in event_source: hookdeck mode — no watched_repos entry or restart needed, unless github_app_installation_id is pinned, in which case add %q's repos to watched_repos instead", owner, owner, owner)
 	}
 	return client, nil
 }
@@ -354,6 +354,25 @@ func (r *Reconciler) MintOwnerAuth(owner string, watchedRepos []string, logf fun
 	return newAuth, true, nil
 }
 
+// registerOwnerAuth registers an already-minted *Auth for owner into
+// r.clients (and, when mintedFresh, r.auths), clearing any stale mintErrors
+// entry — the bookkeeping half of "committing" an Auth, shared by
+// CommitOwnerAuth and Derive's own registration path below. Split out from
+// CommitOwnerAuth specifically so Derive can register a newly-discovered
+// owner WITHOUT also starting its refresh loop there — see Derive's
+// startLoopsForNewOwners parameter for why that distinction matters.
+func (r *Reconciler) registerOwnerAuth(owner string, a *Auth, mintedFresh bool) *gh.Client {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := strings.ToLower(owner)
+	r.clients[key] = a.client
+	delete(r.mintErrors, key)
+	if mintedFresh {
+		r.auths = append(r.auths, a)
+	}
+	return a.client
+}
+
 // CommitOwnerAuth registers an already-minted *Auth (from MintOwnerAuth)
 // for owner — the "commit" half of the two-phase split. mintedFresh must be
 // exactly the value MintOwnerAuth returned alongside a. When mintedFresh is
@@ -362,19 +381,12 @@ func (r *Reconciler) MintOwnerAuth(owner string, watchedRepos []string, logf fun
 // not get a second). Returns the *gh.Client now resolvable via
 // ClientForRepo for owner.
 func (r *Reconciler) CommitOwnerAuth(ctx context.Context, owner string, a *Auth, mintedFresh bool, logf func(format string, args ...any)) *gh.Client {
-	r.mu.Lock()
-	key := strings.ToLower(owner)
-	r.clients[key] = a.client
-	delete(r.mintErrors, key)
-	if mintedFresh {
-		r.auths = append(r.auths, a)
-	}
-	r.mu.Unlock()
+	client := r.registerOwnerAuth(owner, a, mintedFresh)
 
 	if mintedFresh {
 		a.startRefreshLoop(ctx, logf, nil)
 	}
-	return a.client
+	return client
 }
 
 // DetachedAuth pairs a removed owner with the *Auth its token was minted
@@ -714,7 +726,13 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	// accessible repos; opts.WatchedRepos (if any) is only an optional
 	// intersection filter (R3), never the primary input. See Derive's doc
 	// comment — this is the core inversion handarbeit/fabrik#1641 makes.
-	set, _, err := r.Derive(ctx, opts.WatchedRepos, opts.MaxDerivedRepos, logf)
+	//
+	// startLoopsForNewOwners=false: every owner discovered here gets its
+	// refresh loop started by the caller's own subsequent RunRefreshLoops
+	// call instead (see execute.go) — starting it here too would double-
+	// start it. See derive's own doc comment for why this distinction
+	// exists only for Reconcile's first call.
+	set, _, err := r.derive(ctx, opts.WatchedRepos, opts.MaxDerivedRepos, logf, false)
 	if err != nil {
 		return nil, fmt.Errorf("deriving repo set from app installations: %w", err)
 	}

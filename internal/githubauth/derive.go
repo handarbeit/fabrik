@@ -46,6 +46,23 @@ type DerivedInstallation struct {
 	// (see logDerivedSet) must say so rather than implying the installation
 	// was actually confirmed to grant nothing.
 	RepoListError string
+	// MintError is non-empty when minting a token for this installation
+	// itself failed (e.g. a transient GitHub API error) — RepoListError is
+	// always empty in that case, since FetchInstallationRepositories was
+	// never even attempted with no token to call it with. Distinguishing
+	// this from "no installation at all" matters because
+	// guideMissingInstallations otherwise cannot tell a genuinely
+	// uninstalled owner apart from one whose installation exists but whose
+	// mint transiently failed this round — without this field, both looked
+	// identical (absent from Installations entirely), so the former's
+	// guided-install prompt (and, unless NoBrowser is set, an actual
+	// browser-open) fired for the latter too: a misleading "go install the
+	// app" message, and an unwanted browser popup, for what's usually a
+	// transient error that the next reconciliation retry would clear on
+	// its own. See ClientForRepo's mintErrors-aware error message, which
+	// already made this same distinction for the "no client" case —
+	// Installations must make it too, for the same reason.
+	MintError string
 }
 
 // DerivedRepoSet is the result of one Reconciler.Derive call: every repo the
@@ -157,6 +174,26 @@ func sortDerivedRepos(repos []DerivedRepo) {
 // no-op wrapper around derivedSetForPinned — see that function's doc
 // comment for why R1 doesn't apply there.
 func (r *Reconciler) Derive(ctx context.Context, filter []string, maxRepos int, logf func(format string, args ...any)) (DerivedRepoSet, []DetachedAuth, error) {
+	return r.derive(ctx, filter, maxRepos, logf, true)
+}
+
+// derive is Derive's implementation, additionally parameterized by
+// startLoopsForNewOwners: true for every public Derive call (including
+// every re-derivation trigger — installation webhook, the periodic ticker,
+// a SIGHUP watched_repos edit), since nothing else will ever start a
+// refresh loop for an owner one of those calls newly discovers. false only
+// for Reconcile's own first call (see Reconcile's non-pinned discovery
+// path): that caller's own contract (execute.go) is to call
+// Reconciler.RunRefreshLoops itself immediately after Reconcile returns,
+// covering every owner Reconcile just discovered — starting a loop here too
+// would start a *second*, independent refresh-loop goroutine for the exact
+// same *Auth. Auth.startRefreshLoop's cancel func is a single field, so the
+// second call's cancel silently overwrites the first — Auth.Stop (and thus
+// Pruefer's drainThenStopAuth/RemoveOwners cleanup, ADR-1640) could then
+// only ever cancel the second loop, permanently leaking the first for the
+// life of the process, alongside doubling every installation's token-mint
+// API traffic. See TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops.
+func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, logf func(format string, args ...any), startLoopsForNewOwners bool) (DerivedRepoSet, []DetachedAuth, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -208,12 +245,26 @@ func (r *Reconciler) Derive(ctx context.Context, filter []string, maxRepos int, 
 			if err != nil {
 				logf("! minting token for installation %d (account %q) failed: %v", inst.ID, inst.Account, err)
 				newMintErrors[key] = err
+				// Still recorded in instSummaries — this installation was
+				// found, it just couldn't be minted this round. Omitting it
+				// here would make guideMissingInstallations (which decides
+				// "installed" purely from Installations membership) unable
+				// to tell this apart from a genuinely uninstalled owner. See
+				// MintError's own doc comment.
+				instSummaries = append(instSummaries, DerivedInstallation{
+					Account: inst.Account, InstallationID: inst.ID,
+					RepositorySelection: inst.RepositorySelection,
+					MintError:           err.Error(),
+				})
 				continue
 			}
-			installLogf := func(format string, args ...any) {
-				logf("installation %d: "+format, append([]any{inst.ID}, args...)...)
+			client = r.registerOwnerAuth(inst.Account, a, true)
+			if startLoopsForNewOwners {
+				installLogf := func(format string, args ...any) {
+					logf("installation %d: "+format, append([]any{inst.ID}, args...)...)
+				}
+				a.startRefreshLoop(ctx, installLogf, nil)
 			}
-			client = r.CommitOwnerAuth(ctx, inst.Account, a, true, installLogf)
 		}
 
 		repos, repoTruncated, err := gh.FetchInstallationRepositories(baseURL, client.Token())
@@ -300,6 +351,10 @@ func (r *Reconciler) Derive(ctx context.Context, filter []string, maxRepos int, 
 // once per Reconcile/Derive round (initial and every re-derivation trigger).
 func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 	for _, inst := range set.Installations {
+		if inst.MintError != "" {
+			logf("! installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
+			continue
+		}
 		if inst.RepoListError != "" {
 			logf("✓ installation %d (%s, repository_selection=%s): repo-access verification was skipped this round (listing failed — see error above); the installation is still authorized", inst.InstallationID, inst.Account, inst.RepositorySelection)
 			continue
@@ -375,10 +430,14 @@ func guideMissingInstallations(opts Options, slug string, set DerivedRepoSet, lo
 
 // LastDerived returns the DerivedRepoSet from the most recent Derive call —
 // including the one Reconcile itself performs at construction. Callers (e.g.
-// Pruefer's SIGHUP watched_repos reload) use this to re-intersect a changed
-// filter against the already-known installation grant without triggering a
-// fresh, live re-derivation — see this issue's "SIGHUP no longer mints"
-// consequence.
+// Pruefer's execute.go, seeding the daemon's initial Clients/derived state
+// right after Reconcile returns) use this to read that already-computed
+// result without triggering a second, redundant live derivation. A later
+// change to watched_repos (SIGHUP) does NOT read this — it triggers a fresh
+// Derive call instead (see Pruefer's rederiveRepos/triggerRederivation),
+// since every re-derivation trigger re-fetches installations/repos live
+// rather than trusting a cached snapshot; this method is a one-time
+// startup convenience, not a caching layer for the reload path.
 func (r *Reconciler) LastDerived() DerivedRepoSet {
 	r.mu.Lock()
 	defer r.mu.Unlock()
