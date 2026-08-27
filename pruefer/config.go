@@ -50,6 +50,27 @@ const (
 	DefaultReconciliationFallbackInterval = 2 * time.Minute
 )
 
+// Defaults for installation-derived repo discovery (#1641). See ADR-1641.
+const (
+	// DefaultMaxDerivedRepos bounds a single Derive call's result (R5) — a
+	// deliberately generous default (an org-level install this large is
+	// unusual but not implausible) that still protects an operator who
+	// installs the App broadly from an unbounded, silent jump in poll
+	// cost/GraphQL budget/concurrency contention. 0 (or a negative value)
+	// disables the cap entirely — see MaxDerivedRepos' own doc comment.
+	DefaultMaxDerivedRepos = 200
+	// DefaultRepoRederivationInterval is how often the daemon re-derives its
+	// repo set from the App's installations on a timer, independent of any
+	// installation webhook event — the R2 mechanism poll-mode deployments
+	// need since they have no webhook event to react to at all, and a
+	// low-frequency safety net for event-driven mode alongside its own
+	// event-triggered re-derivation. Deliberately coarser than PollInterval:
+	// re-derivation mints a fresh token and re-lists accessible repos for
+	// every installation, which is more expensive than a single
+	// ListOpenPRs call.
+	DefaultRepoRederivationInterval = 10 * time.Minute
+)
+
 // Config holds Pruefer's fully-resolved runtime configuration, after
 // applying the flag > env > YAML file > default precedence chain in
 // LoadConfig.
@@ -63,17 +84,51 @@ const (
 // on the next process start); "skip" is neither reported nor applied
 // (VersionRequested only — never a real runtime value). See ADR-1640.
 type Config struct {
-	// WatchedRepos is tagged "live" but is never applied through the
-	// generic reflection loop in applyConfigReload — it's diffed and
-	// applied specially (diffRepos) so the reload summary can name
-	// individual repos added/removed rather than a single before/after
-	// slice dump.
+	// WatchedRepos is, since #1641, no longer the primary source of which
+	// repos Pruefer reviews — installation-derived discovery
+	// (internal/githubauth.Reconciler.Derive) is. Absent/empty means
+	// "everything the App's installations grant"; present narrows the
+	// derived set to the intersection (R3) — it can only ever exclude a
+	// repo the installation grants, never include one it doesn't (a
+	// watched_repos entry the installation doesn't cover is reported, not
+	// silently added or dropped with no trace — see AC4). Kept as the same
+	// config key (rather than a rename) since it's deeply threaded through
+	// this struct, yamlConfig, and the reload machinery below; see
+	// ADR-1641 for the naming decision.
+	//
+	// Tagged "live" but never applied through the generic reflection loop
+	// in applyConfigReload — it's diffed and applied specially (diffRepos)
+	// so the reload summary can name individual repos added/removed rather
+	// than a single before/after slice dump. A SIGHUP-triggered change to
+	// this field triggers a fresh, live re-derivation (daemon.rederiveRepos,
+	// via execute.go's handleReload) rather than minting or removing any
+	// owner's installation auth itself: every installation is already
+	// minted unconditionally by Derive, so re-deriving after a filter edit
+	// never needs a new token for an already-known owner — but it is a live
+	// call to GitHub (re-listing every installation's accessible repos),
+	// not a local re-intersection against a cached result.
 	WatchedRepos   []string      `reload:"live"` // "owner/repo"
 	PollInterval   time.Duration `reload:"live"`
 	Model          string        `reload:"live"`
 	Effort         string        `reload:"live"`
 	ConcurrencyCap int           `reload:"live"`
 	MaxDiffBytes   int64         `reload:"live"`
+	// MaxDerivedRepos bounds the size of a single installation-derivation
+	// result (R5) — applied last, after the full installation-grant union
+	// and any WatchedRepos filter (R3) are computed, over a deterministic
+	// sort (owner/repo ascending) so the same repos are dropped consistently
+	// across re-derivations rather than an arbitrary API-order cut. <= 0
+	// disables the cap entirely (an explicit operator opt-out — R5's "or
+	// explicit acceptance" option). Live: the next re-derivation (event-
+	// triggered or timer-driven) picks up a changed value; a lowered cap
+	// takes effect on that same call, not only after a restart.
+	MaxDerivedRepos int `reload:"live"`
+	// RepoRederivationInterval is how often the daemon re-derives its repo
+	// set from the App's installations on a timer (R2), independent of any
+	// installation webhook event. See DefaultRepoRederivationInterval.
+	// Live: the ticker re-reads this on every tick (mirroring
+	// ReconciliationFallbackInterval's own reload-live convention).
+	RepoRederivationInterval time.Duration `reload:"live"`
 	// MaxWallTime caps a single claude review invocation's wall-clock
 	// duration. Zero means no cap (only the fixed 15-minute inactivity
 	// watchdog applies), matching Fabrik's own stage `max_wall_time`
@@ -211,6 +266,14 @@ type yamlConfig struct {
 	TUI                     *bool    `yaml:"tui"`
 	LogFile                 *string  `yaml:"log_file"`
 	AutoUpgrade             *bool    `yaml:"auto_upgrade"`
+	MaxDerivedRepos         *int     `yaml:"max_derived_repos"`
+	// RepoRederivationInterval is a Go duration string (e.g. "10m"),
+	// matching reconciliation.fallback_interval's own convention below,
+	// unlike this file's other duration fields (which use a "_seconds" int
+	// convention) — both govern a re-derivation/reconciliation timer, not a
+	// human-authored short interval, so a duration string reads more
+	// naturally here.
+	RepoRederivationInterval string `yaml:"repo_rederivation_interval"`
 
 	EventSource string `yaml:"event_source"`
 	Hookdeck    *struct {
@@ -272,6 +335,9 @@ type flagValues struct {
 	hookdeckWebhookSecretEnv       string
 	reconciliationStartup          bool
 	reconciliationFallbackInterval string
+
+	maxDerivedRepos          int
+	repoRederivationInterval string
 }
 
 // LoadConfig resolves Pruefer's configuration from, in increasing priority:
@@ -309,6 +375,8 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.hookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Environment variable name holding the GitHub App's webhook secret")
 	fs.BoolVar(&fv.reconciliationStartup, "reconciliation-startup", true, "Run a full poll reconciliation pass at startup in event-driven mode")
 	fs.StringVar(&fv.reconciliationFallbackInterval, "reconciliation-fallback-interval", "", "Low-frequency poll interval used as a safety net in event-driven mode (Go duration, e.g. 2m)")
+	fs.IntVar(&fv.maxDerivedRepos, "max-derived-repos", 0, "Cap on the number of repos a single installation-derivation may yield (R5); 0 or negative disables the cap")
+	fs.StringVar(&fv.repoRederivationInterval, "repo-rederivation-interval", "", "How often to re-derive the watched repo set from the App's installations on a timer (Go duration, e.g. 10m)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -347,6 +415,9 @@ func LoadConfig(args []string) (Config, error) {
 		TUI:               true,
 		LogFile:           DefaultLogPath,
 		AutoUpgrade:       false,
+		MaxDerivedRepos:   DefaultMaxDerivedRepos,
+
+		RepoRederivationInterval: DefaultRepoRederivationInterval,
 
 		EventSource:                    DefaultEventSource,
 		HookdeckAPIKeyEnv:              DefaultHookdeckAPIKeyEnv,
@@ -362,6 +433,16 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AutoUpgrade != nil {
 		cfg.AutoUpgrade = *yc.AutoUpgrade
+	}
+	if yc.MaxDerivedRepos != nil {
+		cfg.MaxDerivedRepos = *yc.MaxDerivedRepos
+	}
+	if yc.RepoRederivationInterval != "" {
+		d, err := time.ParseDuration(yc.RepoRederivationInterval)
+		if err != nil {
+			return Config{}, fmt.Errorf("parsing repo_rederivation_interval %q: %w", yc.RepoRederivationInterval, err)
+		}
+		cfg.RepoRederivationInterval = d
 	}
 	if yc.PollIntervalSec != nil {
 		cfg.PollInterval = time.Duration(*yc.PollIntervalSec) * time.Second
@@ -482,6 +563,16 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["auto-upgrade"] {
 		cfg.AutoUpgrade = fv.autoUpgrade
 	}
+	if explicit["max-derived-repos"] {
+		cfg.MaxDerivedRepos = fv.maxDerivedRepos
+	}
+	if explicit["repo-rederivation-interval"] {
+		d, err := time.ParseDuration(fv.repoRederivationInterval)
+		if err != nil {
+			return Config{}, fmt.Errorf("parsing -repo-rederivation-interval %q: %w", fv.repoRederivationInterval, err)
+		}
+		cfg.RepoRederivationInterval = d
+	}
 	if explicit["event-source"] {
 		cfg.EventSource = fv.eventSource
 	}
@@ -599,6 +690,16 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_AUTO_UPGRADE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AutoUpgrade = b
+		}
+	}
+	if v := os.Getenv("PRUEFER_MAX_DERIVED_REPOS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.MaxDerivedRepos = n
+		}
+	}
+	if v := os.Getenv("PRUEFER_REPO_REDERIVATION_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.RepoRederivationInterval = d
 		}
 	}
 	if v := os.Getenv("PRUEFER_EVENT_SOURCE"); v != "" {

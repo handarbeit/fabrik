@@ -30,14 +30,14 @@ func TestFallbackTickerCoalescesWithInFlightPoll(t *testing.T) {
 	client := newFakeLister()
 	client.prsByRepo["owner/repo"] = nil
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:     map[string]GitHubLister{"owner": client},
 		EventSource: blockingEventSource{},
 		Config: Config{
 			WatchedRepos:                   []string{"owner/repo"},
 			ReconciliationFallbackInterval: 10 * time.Millisecond,
 		},
-	}
+	}, "owner/repo")
 
 	// Simulate a reconciliation poll already in flight, exactly as
 	// triggerReconciliationPoll would have left it.
@@ -63,14 +63,14 @@ func TestFallbackTickerPollsWhenIdle(t *testing.T) {
 	client := newFakeLister()
 	client.prsByRepo["owner/repo"] = nil
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:     map[string]GitHubLister{"owner": client},
 		EventSource: blockingEventSource{},
 		Config: Config{
 			WatchedRepos:                   []string{"owner/repo"},
 			ReconciliationFallbackInterval: 10 * time.Millisecond,
 		},
-	}
+	}, "owner/repo")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()

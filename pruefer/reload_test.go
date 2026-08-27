@@ -78,13 +78,13 @@ func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
 	client.prsByRepo["owner/repo1"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
 	client.prsByRepo["owner/repo2"] = []gh.PRDetails{{Number: 2, Author: "alice", HeadSHA: "sha2"}}
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   &mockClaudeInvoker{},
 		Clone:    mustFakeClone(t),
 		Config:   Config{WatchedRepos: []string{"owner/repo1"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo1")
 
 	d.poll(context.Background())
 	if hist := client.historySnapshot(); len(hist) != 1 || hist[0] != "owner/repo1" {
@@ -93,6 +93,12 @@ func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
 
 	merged, _ := applyConfigReload(d.config(), Config{WatchedRepos: []string{"owner/repo1", "owner/repo2"}, ConcurrencyCap: 3})
 	d.ApplyReload(merged, nil, nil) // same owner already has a client — nothing new to add
+	// Simulate the effect of the reload-triggered re-derivation
+	// (daemon.triggerRederivation) that a real watched_repos change would
+	// kick off asynchronously — this test only exercises poll()'s own
+	// consumption of the derived set, not the async re-derivation path
+	// itself (see TestHandleReload_* in this file for that).
+	d.ApplyDerivedRepos(testDerivedRepoSet("owner/repo1", "owner/repo2"), d.Clients)
 
 	d.poll(context.Background())
 	hist := client.historySnapshot()
@@ -115,13 +121,13 @@ func TestDaemon_ApplyReload_RemovedRepoStopsPollingButInFlightReviewCompletes(t 
 
 	claude := newConcurrencyTrackingInvoker()
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    mustFakeClone(t),
 		Config:   Config{WatchedRepos: []string{"owner/repoA", "owner/repoB"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repoA", "owner/repoB")
 
 	done := make(chan struct{})
 	go func() {
@@ -133,6 +139,9 @@ func TestDaemon_ApplyReload_RemovedRepoStopsPollingButInFlightReviewCompletes(t 
 
 	merged, _ := applyConfigReload(d.config(), Config{WatchedRepos: []string{"owner/repoB"}, ConcurrencyCap: 3})
 	d.ApplyReload(merged, nil, nil)
+	// See the sibling test above for why ApplyDerivedRepos is called
+	// explicitly here too.
+	d.ApplyDerivedRepos(testDerivedRepoSet("owner/repoB"), d.Clients)
 
 	close(claude.release)
 	select {
@@ -212,13 +221,13 @@ func TestDaemon_ConcurrentReloadDuringActivePoll(t *testing.T) {
 		})
 	}
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   &mockClaudeInvoker{},
 		Clone:    mustFakeClone(t),
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 4},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -244,6 +253,11 @@ func TestDaemon_ConcurrentReloadDuringActivePoll(t *testing.T) {
 			d.ApplyReload(Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: newCap}, map[string]GitHubLister{
 				"owner": client,
 			}, nil)
+			// Also exercise ApplyDerivedRepos' wholesale rebuild concurrently
+			// with an active poll cycle — a new write pattern distinct from
+			// ApplyReload's incremental merge (see this method's own risk
+			// note in the Plan), so it needs its own race coverage.
+			d.ApplyDerivedRepos(testDerivedRepoSet("owner/repo"), map[string]GitHubLister{"owner": client})
 		}
 	}()
 
@@ -289,21 +303,28 @@ func TestDaemon_OwnerReviewsInFlight(t *testing.T) {
 // internal/githubauth's own unexported test helpers, since this test lives
 // in a different package). ---
 
-// fakeReloadAppServer is a minimal httptest server covering exactly the
-// three GitHub App endpoints Reconcile/MintOwnerAuth need: app identity
-// (/app), installation discovery (/app/installations), and token minting
-// (/app/installations/{id}/access_tokens). Unlike internal/githubauth's own
-// fakeAppServer, this never needs to serve the manifest-exchange endpoint —
-// every test here starts from an already-bootstrapped App (an explicit
-// AppID + on-disk PEM), never the first-run flow.
+// fakeReloadAppServer is a minimal httptest server covering the GitHub App
+// endpoints Reconcile/Derive need: app identity (/app), installation
+// discovery (/app/installations), token minting
+// (/app/installations/{id}/access_tokens), and installation repo
+// enumeration (/installation/repositories) — since #1641, Derive calls the
+// latter unconditionally for every installation. Unlike internal/githubauth's
+// own fakeAppServer, this never needs to serve the manifest-exchange
+// endpoint — every test here starts from an already-bootstrapped App (an
+// explicit AppID + on-disk PEM), never the first-run flow.
 type fakeReloadAppServer struct {
-	mu        sync.Mutex
-	mintCalls map[int64]int
+	mu               sync.Mutex
+	mintCalls        map[int64]int
+	installTokenToID map[string]int64
+	// selectedRepos maps an installation ID to the repos it grants access
+	// to — populated by tests that need the derived (reviewed) set to
+	// actually contain repos, not just resolve a client per owner.
+	selectedRepos map[int64][]string
 }
 
 func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppInstallation) (*httptest.Server, *fakeReloadAppServer) {
 	t.Helper()
-	fake := &fakeReloadAppServer{mintCalls: map[int64]int{}}
+	fake := &fakeReloadAppServer{mintCalls: map[int64]int{}, installTokenToID: map[string]int64{}, selectedRepos: map[int64][]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -311,6 +332,10 @@ func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppIns
 	})
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
+			w.Write([]byte("[]"))
+			return
+		}
 		w.Write([]byte("["))
 		for i, inst := range installations {
 			if i > 0 {
@@ -335,9 +360,31 @@ func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppIns
 		fmt.Sscanf(trimmed, "%d", &instID)
 		fake.mu.Lock()
 		fake.mintCalls[instID]++
+		token := fmt.Sprintf("tok-%d-%d", instID, fake.mintCalls[instID])
+		fake.installTokenToID[token] = instID
 		fake.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"token": "tok-%d", "expires_at": %q}`, instID, time.Now().Add(time.Hour).Format(time.RFC3339))
+		fmt.Fprintf(w, `{"token": %q, "expires_at": %q}`, token, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		fake.mu.Lock()
+		instID, ok := fake.installTokenToID[auth]
+		repos := fake.selectedRepos[instID]
+		fake.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"repositories": [`))
+		for i, r := range repos {
+			if i > 0 {
+				w.Write([]byte(","))
+			}
+			fmt.Fprintf(w, `{"full_name": %q}`, r)
+		}
+		w.Write([]byte("]}"))
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -352,9 +399,10 @@ func (f *fakeReloadAppServer) mintCountFor(installationID int64) int {
 
 // setupReloadDaemon writes the given initial YAML, reconciles auth and
 // builds a Daemon against it via the real LoadConfig/githubauth.Reconcile/
-// NewDaemon production path, and returns the pieces handleReload needs.
-// args is the flag slice a later call to handleReload should reuse,
-// mirroring Execute()'s own single `args` capture.
+// NewDaemon production path (including the initial derivation, wired via
+// Daemon.Reconciler/ApplyDerivedRepos exactly as Execute does), and returns
+// the pieces handleReload needs. args is the flag slice a later call to
+// handleReload should reuse, mirroring Execute()'s own single `args` capture.
 func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.AppInstallation) (args []string, reconciler *githubauth.Reconciler, daemon *Daemon, srv *httptest.Server, fake *fakeReloadAppServer, closeLog func() error) {
 	t.Helper()
 	srv, fake = newFakeReloadAppServer(t, "pruefer-bot", installations)
@@ -372,22 +420,63 @@ func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.App
 		AppPrivateKeyPath: cfg.AppPrivateKeyPath,
 		AppStatePath:      filepath.Join(dir, "app-state.json"),
 		WatchedRepos:      cfg.WatchedRepos,
+		MaxDerivedRepos:   cfg.MaxDerivedRepos,
 		BaseURL:           srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	cfg.AppStatePath = filepath.Join(dir, "app-state.json")
+	derived := reconciler.LastDerived()
 	clients := map[string]GitHubLister{}
-	for _, owner := range distinctOwners(cfg.WatchedRepos) {
-		c, err := reconciler.ClientForRepo(context.Background(), owner, "")
+	for _, inst := range derived.Installations {
+		c, err := reconciler.ClientForRepo(context.Background(), inst.Account, "")
 		if err != nil {
 			continue
 		}
-		clients[strings.ToLower(owner)] = c
+		clients[strings.ToLower(inst.Account)] = c
 	}
 	daemon, closeLog = NewDaemon(cfg, clients, &RealClaudeInvoker{}, nil, reconciler.BotLogin())
+	daemon.Reconciler = reconciler
+	daemon.ApplyDerivedRepos(derived, clients)
 	return args, reconciler, daemon, srv, fake, closeLog
+}
+
+// waitForRederivation polls until cond is true or timeout elapses, for tests
+// that trigger an async re-derivation (daemon.triggerRederivation, invoked
+// from handleReload) and need to observe its effect.
+func waitForRederivation(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatalf("condition not met within %s", timeout)
+	}
+}
+
+// waitForRederivationDone blocks until daemon.rederiveInFlight clears, and
+// then until pollInFlight clears too — i.e. both the async re-derivation
+// triggerRederivation spawned (from handleReload, an installation event, or
+// the ticker) AND the follow-up reconciliation poll it chains into (AC3:
+// "so newly-derived repos are pollable promptly") have fully returned,
+// including every logf call either one makes. pollInFlight is only ever
+// set (by triggerReconciliationPoll) synchronously before rederiveInFlight's
+// own deferred clear runs, so waiting for rederiveInFlight first, then
+// pollInFlight, cannot miss the follow-up poll's own in-flight window.
+// Tests that trigger an async re-derivation must call this before
+// returning (not just before asserting): a still-running goroutine calling
+// logf after the test's own deferred closeLog() has already nilled the
+// package-level Logf hook is a real data race, not just a flaky assertion —
+// see wireLogf's own doc comment on this exact hazard.
+func waitForRederivationDone(t *testing.T, d *Daemon) {
+	t.Helper()
+	waitForRederivation(t, 2*time.Second, func() bool { return !d.rederiveInFlight.Load() })
+	waitForRederivation(t, 2*time.Second, func() bool { return !d.pollInFlight.Load() })
 }
 
 // captureLogf swaps in a capturing Logf for the duration of the test and
@@ -420,7 +509,7 @@ func TestHandleReload_MalformedConfigLeavesRunningConfigUntouched(t *testing.T) 
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
+	args, _, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
 	defer closeLog()
 	snapshot := captureLogf(t)
 
@@ -430,7 +519,7 @@ func TestHandleReload_MalformedConfigLeavesRunningConfigUntouched(t *testing.T) 
 		t.Fatalf("writing malformed config: %v", err)
 	}
 
-	handleReload(context.Background(), args, reconciler, daemon)
+	handleReload(context.Background(), args, daemon)
 
 	if got := daemon.config(); !reflect.DeepEqual(got, before) {
 		t.Errorf("daemon.config() = %+v, want the original config untouched by the failed reload: %+v", got, before)
@@ -447,23 +536,40 @@ func TestHandleReload_MalformedConfigLeavesRunningConfigUntouched(t *testing.T) 
 	}
 }
 
-// TestHandleReload_NewOwnerMintsInstallationTokenAndServable covers the
-// success path: adding a repo under a previously-unwatched owner mints that
-// owner's installation token as part of the reload, and the new owner's
-// repo is servable (has a client) immediately after.
-func TestHandleReload_NewOwnerMintsInstallationTokenAndServable(t *testing.T) {
+// TestHandleReload_WatchedRepoUnderAlreadyInstalledOwner_BecomesReviewable
+// covers #1641's success path: since every installation of the operator's
+// own App is already minted unconditionally by Derive (not just owners
+// named in watched_repos — see the issue's own containment explanation),
+// adding a repo under an owner that's already installed (but wasn't
+// previously named in watched_repos) needs no new mint at all — it becomes
+// part of the derived, reviewed set as soon as the reload's triggered
+// re-derivation completes.
+func TestHandleReload_WatchedRepoUnderAlreadyInstalledOwner_BecomesReviewable(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, reconciler, daemon, _, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+	args, _, daemon, _, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "newowner"},
 	})
 	defer closeLog()
 	captureLogf(t)
+	fake.selectedRepos[111] = []string{"handarbeit/fabrik"}
+	fake.selectedRepos[222] = []string{"newowner/repo"}
+
+	// newowner's installation already existed and was already minted by the
+	// initial Derive call (setupReloadDaemon) — confirm the precondition
+	// this test's whole point rests on: no new mint should be needed.
+	mintsBefore := fake.mintCountFor(222)
+	if mintsBefore == 0 {
+		t.Fatal("precondition failed: newowner should already have been minted by the initial derivation")
+	}
+	if _, ok := daemon.client("newowner"); !ok {
+		t.Fatal("precondition failed: newowner should already be servable before watched_repos ever named it")
+	}
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - newowner/repo\n"), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
@@ -471,13 +577,21 @@ func TestHandleReload_NewOwnerMintsInstallationTokenAndServable(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handleReload(ctx, args, reconciler, daemon)
+	handleReload(ctx, args, daemon)
+	waitForRederivationDone(t, daemon) // must complete (incl. every logf call) before this test returns and closeLog() nils Logf
 
-	if fake.mintCountFor(222) != 1 {
-		t.Errorf("mintCountFor(222 = newowner) = %d, want 1 — reload must mint a token for the newly-watched owner", fake.mintCountFor(222))
+	found := false
+	for _, dr := range daemon.derivedSet().Repos {
+		if dr.Repo == "newowner/repo" {
+			found = true
+		}
 	}
-	if _, ok := daemon.client("newowner"); !ok {
-		t.Error("expected daemon to have a servable client for newowner after reload")
+	if !found {
+		t.Fatalf("derived set = %+v, want newowner/repo included", daemon.derivedSet().Repos)
+	}
+
+	if got := fake.mintCountFor(222); got != mintsBefore {
+		t.Errorf("mintCountFor(222 = newowner) = %d, want unchanged from %d — no re-mint needed for an already-known installation", got, mintsBefore)
 	}
 	got := daemon.config()
 	if len(got.WatchedRepos) != 2 {
@@ -485,12 +599,13 @@ func TestHandleReload_NewOwnerMintsInstallationTokenAndServable(t *testing.T) {
 	}
 }
 
-// TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing
-// covers the failure path and the all-or-nothing guarantee across a
-// multi-owner batch: when one of two newly-watched owners has no App
-// installation, neither new owner is registered and the running config is
-// untouched.
-func TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing(t *testing.T) {
+// TestHandleReload_WatchedRepoNamingUninstalledOwner_ReportedNotFailed is
+// #1641's replacement for the old all-or-nothing mint-failure test: naming
+// an owner with no App installation in watched_repos is no longer a reload
+// failure at all (there is nothing to mint or roll back) — it's reported via
+// the derived set's FilteredOut (R3/AC4), while every other repo (including
+// one under an owner that *does* have an installation) is unaffected.
+func TestHandleReload_WatchedRepoNamingUninstalledOwner_ReportedNotFailed(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
@@ -498,34 +613,48 @@ func TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing(t *tes
 	}
 
 	// "goodowner" has an installation; "badowner" does not.
-	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+	args, _, daemon, _, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "goodowner"},
 	})
 	defer closeLog()
 	captureLogf(t)
-
-	before := daemon.config()
-	beforeInstallationCount := reconciler.InstallationCount()
+	fake.selectedRepos[111] = []string{"handarbeit/fabrik"}
+	fake.selectedRepos[222] = []string{"goodowner/repo"}
 
 	newYAML := "watched_repos:\n  - handarbeit/fabrik\n  - goodowner/repo\n  - badowner/repo\n"
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(newYAML), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
 	}
 
-	handleReload(context.Background(), args, reconciler, daemon)
+	handleReload(context.Background(), args, daemon)
+	waitForRederivationDone(t, daemon) // must complete (incl. every logf call) before this test returns and closeLog() nils Logf
 
-	if got := daemon.config(); !reflect.DeepEqual(got, before) {
-		t.Errorf("daemon.config() changed despite a failed reload: got %+v, want unchanged %+v", got, before)
+	found := false
+	for _, dr := range daemon.derivedSet().Repos {
+		if dr.Repo == "goodowner/repo" {
+			found = true
+		}
 	}
-	if _, ok := daemon.client("goodowner"); ok {
-		t.Error("goodowner must not be registered — the whole reload failed because badowner had no installation (all-or-nothing)")
+	if !found {
+		t.Fatalf("derived set = %+v, want goodowner/repo included", daemon.derivedSet().Repos)
 	}
-	if _, err := reconciler.ClientForRepo(context.Background(), "goodowner", ""); err == nil {
-		t.Error("reconciler must not have a client for goodowner — CommitOwnerAuth must never run for a batch that ultimately fails")
+
+	if _, ok := daemon.client("goodowner"); !ok {
+		t.Error("expected goodowner to be servable — its own installation exists regardless of badowner's absence")
 	}
-	if reconciler.InstallationCount() != beforeInstallationCount {
-		t.Errorf("InstallationCount() = %d, want unchanged %d — a minted-but-uncommitted Auth must never be registered", reconciler.InstallationCount(), beforeInstallationCount)
+	foundBad := false
+	for _, f := range daemon.derivedSet().FilteredOut {
+		if f == "badowner/repo" {
+			foundBad = true
+		}
+	}
+	if !foundBad {
+		t.Errorf("expected badowner/repo in FilteredOut, got %v", daemon.derivedSet().FilteredOut)
+	}
+	got := daemon.config()
+	if len(got.WatchedRepos) != 3 {
+		t.Errorf("daemon.config().WatchedRepos = %v, want all 3 entries applied — naming an uninstalled owner is not a reload failure", got.WatchedRepos)
 	}
 }
 
@@ -538,14 +667,15 @@ func TestHandleReload_LogsDiffSummary(t *testing.T) {
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
+	args, _, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
 	defer closeLog()
 	snapshot := captureLogf(t)
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos: []\nmodel: opus\n"), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
 	}
-	handleReload(context.Background(), args, reconciler, daemon)
+	handleReload(context.Background(), args, daemon)
+	waitForRederivationDone(t, daemon) // must complete (incl. every logf call) before this test returns and closeLog() nils Logf
 
 	joined := strings.Join(snapshot(), "\n")
 	if !strings.Contains(joined, "handarbeit/fabrik") {
@@ -556,23 +686,32 @@ func TestHandleReload_LogsDiffSummary(t *testing.T) {
 	}
 }
 
-// TestHandleReload_RemovedOwnerPrunesClient is the handleReload-level proof
-// that dropping an owner's last watched repo via reload leaves that owner
-// unresolvable through the daemon (not just absent from watched_repos) and
-// drops its Auth from the reconciler.
-func TestHandleReload_RemovedOwnerPrunesClient(t *testing.T) {
+// TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_ButInstallationStaysAuthorized
+// is #1641's replacement for the old owner-pruning test: dropping verveguy's
+// only watched repo no longer drops verveguy's installation Auth at all —
+// R3 is a review-scope narrowing filter, not the containment boundary
+// (that's the operator's own App identity, #1253) — so verveguy stays
+// servable through the daemon, just excluded from the reviewed set. This is
+// a deliberate behavior change from the pre-#1641 model this test used to
+// assert the opposite of.
+func TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_ButInstallationStaysAuthorized(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - verveguy/otherrepo\n"), 0600); err != nil {
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+	args, reconciler, daemon, _, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "verveguy"},
 	})
 	defer closeLog()
 	captureLogf(t)
+	fake.selectedRepos[111] = []string{"handarbeit/fabrik"}
+	fake.selectedRepos[222] = []string{"verveguy/otherrepo"}
+	// Re-derive once now that selectedRepos is populated (setupReloadDaemon's
+	// own initial derivation ran before these fakes were configured).
+	daemon.rederiveRepos(context.Background())
 
 	if _, ok := daemon.client("verveguy"); !ok {
 		t.Fatal("expected verveguy to be servable before the reload")
@@ -582,16 +721,23 @@ func TestHandleReload_RemovedOwnerPrunesClient(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
 	}
-	handleReload(context.Background(), args, reconciler, daemon)
+	handleReload(context.Background(), args, daemon)
+	waitForRederivationDone(t, daemon) // must complete (incl. every logf call) before this test returns and closeLog() nils Logf
 
-	if _, ok := daemon.client("verveguy"); ok {
-		t.Error("expected verveguy to no longer be servable through the daemon after its last watched repo was removed")
+	for _, dr := range daemon.derivedSet().Repos {
+		if dr.Repo == "verveguy/otherrepo" {
+			t.Errorf("expected verveguy/otherrepo to no longer be in the reviewed set after being dropped from watched_repos")
+		}
 	}
-	if _, err := reconciler.ClientForRepo(context.Background(), "verveguy", ""); err == nil {
-		t.Error("expected reconciler to no longer have a client for verveguy after the reload")
+
+	if _, ok := daemon.client("verveguy"); !ok {
+		t.Error("expected verveguy to remain servable — its installation is untouched by a watched_repos edit (R3 is a review-scope filter, not containment)")
 	}
-	if got := reconciler.InstallationCount(); got != beforeInstallationCount-1 {
-		t.Errorf("InstallationCount() = %d, want %d (verveguy's dedicated installation dropped)", got, beforeInstallationCount-1)
+	if _, err := reconciler.ClientForRepo(context.Background(), "verveguy", ""); err != nil {
+		t.Errorf("expected reconciler to still have a client for verveguy: %v", err)
+	}
+	if got := reconciler.InstallationCount(); got != beforeInstallationCount {
+		t.Errorf("InstallationCount() = %d, want unchanged %d — a watched_repos edit must never detach an installation", got, beforeInstallationCount)
 	}
 	if _, ok := daemon.client("handarbeit"); !ok {
 		t.Error("expected handarbeit (still watched) to remain servable")

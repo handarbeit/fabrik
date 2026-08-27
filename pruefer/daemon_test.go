@@ -6,14 +6,46 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/githubauth"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
+
+// testDerivedRepoSet builds a githubauth.DerivedRepoSet directly from a list
+// of "owner/repo" strings, treating every well-formed entry as fully
+// granted with no filtering/capping — the "no derivation, just trust the
+// list" shape most pre-#1641 test fixtures assumed when they set
+// Config.WatchedRepos directly. A malformed entry is silently skipped,
+// mirroring internal/githubauth.derivedRepoFromFullName's own handling.
+// Tests that need FilteredOut/Truncated/Capped semantics construct a
+// githubauth.DerivedRepoSet directly instead of using this helper.
+func testDerivedRepoSet(repos ...string) githubauth.DerivedRepoSet {
+	var out []githubauth.DerivedRepo
+	for _, spec := range repos {
+		owner, name, ok := strings.Cut(spec, "/")
+		if !ok || owner == "" || name == "" {
+			continue
+		}
+		out = append(out, githubauth.DerivedRepo{Repo: spec, Owner: owner, RepoName: name})
+	}
+	return githubauth.DerivedRepoSet{Repos: out}
+}
+
+// withDerivedRepos is a small test-fixture helper: it seeds d's derived
+// state directly from repos (see testDerivedRepoSet) and returns d, so a
+// test can build a Daemon{} literal and apply the derived-set migration in
+// one expression — e.g. `d := withDerivedRepos(&Daemon{...}, "owner/repo")`.
+// See the pruefer test-fixture migration note in ADR-1641.
+func withDerivedRepos(d *Daemon, repos ...string) *Daemon {
+	d.derived = testDerivedRepoSet(repos...)
+	return d
+}
 
 // fakeLister extends fakeReviewer with ListOpenPRs and FetchPRDetails,
 // keyed by "owner/repo".
@@ -172,13 +204,13 @@ func TestDaemonPoll_EnforcesConcurrencyCap(t *testing.T) {
 	claude := newConcurrencyTrackingInvoker()
 	clone, _ := fakeClone(t, nil)
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 2},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 
 	done := make(chan struct{})
 	go func() {
@@ -220,13 +252,13 @@ func TestDaemonPoll_DiffSizeGuardAppliesAcrossRepos(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	clone, cloneCalls := fakeClone(t, nil)
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, MaxDiffBytes: 5, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 	d.poll(context.Background())
 
 	if cloneCalls.Load() != 0 {
@@ -240,17 +272,21 @@ func TestDaemonPoll_DiffSizeGuardAppliesAcrossRepos(t *testing.T) {
 	}
 }
 
+// TestDaemonPoll_SkipsMalformedWatchedRepo covers an empty derived set
+// (e.g. a malformed watched_repos entry, which internal/githubauth's own
+// owner-parsing already skips and logs before Derive ever runs — see
+// distinctOwnersLogging/derivedRepoFromFullName) — poll() must not panic.
 func TestDaemonPoll_SkipsMalformedWatchedRepo(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"not-a-valid-repo-spec"}},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "not-a-valid-repo-spec")
 	d.poll(context.Background()) // must not panic
 }
 
@@ -261,13 +297,13 @@ func TestDaemonPoll_ContinuesAfterOneRepoListFails(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
 
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/broken", "owner/good"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/broken", "owner/good")
 	d.poll(context.Background())
 
 	if client.submitCallCount() != 1 {
@@ -302,9 +338,9 @@ func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
 		return t.TempDir(), func() {}, nil
 	}
 
-	d := &Daemon{
-		// Clients is keyed by lower-cased owner — see distinctOwners' and
-		// poll()'s doc comments for why (execute.go, the real caller,
+	d := withDerivedRepos(&Daemon{
+		// Clients is keyed by lower-cased owner — see poll()'s and
+		// rederiveRepos' doc comments for why (execute.go, the real caller,
 		// always lower-cases when populating this map).
 		Clients: map[string]GitHubLister{"ownera": clientA, "ownerb": clientB},
 		Claude:  claude,
@@ -314,7 +350,7 @@ func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
 			ConcurrencyCap: 3,
 		},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "ownerA/repoA", "ownerB/repoB")
 	d.poll(context.Background())
 
 	if clientA.submitCallCount() != 1 {
@@ -361,14 +397,14 @@ func buildParityFixture(t *testing.T, emit func(ptui.Event)) (*Daemon, *fakeList
 	}
 	claude := &mockClaudeInvoker{}
 	clone, _ := fakeClone(t, nil)
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
 		Emit:     emit,
-	}
+	}, "owner/repo")
 	return d, client, claude
 }
 
@@ -407,41 +443,6 @@ func TestDaemonPoll_TUIOffAndOnProduceIdenticalDecisions(t *testing.T) {
 	mu.Unlock()
 	if n == 0 {
 		t.Error("TUI-on run emitted no events — Emit wiring is not actually exercised by this test")
-	}
-}
-
-func TestSplitOwnerRepo(t *testing.T) {
-	cases := []struct {
-		spec      string
-		wantOwner string
-		wantRepo  string
-		wantOK    bool
-	}{
-		{"handarbeit/fabrik", "handarbeit", "fabrik", true},
-		{"handarbeit", "", "", false},
-		{"handarbeit/fabrik/extra", "", "", false},
-		{"/fabrik", "", "", false},
-		{"handarbeit/", "", "", false},
-		{"", "", "", false},
-	}
-	for _, tc := range cases {
-		owner, repo, ok := splitOwnerRepo(tc.spec)
-		if ok != tc.wantOK || owner != tc.wantOwner || repo != tc.wantRepo {
-			t.Errorf("splitOwnerRepo(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.spec, owner, repo, ok, tc.wantOwner, tc.wantRepo, tc.wantOK)
-		}
-	}
-}
-
-func TestDistinctOwners(t *testing.T) {
-	got := distinctOwners([]string{"a/one", "b/two", "a/three", "malformed", "b/four"})
-	want := []string{"a", "b"}
-	if len(got) != len(want) {
-		t.Fatalf("distinctOwners = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("distinctOwners[%d] = %q, want %q", i, got[i], want[i])
-		}
 	}
 }
 

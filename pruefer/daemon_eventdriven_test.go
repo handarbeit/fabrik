@@ -50,14 +50,14 @@ func newEventDrivenTestDaemon(source *fakeEventSource) (*Daemon, *fakeLister) {
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:     map[string]GitHubLister{"owner": client},
 		Claude:      claude,
 		Clone:       clone,
 		Config:      Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 3},
 		BotLogin:    "pruefer-bot[bot]",
 		EventSource: source,
-	}
+	}, "owner/repo")
 	return d, client
 }
 

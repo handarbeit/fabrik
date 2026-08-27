@@ -423,6 +423,90 @@ func TestLoadConfig_AutoUpgradePrecedence(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_MaxDerivedReposDefaultsAndPrecedence covers R5's
+// max_derived_repos knob (#1641): the default, and the YAML < env < flag
+// precedence chain every other numeric field in this file already follows.
+func TestLoadConfig_MaxDerivedReposDefaultsAndPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxDerivedRepos != DefaultMaxDerivedRepos {
+		t.Errorf("MaxDerivedRepos = %d, want default %d", cfg.MaxDerivedRepos, DefaultMaxDerivedRepos)
+	}
+
+	path := writeYAMLConfig(t, dir, `max_derived_repos: 50`)
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxDerivedRepos != 50 {
+		t.Errorf("MaxDerivedRepos = %d, want 50 (from YAML)", cfg.MaxDerivedRepos)
+	}
+
+	t.Setenv("PRUEFER_MAX_DERIVED_REPOS", "75")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxDerivedRepos != 75 {
+		t.Errorf("MaxDerivedRepos = %d, want 75 (env should override YAML)", cfg.MaxDerivedRepos)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-max-derived-repos", "10"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxDerivedRepos != 10 {
+		t.Errorf("MaxDerivedRepos = %d, want 10 (flag should override env)", cfg.MaxDerivedRepos)
+	}
+}
+
+// TestLoadConfig_RepoRederivationIntervalDefaultsAndPrecedence mirrors
+// TestLoadConfig_ReconciliationPrecedence's duration-string handling for
+// repo_rederivation_interval (#1641/R2).
+func TestLoadConfig_RepoRederivationIntervalDefaultsAndPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RepoRederivationInterval != DefaultRepoRederivationInterval {
+		t.Errorf("RepoRederivationInterval = %s, want default %s", cfg.RepoRederivationInterval, DefaultRepoRederivationInterval)
+	}
+
+	path := writeYAMLConfig(t, dir, `repo_rederivation_interval: "5m"`)
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RepoRederivationInterval != 5*time.Minute {
+		t.Errorf("RepoRederivationInterval = %s, want 5m (from YAML)", cfg.RepoRederivationInterval)
+	}
+
+	t.Setenv("PRUEFER_REPO_REDERIVATION_INTERVAL", "7m")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RepoRederivationInterval != 7*time.Minute {
+		t.Errorf("RepoRederivationInterval = %s, want 7m (env should override YAML)", cfg.RepoRederivationInterval)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-repo-rederivation-interval", "3m"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RepoRederivationInterval != 3*time.Minute {
+		t.Errorf("RepoRederivationInterval = %s, want 3m (flag should override env)", cfg.RepoRederivationInterval)
+	}
+
+	if _, err := LoadConfig([]string{"-config", path, "-repo-rederivation-interval", "not-a-duration"}); err == nil {
+		t.Error("expected an error for an invalid -repo-rederivation-interval value")
+	}
+}
+
 func TestLoadConfig_VersionRequestedShortCircuits(t *testing.T) {
 	// --version must work even with no config file present and no other
 	// required flags set, so it short-circuits before YAML/env resolution.

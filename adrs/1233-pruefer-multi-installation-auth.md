@@ -1,8 +1,58 @@
 # ADR 1233: Pruefer Multi-Installation Auth Derived from `watched_repos`
 
 **Date**: 2026-07-28
-**Status**: Accepted
+**Status**: Accepted (Decision 1's security framing superseded — see Amendment below)
 **Issue**: #1233 — derive App installations from `watched_repos` (multi-org, one daemon)
+
+## Amendment (2026-08-27, #1641)
+
+Decision 1's core claim — **"this is also the whole security control": the set of
+installations Pruefer ever tokenizes equals exactly the set of owners in
+`watched_repos`, nothing more** — is superseded. #1253 replaced the shared,
+publicly-installable App (`handarbeit-pruefer`) this ADR was written against with a
+per-operator dedicated App, bootstrapped via manifest flow
+(`internal/githubauth.Reconciler`); `pruefer/auth.go`'s `BootstrapMulti`/`AuthSet`
+(the code this ADR describes) no longer exists. #1641 then inverted discovery
+direction entirely: `internal/githubauth.Reconciler.Derive` now discovers and mints
+**every** installation of the operator's own App unconditionally, regardless of
+whether `watched_repos` names its owner — the opposite of Decision 1's "only ever
+mints a token for an owner that appears in `watched_repos`."
+
+This is safe, not a regression, because the *reason* Decision 1's allowlist existed
+— a stranger installing the same shared App must never enlist this operator's daemon
+— is now satisfied structurally by App identity instead: `GET /app/installations` is
+JWT-scoped to the calling App, so it is physically incapable of returning another
+App's installations. Once every operator runs their own dedicated App, "installed on
+it" and "mine to review" are the same statement, and an owner-derived-from-`watched_repos`
+allowlist adds no additional protection — see
+[adrs/1641-pruefer-installation-derived-repo-discovery.md](1641-pruefer-installation-derived-repo-discovery.md)
+for the full rationale and `internal/githubauth`'s own containment regression test
+(`TestDerive_Containment_NeverContactsOtherAppsInstallations`).
+
+`watched_repos` is not removed — it becomes an optional, operator-preference
+narrowing filter over the installation-derived set (never a widening, never the
+containment boundary) — see ADR-1641's R3.
+
+What this amendment does **not** touch, because #1253/#1641 retained and reused it
+rather than replacing it:
+- **Decision 2** (one `*github.Client`/`*Auth` per owner, not a token-provider inside
+  `github/client.go`) — the owner-scoped client-map shape is unchanged; `Reconciler.clients`
+  is exactly this pattern under a new name.
+- **Decision 3** (`RunRefreshLoop` per distinct `*Auth`) — `Reconciler.RunRefreshLoops`
+  is the direct successor, same dedup-by-pointer-identity mechanism.
+- **Decision 4** (`github_app_installation_id` as a legacy pin/escape hatch) — preserved
+  byte-for-byte; ADR-1641 confirms this pinned path is fully exempt from the R1
+  discovery inversion, exactly as it was exempt from Decision 1's `watched_repos`-driven
+  discovery here.
+- **Decision 6** (pagination gap in `FetchAppInstallations`/`FetchInstallationRepositories`,
+  deferred at the time) — now addressed: both functions paginate for real as of #1641,
+  since installation enumeration became the *primary* discovery path rather than a
+  verification check against a short list, making silent under-enumeration a
+  materially worse failure mode. See ADR-1641.
+
+Decision 5 (`repository_selection: selected` handled via `FetchInstallationRepositories`)
+is subsumed by `Derive`, which now calls that same endpoint unconditionally for every
+installation regardless of mode — see ADR-1641.
 
 ## Context
 

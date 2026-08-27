@@ -137,6 +137,7 @@ func TestVerifyRepoAccess_TruncatedListYieldsAmbiguousReason(t *testing.T) {
 		{ID: 111, Account: "someorg", RepositorySelection: "selected"},
 	}, func() time.Time { return time.Now().Add(time.Hour) })
 	fake.selectedRepos = map[int64][]string{111: accessibleRepos}
+	fake.neverShortPage = true // simulate a server that never signals the end of the list
 	defer srv.Close()
 
 	dir := t.TempDir()
