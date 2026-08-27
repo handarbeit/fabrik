@@ -591,10 +591,25 @@ func (e *Engine) emitStructural(ev tui.Event) {
 // logf emits a LogEvent to the channel (if configured) or prints directly.
 // issueNumber == 0 means a poll-level message; it prints as "[tag]" not "[#0 tag]".
 func (e *Engine) logf(issueNumber int, tag, format string, args ...any) {
+	e.logEvent(issueNumber, "", tag, format, args...)
+}
+
+// logfRepo emits a repo-level LogEvent (IssueNumber 0, Repo set to repoKey) —
+// used by the merge train, whose activity has no single issue number but does
+// have a repo identity, so it can be routed to that repo's job row in the TUI
+// (see tui.LogEvent.Repo) instead of clobbering the header status line.
+// Plain-text/log-file output is unchanged from logf's issueNumber==0 case
+// (repo is a TUI-routing concern only, not a formatting one).
+func (e *Engine) logfRepo(repoKey string, tag, format string, args ...any) {
+	e.logEvent(0, repoKey, tag, format, args...)
+}
+
+// logEvent is the shared implementation behind logf and logfRepo.
+func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	if e.events != nil {
 		select {
-		case e.events <- tui.LogEvent{IssueNumber: issueNumber, Tag: tag, Message: msg}:
+		case e.events <- tui.LogEvent{IssueNumber: issueNumber, Repo: repo, Tag: tag, Message: msg}:
 		default:
 		}
 	} else {
