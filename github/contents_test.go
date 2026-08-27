@@ -33,6 +33,38 @@ func TestFetchFileAtRef_DecodesFileContent(t *testing.T) {
 	}
 }
 
+// TestFetchFileAtRef_EscapesRefAndPath covers a base branch name containing
+// characters that are legal in a git ref but significant in a URL/query
+// string (here, "#" and "+") — without percent-encoding, "#" would truncate
+// the URL at a fragment and "+" would decode as a space, silently corrupting
+// the request rather than the intended "genuinely absent/invalid file"
+// failure mode. Also exercises a multi-segment path to confirm "/" survives
+// escaping without being encoded into a single opaque segment.
+func TestFetchFileAtRef_EscapesRefAndPath(t *testing.T) {
+	want := []byte("excluded_paths:\n  - vendor/**\n")
+	const ref = "release/2026-08#hotfix+1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, wantPath := r.URL.Path, "/repos/owner/repo/contents/.pruefer/config.yaml"; got != wantPath {
+			t.Errorf("request path = %q, want %q", got, wantPath)
+		}
+		if got, want := r.URL.Query().Get("ref"), ref; got != want {
+			t.Errorf("ref query param = %q, want %q", got, want)
+		}
+		fmt.Fprintf(w, `{"type":"file","encoding":"base64","content":%q,"size":%d}`,
+			base64.StdEncoding.EncodeToString(want), len(want))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	got, err := c.FetchFileAtRef("owner", "repo", ".pruefer/config.yaml", ref)
+	if err != nil {
+		t.Fatalf("FetchFileAtRef: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("content = %q, want %q", got, want)
+	}
+}
+
 func TestFetchFileAtRef_NewlineWrappedBase64(t *testing.T) {
 	want := []byte("hello world")
 	encoded := base64.StdEncoding.EncodeToString(want)

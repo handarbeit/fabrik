@@ -3,6 +3,7 @@ package github
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -34,7 +35,8 @@ type contentsResponse struct {
 // "base64" is supported, which is what the Contents API always uses for
 // file content).
 func (c *Client) FetchFileAtRef(owner, repo, path, ref string) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", c.baseURL, owner, repo, path, ref)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
+		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), escapeRepoPath(path), url.QueryEscape(ref))
 	var resp contentsResponse
 	if err := c.restGetJSON(apiURL, &resp); err != nil {
 		return nil, fmt.Errorf("fetching %s at %s in %s/%s: %w", path, ref, owner, repo, err)
@@ -52,4 +54,16 @@ func (c *Client) FetchFileAtRef(owner, repo, path, ref string) ([]byte, error) {
 		return nil, fmt.Errorf("decoding %s at %s in %s/%s: %w", path, ref, owner, repo, err)
 	}
 	return decoded, nil
+}
+
+// escapeRepoPath percent-encodes each "/"-separated segment of a
+// repo-relative path independently, preserving the separators themselves.
+// url.PathEscape alone would also encode "/", corrupting a multi-segment
+// path like ".pruefer/config.yaml" into a single, non-existent path segment.
+func escapeRepoPath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	return strings.Join(segments, "/")
 }
