@@ -29,10 +29,22 @@ type fakeReviewer struct {
 	token            string
 	botLogin         string
 
-	mu          sync.Mutex
-	submitCalls []submitCall
-	diffCalls   int
-	filesCalls  int
+	// repoConfigData/repoConfigErr control FetchFileAtRef's response.
+	// Default (both zero) is gh.ErrNotFound — "no repo config" — so every
+	// existing test exercising ReviewPR without setting these fields
+	// continues to exercise the R3 absent-file path unmodified.
+	repoConfigData []byte
+	repoConfigErr  error
+
+	mu             sync.Mutex
+	submitCalls    []submitCall
+	diffCalls      int
+	filesCalls     int
+	fileAtRefCalls []fileAtRefCall
+}
+
+type fileAtRefCall struct {
+	owner, repo, path, ref string
 }
 
 type submitCall struct {
@@ -42,6 +54,27 @@ type submitCall struct {
 	body        string
 	event       gh.ReviewEvent
 	comments    []gh.ReviewComment
+}
+
+func (f *fakeReviewer) FetchFileAtRef(owner, repo, path, ref string) ([]byte, error) {
+	f.mu.Lock()
+	f.fileAtRefCalls = append(f.fileAtRefCalls, fileAtRefCall{owner, repo, path, ref})
+	f.mu.Unlock()
+	if f.repoConfigErr != nil {
+		return nil, f.repoConfigErr
+	}
+	if f.repoConfigData == nil {
+		return nil, gh.ErrNotFound
+	}
+	return f.repoConfigData, nil
+}
+
+func (f *fakeReviewer) fileAtRefCallArgs() []fileAtRefCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fileAtRefCall, len(f.fileAtRefCalls))
+	copy(out, f.fileAtRefCalls)
+	return out
 }
 
 func (f *fakeReviewer) FetchPRDiff(owner, repo string, prNumber int) (string, error) {

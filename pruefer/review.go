@@ -16,6 +16,13 @@ import (
 // interface keeps tests independent of HTTP mocking.
 type GitHubReviewer interface {
 	GitHubCommenter
+	// FetchFileAtRef resolves the reviewed repo's repo-resident
+	// .pruefer/config.yaml at the PR's base ref (never the head — see
+	// fetchRepoConfig and ADR-1642). Required unconditionally, not
+	// type-asserted, so the security property (a reviewed repo can never
+	// widen its own review) is structural for every GitHubReviewer, not
+	// opt-in.
+	FetchFileAtRef(owner, repo, path, ref string) ([]byte, error)
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
 	// FetchPRFiles returns the changed-path list via the paginated
 	// /pulls/{n}/files endpoint, which has no 20,000-line ceiling — the
@@ -51,9 +58,11 @@ type ReviewOutcome struct {
 	CostUSD  float64    // set iff Reviewed; cost of the claude invocation
 }
 
-// ReviewPR runs the full per-PR pipeline: on-demand-comment detection,
-// eligibility check, path exclusion, diff-size guard, ephemeral clone,
-// Claude invocation, and — on success — formal review submission pinned to
+// ReviewPR runs the full per-PR pipeline: repo-resident config resolution
+// (#1642, at the PR's base ref — see the first block of the function body),
+// on-demand-comment detection, eligibility check, path exclusion,
+// diff-size guard, ephemeral clone, Claude invocation, and — on success —
+// formal review submission pinned to
 // the PR's current head SHA.
 //
 // On any failure it posts nothing (per the issue's explicit "on invocation
@@ -100,6 +109,25 @@ type ReviewOutcome struct {
 // is called below, so R6 (a finding can never anchor to an omitted file)
 // holds with no separate anchor-scrubbing logic.
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
+	// R1/R2 (#1642): resolve owner/repo's repo-resident .pruefer/config.yaml
+	// at the PR's base ref — never the head, so a PR can never change how it
+	// is itself reviewed (mirrors --setting-sources user's "the PR head is
+	// untrusted" doctrine, adrs/1113-pruefer-v1-architecture.md). This is
+	// deliberately the very first network call in ReviewPR, ahead of even
+	// PendingForceReview/FetchPRReviews below: EligibilityInput (built just
+	// below from cfg.ExcludedAuthors/cfg.ExcludedLabels) must see any
+	// repo-narrowed exclusion before Eligible() runs — otherwise a
+	// repo-narrowed author/label exclusion would never take effect, since
+	// the PR would already have been dispatched to Claude on the
+	// operator-only exclusion set by the time repo config was consulted.
+	// applyRepoNarrowing never widens operator's configuration (see its doc
+	// comment and adrs/1642-*.md); every field below this point reads the
+	// resulting effective cfg exactly where it read the operator's cfg
+	// before this issue.
+	repoYAML, prov := fetchRepoConfig(client, owner, repo, pr.BaseRef)
+	cfg, warnings := applyRepoNarrowing(cfg, repoYAML)
+	logRepoConfigResolution(pr.Number, owner, repo, prov, warnings)
+
 	forceReview, err := PendingForceReview(client, owner, repo, pr.Number)
 	if err != nil {
 		logf(pr.Number, "warn", "checking for /pruefer review command on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
