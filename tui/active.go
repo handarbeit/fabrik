@@ -110,6 +110,16 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 					job.LastLine = strings.TrimRight(ev.Message, "\n")
 				}
 			}
+		} else if ev.Repo != "" {
+			// Repo-level lines (e.g. merge-train) route directly via the
+			// (Repo, 0) composite key, bypassing activeNumToKey — that map
+			// is keyed only by issue number and would collide across two
+			// concurrent trains, which both use IssueNumber 0 (AC4).
+			key := activeJobKey(ev.Repo, 0)
+			if job, ok := a.active[key]; ok {
+				job.LastTag = ev.Tag
+				job.LastLine = strings.TrimRight(ev.Message, "\n")
+			}
 		}
 
 	case tea.KeyMsg:

@@ -715,7 +715,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case LogEvent:
-		if ev.IssueNumber == 0 {
+		if ev.IssueNumber == 0 && ev.Repo == "" {
 			comp, _ := m.header.Update(msg)
 			m.header = comp.(HeaderComponent)
 		} else {
