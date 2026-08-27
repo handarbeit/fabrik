@@ -710,11 +710,11 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// bisection sub-trial — forks off the same base and a red result is attributable to
 	// member composition, not a moving base branch. Skipped under the test seam (no git).
 	if e.trainValidateFn == nil {
-		fetchCmd := exec.Command("git", "fetch", "origin")
-		fetchCmd.Dir = wm.baseDir
-		fetchCmd.Env = nonInteractiveGitEnv()
-		if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
-			e.logf(0, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(string(out)))
+		// FetchOrigin (not a raw exec.Command) — serialized under wm.mu, since #1648
+		// this WorktreeManager is shared by every base partition of this repo (found
+		// in review, #1648).
+		if out, ferr := wm.FetchOrigin(); ferr != nil {
+			e.logf(0, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(out))
 		}
 		baseSHA, perr := gitRevParse(wm.baseDir, "refs/remotes/origin/"+baseBranch)
 		if perr != nil {
@@ -1331,11 +1331,11 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 	e.logf(0, "merge-train", "one-at-a-time fallback: processing %d member(s) as singleton batches\n", len(members))
 	for _, m := range members {
 		if e.trainValidateFn == nil {
-			// Re-pin the base to current origin/<base> so a prior singleton's land is seen.
-			fetchCmd := exec.Command("git", "fetch", "origin")
-			fetchCmd.Dir = p.wm.baseDir
-			fetchCmd.Env = nonInteractiveGitEnv()
-			fetchCmd.CombinedOutput() // best-effort
+			// Re-pin the base to current origin/<base> so a prior singleton's land is
+			// seen. FetchOrigin (not a raw exec.Command) — serialized under wm.mu, since
+			// this WorktreeManager is shared by every base partition of this repo
+			// (found in review, #1648).
+			p.wm.FetchOrigin() // best-effort
 			if sha, rerr := gitRevParse(p.wm.baseDir, "refs/remotes/origin/"+p.baseBranch); rerr == nil {
 				p.baseSHA = sha // local copy; persists across this loop, does not leak to caller
 			}
@@ -3523,12 +3523,12 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		e.logf(0, "merge-train", "trial %s is behind %s (main moved) — rebasing off the new base (cycle %d/%d)\n", trialName, p.baseBranch, cycles, maxCycles)
 
 		// Re-pin the base to the current origin/<base> so the re-assembly forks off
-		// the advanced main (skipped under the test seam — no real git).
+		// the advanced main (skipped under the test seam — no real git). FetchOrigin
+		// (not a raw exec.Command) — serialized under wm.mu, since this
+		// WorktreeManager is shared by every base partition of this repo (found in
+		// review, #1648).
 		if e.trainValidateFn == nil {
-			fetchCmd := exec.Command("git", "fetch", "origin")
-			fetchCmd.Dir = p.wm.baseDir
-			fetchCmd.Env = nonInteractiveGitEnv()
-			fetchCmd.CombinedOutput() // best-effort
+			p.wm.FetchOrigin() // best-effort
 			if sha, rerr := gitRevParse(p.wm.baseDir, "refs/remotes/origin/"+p.baseBranch); rerr == nil {
 				p.baseSHA = sha // local copy; the loop reuses it, no leak to caller
 			}
