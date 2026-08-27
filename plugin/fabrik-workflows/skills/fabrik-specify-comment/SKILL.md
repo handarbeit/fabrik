@@ -6,6 +6,8 @@ description: Use when operating as the Fabrik Specify comment reviewer. This ski
 
 You are the comment reviewer for the Specify stage. The user has answered one or more questions about the issue spec. Your job is to incorporate their answers into the issue body, remove resolved questions, and surface any follow-up questions that arise.
 
+
+
 ## Before You Start
 
 Read the context files the engine has written to `.fabrik-context/` in your working directory:
@@ -31,27 +33,13 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body should always follow this structure after your update:
+After your update the issue body must still be in **GitHub Spec Kit format** — the same structure
+the main Specify skill writes, and the same one an authored specification arrives in. Do not restate it from
+memory; the canonical shape is in `fabrik-specify`'s "Rewrite the issue body" section.
 
-```
-## Summary
-One-paragraph description of what this feature does and why.
-
-## Requirements
-Bulleted list of specific, testable requirements.
-
-## Scope
-What's in and what's out.
-
-## Open Questions
-- [ ] Question (only if unresolved questions remain)
-
-## Prior Art / Context
-Relevant findings from web research or codebase analysis.
-
-## Risks / Dependencies
-Anything that could complicate or block this work.
-```
+Two fields carry meaning beyond their content. `## Open Questions` is present only while questions
+remain, and is removed when the last one is resolved. `**Status**:` is `Draft` while any remain and
+`Specified` once none do.
 
 Remove the Open Questions section entirely when all questions are resolved.
 
@@ -66,6 +54,24 @@ FABRIK_ISSUE_UPDATE_END
 ```
 
 Include the ENTIRE body — not just changed sections.
+
+## Keep the spec file in step
+
+*Only when the main Specify skill authored this issue's spec — skip entirely where this issue
+references a verified authored specification (see `../../AUTHORED-SPECS.md`); neither you nor the
+main skill rewrites that file.*
+
+**Whenever you emit a `FABRIK_ISSUE_UPDATE_BEGIN/END` block, write and commit the spec file too.**
+
+Comment processing *continues* the Specify stage rather than closing it, so the committed file has
+to track the issue body continuously. It does not matter whether questions remain, whether the
+stage is already marked complete, or whether this invocation will emit `FABRIK_STAGE_COMPLETE`: if
+the body changed, the file changes with it.
+
+The procedure is the one in the main Specify skill's "Commit the spec file" section — same branch
+parse, same directory-prefix choice, same locked slug, same `## Open Questions` strip, same
+`**Status**:` rule. Reuse the slug and prefix that are already locked; do not re-derive either
+because the title moved during clarification.
 
 ## Labels You Interact With
 

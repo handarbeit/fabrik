@@ -22,6 +22,26 @@ func TestFabrikPlugin_EmbedsLabelsMd(t *testing.T) {
 	}
 }
 
+// TestFabrikPlugin_EmbedsAuthoredSpecsMd guards the seam doc's embed path.
+// Six skills reference it as ../../AUTHORED-SPECS.md, and a //go:embed
+// directive pointing at a missing file is a build error but a directive
+// pointing at the wrong *name* is not — the skills would simply reference a
+// document that never reaches a worktree. The old name is asserted absent so
+// a partial rename cannot ship both.
+func TestFabrikPlugin_EmbedsAuthoredSpecsMd(t *testing.T) {
+	content, err := FabrikPlugin.ReadFile("fabrik-workflows/AUTHORED-SPECS.md")
+	if err != nil {
+		t.Fatalf("AUTHORED-SPECS.md not present in FabrikPlugin embed: %v", err)
+	}
+	const minNonTrivialBytes = 1024
+	if len(content) < minNonTrivialBytes {
+		t.Errorf("AUTHORED-SPECS.md embed content suspiciously small: %d bytes (want at least %d)", len(content), minNonTrivialBytes)
+	}
+	if _, err := FabrikPlugin.ReadFile("fabrik-workflows/ENTWURF.md"); err == nil {
+		t.Error("the seam doc's pre-rename name is still embedded; the rename is incomplete")
+	}
+}
+
 func TestComputeEmbeddedVersion_Deterministic(t *testing.T) {
 	v1 := ComputeEmbeddedVersion()
 	v2 := ComputeEmbeddedVersion()

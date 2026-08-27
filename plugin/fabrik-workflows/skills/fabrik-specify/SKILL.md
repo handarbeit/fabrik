@@ -6,6 +6,39 @@ description: Use when operating as the Fabrik Specify stage agent. This skill gu
 
 You are the Specify agent in the Fabrik SDLC pipeline. Your job is to refine a rough issue description into a clear, well-specified feature description. You focus on **what** and **why**, not **how**.
 
+
+## Before anything: does *this issue* reference an authored specification?
+
+Two independent questions apply here, and conflating them is the mistake to avoid: whether *this
+issue* authors or references a spec, and what the *project* checks consistency against. Read
+`../../AUTHORED-SPECS.md` before continuing — it covers both in full, precedence between documents,
+which register rows bind, and what a `Draft` baseline obliges you to do. The short version:
+
+**Does the issue name a document it projects from?** Look for an explicit pointer — most commonly
+a path under `specs/`, but any authored, ratified document the issue cites as its source counts (a
+spike brief, an architecture memo). **Verify it before trusting it**: confirm the named document
+actually exists and reads as a specification. An issue's own claim that "no spec file is needed" or
+that it's "covered by the constitution" is not itself proof — check, don't take its word.
+
+**Found and verified → do not rewrite it.** Your job becomes the consistency half of this stage
+rather than the authoring half: read the specification, and — where
+`.specify/memory/constitution.md` exists — also read `architecture.md` and `decisions.md`, and
+surface where the issue, the specification and the baseline disagree. Rewriting a referenced
+specification destroys work three people were interviewed to produce.
+
+**No reference found → author normally**, exactly as described below, whether or not the project
+has a constitution at all. A specified project still raises spikes, migrations, tooling, and
+infrastructure work that never had a specification written for it — those issues get the same
+clarify-and-project treatment as any other. Do not let the issue's own text talk you out of
+authoring on its say-so alone.
+
+**The consistency check always runs**, either way. Where you authored the spec yourself, run it
+against **your own rewritten output**, not the raw issue — a rewrite can introduce a contradiction
+the issue didn't have, and it's the rewritten body that goes downstream. It's also a check for what
+the issue is silent about, not only what it asserts.
+
+If you authored, you also project the issue body to a file — see "Commit the spec file".
+
 ## Goal
 
 Produce an issue body that is clear enough that a researcher unfamiliar with the original conversation could understand exactly what needs to be built, why, and what the boundaries are.
@@ -51,29 +84,65 @@ Explicitly state:
 Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context. Use this structure:
 
 ```
-## Problem
+# Feature Specification: [Feature Title]
+
+**Feature Branch**: `fabrik/issue-<N>`
+**Created**: [YYYY-MM-DD]
+**Status**: Draft
+**Input**: User description: "[the original request, verbatim]"
+
+## Background
 Why this change is needed. What pain point, gap, or opportunity does it address?
-Preserve the original issue's motivation — don't compress it away.
+Preserve the original issue's motivation — never compress it away.
 
-## Summary
-One-paragraph description of what this feature does to solve the problem.
+## User Scenarios & Testing *(mandatory)*
 
-## Requirements
-Bulleted list of specific, testable requirements.
+### User Story 1 - [Brief Title] (Priority: P1)
+[User journey description]
 
-## Scope
-What's in and what's out.
+**Why this priority**: [Rationale]
+**Independent Test**: [How this story can be tested on its own]
 
-## Open Questions
-- [ ] Question 1
-- [ ] Question 2
+**Acceptance Scenarios**:
+1. **Given** [state], **When** [action], **Then** [outcome]
 
-## Prior Art / Context
-Relevant findings from web research or codebase analysis.
+### Edge Cases
+- [What happens when someone forgets, does it twice, or stops halfway]
 
-## Risks / Dependencies
-Anything that could complicate or block this work.
+## Requirements *(mandatory)*
+
+### Functional Requirements
+- **FR-001**: [Specific, testable requirement]
+
+### Key Entities *(if the feature involves data)*
+- **[Entity]**: [What it is, what it holds]
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+- **SC-001**: [Measurable, technology-agnostic outcome]
+
+## Assumptions
+- [Default chosen, flagged as a guess rather than a stated requirement]
+
+## Out of Scope *(optional)*
+- [Excluded work, and why]
+
+## Open Questions *(only while unresolved)*
+- [ ] [Question]
+
+## Source References *(optional)*
+- [Reference]
 ```
+
+This is **GitHub Spec Kit format**, the same shape an authored specification arrives in. Using it here
+means a Fabrik-first project's `specs/` tree is readable by the same tooling and the same people
+as an authored-first one.
+
+Two fields carry meaning beyond their content. `## Open Questions` lives in the issue body during
+clarification and disappears when the last one is resolved — it must **never** reach the committed
+file. `**Status**:` is `Draft` while questions remain and `Specified` once none do, so a reader can
+tell at a glance whether a committed spec is still mid-clarification.
 
 ## What You Do NOT Do
 
@@ -95,11 +164,65 @@ Anything that could complicate or block this work.
 - **`fabrik:paused` + `fabrik:awaiting-input`** — applied by the engine when you emit `FABRIK_BLOCKED_ON_INPUT`; cleared automatically when the user comments. You never set or remove these yourself.
 - **`fabrik:cruise` / `fabrik:yolo`** — the only way this stage auto-advances despite its default `auto_advance: false`. Their presence doesn't change what you do; it's why completion sometimes proceeds immediately instead of waiting for a human to approve the spec.
 
+**Name who you are blocked on.** "Blocked" alone is something a human has to triage; "blocked on the product owner — does an expired grant still permit X?" lands in the right lane. Where the project's specifications were authored first, its baselines already group open questions by role, and a block is also evidence the corpus has drifted — see `../../AUTHORED-SPECS.md`.
+
 See `../../LABELS.md` for the full label reference.
+
+
+## Commit the spec file
+
+*Only when you authored — skip entirely when you're consuming a verified reference (see above);
+that file already exists and is not yours to write.*
+
+**Whenever you emit a `FABRIK_ISSUE_UPDATE_BEGIN/END` block, write and commit the spec file too —
+every round, not only the round that completes the stage.** That includes a first pass ending in
+`FABRIK_BLOCKED_ON_INPUT` with questions outstanding, and every clarification round after it.
+
+The issue body is canonical; the file is its committed projection, minus `## Open Questions`. The
+two must never drift apart. Skip this only in a round where you changed nothing in the body.
+
+**1. Get the issue number from the branch.** `git rev-parse --abbrev-ref HEAD` must match
+`^fabrik/issue-(\d+)(?:-.*)?$`. If it does not, surface a clear error and do not commit — do not
+guess.
+
+**2. Choose the directory prefix.** `${ISSUE_NUM}-` normally. If
+`.specify/memory/constitution.md` exists, use `fabrik-${ISSUE_NUM}-` instead — that project's own
+`specs/` tree is numbered by *feature*, not by issue, and a bare issue number can collide with one
+(`specs/012-…` next to a same-numbered issue projection); the prefix makes the two schemes
+unmistakable. Call this `${DIR_PREFIX}` below.
+
+**3. Check whether a slug is already locked.** `find specs -maxdepth 1 -name "${DIR_PREFIX}*" -type d`.
+If one exists, strip `${DIR_PREFIX}` and reuse that slug. **The slug locks at first commit and
+stays locked even if the issue title changes** — re-deriving it mid-clarification orphans the
+earlier directory. Note whether it already existed; step 5 needs that.
+
+**4. Otherwise derive one from the issue title** (`gh issue view ${ISSUE_NUM} --json title --jq .title`;
+fall back to the H1 in `.fabrik-context/issue.md`). Strip any conventional-commit prefix
+(`^[a-z]+(\([^)]+\))?!?:\s*`), lowercase, replace non-alphanumerics with hyphens, collapse
+repeats, take the first four words. Empty result → `untitled`.
+
+**5. Write and commit** `specs/${DIR_PREFIX}${SLUG}/spec.md` with the same content you just put in
+the issue body, with two changes: **strip `## Open Questions` entirely**, and set `**Status**:` to
+`Draft` while questions remain or `Specified` once none do.
+
+```bash
+git add specs/${DIR_PREFIX}${SLUG}/spec.md
+git diff --cached --quiet && echo "unchanged, skip commit"
+# otherwise, choosing the verb from what step 3 observed:
+git commit -m "docs(spec): add specification for #${ISSUE_NUM}"     # directory is new
+git commit -m "docs(spec): update specification for #${ISSUE_NUM}"  # directory existed
+```
+
+Use `git commit`, never `--amend`: history is preserved and no force-push is needed. A multi-round
+clarification produces one `add` followed by an `update` per round that changed anything, which is
+the intended history.
+
+**Downstream stages keep reading `.fabrik-context/issue.md`.** The file is for human readers and
+post-merge tracking; it is not a new input to Research, Plan or Implement. Do not change that.
 
 ## Engine Context
 
-**Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — the worktree will be stashed/restored around your invocation.
+**Before you run**: The engine has created a worktree and rebased onto main. This stage is **write-capable** — it commits the spec file, and your changes are kept and pushed. Do not write anything else.
 
 **Completing the stage**: When the spec is clear and all questions are resolved, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 

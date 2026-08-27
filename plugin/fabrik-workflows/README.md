@@ -57,3 +57,14 @@ Skills reference these markers that the Fabrik engine processes:
 
 - [Stage Lifecycle](https://github.com/handarbeit/fabrik/blob/main/docs/stage-lifecycle.md) — full engine lifecycle documentation
 - [User Guide](https://github.com/handarbeit/fabrik/blob/main/docs/USER_GUIDE.md) — Fabrik setup and usage
+
+## Projects whose specifications were authored first
+
+Some projects arrive with their specifications already written — a product owner, an architect
+and an experience lead interviewed before any issue existed, leaving behind a `specs/` tree plus
+`.specify/memory/` in [GitHub Spec Kit](https://github.com/github/spec-kit) layout.
+
+Where that is the case the pipeline consumes those documents rather than recreating them, and
+**Specify must never rewrite an authored specification**. See [AUTHORED-SPECS.md](AUTHORED-SPECS.md) for how to
+tell, what wins when two documents disagree, and how to write decisions down at the right
+altitude.
