@@ -18,6 +18,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // TrainCIResult is the typed outcome of the combined-Validate CI poll.
@@ -701,6 +702,18 @@ func (e *Engine) resetMergeTrainCloneSkip(repoKey string) {
 	e.mergeTrainCloneSkipMu.Unlock()
 }
 
+// trainBatchTitle builds the TUI job row's title from the dispatched batch — member
+// count and issue numbers, in batch order (e.g. "4 member(s): #1253 #1644 #1647
+// #1649") — mirroring the "%d survivor(s)" pluralization convention already used
+// throughout this file's own log lines.
+func trainBatchTitle(batch []gh.ProjectItem) string {
+	numbers := make([]string, 0, len(batch))
+	for _, item := range batch {
+		numbers = append(numbers, fmt.Sprintf("#%d", item.Number))
+	}
+	return fmt.Sprintf("%d member(s): %s", len(batch), strings.Join(numbers, " "))
+}
+
 // runMergeTrainWorker is the main body of the merge-train goroutine (ADR-059 D3/D4).
 // After prepareTrainWorker hands off setup, it runs a re-form loop: assemble+validate
 // the (re-formed) batch exactly once; a green result lands immediately (D-d — zero
@@ -710,8 +723,36 @@ func (e *Engine) resetMergeTrainCloneSkip(repoKey string) {
 // the one-at-a-time fallback (FR-5). Every exit from this function — including every
 // nested landing/dissolve helper it calls — clears the in-flight marker via the single
 // deferred finishTrain call below (see ADR-067).
+//
+// Emits a JobStartedEvent/JobCompletedEvent pair around the whole batch lifecycle
+// (#1661) so the train has a TUI job row for its entire run, keyed by (Repo,
+// IssueNumber=0) — the same composite key activeJobKey already supports, and unique
+// since there is at most one train per repo. Deliberately emitted here, before
+// prepareTrainWorker runs — not after it succeeds — so prepareTrainWorker's own
+// diagnostic log lines (repo-not-ready, cannot pin base SHA, no holding stage
+// configured) land in a visible row instead of nowhere; the accepted cost is a rare
+// flash-then-vanish row if prepareTrainWorker fails immediately (e.g. context
+// cancelled before the semaphore is acquired) — see adrs/1661-*.md. The completed
+// event always carries Skipped: true (there is no per-train equivalent of
+// InvocationObserver), so the row is simply removed, never added to history.
 func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) {
 	repoKey := owner + "/" + repo
+	title := trainBatchTitle(batch)
+
+	e.emitStructural(tui.JobStartedEvent{
+		IssueNumber: 0,
+		Repo:        repoKey,
+		Title:       title,
+		StageName:   "Merge Train",
+		StartedAt:   time.Now(),
+	})
+	defer e.emitStructural(tui.JobCompletedEvent{
+		IssueNumber: 0,
+		Repo:        repoKey,
+		Title:       title,
+		StageName:   "Merge Train",
+		Skipped:     true,
+	})
 
 	p, current, ok := e.prepareTrainWorker(ctx, state, owner, repo, batch)
 	if !ok {
