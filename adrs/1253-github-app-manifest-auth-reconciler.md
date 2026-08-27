@@ -110,8 +110,13 @@ mint/commit or detach/drain sequence itself.
 Concretely, `handleReload` (`pruefer/execute.go`) no longer calls `MintOwnerAuth`,
 `CommitOwnerAuth`, or `RemoveOwners` at all — those three methods remain on `Reconciler`,
 still correct, but are now exercised only via `Derive`'s own internal use of
-`CommitOwnerAuth`/`RemoveOwners` (for the genuinely new installation-driven trigger, not
-a config-driven one). `MintOwnerAuth` and `internal/githubauth/installations.go`'s
+`RemoveOwners` (for the genuinely new installation-driven trigger, not a config-driven
+one). `Derive` does **not** call `CommitOwnerAuth` for a newly-discovered owner —
+it registers the new `Auth` via a lower-level `registerOwnerAuth` helper instead, and
+starts its refresh loop itself only when appropriate (see ADR-1641 Decision 1's
+`startLoopsForNewOwners` note: `Reconcile`'s own first call defers loop-starting to its
+caller's subsequent `RunRefreshLoops`, to avoid starting the same installation's refresh
+loop twice). `MintOwnerAuth` and `internal/githubauth/installations.go`'s
 `verifyRepoAccess` have no remaining caller in the non-test code path as of this change;
 they are deliberately left in place (not deleted) as a scoped, explicitly-noted
 deferral — see ADR-1641's own trade-offs section for why immediate removal was not

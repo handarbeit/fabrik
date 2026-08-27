@@ -38,10 +38,29 @@ former owner-scoped discovery loop (which only ever iterated owners already pres
 1. Calls `gh.FetchAppInstallations` with **no owner list as input** — every installation
    of the operator's own App, discovered unconditionally.
 2. For each installation not already known (by lower-cased account), mints a token
-   (`mintAuth`) and commits it via the existing `CommitOwnerAuth` (starting its refresh
-   loop). An *already*-known owner's existing client/`Auth` is reused unchanged — no
-   re-mint — so a repo gained or lost under an already-known installation never
-   disturbs that installation's running refresh loop.
+   (`mintAuth`) and registers it via `registerOwnerAuth` (a helper factored out of
+   `CommitOwnerAuth`'s registration bookkeeping — see below for why `Derive` doesn't
+   call `CommitOwnerAuth` itself). An *already*-known owner's existing client/`Auth`
+   is reused unchanged — no re-mint — so a repo gained or lost under an already-known
+   installation never disturbs that installation's running refresh loop.
+   Whether the newly-registered `Auth`'s refresh loop starts immediately depends on
+   an unexported `startLoopsForNewOwners` parameter: true for every public `Derive`
+   call (an installation webhook event, the periodic ticker, or a SIGHUP
+   `watched_repos` edit — nothing else will ever start a loop for an owner one of
+   those newly discovers), but false specifically for `Reconcile`'s own first,
+   internal call. That distinction exists because `Reconcile`'s caller
+   (`pruefer/execute.go`) always calls `Reconciler.RunRefreshLoops` itself immediately
+   after `Reconcile` returns, to start every discovered owner's refresh loop as one
+   batch — if `Derive` had also started a loop right away (via `CommitOwnerAuth`, as
+   an earlier revision of this change did), every installation would get **two**
+   independent refresh-loop goroutines: `Auth.startRefreshLoop`'s `cancel` field holds
+   only the most recent loop's cancel func, so the second start silently orphans the
+   first — un-stoppable by `Auth.Stop`/`drainThenStopAuth`/`RemoveOwners` short of a
+   process restart — while also doubling every installation's token-mint API traffic.
+   Caught by a data race in the existing test suite (two independently-running,
+   `context.Background()`-rooted refresh loops touching shared test state) and fixed
+   during this issue's own review; see
+   `TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops`.
 3. Calls `gh.FetchInstallationRepositories` for **every** installation, regardless of
    `repository_selection` — that endpoint already returns the full accessible set for
    `"all"`-mode installations too; the pre-#1641 code only called it for `"selected"`
