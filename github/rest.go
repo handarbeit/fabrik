@@ -33,6 +33,15 @@ var ErrUnprocessableEntity = errors.New("unprocessable entity")
 // detect unsupported operations (e.g. rebase merge not allowed by repo policy).
 var ErrMethodNotAllowed = errors.New("method not allowed")
 
+// ErrConflict is returned by REST methods when the server responds with 409.
+// Introduced for MergePRAtHeadSHA (#1644): GitHub's merge endpoint returns
+// 409 when the caller's expected head SHA no longer matches the PR's live
+// head — the caller asked to merge exactly what it validated, and the world
+// moved underneath it. Callers may use errors.Is(err, github.ErrConflict) to
+// detect this and retry from a fresh read rather than treating it as a
+// generic failure.
+var ErrConflict = errors.New("conflict")
+
 // ErrDiffTooLarge is returned by REST methods when the server responds with
 // 406 Not Acceptable and the body's errors[].code is "too_large" — GitHub's
 // deterministic refusal to render a diff exceeding its 20,000-line ceiling
@@ -144,6 +153,8 @@ func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*ht
 			return resp, respBody, fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
 		case 405:
 			return resp, respBody, fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
+		case 409:
+			return resp, respBody, fmt.Errorf("GitHub API returned 409: %s: %w", string(respBody), ErrConflict)
 		case 406:
 			if isDiffTooLarge(respBody) {
 				return resp, respBody, fmt.Errorf("GitHub API returned 406: %s: %w", string(respBody), ErrDiffTooLarge)

@@ -721,6 +721,33 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			return
 		}
 
+		// #1644: a length-1 batch may be landable directly from its own PR,
+		// skipping the trial entirely — checked on every iteration (not just
+		// the first) so a batch that bisects down to a single clean survivor
+		// and re-forms is also eligible. See trySingletonFastPath's doc
+		// comment for why this guard lives here rather than inside
+		// assembleAndValidate itself.
+		if len(current) == 1 {
+			// Apply any pending review-finding eject signal (#1208) before
+			// considering the fast path. The fast path never calls
+			// assembleAndValidate, so without this it would silently bypass
+			// every one of applyPendingReviewEjects' three existing
+			// checkpoints (this loop's Hook 2 below, landOneAtATime,
+			// landGreenBatch's rebase loop) — landing a member flagged for
+			// unresolved review-thread findings on its own linked PR directly,
+			// the exact case #1208 exists to prevent. An ejected member leaves
+			// `current` empty, so `continue` re-enters the loop and the
+			// top-of-loop zero-survivors check returns.
+			if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, current); ejectedCount > 0 {
+				e.logf(0, "merge-train", "%d member(s) ejected for unresolved review findings before the singleton fast path — re-forming for %s\n", ejectedCount, repoKey)
+				current = remaining
+				continue
+			}
+			if e.trySingletonFastPath(ctx, state, p, current[0]) {
+				return
+			}
+		}
+
 		trialName := p.nextTrialName()
 		state.mu.Lock()
 		state.trialName = trialName
@@ -1314,6 +1341,182 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
 	e.resetTrialCounter(p.owner + "/" + p.repo)
+}
+
+// singletonFastPathEligible decides whether trainMember m can be landed directly
+// from its own PR, skipping the trial branch entirely (#1644 R1/R2/R3). Checked
+// in cheapest-first order, each step consuming only already-fetched data or a
+// single extra API call:
+//
+//  1. The live PR head SHA (pr.HeadSHA) still equals the cached snapshot
+//     (m.headSHA) taken once at batch formation (fetchTrainMembers) — closes an
+//     otherwise-silent TOCTOU gap: a member re-pushed after batch formation but
+//     before this check must never be landed on stale ancestry/CI evidence.
+//  2. The pinned base SHA (p.baseSHA — never a live origin/<base> read, R3) is
+//     an ancestor of the member's head: FetchCommitsBehind(base=p.baseSHA,
+//     head=m.headSHA) == 0 means the merge would be a fast-forward, so the
+//     trial's tree would be byte-identical to the member's own PR head tree —
+//     already validated by the member's own CI.
+//  3. The PR's mergeable_state is accepted (gh.MergeableStateAccepted, ADR-072)
+//     — R1.3's narrower "not dirty" half, which Research judged uncontroversial
+//     under either ADR-072 or ADR-1153.
+//  4. The member's own CI is green AND complete by ADR-1153/ADR-1441's
+//     standard — classifyLandingCI, reused unmodified (R1.2's "must not fork or
+//     loosen that logic").
+//
+// R2's fail-closed discipline is structural, not a convention to remember: every
+// branch that cannot positively confirm a condition returns (false, reason) —
+// there is no code path that returns true except by every check having been
+// positively satisfied. An API error is always "not confirmed," never "assumed
+// fine" — the opposite polarity from trialBehind's "assume up to date on error,"
+// which exists for a different, lower-stakes decision (FR-2 main-moved
+// detection during an already-green trial, not an unattended skip-the-trial
+// decision).
+func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.PRDetails) (bool, string) {
+	if pr.HeadSHA != m.headSHA {
+		return false, fmt.Sprintf("live PR head %s no longer matches the batch-formation snapshot %s", pr.HeadSHA, m.headSHA)
+	}
+	if p.baseSHA == "" {
+		return false, "no pinned base SHA available"
+	}
+
+	behind, err := e.client.FetchCommitsBehind(p.owner, p.repo, p.baseSHA, m.headSHA)
+	if err != nil {
+		return false, fmt.Sprintf("could not confirm pinned base is an ancestor of the member's head: %v", err)
+	}
+	if behind > 0 {
+		return false, fmt.Sprintf("pinned base is %d commit(s) ahead of the member's head — not a fast-forward, base moved since pinning", behind)
+	}
+
+	if !gh.MergeableStateAccepted(pr.MergeableState) {
+		return false, fmt.Sprintf("mergeable_state %q not accepted", pr.MergeableState)
+	}
+
+	checkRuns, err := e.client.FetchCheckRuns(p.owner, p.repo, m.headSHA)
+	if err != nil {
+		return false, fmt.Sprintf("could not fetch check runs for %s: %v", m.headSHA, err)
+	}
+	// classifyLandingCI's zero-check-runs branch falls back to mergeable_state
+	// alone (ADR-933's "Actions disabled" case) — correct for its usual caller
+	// (pollForMergeable, judging a landing PR whose tree was already validated
+	// by a just-polled trial CI run) but wrong here: R1.2 requires positive
+	// evidence that the member's OWN CI already ran and passed, and this fast
+	// path never builds a trial, so zero check runs on the member's own PR
+	// head means "nothing has actually run" (or CI hasn't reported yet), not
+	// "green by absence." Falling through to classifyLandingCI's fallback
+	// would land an unvalidated tree — exactly the false positive R2/AC4
+	// require failing closed on — so it's rejected before classifyLandingCI
+	// is even consulted, regardless of mergeable_state.
+	if len(checkRuns) == 0 {
+		return false, "zero check runs on the member's own PR head — no positive CI evidence to land on"
+	}
+	result, detail := e.classifyLandingCI(p.owner, p.repo, pr.MergeableState, m.headSHA, checkRuns)
+	if result != TrainCIGreen {
+		return false, fmt.Sprintf("CI not confirmed green and complete: %s", detail)
+	}
+	return true, detail
+}
+
+// finishSingletonFastPathLanding completes the Done transition for a
+// singleton-fast-path landing (R5, #1644) — called once the member's own PR is
+// confirmed merged (either just merged by trySingletonFastPath, or found
+// already merged on a prior partial run). Unlike landSingleton this never mints
+// a dedicated landing PR: there is no validated trial branch to build one from,
+// by construction (the entire point of the fast path is skipping the trial).
+//
+// Modeled on advanceConvergedPRToDone (engine/merge_gate.go) — the ordinary
+// auto-merge path's Done-transition template — rather than landSingleton:
+// advance Queued -> Done via recordAdvanceOutcome (so a failed advance gets the
+// same durable retry/escalation as every other terminal advance), then
+// closeIssueIfNonDefaultBase unconditionally on the confirmed merge (this is
+// the first merge-train landing path that needs it — landSingleton/
+// landMergeTrainBatch always close explicitly regardless of base, but this path
+// deliberately relies on the merged PR's own Closes #N per R5), then apply
+// awaitingLandingVerificationLabel only once the advance itself succeeded — no
+// fabrik:credited-pr:<N> is ever applied here, since the merged PR IS the
+// item's own linked PR and is durably rediscoverable via #1616's settle scan's
+// ordinary FetchLinkedPR fallback (see markCreditedLanding's doc comment for
+// why that label exists only for merge-train's other two landing paths, whose
+// credited PR is never the member's own).
+func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p trialParams, m trainMember) {
+	if m.item.Status != "Done" {
+		var advErr error
+		if e.statusField == nil {
+			advErr = fmt.Errorf("statusField not available")
+			e.logf(m.item.Number, "merge-train", "warn: statusField unavailable — cannot advance #%d to Done\n", m.item.Number)
+		} else {
+			board := &gh.ProjectBoard{ProjectID: state.projectID}
+			if advErr = e.recordAdvanceOutcome(board, m.item, p.holdingStg); advErr != nil {
+				e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
+			} else {
+				e.logf(m.item.Number, "merge-train", "advanced #%d to Done via singleton fast path\n", m.item.Number)
+			}
+		}
+		// closeIssueIfNonDefaultBase runs unconditionally on the confirmed merge
+		// (advanceConvergedPRToDone's pattern), regardless of the advance's own
+		// outcome above — see awaitingAdvanceLabel's doc comment for why that's
+		// safe even when recordAdvanceOutcome just failed.
+		e.closeIssueIfNonDefaultBase(m.item, m.prNum)
+		if advErr == nil {
+			e.addLabel(m.item, awaitingLandingVerificationLabel)
+		}
+	} else {
+		// Restart safety: already Done from a prior partial run (e.g. crashed
+		// between MergePR and the advance). Both calls are idempotent, so
+		// re-applying them here costs at most a redundant API call — mirrors
+		// landMergeTrainBatch's identical "already Done" restart branch.
+		e.closeIssueIfNonDefaultBase(m.item, m.prNum)
+		e.addLabel(m.item, awaitingLandingVerificationLabel)
+	}
+
+	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
+	e.resetTrialCounter(p.owner + "/" + p.repo)
+}
+
+// trySingletonFastPath is runMergeTrainWorker's re-form-loop guard (#1644),
+// checked on every iteration for a length-1 current batch, immediately before a
+// trial would otherwise be built. It is deliberately NOT inside
+// assembleAndValidate/assembleAndValidateInner: that would also fire inside
+// bisect's poisoner-isolation sub-trials (wrong — a sub-batch member's own-PR
+// CI says nothing about whether it's the poisoner in an already-red
+// combination) and inside landOneAtATime's fallback (explicitly out of scope
+// per the issue's Scope section). Returns true when the disposition for this
+// poll is already decided — landed, or a landing attempt was made and should
+// not fall through to a trial this cycle — and false when the caller should
+// proceed to build the trial exactly as before this feature existed.
+func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember) bool {
+	pr, err := e.client.FetchPRDetails(p.owner, p.repo, m.prNum)
+	if err != nil || pr == nil {
+		e.logf(m.item.Number, "merge-train", "singleton fast path: could not fetch PR #%d details: %v — building trial\n", m.prNum, err)
+		return false
+	}
+
+	if pr.Merged {
+		e.logf(m.item.Number, "merge-train", "singleton fast path: PR #%d already merged (resuming a prior partial run) — completing Done transition\n", m.prNum)
+		e.finishSingletonFastPathLanding(state, p, m)
+		return true
+	}
+
+	eligible, reason := e.singletonFastPathEligible(p, m, pr)
+	if !eligible {
+		e.logf(m.item.Number, "merge-train", "singleton fast path not taken for #%d: %s — building trial\n", m.item.Number, reason)
+		return false
+	}
+	e.logf(m.item.Number, "merge-train", "singleton fast path taken for #%d: %s — landing PR #%d directly, no trial branch, no draft CI PR\n", m.item.Number, reason, m.prNum)
+
+	// MergePRAtHeadSHA, not MergePR: singletonFastPathEligible's CI/mergeability
+	// evidence was gathered against pr.HeadSHA (== m.headSHA, confirmed equal
+	// above) on the member's own, externally-writable PR branch. Pinning the
+	// merge request to that exact SHA closes the window between that check and
+	// this call — a push landing in between is rejected (ErrConflict, mapped
+	// from GitHub's 409) rather than silently merged unvalidated.
+	if err := e.client.MergePRAtHeadSHA(p.owner, p.repo, m.prNum, m.headSHA); err != nil {
+		e.logf(m.item.Number, "merge-train", "singleton fast path: merge of PR #%d failed: %v — leaving #%d in Queued for retry\n", m.prNum, err, m.item.Number)
+		return true
+	}
+	e.logf(m.item.Number, "merge-train", "singleton fast path: merged PR #%d for #%d\n", m.prNum, m.item.Number)
+	e.finishSingletonFastPathLanding(state, p, m)
+	return true
 }
 
 // cleanupTrialArtifacts removes a trial's local worktree and its local+remote branch (which
@@ -2265,10 +2468,13 @@ func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, b
 // eject signal (#1208) and, for each flagged member, ejects it via
 // ejectQueuedMemberForReviewFindings and excludes it from the returned remaining slice.
 // Called from inside the merge-train worker goroutine at its natural checkpoints —
-// after assembleAndValidate returns in runMergeTrainWorker's re-form loop, and inside
-// landOneAtATime's per-singleton loop — so a flagged member can never ride a trial
-// (green or otherwise) to landing: the caller must discard the current trial whenever
-// ejectedCount > 0, regardless of that trial's own CI result.
+// before the #1644 singleton fast path is even considered (a fast-path land never calls
+// assembleAndValidate at all, so without this checkpoint it would bypass the other
+// three entirely), after assembleAndValidate returns in runMergeTrainWorker's re-form
+// loop, inside landOneAtATime's per-singleton loop, and inside landGreenBatch's
+// main-moved rebase loop — so a flagged member can never ride a trial (green or
+// otherwise), or the fast path, to landing: the caller must discard the current trial
+// whenever ejectedCount > 0, regardless of that trial's own CI result.
 func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
 	for _, m := range members {
 		if count, ok := e.takePendingReviewEject(repoKey, m.item.Number); ok {

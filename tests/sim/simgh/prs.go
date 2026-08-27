@@ -498,6 +498,27 @@ func worseVerdict(a, b string) string {
 // Without this gate a scenario could merge a PR in a blocked state, which is
 // exactly the class of bug ADR-072 records.
 func (s *Sim) MergePR(owner, repo string, prNumber int) error {
+	return s.mergePR(owner, repo, prNumber, "")
+}
+
+// MergePRAtHeadSHA is MergePR's SHA-pinned counterpart (#1644): the merge is
+// refused with gh.ErrConflict if the PR's live head no longer matches
+// expectedHeadSHA, mirroring GitHub's own "sha" merge-request field. Unlike
+// MergePR, this closes the "gate CI verdict can be stale" exposure FIDELITY.md
+// documents for MergePR — the whole reason #1644's singleton fast path calls
+// this instead: its CI classification was computed against one specific head
+// SHA on the member's own, externally-writable PR branch, not a Fabrik-owned
+// one nobody else can push to.
+func (s *Sim) MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error {
+	if expectedHeadSHA == "" {
+		return fmt.Errorf("simgh: MergePRAtHeadSHA: expectedHeadSHA must not be empty")
+	}
+	return s.mergePR(owner, repo, prNumber, expectedHeadSHA)
+}
+
+// mergePR is the shared implementation behind MergePR and MergePRAtHeadSHA.
+// expectedHeadSHA == "" means unpinned (MergePR's behavior).
+func (s *Sim) mergePR(owner, repo string, prNumber int, expectedHeadSHA string) error {
 	// Snapshot the refs the gate is about to be computed against, so the merge
 	// below can confirm it is merging the same thing that was cleared. The gate
 	// necessarily drops both locks (it takes mu and gitMu in turn, which the
@@ -538,9 +559,11 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 
 	// This compares which refs the PR points at, not what they contain. A
 	// commit or check run landing on the same branches inside the window is
-	// not caught, so the gate's CI verdict can be stale here — deliberately,
-	// because production's own MergePR has the identical exposure (it sends no
-	// `sha` to GitHub's merge endpoint). See FIDELITY.md, "Merge commits".
+	// not caught by this ref-identity check alone — deliberately, because
+	// production's own MergePR has the identical exposure (it sends no `sha`
+	// to GitHub's merge endpoint). See FIDELITY.md, "Merge commits". The
+	// expectedHeadSHA check right below is what actually closes that gap, for
+	// the callers (MergePRAtHeadSHA) that ask for it.
 	if head != gatedHead || base != gatedBase {
 		// Retargeted underneath the gate. Refuse rather than merge against a
 		// base the gate never cleared — recording a merge the gate did not
@@ -551,6 +574,22 @@ func (s *Sim) MergePR(owner, repo string, prNumber int) error {
 		return fmt.Errorf("simgh: merging PR #%d: retargeted from %s->%s to %s->%s "+
 			"between the mergeability gate and the merge: %w",
 			prNumber, gatedHead, gatedBase, head, base, gh.ErrNotMergeable)
+	}
+
+	if expectedHeadSHA != "" {
+		liveHeadSHA, err := s.resolveRefSHA(owner, repo, head)
+		if err != nil {
+			return fmt.Errorf("simgh: merging PR #%d: resolving live head SHA: %w", prNumber, err)
+		}
+		if liveHeadSHA != expectedHeadSHA {
+			// Mirrors GitHub's real 409: the caller validated evidence against
+			// expectedHeadSHA, and the live head has since moved — refuse
+			// rather than silently merge a tree that was never actually
+			// checked. gh.ErrConflict, not ErrNotMergeable: the caller's
+			// correct response is a fresh read-and-decide, not the rebase path.
+			return fmt.Errorf("simgh: merging PR #%d: expected head %s, live head is %s: %w",
+				prNumber, expectedHeadSHA, liveHeadSHA, gh.ErrConflict)
+		}
 	}
 
 	r.gitMu.Lock()

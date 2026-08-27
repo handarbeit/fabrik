@@ -58,6 +58,7 @@ type GitHubClient interface {
 	ListPRs(owner, repo string) ([]gh.PRDetails, error)
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
+	MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error
 	EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error
 	DisablePullRequestAutoMerge(owner, repo string, prNumber int) error
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)

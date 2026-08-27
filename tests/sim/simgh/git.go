@@ -395,16 +395,37 @@ func (r *repoState) tryMerge(base, head string, commit bool, msg string) (sha st
 	return sha, false, nil
 }
 
+// resolveCompareRef resolves a compare-endpoint argument (FetchCommitsBehind's
+// base/head) to a concrete git ref usable in a rev-list invocation: a branch
+// name when one exists under that name, otherwise whatever resolveRef can
+// verify (a raw commit SHA, tag, or other rev-parse-able ref). GitHub's real
+// /compare/{base}...{head} endpoint accepts either shape for either side —
+// engine/merge_train.go's singleton fast path (#1644) compares the *pinned*
+// base commit SHA against a member's head SHA (R3: never a live branch
+// read), so SHA support here is not optional test scaffolding, it mirrors
+// real API grammar. Caller must hold gitMu.
+func (r *repoState) resolveCompareRef(ref string) (string, error) {
+	if r.branchExists(ref) {
+		return "refs/heads/" + ref, nil
+	}
+	sha, err := r.resolveRef(ref)
+	if err != nil {
+		return "", fmt.Errorf("simgh: ref %q does not exist in %s/%s", ref, r.owner, r.repo)
+	}
+	return sha, nil
+}
+
 // commitsBehind returns how many commits are on base but not on head — the
 // same quantity GitHub's compare endpoint reports as behind_by, which is what
 // production's FetchCommitsBehind reads. Caller must hold gitMu.
 func (r *repoState) commitsBehind(base, head string) (int, error) {
-	baseRef, headRef := "refs/heads/"+base, "refs/heads/"+head
-	if !r.branchExists(base) {
-		return 0, fmt.Errorf("simgh: base branch %q does not exist in %s/%s", base, r.owner, r.repo)
+	baseRef, err := r.resolveCompareRef(base)
+	if err != nil {
+		return 0, err
 	}
-	if !r.branchExists(head) {
-		return 0, fmt.Errorf("simgh: head branch %q does not exist in %s/%s", head, r.owner, r.repo)
+	headRef, err := r.resolveCompareRef(head)
+	if err != nil {
+		return 0, err
 	}
 	out, err := runGit(r.bareDir, "rev-list", "--count", headRef+".."+baseRef)
 	if err != nil {

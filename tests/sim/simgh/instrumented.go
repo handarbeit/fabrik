@@ -393,6 +393,11 @@ func (in *Instrumented) MergePR(owner, repo string, prNumber int) error {
 		func() error { return in.sim.MergePR(owner, repo, prNumber) })
 }
 
+func (in *Instrumented) MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error {
+	return do0(in, "MergePRAtHeadSHA", true, Args{Owner: owner, Repo: repo, Number: prNumber, Values: []string{expectedHeadSHA}},
+		func() error { return in.sim.MergePRAtHeadSHA(owner, repo, prNumber, expectedHeadSHA) })
+}
+
 func (in *Instrumented) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
 	return do0(in, "EnablePullRequestAutoMerge", true, Args{Owner: owner, Repo: repo, Number: prNumber, Values: []string{strategy}},
 		func() error { return in.sim.EnablePullRequestAutoMerge(owner, repo, prNumber, strategy) })
