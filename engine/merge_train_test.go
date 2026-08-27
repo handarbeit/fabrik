@@ -1833,6 +1833,52 @@ func TestTrialBelongsToBase_RejectsPrefixCollision(t *testing.T) {
 	}
 }
 
+// TestTrialBelongsToBase_RejectsDigitSuffixCollision is a direct regression guard
+// (found in review, #1648, second pass) for a gap the first-character-only digit
+// check (TestTrialBelongsToBase_RejectsPrefixCollision's fix) left open: a sibling
+// base whose name is a hyphen-prefix of another AND whose own suffix segment
+// happens to start with a digit. Real bases "release" and "release-2": a trial
+// for "release-2" checked against "release" leaves a remainder of "2-<ts>", whose
+// first character is a digit but which is not actually a valid "<unix-ts>[-t<n>]"
+// suffix — it must still be rejected. The fix matches the remainder against the
+// exact end-anchored grammar nextTrialName produces, not just its first byte.
+func TestTrialBelongsToBase_RejectsDigitSuffixCollision(t *testing.T) {
+	// A genuine "release-2" trial must not be reported as belonging to "release".
+	release2Trial := "fabrik/merge-train/merge-train-release-2-1787790738"
+	if trialBelongsToBase(release2Trial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false (digit-suffix collision: this trial belongs to \"release-2\", not \"release\")", release2Trial, "release")
+	}
+	if !trialBelongsToBase(release2Trial, "release-2") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (exact match)", release2Trial, "release-2")
+	}
+
+	// A true "release" trial (and its bisection sub-trial) must still match "release".
+	releaseTrial := "fabrik/merge-train/merge-train-release-1787790738"
+	if !trialBelongsToBase(releaseTrial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true", releaseTrial, "release")
+	}
+	releaseSubTrial := "fabrik/merge-train/merge-train-release-1787790738-t1"
+	if !trialBelongsToBase(releaseSubTrial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (bisection sub-trial)", releaseSubTrial, "release")
+	}
+
+	// A base literally containing a "-tN"-shaped segment as part of its own real
+	// name must not be mistaken for a shorter base's bisection sub-trial: the
+	// grammar match is end-anchored, so trailing content after "-t<n>" (the real
+	// trial's own timestamp) correctly disqualifies both the wrong shorter-base
+	// hypotheses.
+	weirdTrial := "fabrik/merge-train/merge-train-release-5-t2-1787790738"
+	if trialBelongsToBase(weirdTrial, "release") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false", weirdTrial, "release")
+	}
+	if trialBelongsToBase(weirdTrial, "release-5") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false", weirdTrial, "release-5")
+	}
+	if !trialBelongsToBase(weirdTrial, "release-5-t2") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (exact match)", weirdTrial, "release-5-t2")
+	}
+}
+
 // ── bisection cost-cap derivation tests (Task 1) ──────────────────────────────
 
 func TestCeilLog2(t *testing.T) {

@@ -329,14 +329,27 @@ func mergeTrainKey(repoKey, baseBranch string) string {
 // sanitized base name that is itself a hyphen-prefix of a different base's
 // sanitized name would match it too (e.g. base "main" wrongly matches a sibling
 // trial "merge-train-main-hotfix-<ts>", whose real base is "main-hotfix", not
-// "main" — found in review, #1648). The unix-timestamp segment always starts
-// immediately after the matched prefix, so requiring the remainder to begin with
-// a digit closes this gap. A residual, narrower ambiguity remains when two
-// distinct real branch names sanitize to the identical string (e.g. "release/1.x"
-// and "release-1.x" both become "release-1.x") — accepted as a pre-existing,
-// documented limitation of sanitizeBranchName rather than a new one introduced
-// here; resolving it would require a broader trial-naming redesign, out of scope
-// for this fix.
+// "main" — found in review, #1648).
+//
+// Requiring only that the remainder *begin* with a digit is still not enough:
+// it closes the word-suffix collision above but not a digit-suffix one. If base
+// "release-2" is itself a real sibling base, its trial "merge-train-release-2-
+// <ts>" checked against base "release" leaves a remainder of "2-<ts>", whose
+// first character is a digit — a first-character-only check wrongly accepts it
+// (found in review, #1648, second pass). The fix is to match the remainder
+// against nextTrialName's exact, end-anchored grammar — "<unix-ts>" or
+// "<unix-ts>-t<n>", both pure-digit runs joined only by the literal "-t"
+// bisection marker — rather than merely checking its first character. "2-<ts>"
+// fails this: after the digit run "2" comes "-<ts>", which is neither
+// end-of-string nor the literal "-t" marker, so it is correctly rejected no
+// matter how digit-like the trailing content looks. A residual, narrower
+// ambiguity remains when two distinct real branch names sanitize to the
+// identical string (e.g. "release/1.x" and "release-1.x" both become
+// "release-1.x") — accepted as a pre-existing, documented limitation of
+// sanitizeBranchName rather than a new one introduced here; resolving it would
+// require a broader trial-naming redesign, out of scope for this fix.
+var trialSuffixPattern = regexp.MustCompile(`^[0-9]+(-t[0-9]+)?$`)
+
 func trialBelongsToBase(headRef, baseBranch string) bool {
 	trialName := trialNameFromBranch(headRef)
 	if trialName == "" {
@@ -347,7 +360,7 @@ func trialBelongsToBase(headRef, baseBranch string) bool {
 	if !ok || rest == "" {
 		return false
 	}
-	return rest[0] >= '0' && rest[0] <= '9'
+	return trialSuffixPattern.MatchString(rest)
 }
 
 // ceilLog2 returns ⌈log₂(n)⌉ for n ≥ 1 and 0 for n ≤ 1. It is the number of
