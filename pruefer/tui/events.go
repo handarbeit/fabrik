@@ -114,6 +114,15 @@ type DerivedInstallationSummary struct {
 	RepoCount           int
 }
 
+// DerivedRepoEntry pairs one derived repo with the installation ID that
+// granted it — the per-repo half of R4's "exactly which repos it derived
+// and from which installation" requirement (DerivedInstallationSummary
+// above is the per-installation half).
+type DerivedRepoEntry struct {
+	Repo           string // "owner/repo"
+	InstallationID int64
+}
+
 // DerivedRepoSetEvent is emitted whenever the daemon re-derives its repo
 // set from the App's installations (#1641/R4) — at startup and on every
 // subsequent re-derivation trigger (an installation webhook event or the
@@ -123,7 +132,7 @@ type DerivedInstallationSummary struct {
 // filtering/capping, so an operator can tell "no installation found" apart
 // from "installation found, but every repo was filtered/capped out."
 type DerivedRepoSetEvent struct {
-	Repos         []string // "owner/repo", the final derived+filtered+capped set
+	Repos         []DerivedRepoEntry
 	Installations []DerivedInstallationSummary
 	// FilteredOut lists watched_repos entries not covered by any
 	// installation's grant (R3/AC4) — reported, not silently dropped.

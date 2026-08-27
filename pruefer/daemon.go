@@ -945,13 +945,13 @@ func (d *Daemon) rederiveRepos(ctx context.Context) {
 	d.ApplyDerivedRepos(set, clients)
 	logRederivedRepos(set)
 	d.emit(ptui.DerivedRepoSetEvent{
-		Repos:       derivedRepoNames(set),
+		Repos:         derivedRepoEntries(set),
 		Installations: derivedInstallationSummaries(set),
-		FilteredOut: append([]string(nil), set.FilteredOut...),
-		Truncated:   set.Truncated,
-		Capped:      set.Capped,
-		CapApplied:  set.CapApplied,
-		At:          time.Now(),
+		FilteredOut:   append([]string(nil), set.FilteredOut...),
+		Truncated:     set.Truncated,
+		Capped:        set.Capped,
+		CapApplied:    set.CapApplied,
+		At:            time.Now(),
 	})
 
 	// Owners that lost their installation between this and the previous
@@ -993,6 +993,19 @@ func derivedRepoNames(set githubauth.DerivedRepoSet) []string {
 	out := make([]string, len(set.Repos))
 	for i, dr := range set.Repos {
 		out[i] = dr.Repo
+	}
+	return out
+}
+
+// derivedRepoEntries re-expresses set.Repos as ptui.DerivedRepoEntry —
+// "owner/repo" paired with its granting installation ID — the per-repo half
+// of R4's "exactly which repos it derived and from which installation"
+// requirement DerivedRepoSetEvent carries (derivedRepoNames above discards
+// that pairing; it exists only for tui.New's plain-name seed).
+func derivedRepoEntries(set githubauth.DerivedRepoSet) []ptui.DerivedRepoEntry {
+	out := make([]ptui.DerivedRepoEntry, len(set.Repos))
+	for i, dr := range set.Repos {
+		out[i] = ptui.DerivedRepoEntry{Repo: dr.Repo, InstallationID: dr.InstallationID}
 	}
 	return out
 }
