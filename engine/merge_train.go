@@ -324,13 +324,30 @@ func mergeTrainKey(repoKey, baseBranch string) string {
 // this is the check that closes that gap (see ADR-1648). headRef that isn't a
 // merge-train branch at all (trialNameFromBranch returns "") never belongs to
 // any base.
+//
+// A bare strings.HasPrefix match on "merge-train-<sanitized>-" is not enough: a
+// sanitized base name that is itself a hyphen-prefix of a different base's
+// sanitized name would match it too (e.g. base "main" wrongly matches a sibling
+// trial "merge-train-main-hotfix-<ts>", whose real base is "main-hotfix", not
+// "main" — found in review, #1648). The unix-timestamp segment always starts
+// immediately after the matched prefix, so requiring the remainder to begin with
+// a digit closes this gap. A residual, narrower ambiguity remains when two
+// distinct real branch names sanitize to the identical string (e.g. "release/1.x"
+// and "release-1.x" both become "release-1.x") — accepted as a pre-existing,
+// documented limitation of sanitizeBranchName rather than a new one introduced
+// here; resolving it would require a broader trial-naming redesign, out of scope
+// for this fix.
 func trialBelongsToBase(headRef, baseBranch string) bool {
 	trialName := trialNameFromBranch(headRef)
 	if trialName == "" {
 		return false
 	}
 	want := "merge-train-" + sanitizeBranchName(baseBranch) + "-"
-	return strings.HasPrefix(trialName, want)
+	rest, ok := strings.CutPrefix(trialName, want)
+	if !ok || rest == "" {
+		return false
+	}
+	return rest[0] >= '0' && rest[0] <= '9'
 }
 
 // ceilLog2 returns ⌈log₂(n)⌉ for n ≥ 1 and 0 for n ≤ 1. It is the number of
@@ -901,9 +918,13 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		}
 
 		// Hook 1: check runaway guard after the initial re-form trial (ADR-059 D8).
+		// partitionBase (this function's own parameter, sentinel-aware), not
+		// p.baseBranch (the real resolved branch name, never empty) — the latter
+		// would desync this call's trainKey from the trainKey local var used for
+		// isRunawayTripped just above (found in review, #1648).
 		if count, tripped := e.isRunawayTripped(trainKey); tripped {
 			e.cleanupTrialArtifacts(p.wm, trialName)
-			e.fireRunawayGuard(ctx, p.owner, p.repo, p.baseBranch, membersToItems(current), count)
+			e.fireRunawayGuard(ctx, p.owner, p.repo, partitionBase, membersToItems(current), count)
 			return
 		}
 
@@ -962,9 +983,10 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			state.bisecting = false
 			state.mu.Unlock()
 			if runaway {
-				// Runaway guard fired inside bisect or landOneAtATime.
+				// Runaway guard fired inside bisect or landOneAtATime. partitionBase
+				// (sentinel-aware), not p.baseBranch — see the Hook 1 call above.
 				count, _ := e.isRunawayTripped(trainKey)
-				e.fireRunawayGuard(ctx, p.owner, p.repo, p.baseBranch, membersToItems(survivors), count)
+				e.fireRunawayGuard(ctx, p.owner, p.repo, partitionBase, membersToItems(survivors), count)
 				return
 			}
 			if fellBack {
@@ -2731,9 +2753,13 @@ func runawayGuardAlertMessage(count int, trainKey string, window time.Duration) 
 // member per guard episode. Called from three independent sites — twice inside
 // runMergeTrainWorker (Hook 1, the worker goroutine) and once from routeQueuedGroup (Hook 2,
 // the poll goroutine) — whenever the trial counter reaches the runaway threshold (ADR-059
-// D8). baseBranch identifies which (repo, base) partition tripped — #1648 R2/AC5 requires
-// this guard to fire per partition, not repo-wide, so one base's runaway must never pause a
-// healthy sibling base's members. Each call site constructs its own, possibly-overlapping
+// D8). partitionBase identifies which (repo, base) partition tripped and MUST be the same
+// sentinel-aware value dispatchMergeTrainWorker/routeQueuedGroup use everywhere else
+// (defaultPartitionBase, "", for the default partition — never p.baseBranch, the real
+// resolved git branch name, which is never empty and would desync this call's trainKey from
+// every other guard/counter for the same worker run — found in review, #1648). #1648 R2/AC5
+// requires this guard to fire per partition, not repo-wide, so one base's runaway must never
+// pause a healthy sibling base's members. Each call site constructs its own, possibly-overlapping
 // items slice from whatever local state it holds, and nothing prevents Hook 1 and Hook 2
 // from running concurrently for the same trainKey once the shared counter trips (the poll
 // loop does not check whether a worker is mid-firing).
@@ -2782,10 +2808,10 @@ func runawayGuardAlertMessage(count int, trainKey string, window time.Duration) 
 // most a few seconds in the worst case, versus the real complexity of a keyed-mutex-with-
 // cleanup scheme a per-repo/sync.Map-of-mutexes approach would require. See ADR-1533's
 // "Rejected alternatives" section.
-func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, baseBranch string, items []gh.ProjectItem, count int) {
+func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, partitionBase string, items []gh.ProjectItem, count int) {
 	_, window := e.effectiveTrialWindow()
 	repoKey := owner + "/" + repo
-	trainKey := mergeTrainKey(repoKey, baseBranch)
+	trainKey := mergeTrainKey(repoKey, partitionBase)
 	e.logf(0, "merge-train", "runaway guard fired for %s: %d trial(s) with zero successful lands within %s — pausing %d Queued member(s)\n",
 		trainKey, count, window, len(items))
 

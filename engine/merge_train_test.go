@@ -1797,6 +1797,42 @@ func TestSanitizeBranchName(t *testing.T) {
 	}
 }
 
+// TestTrialBelongsToBase_RejectsPrefixCollision is a direct regression guard (found in
+// review, #1648) for a bare strings.HasPrefix match on "merge-train-<sanitized>-": a base
+// whose sanitized name is itself a hyphen-prefix of a different base's sanitized name (e.g.
+// "main" vs "main-hotfix") must NOT be reported as belonging to the shorter base — the
+// unix-timestamp segment always starts immediately after the true prefix, so the character
+// right after the matched prefix must be a digit. Without this, reconstructTrainState's
+// stale-open-PR-close and orphan-branch-sweep paths (the safety-critical gate this function
+// exists for) would wrongly treat a sibling partition's live trial for "main-hotfix" as
+// belonging to "main" and destroy it — exactly the cross-partition destruction #1648 added
+// this function to prevent.
+func TestTrialBelongsToBase_RejectsPrefixCollision(t *testing.T) {
+	// A genuine "main-hotfix" trial must not be reported as belonging to "main".
+	hotfixTrial := "fabrik/merge-train/merge-train-main-hotfix-1787790738"
+	if trialBelongsToBase(hotfixTrial, "main") {
+		t.Errorf("trialBelongsToBase(%q, %q) = true, want false (prefix collision: this trial belongs to \"main-hotfix\", not \"main\")", hotfixTrial, "main")
+	}
+	if !trialBelongsToBase(hotfixTrial, "main-hotfix") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (exact match)", hotfixTrial, "main-hotfix")
+	}
+
+	// A true "main" trial must still match "main", including a bisection sub-trial suffix.
+	mainTrial := "fabrik/merge-train/merge-train-main-1787790738"
+	if !trialBelongsToBase(mainTrial, "main") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true", mainTrial, "main")
+	}
+	mainSubTrial := "fabrik/merge-train/merge-train-main-1787790738-t1"
+	if !trialBelongsToBase(mainSubTrial, "main") {
+		t.Errorf("trialBelongsToBase(%q, %q) = false, want true (bisection sub-trial)", mainSubTrial, "main")
+	}
+
+	// Not a merge-train branch at all → never belongs to any base.
+	if trialBelongsToBase("refs/heads/unrelated-branch", "main") {
+		t.Error("trialBelongsToBase on a non-merge-train branch = true, want false")
+	}
+}
+
 // ── bisection cost-cap derivation tests (Task 1) ──────────────────────────────
 
 func TestCeilLog2(t *testing.T) {
@@ -6479,6 +6515,63 @@ func TestRunawayGuard_Fires(t *testing.T) {
 	// mergeTrainInFlight must be cleared after the guard fires.
 	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight cleared after runaway guard fires")
+	}
+}
+
+// TestRunawayGuard_Fires_DefaultPartition_UsesUnkeyedTrainKey is a direct regression guard
+// (found in review, #1648) for Hook 1's two fireRunawayGuard call sites inside
+// runMergeTrainWorker: they must key the alert on partitionBase (defaultPartitionBase, "",
+// for the default/unlabeled partition), never on p.baseBranch (the real resolved git branch
+// name, which is never empty). Dispatching with partitionBase="main" (as
+// TestRunawayGuard_Fires and most other tests here do) cannot catch this bug, because in
+// that case partitionBase == p.baseBranch already — this test dispatches with the true
+// default-sentinel partitionBase to distinguish the two. Before the fix, the alert map key
+// was "owner/repo:main#N" instead of the correct "owner/repo#N", desyncing Hook 1's alert
+// idempotency from Hook 2's (routeQueuedGroup, which always passed g.base correctly) and
+// from mergeTrainKeyForItem's settle-scan reconstruction for the same unlabeled item.
+func TestRunawayGuard_Fires_DefaultPartition_UsesUnkeyedTrainKey(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Always red — no member ever lands.
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return true })
+	eng.cfg.MaxTrainTrialsPerWindow = 2
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	batch := makeSeamBatch(3)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	wantKey := mergeTrainKey("owner/repo", defaultPartitionBase)
+	eng.mergeTrainInFlight.Store(wantKey, state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// partitionBase is the true default-sentinel value, exactly as
+	// dispatchMergeTrainWorker passes for an unlabeled Queued member.
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", defaultPartitionBase, batch)
+
+	if wantKey != "owner/repo" {
+		t.Fatalf("sanity: expected the default partition's trainKey to be the bare repoKey, got %q", wantKey)
+	}
+
+	client.mu.Lock()
+	hasAlert := false
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 1 && strings.Contains(c.body, "runaway guard") {
+			hasAlert = true
+			if strings.Contains(c.body, "owner/repo:") {
+				t.Errorf("default-partition runaway alert comment wrongly names a composite key, got: %s", c.body)
+			}
+		}
+	}
+	client.mu.Unlock()
+	if !hasAlert {
+		t.Fatal("expected a runaway guard alert comment on member #1")
+	}
+
+	eng.mergeTrainRunawayMu.Lock()
+	_, ok := eng.mergeTrainRunawayAlerted[wantKey+"#1"]
+	eng.mergeTrainRunawayMu.Unlock()
+	if !ok {
+		t.Errorf("expected mergeTrainRunawayAlerted keyed on the bare repoKey (%q#1) — Hook 1 must not have used p.baseBranch to compute a different composite key", wantKey)
 	}
 }
 
