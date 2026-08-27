@@ -1528,6 +1528,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// itemMayNeedWork/itemNeedsWork dispatch — the item has already reached Done.
 	e.settleNonDefaultBaseCloses(board)
 
+	// Non-default-base linkage notice settle scan (#1649): posts the one-time,
+	// human-visible comment naming an item's PR when its resolved base branch
+	// (base:<branch>) differs from the repository default — GitHub creates no
+	// Development-panel issue↔PR link at all in that case, not merely no
+	// auto-close (see ADR-1096 above, which already handles the engine's own
+	// explicit-close half). Runs unconditionally every poll, independent of
+	// itemMayNeedWork/itemNeedsWork dispatch, and independent of the item's
+	// board column — eligibility is "has a base: label and a discoverable PR,"
+	// not "reached Done."
+	e.settleNonDefaultBaseLinkageNotice(board)
+
 	// Landing verification settle scan (#1616): the post-Done backstop that verifies
 	// a merge-attributable Done transition's credited PR actually merged, for any
 	// item carrying fabrik:awaiting-landing-verification. Runs unconditionally every
