@@ -199,6 +199,40 @@ func TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk(t *testing.T) {
 	}
 }
 
+// TestUpdate_JobStarted_ConcurrentTrainsDoNotShareActiveNumToKey guards
+// against a regression class distinct from TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk
+// above: that test pre-seeds a.active directly and never exercises the
+// JobStartedEvent handler itself. Two real trains both emit
+// JobStartedEvent{IssueNumber: 0}, and activeNumToKey is keyed only by
+// issue number — without a guard, the second train's JobStartedEvent would
+// clobber the first train's entry at activeNumToKey[0]. Nothing currently
+// reads activeNumToKey[0] (repo-level LogEvent routing goes through
+// activeJobKey(Repo, 0) directly against a.active — see the LogEvent case in
+// active.go), so this guard is defense-in-depth: it keeps activeNumToKey's
+// invariant ("keyed by real issue number") intact so a future per-issue
+// event type added to that map's read side can't silently misattribute
+// across two concurrent trains.
+func TestUpdate_JobStarted_ConcurrentTrainsDoNotShareActiveNumToKey(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+
+	next, _ := m.Update(JobStartedEvent{IssueNumber: 0, Repo: "owner/repo-a", StageName: "Merge Train", StartedAt: time.Now()})
+	nm := next.(Model)
+	next2, _ := nm.Update(JobStartedEvent{IssueNumber: 0, Repo: "owner/repo-b", StageName: "Merge Train", StartedAt: time.Now()})
+	nm2 := next2.(Model)
+
+	if key, ok := nm2.active.activeNumToKey[0]; ok {
+		t.Errorf("activeNumToKey[0] = %q, want no entry — repo-level rows must not populate this issue-number-keyed map", key)
+	}
+	// Both rows must still exist independently, keyed by their own composite key.
+	if _, ok := nm2.active.active[activeJobKey("owner/repo-a", 0)]; !ok {
+		t.Error("expected owner/repo-a train row present")
+	}
+	if _, ok := nm2.active.active[activeJobKey("owner/repo-b", 0)]; !ok {
+		t.Error("expected owner/repo-b train row present")
+	}
+}
+
 func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 	// LogEvent for an issue not in active map should not panic
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
