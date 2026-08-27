@@ -310,6 +310,45 @@ A `REQUEST_CHANGES` review blocks merges in repos with branch protection requiri
 
 **Not implemented**: Pruefer does not (yet) self-dismiss its own prior `REQUEST_CHANGES` review as a fallback for repos without stale-review dismissal enabled. If a future need for this arises: dismissing a PR review via `PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/dismissals` requires the GitHub App installation to have `pull_requests: write`, **and**, on a protected branch, the App must additionally be included in that branch protection rule's explicit list of actors allowed to dismiss reviews — a separate, per-repo, manually-configured GitHub setting beyond the write permission itself. Self-dismissal is scoped to only ever dismiss Pruefer's own prior review, never another reviewer's.
 
+## Repo-resident config (`.pruefer/config.yaml` in the reviewed repo)
+
+In addition to the operator's own `.pruefer/config.yaml` (the daemon's own working directory, covered everywhere else in this document), a **reviewed repo** may commit its own `.pruefer/config.yaml` at its root to narrow a handful of review preferences for itself — excluding its own generated paths, capping its own diff size, or opting into a stricter severity threshold — without the operator having to hand-maintain per-repo settings.
+
+**The base-ref rule.** Pruefer resolves a repo's config by reading `.pruefer/config.yaml` from the PR's **base ref** — via the GitHub Contents API, not from the local clone — never from the PR's head. This is the same rule `--setting-sources user` already enforces for `.claude/settings.json` (see [How it works](#how-it-works) and [adrs/1113-pruefer-v1-architecture.md](../../adrs/1113-pruefer-v1-architecture.md)): a repo-resident file under review is untrusted input from the artifact being reviewed, and the base ref is the one input a PR cannot itself edit.
+
+**The consequence**: a PR that edits `.pruefer/config.yaml` does not change how that PR itself is reviewed. The new settings take effect only once merged, for the *next* PR. This is deliberate — otherwise a PR could loosen its own review (widen `request_changes_threshold`, add its own touched paths to `excluded_paths`) on the very change that needs the most scrutiny.
+
+**No repo config present is the default and overwhelmingly common case** — behavior is byte-for-byte identical to a repo with no `.pruefer/config.yaml` at all.
+
+### What a repo may and may not set
+
+A repo's config can only **narrow** the operator's settings — it can never widen its own review, spend more of the operator's Claude budget, change the reviewer identity, or affect its own discoverability. Every field is explicitly classified; anything not listed under "May" is either a real operator-only field or simply unrecognized, and either way is ignored with a logged warning (never an error, and never a value that reaches the effective config).
+
+| Key | May a repo set it? | Rule |
+|---|---|---|
+| `excluded_paths` | Yes | **Union** with the operator's list — a repo may add its own generated/vendored paths, never remove one of the operator's. |
+| `excluded_labels` | Yes | Union, same as above. |
+| `excluded_authors` | Yes | Union, same as above. |
+| `max_diff_bytes` | Yes, narrowing only | A repo may only **lower** the operator's cap, never raise it or uncap it. |
+| `request_changes_threshold` | Yes, narrowing only | A repo may only move it to an **equal-or-stricter** severity tier than the operator's — including turning it on (any tier) when the operator left it off — never to a more lenient tier, and never back to off if the operator configured one. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes) for tier ordering. |
+| Everything else | No | `model`, `effort`, `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
+
+A rejected widening attempt (e.g. a repo trying to raise `max_diff_bytes` or unset an operator-configured `request_changes_threshold`) is logged and ignored for that field alone — the operator's value holds, and the rest of the repo's config (any other, valid narrowing) still applies.
+
+Example — a repo opting into a stricter review than its operator's default:
+
+```yaml
+# .pruefer/config.yaml, committed at the root of the *reviewed* repo,
+# on its default/base branch — NOT the operator's own daemon config.
+excluded_paths:
+  - "testdata/golden/**"
+request_changes_threshold: high
+```
+
+Size cap: a repo-resident config file over 32 KB, non-UTF-8, or unparseable YAML is treated as absent — Pruefer falls back to the operator's config alone and logs a warning, rather than failing the review. A repo can never break its own reviews by committing a broken file.
+
+Observability: every review logs which repo config (if any) was applied and at which base SHA — see [Logging](#logging).
+
 ## Configuration reference
 
 Precedence, highest to lowest: **flag > environment variable > YAML config file > default.** Most of these fields can also be changed on a running daemon via `SIGHUP` — see [Config reload (SIGHUP)](#config-reload-sighup) for which ones, and what happens to the rest.
@@ -351,7 +390,7 @@ Draft PRs are always skipped — there is no configuration flag to include them 
 
 - `APPROVE` verdicts — permanently out of scope, under any configuration (see [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes)). `REQUEST_CHANGES` is now in scope, gated behind `request_changes_threshold` (default off).
 - Self-dismissing Pruefer's own `REQUEST_CHANGES` review as a fallback for repos without "dismiss stale reviews on push" enabled — documented as a future option, not implemented.
-- Per-repo severity thresholds — `request_changes_threshold` is global to the daemon instance, like every other Pruefer config field.
+- A reviewed repo widening any of its own review settings — a repo-resident config can only ever narrow `request_changes_threshold`, `max_diff_bytes`, or the `excluded_*` lists relative to the operator's own configuration; every other config field remains exclusively operator-scoped. See [Repo-resident config](#repo-resident-config-prueferconfigyaml-in-the-reviewed-repo).
 - Risk scoring/rubric (deciding which PRs/repos need what tier of human review) — a distinct, separate concept from per-finding severity.
 - Multi-line (`start_line`) inline comment ranges — single-line anchors only.
 - Non-GitHub forges.
