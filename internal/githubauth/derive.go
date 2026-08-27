@@ -87,6 +87,22 @@ type DerivedRepoSet struct {
 	// CapApplied is the max_derived_repos value in effect when Capped is
 	// true; zero otherwise.
 	CapApplied int
+	// PreCapCount is len(Repos) immediately before the max_derived_repos cap
+	// was applied — i.e. after the watched_repos filter (R3), but before R5's
+	// cap — valid only when Capped is true. This is deliberately NOT the same
+	// as TotalGranted(): TotalGranted sums every installation's raw,
+	// pre-filter RepoCount, which is a different (and, whenever a narrowing
+	// watched_repos filter is also active, larger) number than what the cap
+	// actually sliced from. Reporting TotalGranted() as "capped from N" would
+	// misattribute repos the filter already excluded to the cap instead —
+	// found by review (handarbeit-pruefer): a 1000-repo grant narrowed by
+	// watched_repos to 250 and then capped to 200 would otherwise log
+	// "capped from 1000 by max_derived_repos=200", implying the cap dropped
+	// 800 repos when it actually dropped only 50 (the filter dropped the
+	// other 750) — the opposite of R4's "make the derived set observable"
+	// goal. See logDerivedSet/Pruefer's logRederivedRepos, which both report
+	// this instead of TotalGranted() in the "capped from" message.
+	PreCapCount int
 	// Installations summarizes every installation Derive found, regardless
 	// of whether any of its repos survived filtering/capping.
 	Installations []DerivedInstallation
@@ -329,6 +345,7 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 	if maxRepos > 0 && len(allRepos) > maxRepos {
 		set.Capped = true
 		set.CapApplied = maxRepos
+		set.PreCapCount = len(allRepos)
 		logf("! derived repo set (%d repos) exceeds max_derived_repos=%d — capping to the first %d (sorted owner/repo); raise max_derived_repos, or narrow watched_repos, to review the rest", len(allRepos), maxRepos, maxRepos)
 		allRepos = allRepos[:maxRepos]
 	}
@@ -366,7 +383,7 @@ func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 	}
 	suffix := ""
 	if set.Capped {
-		suffix = fmt.Sprintf(" (capped from %d by max_derived_repos=%d)", set.TotalGranted(), set.CapApplied)
+		suffix = fmt.Sprintf(" (capped from %d by max_derived_repos=%d)", set.PreCapCount, set.CapApplied)
 	}
 	if set.Truncated {
 		suffix += " — WARNING: pagination ceiling was hit while enumerating installations/repos; the actual grant may be larger than shown"

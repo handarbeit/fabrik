@@ -978,7 +978,7 @@ func logRederivedRepos(set githubauth.DerivedRepoSet) {
 	}
 	suffix := ""
 	if set.Capped {
-		suffix = fmt.Sprintf(" (capped from %d by max_derived_repos=%d)", set.TotalGranted(), set.CapApplied)
+		suffix = fmt.Sprintf(" (capped from %d by max_derived_repos=%d)", set.PreCapCount, set.CapApplied)
 	}
 	if set.Truncated {
 		suffix += " — WARNING: a pagination ceiling was hit while enumerating installations/repos; the actual grant may be larger than shown"

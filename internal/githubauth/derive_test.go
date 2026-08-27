@@ -150,6 +150,59 @@ func TestDerive_MaxDerivedReposCapsDeterministically(t *testing.T) {
 	}
 }
 
+// TestDerive_PreCapCount_ReflectsPostFilterNotTotalGrant is the regression
+// test for a review finding (handarbeit-pruefer): the "capped from N"
+// log/TUI message used to report TotalGranted() — the installation grant's
+// raw, pre-watched_repos-filter total — as the pre-cap count. That's wrong
+// whenever a narrowing watched_repos filter and max_derived_repos are both
+// active: the cap actually slices from the post-filter count, not the raw
+// grant, so reporting TotalGranted() misattributes repos the filter already
+// excluded to the cap instead. PreCapCount must reflect the post-filter,
+// pre-cap count that was actually sliced.
+func TestDerive_PreCapCount_ReflectsPostFilterNotTotalGrant(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	const totalGrant = 10
+	const wantCap = 3
+	repos := make([]string, totalGrant)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("bigorg/repo-%03d", i)
+	}
+	// filter narrows the grant to 5 of the 10 repos.
+	filter := repos[:5]
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "bigorg", RepositorySelection: "selected"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{111: repos}
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: filter, MaxDerivedRepos: wantCap, BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if !set.Capped {
+		t.Fatal("expected Capped = true")
+	}
+	if len(set.Repos) != wantCap {
+		t.Fatalf("len(Repos) = %d, want %d", len(set.Repos), wantCap)
+	}
+	if set.TotalGranted() != totalGrant {
+		t.Errorf("TotalGranted() = %d, want %d (the raw installation grant, before the filter)", set.TotalGranted(), totalGrant)
+	}
+	if set.PreCapCount != len(filter) {
+		t.Errorf("PreCapCount = %d, want %d (the post-filter count the cap actually sliced from, not TotalGranted()=%d)", set.PreCapCount, len(filter), set.TotalGranted())
+	}
+}
+
 // --- AC7 containment regression: two distinct App identities ---
 
 // jwtIssuer decodes the "iss" claim (App ID) from an unverified JWT — good
