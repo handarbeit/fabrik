@@ -18,13 +18,13 @@ func newTestDaemonForEvents(client *fakeLister) *Daemon {
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	return &Daemon{
+	return withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 }
 
 func TestDaemonEventSink_PullRequestTriggerActions_DispatchReview(t *testing.T) {
@@ -165,7 +165,7 @@ func TestDaemonEventSink_CaseMismatchedOwnerInClientsMap_DispatchesReview(t *tes
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		// Keyed lower-case, matching how Reconciler/execute.go actually
 		// build this map — the event below uses GitHub's own canonical
 		// casing for the same account, which differs.
@@ -174,7 +174,7 @@ func TestDaemonEventSink_CaseMismatchedOwnerInClientsMap_DispatchesReview(t *tes
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"MyOrg/repo"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "MyOrg/repo")
 	sink := &daemonEventSink{daemon: d}
 
 	sink.Handle(context.Background(), events.GitHubEvent{
@@ -198,7 +198,7 @@ func TestDaemonEventSink_CaseMismatchedWatchedRepoSpec_DispatchesReview(t *testi
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients: map[string]GitHubLister{"myorg": client},
 		Claude:  claude,
 		Clone:   clone,
@@ -207,7 +207,7 @@ func TestDaemonEventSink_CaseMismatchedWatchedRepoSpec_DispatchesReview(t *testi
 		// Clients-map lookup above already matches, via strings.ToLower).
 		Config:   Config{WatchedRepos: []string{"MyOrg/Repo"}, ConcurrencyCap: 3},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "MyOrg/Repo")
 	sink := &daemonEventSink{daemon: d}
 
 	sink.Handle(context.Background(), events.GitHubEvent{
@@ -297,13 +297,13 @@ func TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation(t *testi
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 1},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 	sink := &daemonEventSink{daemon: d}
 
 	// Saturate the daemon's single concurrency slot with PR #1's review.
@@ -365,13 +365,13 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 2},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 	sink := &daemonEventSink{daemon: d}
 
 	// Start PR #1's review, occupying one of two slots.
@@ -477,13 +477,13 @@ func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testin
 	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
-	d := &Daemon{
+	d := withDerivedRepos(&Daemon{
 		Clients:  map[string]GitHubLister{"owner": client},
 		Claude:   claude,
 		Clone:    clone,
 		Config:   Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: 1},
 		BotLogin: "pruefer-bot[bot]",
-	}
+	}, "owner/repo")
 
 	// Saturate the daemon's single concurrency slot with a bystander review
 	// of an unrelated PR (#99), the same dispatch path poll() itself uses.

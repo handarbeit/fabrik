@@ -116,7 +116,7 @@ func TestAcquirePRGateRefcountedAcrossHolders(t *testing.T) {
 // in GitHub's canonical casing, while WatchedRepos is hand-typed. A divergence
 // silently dropped every event for that repo.
 func TestIsWatchedRepoCaseInsensitive(t *testing.T) {
-	d := &Daemon{Config: Config{WatchedRepos: []string{"handarbeit/fabrik"}}}
+	d := withDerivedRepos(&Daemon{Config: Config{WatchedRepos: []string{"handarbeit/fabrik"}}}, "handarbeit/fabrik")
 
 	for _, tc := range []struct {
 		owner, repo string
