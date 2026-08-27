@@ -79,6 +79,59 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	}
 }
 
+// TestUpdate_MergeTrainRow_NonVacuous proves AC1: a merge-train job row is
+// present only when a JobStartedEvent for it has actually arrived — suppressing
+// the event (simply never sending it, since Go has no way to "not call" a
+// function conditionally in a unit test) leaves the row absent, and sending it
+// makes the row appear with the expected stage name and title. Also covers
+// AC3: a subsequent JobCompletedEvent removes the row again.
+func TestUpdate_MergeTrainRow_NonVacuous(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	keyTrain := activeJobKey("owner/repo", 0)
+
+	// Before any JobStartedEvent, the row does not exist.
+	if _, ok := m.active.active[keyTrain]; ok {
+		t.Fatal("train row present before JobStartedEvent — test setup is wrong")
+	}
+	if m.active.ActiveCount() != 0 {
+		t.Fatalf("ActiveCount() = %d before any event, want 0", m.active.ActiveCount())
+	}
+
+	start := time.Now()
+	next, _ := m.Update(JobStartedEvent{
+		IssueNumber: 0,
+		Repo:        "owner/repo",
+		Title:       "2 member(s): #1 #2",
+		StageName:   "Merge Train",
+		StartedAt:   start,
+	})
+	nm := next.(Model)
+
+	job, ok := nm.active.active[keyTrain]
+	if !ok {
+		t.Fatal("expected train row present after JobStartedEvent")
+	}
+	if job.StageName != "Merge Train" {
+		t.Errorf("StageName = %q, want %q", job.StageName, "Merge Train")
+	}
+	if job.Title != "2 member(s): #1 #2" {
+		t.Errorf("Title = %q, want %q", job.Title, "2 member(s): #1 #2")
+	}
+
+	// AC3: JobCompletedEvent removes the row.
+	next2, _ := nm.Update(JobCompletedEvent{
+		IssueNumber: 0,
+		Repo:        "owner/repo",
+		StageName:   "Merge Train",
+		Skipped:     true,
+	})
+	nm2 := next2.(Model)
+	if _, ok := nm2.active.active[keyTrain]; ok {
+		t.Error("expected train row removed after JobCompletedEvent")
+	}
+}
+
 func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	key7 := activeJobKey("", 7)
