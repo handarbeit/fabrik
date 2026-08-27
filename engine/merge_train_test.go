@@ -2703,6 +2703,67 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 	}
 }
 
+// TestPrepareTrainWorker_SemaphoreWait_LogsWaitingMessage verifies a review
+// finding on #1661/PR #1663: since JobStartedEvent fires before
+// prepareTrainWorker is even called, a saturated e.sem (shared with every
+// per-issue Claude invocation) would otherwise leave the merge train's TUI
+// row sitting with an empty LastLine and a ticking elapsed timer while
+// merely queued for a slot — indistinguishable from a hung worker. When the
+// semaphore isn't immediately available, prepareTrainWorker must log once
+// before blocking on it.
+func TestPrepareTrainWorker_SemaphoreWait_LogsWaitingMessage(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	ch := make(chan tui.Event, 64)
+	eng.events = ch
+
+	// Saturate every slot so the semaphore acquire in prepareTrainWorker cannot
+	// succeed immediately.
+	for i := 0; i < eng.cfg.MaxConcurrent; i++ {
+		eng.sem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < eng.cfg.MaxConcurrent; i++ {
+			<-eng.sem
+		}
+	}()
+
+	batch := makeSeamBatch(1)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	// A short-lived context so the blocked semaphore acquire hits ctx.Done()
+	// instead of hanging forever (nothing else drains eng.sem in this test).
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, _, ok := eng.prepareTrainWorker(ctx, state, "owner", "repo", batch)
+	if ok {
+		t.Fatal("expected prepareTrainWorker to fail — the semaphore was never freed")
+	}
+
+	events := collectEvents(ch, 20*time.Millisecond)
+	var sawWaiting bool
+	for _, raw := range events {
+		if ev, isLog := raw.(tui.LogEvent); isLog && ev.Tag == "merge-train" && ev.Repo == "owner/repo" {
+			if strings.Contains(ev.Message, "waiting for a free worker slot") {
+				sawWaiting = true
+			}
+		}
+	}
+	if !sawWaiting {
+		t.Errorf("expected a 'waiting for a free worker slot' LogEvent while the semaphore was saturated; events: %v", events)
+	}
+}
+
 // TestEnsureTrainWorktree verifies the WorktreeManager train methods (Task 2 integration).
 func TestEnsureTrainWorktree(t *testing.T) {
 	skipIfNoGit(t)

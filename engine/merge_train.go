@@ -480,12 +480,25 @@ func mergeTrainMaxTurnsOverride(holdingStg *stages.Stage, extendTurns bool) int 
 func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) (p trialParams, members []trainMember, ok bool) {
 	repoKey := owner + "/" + repo
 
+	// The row already exists at this point (JobStartedEvent fires before
+	// prepareTrainWorker is even called — see runMergeTrainWorker and
+	// adrs/1661-*.md), so a saturated e.sem (shared with every per-issue Claude
+	// invocation) would otherwise leave the row's elapsed timer ticking with an
+	// empty LastLine and no indication the worker is merely queued for a slot,
+	// not doing anything yet. Try a non-blocking acquire first so the common
+	// case (a slot is free) logs nothing extra; only announce the wait when it's
+	// actually going to be a wait (review finding on #1661/PR #1663).
 	select {
 	case e.sem <- struct{}{}:
-	case <-ctx.Done():
-		e.logfRepo(repoKey, "merge-train", "context cancelled before semaphore acquired for %s\n", repoKey)
-		e.finishTrain(repoKey)
-		return trialParams{}, nil, false
+	default:
+		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for %s\n", repoKey)
+		select {
+		case e.sem <- struct{}{}:
+		case <-ctx.Done():
+			e.logfRepo(repoKey, "merge-train", "context cancelled before semaphore acquired for %s\n", repoKey)
+			e.finishTrain(repoKey)
+			return trialParams{}, nil, false
+		}
 	}
 
 	// The semaphore is now held. Every early-return below must release it, since
