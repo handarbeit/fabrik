@@ -140,9 +140,12 @@ func TestFetchAppInstallations(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	installs, err := FetchAppInstallations(srv.URL, "test-jwt")
+	installs, truncated, err := FetchAppInstallations(srv.URL, "test-jwt")
 	if err != nil {
 		t.Fatalf("FetchAppInstallations: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true, want false for a short (2-item) page")
 	}
 	if len(installs) != 2 {
 		t.Fatalf("expected 2 installations, got %d", len(installs))
@@ -152,15 +155,58 @@ func TestFetchAppInstallations(t *testing.T) {
 	}
 }
 
-// TestFetchAppInstallations_WarnsAtCap is the regression test for a review
-// finding: /app/installations was called with no per_page/pagination at
-// all (GitHub's own default page size is only 30), so an App installed on
-// more accounts than fit on one page would silently miss the rest —
-// Reconcile would then treat an already-installed owner beyond page 1 as
-// uninstalled and walk the operator through a spurious guided-install flow.
+// TestFetchAppInstallations_Paginates is the regression test for real
+// pagination (#1641): a first page of exactly 100 (the old cap) followed by
+// a second, short page must all be accumulated, not just the first page
+// returned to the caller.
+func TestFetchAppInstallations_Paginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		var entries []map[string]interface{}
+		switch page {
+		case "1":
+			entries = make([]map[string]interface{}, 100)
+			for i := range entries {
+				entries[i] = map[string]interface{}{"id": i + 1, "account": map[string]string{"login": "someorg"}}
+			}
+		case "2":
+			entries = []map[string]interface{}{
+				{"id": 101, "account": map[string]string{"login": "anotherorg"}},
+			}
+		default:
+			t.Errorf("unexpected page %q", page)
+		}
+		json.NewEncoder(w).Encode(entries)
+	}))
+	defer srv.Close()
+
+	installs, truncated, err := FetchAppInstallations(srv.URL, "test-jwt")
+	if err != nil {
+		t.Fatalf("FetchAppInstallations: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true, want false: the second page was short, so pagination reached its natural end")
+	}
+	if len(installs) != 101 {
+		t.Fatalf("expected 101 installations across both pages, got %d", len(installs))
+	}
+	if installs[100].ID != 101 || installs[100].Account != "anotherorg" {
+		t.Errorf("installs[100] = %+v", installs[100])
+	}
+}
+
+// TestFetchAppInstallations_WarnsAtPaginationCeiling is the regression test
+// for a review finding: /app/installations was called with no
+// per_page/pagination at all (GitHub's own default page size is only 30),
+// so an App installed on more accounts than fit on one page would silently
+// miss the rest — Reconcile would then treat an already-installed owner
+// beyond page 1 as uninstalled and walk the operator through a spurious
+// guided-install flow. Now that real pagination follows every full page,
+// only a server that never returns a short page (the appFetchMaxPages
+// ceiling) is genuinely ambiguous — that's what this test simulates.
 // Mirrors TestListOpenPRs_WarnsAtCap's "explicit per_page cap + warn, don't
 // silently truncate" convention (prs.go).
-func TestFetchAppInstallations_WarnsAtCap(t *testing.T) {
+func TestFetchAppInstallations_WarnsAtPaginationCeiling(t *testing.T) {
 	var warned bool
 	Logf = func(issueNumber int, tag, format string, args ...any) {
 		if tag == "app" {
@@ -176,19 +222,25 @@ func TestFetchAppInstallations_WarnsAtCap(t *testing.T) {
 		}
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every page comes back full (100 items) — never a short page — so
+		// the loop must run out at appFetchMaxPages rather than looping
+		// forever.
 		json.NewEncoder(w).Encode(entries)
 	}))
 	defer srv.Close()
 
-	installs, err := FetchAppInstallations(srv.URL, "test-jwt")
+	installs, truncated, err := FetchAppInstallations(srv.URL, "test-jwt")
 	if err != nil {
 		t.Fatalf("FetchAppInstallations: %v", err)
 	}
-	if len(installs) != 100 {
-		t.Fatalf("expected 100 installations, got %d", len(installs))
+	if !truncated {
+		t.Error("truncated = false, want true: every page was full, so the ceiling should have been hit")
+	}
+	if want := appFetchMaxPages * appFetchPageSize; len(installs) != want {
+		t.Fatalf("expected %d installations (ceiling), got %d", want, len(installs))
 	}
 	if !warned {
-		t.Error("expected a warning when exactly 100 installations are returned (more may exist)")
+		t.Error("expected a warning when the pagination ceiling is hit (more installations may exist)")
 	}
 }
 
@@ -201,7 +253,7 @@ func TestFetchAppInstallations_DecodesRepositorySelection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	installs, err := FetchAppInstallations(srv.URL, "test-jwt")
+	installs, _, err := FetchAppInstallations(srv.URL, "test-jwt")
 	if err != nil {
 		t.Fatalf("FetchAppInstallations: %v", err)
 	}
@@ -236,9 +288,12 @@ func TestFetchInstallationRepositories(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	repos, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
+	repos, truncated, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
 	if err != nil {
 		t.Fatalf("FetchInstallationRepositories: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true, want false for a short (2-item) page")
 	}
 	want := []string{"someorg/repo-one", "someorg/repo-two"}
 	if len(repos) != len(want) {
@@ -251,15 +306,53 @@ func TestFetchInstallationRepositories(t *testing.T) {
 	}
 }
 
-// TestFetchInstallationRepositories_WarnsAtCap is the regression test for a
-// review finding: /installation/repositories was called with no
-// per_page/pagination at all (GitHub's own default page size is only 30),
-// so a "selected"-mode installation granting access to more repos than fit
-// on one page would silently miss the rest — verifyRepoAccess would then
-// report a genuinely-authorized repo beyond page 1 as unauthorized. Mirrors
-// TestListOpenPRs_WarnsAtCap's "explicit per_page cap + warn, don't
-// silently truncate" convention (prs.go).
-func TestFetchInstallationRepositories_WarnsAtCap(t *testing.T) {
+// TestFetchInstallationRepositories_Paginates mirrors
+// TestFetchAppInstallations_Paginates for the sibling endpoint: a full first
+// page followed by a short second page must be fully accumulated.
+func TestFetchInstallationRepositories_Paginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		var repos []map[string]interface{}
+		switch page {
+		case "1":
+			repos = make([]map[string]interface{}, 100)
+			for i := range repos {
+				repos[i] = map[string]interface{}{"full_name": fmt.Sprintf("someorg/repo-%d", i)}
+			}
+		case "2":
+			repos = []map[string]interface{}{{"full_name": "someorg/repo-100"}}
+		default:
+			t.Errorf("unexpected page %q", page)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": repos})
+	}))
+	defer srv.Close()
+
+	got, truncated, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
+	if err != nil {
+		t.Fatalf("FetchInstallationRepositories: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true, want false: the second page was short")
+	}
+	if len(got) != 101 {
+		t.Fatalf("expected 101 repositories across both pages, got %d", len(got))
+	}
+	if got[100] != "someorg/repo-100" {
+		t.Errorf("got[100] = %q, want someorg/repo-100", got[100])
+	}
+}
+
+// TestFetchInstallationRepositories_WarnsAtPaginationCeiling is the
+// regression test for a review finding: /installation/repositories was
+// called with no per_page/pagination at all (GitHub's own default page size
+// is only 30), so an installation granting access to more repos than fit on
+// one page would silently miss the rest. Now that real pagination follows
+// every full page, only a server that never returns a short page (the
+// appFetchMaxPages ceiling) is genuinely ambiguous — that's what this test
+// simulates. Mirrors TestListOpenPRs_WarnsAtCap's "explicit per_page cap +
+// warn, don't silently truncate" convention (prs.go).
+func TestFetchInstallationRepositories_WarnsAtPaginationCeiling(t *testing.T) {
 	var warned bool
 	Logf = func(issueNumber int, tag, format string, args ...any) {
 		if tag == "app" {
@@ -273,19 +366,23 @@ func TestFetchInstallationRepositories_WarnsAtCap(t *testing.T) {
 		repos[i] = map[string]interface{}{"full_name": fmt.Sprintf("someorg/repo-%d", i)}
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every page comes back full — never a short page.
 		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": repos})
 	}))
 	defer srv.Close()
 
-	got, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
+	got, truncated, err := FetchInstallationRepositories(srv.URL, "ghs_installation_token")
 	if err != nil {
 		t.Fatalf("FetchInstallationRepositories: %v", err)
 	}
-	if len(got) != 100 {
-		t.Fatalf("expected 100 repositories, got %d", len(got))
+	if !truncated {
+		t.Error("truncated = false, want true: every page was full, so the ceiling should have been hit")
+	}
+	if want := appFetchMaxPages * appFetchPageSize; len(got) != want {
+		t.Fatalf("expected %d repositories (ceiling), got %d", want, len(got))
 	}
 	if !warned {
-		t.Error("expected a warning when exactly 100 repositories are returned (more may exist)")
+		t.Error("expected a warning when the pagination ceiling is hit (more repositories may exist)")
 	}
 }
 
@@ -296,7 +393,7 @@ func TestFetchInstallationRepositories_ErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := FetchInstallationRepositories(srv.URL, "ghs_bad"); err == nil {
+	if _, _, err := FetchInstallationRepositories(srv.URL, "ghs_bad"); err == nil {
 		t.Fatal("expected error on 403, got nil")
 	}
 }
@@ -435,10 +532,10 @@ func TestAppRequest_EmptyBaseURLFallsBackToDefaultBaseURL(t *testing.T) {
 	})
 	defer func() { appHTTPClient.Transport = origTransport }()
 
-	if _, err := FetchAppInstallations("", "test-jwt"); err != nil {
+	if _, _, err := FetchAppInstallations("", "test-jwt"); err != nil {
 		t.Fatalf("FetchAppInstallations: %v", err)
 	}
-	want := defaultBaseURL + "/app/installations?per_page=100"
+	want := defaultBaseURL + "/app/installations?per_page=100&page=1"
 	if capturedURL != want {
 		t.Errorf("request URL = %q, want %q (empty baseURL must fall back to defaultBaseURL)", capturedURL, want)
 	}
@@ -451,7 +548,7 @@ func TestAppRequest_ErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := FetchAppInstallations(srv.URL, "test-jwt"); err == nil {
+	if _, _, err := FetchAppInstallations(srv.URL, "test-jwt"); err == nil {
 		t.Fatal("expected error on 403, got nil")
 	}
 }

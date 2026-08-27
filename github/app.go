@@ -167,77 +167,128 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 	return nil
 }
 
+// appFetchPageSize is the page size every paginated App-auth REST fetcher
+// below requests — GitHub's max per_page (its own default is only 30).
+const appFetchPageSize = 100
+
+// appFetchMaxPages bounds FetchAppInstallations/FetchInstallationRepositories'
+// pagination as a sanity ceiling (50 pages * 100/page = 5,000 items),
+// distinct from Pruefer's own operator-facing max_derived_repos cap (R5):
+// this only guards against an unbounded loop against a pathological or
+// misbehaving server, not a deliberate operator choice about review scope.
+const appFetchMaxPages = 50
+
+// fetchAppInstallationsPage and fetchInstallationRepositoriesPage's shared
+// page-loop shape: accumulate pages until one comes back short of
+// appFetchPageSize (the last page) or appFetchMaxPages is reached (in which
+// case truncated=true is returned instead of an error — see the two
+// functions' doc comments for why silent-but-flagged truncation, not a hard
+// failure, is the right trade-off once installation enumeration is the
+// *primary* discovery path, not a verification check against a short list).
+func fetchAppPaginated[T any](fetchPage func(page int) ([]T, error)) (items []T, truncated bool, err error) {
+	for page := 1; page <= appFetchMaxPages; page++ {
+		chunk, err := fetchPage(page)
+		if err != nil {
+			return nil, false, err
+		}
+		items = append(items, chunk...)
+		if len(chunk) < appFetchPageSize {
+			return items, false, nil
+		}
+	}
+	return items, true, nil
+}
+
 // FetchAppInstallations lists every installation of the GitHub App
 // authenticated by jwt via GET /app/installations. Used for dynamic
 // installation discovery: Pruefer watches whatever repos the App is
 // installed on, so adding a repo requires only a GitHub-side installation
 // change, not a Pruefer config or code change (see ADR-1113).
 //
-// Capped at 100 results (GitHub's max per_page, requested explicitly —
-// GitHub's own default is only 30) rather than following the Link header to
-// fetch further pages; a warning is logged (not silently truncated) when
-// exactly 100 are returned, since more installations may exist. Matches the
-// same convention as ListOpenPRs (prs.go): a self-hosted App realistically
-// has far fewer installations than this cap, so full pagination isn't
-// warranted, but silently truncating past it would make an owner beyond
-// page 1 look uninstalled and trigger a spurious guided-install prompt.
-func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, error) {
-	var raw []struct {
+// Follows GitHub's page-number pagination (not the Link header — every
+// caller already builds page-numbered URLs directly) up to appFetchMaxPages;
+// the returned truncated bool is true if that ceiling was hit before a short
+// page was seen, i.e. more installations may exist beyond what was
+// returned. Once installation enumeration is the primary repo-discovery
+// path (handarbeit/fabrik#1641), silently returning an incomplete list here
+// would make an owner beyond the ceiling look uninstalled and trigger a
+// spurious guided-install prompt — callers must check truncated rather than
+// assume completeness.
+func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, bool, error) {
+	type rawInstallation struct {
 		ID      int64 `json:"id"`
 		Account struct {
 			Login string `json:"login"`
 		} `json:"account"`
 		RepositorySelection string `json:"repository_selection"`
 	}
-	if err := appRequest("GET", baseURL, "/app/installations?per_page=100", jwt, &raw); err != nil {
-		return nil, fmt.Errorf("fetching app installations: %w", err)
+	raw, truncated, err := fetchAppPaginated(func(page int) ([]rawInstallation, error) {
+		var chunk []rawInstallation
+		path := fmt.Sprintf("/app/installations?per_page=%d&page=%d", appFetchPageSize, page)
+		if err := appRequest("GET", baseURL, path, jwt, &chunk); err != nil {
+			return nil, err
+		}
+		return chunk, nil
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("fetching app installations: %w", err)
 	}
-	if len(raw) == 100 {
-		logf(0, "app", "FetchAppInstallations: received exactly 100 results — more installations may exist (pagination not implemented)\n")
+	if truncated {
+		logf(0, "app", "FetchAppInstallations: hit the %d-page pagination ceiling (%d installations returned) — more installations may exist\n", appFetchMaxPages, len(raw))
 	}
 	out := make([]AppInstallation, len(raw))
 	for i, inst := range raw {
 		out[i] = AppInstallation{ID: inst.ID, Account: inst.Account.Login, RepositorySelection: inst.RepositorySelection}
 	}
-	return out, nil
+	return out, truncated, nil
 }
 
 // FetchInstallationRepositories lists the repositories an installation
-// actually grants access to, via GET /installation/repositories. Only
-// meaningful (and only ever called) for an installation whose
-// RepositorySelection is "selected" — an "all" installation grants access to
-// every current and future repo on the account, so there is nothing to
-// enumerate. Unlike the App-JWT-authenticated calls above, this endpoint is
-// scoped to the installation's own identity: it must be authenticated with
-// that installation's access token, not the App's JWT.
+// actually grants access to, via GET /installation/repositories. Called for
+// every installation regardless of RepositorySelection: unlike an earlier
+// revision of this function (which only bothered for "selected"-mode
+// installations, since "all" was assumed to cover every current and future
+// repo), the endpoint already returns the full accessible set for "all"
+// installations too — calling it unconditionally is what lets
+// installation-derived discovery (handarbeit/fabrik#1641) enumerate an
+// "all"-mode installation's repos without a separate code path, and also
+// makes newly-created repos under an "all" installation show up on the next
+// call with no special casing. Unlike the App-JWT-authenticated calls
+// above, this endpoint is scoped to the installation's own identity: it
+// must be authenticated with that installation's access token, not the
+// App's JWT.
 //
-// Capped at 100 results (GitHub's max per_page, requested explicitly —
-// GitHub's own default is only 30) rather than following the Link header to
-// fetch further pages; a warning is logged (not silently truncated) when
-// exactly 100 are returned, since more accessible repositories may exist —
-// see FetchAppInstallations' doc comment for the same convention and its
-// rationale. Unlike installation counts, a "selected"-mode installation
-// granting more than 100 repos is plausible for a larger org, so a missed
-// repo beyond page 1 would be reported by verifyRepoAccess as unauthorized
-// even though access is actually granted; the warning at least surfaces
-// that the result may be incomplete instead of failing silently.
-func FetchInstallationRepositories(baseURL, installationToken string) ([]string, error) {
-	var result struct {
-		Repositories []struct {
-			FullName string `json:"full_name"`
-		} `json:"repositories"`
+// Follows GitHub's page-number pagination up to appFetchMaxPages, exactly
+// like FetchAppInstallations above; the returned truncated bool reports
+// whether the ceiling was hit. A "selected"-mode installation granting more
+// than 100 repos is plausible for a larger org, and an "all"-mode
+// installation on a large account even more so — callers must check
+// truncated rather than assume the returned list is complete.
+func FetchInstallationRepositories(baseURL, installationToken string) ([]string, bool, error) {
+	type repoEntry struct {
+		FullName string `json:"full_name"`
 	}
-	if err := appRequest("GET", baseURL, "/installation/repositories?per_page=100", installationToken, &result); err != nil {
-		return nil, fmt.Errorf("fetching installation repositories: %w", err)
+	raw, truncated, err := fetchAppPaginated(func(page int) ([]repoEntry, error) {
+		var result struct {
+			Repositories []repoEntry `json:"repositories"`
+		}
+		path := fmt.Sprintf("/installation/repositories?per_page=%d&page=%d", appFetchPageSize, page)
+		if err := appRequest("GET", baseURL, path, installationToken, &result); err != nil {
+			return nil, err
+		}
+		return result.Repositories, nil
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("fetching installation repositories: %w", err)
 	}
-	if len(result.Repositories) == 100 {
-		logf(0, "app", "FetchInstallationRepositories: received exactly 100 results — more accessible repositories may exist (pagination not implemented)\n")
+	if truncated {
+		logf(0, "app", "FetchInstallationRepositories: hit the %d-page pagination ceiling (%d repositories returned) — more accessible repositories may exist\n", appFetchMaxPages, len(raw))
 	}
-	out := make([]string, len(result.Repositories))
-	for i, r := range result.Repositories {
+	out := make([]string, len(raw))
+	for i, r := range raw {
 		out[i] = r.FullName
 	}
-	return out, nil
+	return out, truncated, nil
 }
 
 // MintInstallationToken exchanges a JWT for a short-lived (~1 hour)

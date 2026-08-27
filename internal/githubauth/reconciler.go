@@ -116,7 +116,19 @@ type Options struct {
 	// persisted. Never config.yaml — see the Plan's "config.yaml is never
 	// written back to" decision.
 	AppStatePath string
+	// WatchedRepos is, since this issue (handarbeit/fabrik#1641), no longer
+	// the primary input to discovery — it is an optional intersection
+	// filter (R3) applied on top of whatever the App's installations
+	// actually grant. Absent/empty means "everything the installations
+	// grant"; present narrows to the intersection, and a named repo the
+	// installation grant doesn't cover is reported via
+	// DerivedRepoSet.FilteredOut rather than silently included or excluded
+	// with no explanation. See Derive.
 	WatchedRepos []string
+	// MaxDerivedRepos bounds the derived set's size (R5) — applied last,
+	// after the installation-grant union and any WatchedRepos filter. <= 0
+	// means no cap.
+	MaxDerivedRepos int
 	// NoBrowser is forwarded to RunManifestFlow unchanged.
 	NoBrowser bool
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
@@ -185,6 +197,11 @@ type Reconciler struct {
 	// Reconciler's lifetime (restart-only, see above), so this is set once
 	// in Reconcile and never itself changes.
 	pinnedInstallationID int64
+
+	// lastDerived is the result of the most recent Derive call (including
+	// the one Reconcile itself performs) — see LastDerived and Derive's own
+	// doc comment.
+	lastDerived DerivedRepoSet
 }
 
 // BotLogin returns the App's own identity as it appears as a PR/review
@@ -293,17 +310,15 @@ func (r *Reconciler) MintOwnerAuth(owner string, watchedRepos []string, logf fun
 	if err != nil {
 		return nil, false, fmt.Errorf("building app JWT: %w", err)
 	}
-	installations, err := gh.FetchAppInstallations(baseURL, jwt)
+	installations, installationsTruncated, err := gh.FetchAppInstallations(baseURL, jwt)
 	if err != nil {
 		return nil, false, fmt.Errorf("discovering app installations: %w", err)
 	}
-	// Mirrors Reconcile's own discovery loop: FetchAppInstallations caps at
-	// 100 results, so a hit at exactly that count means owner's actual
-	// installation could be sitting just past the first page rather than
-	// genuinely missing — a newly-watched owner on a very large App must
-	// not be misreported (and the whole reload aborted on) a pagination
-	// gap it never had.
-	installationsTruncated := len(installations) == 100
+	// Mirrors Reconcile's own discovery loop: a truncated result means
+	// owner's actual installation could be sitting past the pagination
+	// ceiling rather than genuinely missing — a newly-watched owner on a
+	// very large App must not be misreported (and the whole reload aborted
+	// on) a pagination gap it never had.
 	var inst *gh.AppInstallation
 	for i := range installations {
 		if strings.EqualFold(installations[i].Account, owner) {
@@ -635,17 +650,6 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		pinnedInstallationID: opts.AppInstallationID,
 	}
 
-	// A single pass both validates and enumerates — see
-	// distinctOwnersLogging's own doc comment for why this replaced two
-	// separate passes (one purely to log malformed entries, one via
-	// distinctOwners to actually use them) that re-ran the identical
-	// splitOwnerRepo check over the same slice.
-	owners := distinctOwnersLogging(opts.WatchedRepos, logf)
-	if len(owners) == 0 {
-		logf("no watched repos configured — reconciliation has nothing to authorize")
-		return r, nil
-	}
-
 	// Compat path: a pinned installation ID skips discovery entirely,
 	// preserving pre-reconciler behavior byte-for-byte — see ADR-1233
 	// Decision 4. Every watched repo is cached as authorized under the
@@ -666,6 +670,12 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	// legacy behavior this compat path exists to preserve, not a
 	// regression introduced by the reconciler.
 	if opts.AppInstallationID != 0 {
+		// A single pass both validates and enumerates — see
+		// distinctOwnersLogging's own doc comment for why this replaced two
+		// separate passes (one purely to log malformed entries, one via
+		// distinctOwners to actually use them) that re-ran the identical
+		// splitOwnerRepo check over the same slice.
+		owners := distinctOwnersLogging(opts.WatchedRepos, logf)
 		a, err := mintAuth(appID, opts.AppInstallationID, botLogin, privateKey, opts.BaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("minting pinned installation token: %w", err)
@@ -687,6 +697,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			}
 		}
 		r.auths = []*Auth{a}
+		r.lastDerived = derivedSetForPinned(opts.WatchedRepos, opts.AppInstallationID)
 		saveInstallationRepoCache(opts.AppStatePath, opts.AppPrivateKeyPath, appID, slug, repoCache, logf)
 		// Unlike the discovery path below (verifyRepoAccess), minting a
 		// token here is the only check this compat path performs — it
@@ -698,128 +709,29 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		return r, nil
 	}
 
-	installations, err := gh.FetchAppInstallations(opts.BaseURL, jwt)
+	// Non-pinned: installations are the desired state (R1) — Derive
+	// discovers every installation of this App and enumerates its
+	// accessible repos; opts.WatchedRepos (if any) is only an optional
+	// intersection filter (R3), never the primary input. See Derive's doc
+	// comment — this is the core inversion handarbeit/fabrik#1641 makes.
+	set, _, err := r.Derive(ctx, opts.WatchedRepos, opts.MaxDerivedRepos, logf)
 	if err != nil {
-		return nil, fmt.Errorf("discovering app installations: %w", err)
+		return nil, fmt.Errorf("deriving repo set from app installations: %w", err)
 	}
-	// FetchAppInstallations caps at 100 results and only surfaces
-	// truncation via its own package-level log line (github/app.go) — this
-	// caller has no other way to know the list it received was incomplete.
-	// Without this, an owner whose installation exists beyond page 1 of a
-	// >100-installation App would be reported "no installation" below with
-	// the same confidence as a genuinely missing one — a false negative
-	// that triggers an unnecessary guided-install browser-open, unlike
-	// verifyRepoAccess's analogous truncated case below, which this
-	// mirrors.
-	installationsTruncated := len(installations) == 100
-	// Keyed by lower-cased account login: GitHub org/user logins are
-	// case-insensitive, but FetchAppInstallations returns each Account in
-	// its canonical case while owner (below) comes verbatim from the
-	// user's watched_repos config string — an exact-case map would treat
-	// e.g. a config entry "MyOrg/repo" against a canonical "myorg"
-	// installation as uninstalled, spuriously re-triggering guided-install
-	// guidance every restart despite the installation already existing.
-	byAccount := make(map[string]gh.AppInstallation, len(installations))
-	for _, inst := range installations {
-		byAccount[strings.ToLower(inst.Account)] = inst
-	}
+	logDerivedSet(set, logf)
+	guideMissingInstallations(opts, slug, set, logf)
 
-	// repoCache accumulates the "which of this owner's watched repos does
-	// the installation actually grant access to" diagnostic the issue's
-	// credential-model requirement asks the reconciler to persist
-	// (Credentials.InstallationRepoCache) — populated here, from data this
-	// loop already fetches, and saved once discovery completes. Purely a
-	// human-readable cache: Reconcile always re-verifies live against
-	// GitHub on the next run rather than trusting it (see that field's own
-	// doc comment).
 	repoCache := make(map[string][]string)
-
-	// openedInstallBrowser bounds guided-installation browser-opening to at
-	// most once per Reconcile call: WatchedRepos can plausibly span several
-	// owners with no installation at all (e.g. a first run watching repos
-	// under three different orgs), and popping open a separate browser
-	// tab/window per missing owner is surprising, unlike the single-flow
-	// manifest bootstrap. Every missing owner still gets its install URL
-	// logged; only the first one also gets an actual browser-open attempt.
-	openedInstallBrowser := false
-	for _, owner := range owners {
-		inst, ok := byAccount[strings.ToLower(owner)]
-		if !ok {
-			installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
-			notFoundDesc := "has no installation"
-			if installationsTruncated {
-				notFoundDesc = "not found in the first 100 installations returned — the App may have ≥100 installations, so this could be a pagination gap rather than an actual missing installation; re-run reconciliation to confirm before assuming it needs installing"
-			}
-			if !opts.NoBrowser && !openedInstallBrowser {
-				logf("! %s %s → opening %s …", owner, notFoundDesc, installURL)
-				if err := openBrowser(installURL); err != nil {
-					logf("could not open browser automatically (%v) — visit the URL above manually", err)
-				}
-				openedInstallBrowser = true
-			} else {
-				logf("! %s %s → %s", owner, notFoundDesc, installURL)
-			}
-			continue
-		}
-
-		a, err := mintAuth(appID, inst.ID, botLogin, privateKey, opts.BaseURL)
-		if err != nil {
-			logf("! minting token for owner %q (installation %d) failed: %v", owner, inst.ID, err)
-			r.mintErrors[strings.ToLower(owner)] = err
-			continue
-		}
-
-		// repoVerifyFailed tracks whether the "selected"-mode repo-access
-		// check below errored (e.g. a transient failure listing
-		// /installation/repositories) — the minted token is still usable
-		// either way, but the final "✓ authorized" log line must say so
-		// rather than implying repo access was actually confirmed.
-		repoVerifyFailed := false
-		if inst.RepositorySelection == "selected" {
-			statuses, err := verifyRepoAccess(opts.BaseURL, a.client.Token(), inst.ID, owner, opts.WatchedRepos)
-			if err != nil {
-				logf("! verifying repo access for owner %q failed: %v", owner, err)
-				repoVerifyFailed = true
-			} else {
-				// A definitive answer for this owner this round — set the
-				// map key now (possibly to an empty, non-nil slice) so
-				// saveInstallationRepoCache's per-owner merge overwrites
-				// whatever stale entry it holds, even when zero repos come
-				// back authorized. Leaving the key unset here would be
-				// indistinguishable from the repoVerifyFailed ("we didn't
-				// check this round") case above, silently perpetuating a
-				// stale "authorized" cache entry that a live, successful
-				// check just definitively contradicted.
-				repoCache[strings.ToLower(owner)] = []string{}
-			}
-			for _, st := range statuses {
-				if st.Authorized {
-					repoCache[strings.ToLower(owner)] = append(repoCache[strings.ToLower(owner)], st.Repo)
-				} else {
-					logf("! %s is not authorized (%s) → %s", st.Repo, st.Reason, st.GrantURL)
-				}
-			}
-		} else {
-			// An "all" installation grants access to every current and
-			// future repo on the account, so every one of owner's watched
-			// repos is authorized — no live per-repo check to make, unlike
-			// the "selected" branch above.
-			for _, spec := range opts.WatchedRepos {
-				if o, _, ok := splitOwnerRepo(spec); ok && strings.EqualFold(o, owner) {
-					repoCache[strings.ToLower(owner)] = append(repoCache[strings.ToLower(owner)], spec)
-				}
-			}
-		}
-
-		r.clients[strings.ToLower(owner)] = a.client
-		r.auths = append(r.auths, a)
-		if repoVerifyFailed {
-			logf("✓ %s authorized (installation token minted; repo-access verification was skipped — see error above)", owner)
-		} else {
-			logf("✓ %s authorized", owner)
+	for _, dr := range set.Repos {
+		key := strings.ToLower(dr.Owner)
+		repoCache[key] = append(repoCache[key], dr.Repo)
+	}
+	for _, inst := range set.Installations {
+		key := strings.ToLower(inst.Account)
+		if _, ok := repoCache[key]; !ok {
+			repoCache[key] = []string{}
 		}
 	}
-
 	saveInstallationRepoCache(opts.AppStatePath, opts.AppPrivateKeyPath, appID, slug, repoCache, logf)
 
 	return r, nil
