@@ -17,6 +17,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1995,6 +1996,216 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	}
 	if state.CIResult != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen, got %v", state.CIResult)
+	}
+}
+
+// TestMergeTrainWorker_TUIJobRow verifies the merge train's TUI job row
+// lifecycle (#1661, Task 10): a JobStartedEvent naming the batch (Repo,
+// StageName "Merge Train", Title listing the members) is emitted at the top
+// of the run, a JobCompletedEvent for the same (Repo, IssueNumber=0) key
+// follows once the batch lands, and at least one repo-carrying merge-train
+// LogEvent is observed along the way — proof that the Task 9 logfRepo
+// rewrite actually reaches the TUI event stream (R5, AC1, AC2, AC3).
+func TestMergeTrainWorker_TUIJobRow(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	ch := make(chan tui.Event, 256)
+	eng.events = ch
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.store.EnterRepoWorker("owner/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	events := collectEvents(ch, 20*time.Millisecond)
+
+	var sawStarted, sawCompleted, sawTrainLog bool
+	for _, raw := range events {
+		switch ev := raw.(type) {
+		case tui.JobStartedEvent:
+			if ev.IssueNumber == 0 && ev.Repo == "owner/repo" {
+				sawStarted = true
+				if ev.StageName != "Merge Train" {
+					t.Errorf("JobStartedEvent.StageName = %q, want %q", ev.StageName, "Merge Train")
+				}
+				if !strings.Contains(ev.Title, "#1") || !strings.Contains(ev.Title, "#2") {
+					t.Errorf("JobStartedEvent.Title = %q, want it to name #1 and #2", ev.Title)
+				}
+			}
+		case tui.JobCompletedEvent:
+			if ev.IssueNumber == 0 && ev.Repo == "owner/repo" && ev.StageName == "Merge Train" {
+				sawCompleted = true
+				if !ev.Skipped {
+					t.Error("expected JobCompletedEvent.Skipped=true (no per-train InvocationObserver)")
+				}
+			}
+		case tui.LogEvent:
+			if ev.IssueNumber == 0 && ev.Repo == "owner/repo" && ev.Tag == "merge-train" {
+				sawTrainLog = true
+			}
+		}
+	}
+
+	if !sawStarted {
+		t.Errorf("expected a JobStartedEvent{IssueNumber:0, Repo:%q} for the train; events: %v", "owner/repo", events)
+	}
+	if !sawCompleted {
+		t.Errorf("expected a JobCompletedEvent{IssueNumber:0, Repo:%q} for the train; events: %v", "owner/repo", events)
+	}
+	if !sawTrainLog {
+		t.Errorf("expected at least one repo-carrying merge-train LogEvent (AC2 proxy); events: %v", events)
+	}
+}
+
+// TestMergeTrainWorker_TwoRepos_EventsDoNotCrossTalk verifies AC4 at the
+// engine level: two trains for two different repos each emit
+// JobStartedEvent/JobCompletedEvent/LogEvents carrying their own Repo value,
+// never the other's — the (Repo, IssueNumber=0) key R2 specifies is what
+// keeps them distinct. Driven sequentially (not real concurrent goroutines)
+// per the plan's flakiness mitigation; this asserts attribution correctness,
+// which is independent of scheduling.
+func TestMergeTrainWorker_TwoRepos_EventsDoNotCrossTalk(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDirA, _, wmA := setupTrainRepo(t)
+	_, srcDirB, _, wmB := setupTrainRepo(t)
+
+	shaA := pushBranchToBare(t, srcDirA, wmA.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	shaB := pushBranchToBare(t, srcDirB, wmB.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch repo {
+			case "repo-a":
+				return &gh.PRDetails{Number: 10, HeadSHA: shaA, State: "open"}, nil
+			case "repo-b":
+				return &gh.PRDetails{Number: 20, HeadSHA: shaB, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("unexpected repo %q", repo)
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil // CI green immediately
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wmA)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner-a/repo-a"] = wmA
+	eng.worktreeManagers["owner-b/repo-b"] = wmB
+	eng.mu.Unlock()
+
+	ch := make(chan tui.Event, 512)
+	eng.events = ch
+
+	itemA := makeTrainItem(1, "Issue A")
+	itemA.Repo = "owner-a/repo-a"
+	itemB := makeTrainItem(1, "Issue B")
+	itemB.Repo = "owner-b/repo-b"
+
+	stateA := &mergeTrainWorkerState{assembling: true, trialName: "merge-train-a"}
+	stateB := &mergeTrainWorkerState{assembling: true, trialName: "merge-train-b"}
+	eng.mergeTrainInFlight.Store("owner-a/repo-a", stateA)
+	eng.mergeTrainInFlight.Store("owner-b/repo-b", stateB)
+	eng.store.EnterRepoWorker("owner-a/repo-a")
+	eng.store.EnterRepoWorker("owner-b/repo-b")
+
+	// Driven sequentially rather than as real concurrent goroutines — the
+	// plan's own flakiness mitigation. What's under test is attribution
+	// correctness (does each event carry the right Repo?), which is
+	// independent of scheduling; the actual cross-talk hazard this guards
+	// against (activeNumToKey collision on IssueNumber=0) lives in the TUI
+	// routing layer and is covered directly by
+	// TestUpdate_LogEvent_TwoConcurrentTrainsDoNotCrossTalk in tui/active_test.go.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, stateA, "owner-a", "repo-a", []gh.ProjectItem{itemA})
+	eng.runMergeTrainWorker(ctx, stateB, "owner-b", "repo-b", []gh.ProjectItem{itemB})
+
+	events := collectEvents(ch, 20*time.Millisecond)
+
+	seenStarted := map[string]bool{}
+	seenCompleted := map[string]bool{}
+	seenLog := map[string]bool{}
+	for _, raw := range events {
+		switch ev := raw.(type) {
+		case tui.JobStartedEvent:
+			if ev.IssueNumber != 0 {
+				continue
+			}
+			if ev.Repo != "owner-a/repo-a" && ev.Repo != "owner-b/repo-b" {
+				t.Errorf("JobStartedEvent with unexpected Repo %q", ev.Repo)
+			}
+			seenStarted[ev.Repo] = true
+		case tui.JobCompletedEvent:
+			if ev.IssueNumber != 0 {
+				continue
+			}
+			if ev.Repo != "owner-a/repo-a" && ev.Repo != "owner-b/repo-b" {
+				t.Errorf("JobCompletedEvent with unexpected Repo %q", ev.Repo)
+			}
+			seenCompleted[ev.Repo] = true
+		case tui.LogEvent:
+			if ev.IssueNumber != 0 || ev.Tag != "merge-train" {
+				continue
+			}
+			if ev.Repo != "owner-a/repo-a" && ev.Repo != "owner-b/repo-b" {
+				t.Errorf("merge-train LogEvent with unexpected Repo %q (message: %q)", ev.Repo, ev.Message)
+			}
+			seenLog[ev.Repo] = true
+		}
+	}
+
+	for _, repo := range []string{"owner-a/repo-a", "owner-b/repo-b"} {
+		if !seenStarted[repo] {
+			t.Errorf("expected a JobStartedEvent for %s", repo)
+		}
+		if !seenCompleted[repo] {
+			t.Errorf("expected a JobCompletedEvent for %s", repo)
+		}
+		if !seenLog[repo] {
+			t.Errorf("expected at least one merge-train LogEvent for %s", repo)
+		}
 	}
 }
 
