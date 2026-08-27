@@ -1737,7 +1737,7 @@ func TestDispatchMergeTrainWorker_SkipsWhenAlreadyAssembling(t *testing.T) {
 
 	// Pre-populate in-flight state.
 	existingState := &mergeTrainWorkerState{assembling: true, trialName: "existing"}
-	eng.mergeTrainInFlight.Store("owner/repo", existingState)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), existingState)
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	eng.dispatchMergeTrainWorker(context.Background(), batch, "", "main")
@@ -1763,7 +1763,7 @@ func TestDispatchMergeTrainWorker_LogsGreenState(t *testing.T) {
 
 	// Pre-populate with green CI result.
 	existingState := &mergeTrainWorkerState{assembling: false, prNum: 99, CIResult: TrainCIGreen}
-	eng.mergeTrainInFlight.Store("owner/repo", existingState)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), existingState)
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	// Just verify it doesn't panic or launch a worker.
@@ -1967,8 +1967,8 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1987,10 +1987,10 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	mu.Unlock()
 
 	// Landing runs on TrainCIGreen and clears the in-flight entry when done.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after landing completes")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared after landing completes")
 	}
 	if state.CIResult != TrainCIGreen {
@@ -2052,8 +2052,8 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2092,10 +2092,10 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 
 	// The worker must have re-formed and landed #2 normally — trainInFlight/store
 	// liveness clears only once the (re-formed) train actually finishes.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared once the re-formed train finishes")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared once the re-formed train finishes")
 	}
 
@@ -2169,7 +2169,7 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 	// Since both modify counter.txt, the first merge goes in, second conflicts.
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2250,8 +2250,8 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2279,10 +2279,10 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 		t.Error("expected account-wide Claude suspension to be active after the usage-limit hit")
 	}
 	// In-flight entry must still be cleared despite the fatal error (ADR-067).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after fatal assembly error")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared after fatal assembly error")
 	}
 }
@@ -2320,8 +2320,8 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2335,10 +2335,10 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 		t.Errorf("expected 0 draft PRs for zero-survivor batch, got %d", prs)
 	}
 	// In-flight entry must be cleared (FR-6: no silent abandonment).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight to be cleared after zero-survivor batch")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness to be cleared after zero-survivor batch")
 	}
 }
@@ -2415,7 +2415,7 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2461,18 +2461,18 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", "main", batch)
 	if ok {
 		t.Fatal("expected prepareTrainWorker to fail with no holding stage configured")
 	}
 
-	if _, found := eng.mergeTrainInFlight.Load("owner/repo"); found {
+	if _, found := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); found {
 		t.Error("expected mergeTrainInFlight cleared by prepareTrainWorker's own-failure defer")
 	}
-	if eng.store.RepoWorkerActive("owner/repo") {
+	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness cleared by prepareTrainWorker's own-failure defer")
 	}
 
@@ -2674,9 +2674,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 		trialName: "merge-train-main-12345",
 		projectID: "PVT_test",
 	}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// FR-1 + connectivity: integration PR created with correct title, the batch
 	// marker, AND a Closes #N per member issue (auto-closes them on merge, linking
@@ -2786,9 +2786,9 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	if createPRCalled {
 		t.Error("CreatePR must not be called when an existing integration PR is found (FR-1 skip)")
@@ -2839,9 +2839,9 @@ func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	if createPRCalled {
 		t.Error("CreatePR must not be called — the draft CI PR must be reused (regression: 422 collision)")
@@ -2897,9 +2897,9 @@ func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// FR-2 skip: MergePR must not be called.
 	if mergePRCalled {
@@ -2950,9 +2950,9 @@ func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// Only the Queued member should be advanced; the Done member must be skipped.
 	client.mu.Lock()
@@ -3011,9 +3011,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	advanced := len(client.updateStatusCalls)
@@ -3664,8 +3664,8 @@ func TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPat
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -3734,8 +3734,8 @@ func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *test
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -3808,9 +3808,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	advanced := len(client.updateStatusCalls)
@@ -3864,7 +3864,7 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	// Pre-seed stale ejection counts from a prior train.
 	eng.mergeTrainEjectionsMu.Lock()
@@ -3872,7 +3872,7 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 	eng.mergeTrainEjectionCounts["owner/repo#2"] = 1
 	eng.mergeTrainEjectionsMu.Unlock()
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	// After landing, both counters must be zeroed.
 	eng.mergeTrainEjectionsMu.Lock()
@@ -3954,9 +3954,9 @@ func TestLandMergeTrainBatch_ClosedUnmergedTrialPR_EscalatesInsteadOfLanding(t *
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	if mergeCalled {
 		t.Error("MergePR must never be called for a closed-unmerged trial PR (R2/R5)")
@@ -4057,9 +4057,9 @@ func TestLandMergeTrainBatch_DroppedMemberNotInBatchBody_EscalatesThatMemberOnly
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, claude, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", mergeTrainKey("owner/repo", "main"), survivors, wm)
 
 	client.mu.Lock()
 	updateStatus := append([]updateStatusCall(nil), client.updateStatusCalls...)
@@ -4283,7 +4283,7 @@ func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4303,7 +4303,7 @@ func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
 	if merges != 1 {
 		t.Errorf("expected the integration PR to be merged once (batch landed), got %d", merges)
 	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight cleared after green landing")
 	}
 }
@@ -4318,7 +4318,7 @@ func TestMergeTrainBisect_SinglePoisoner(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4368,7 +4368,7 @@ func TestMergeTrainBisect_RepeatedEjectionPauses(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4407,7 +4407,7 @@ func TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4481,7 +4481,7 @@ func TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4514,7 +4514,7 @@ func TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4554,7 +4554,7 @@ func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4636,7 +4636,7 @@ func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
 
 	batch := makeSeamBatch(1)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4994,7 +4994,7 @@ func TestMergeTrainBisect_PauseCommentNamesCause(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -5031,7 +5031,7 @@ func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
 
 	batch := makeSeamBatch(4)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -5076,7 +5076,7 @@ func TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition(t *testing.T) {
 
 	batch := makeSeamBatch(4)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -5139,7 +5139,7 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 
 	batch := makeSeamBatch(4)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -5203,7 +5203,7 @@ func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testi
 
 	batch := makeSeamBatch(2)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -5450,7 +5450,7 @@ func TestDissolveBatch(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
 	members := []gh.ProjectItem{makeTrainItem(1, "One"), makeTrainItem(2, "Two")}
@@ -5492,7 +5492,7 @@ func TestDissolveBatch_NoPR(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
 
 	eng.dissolveBatch(state, p, 0, "merge-train-main-1", []gh.ProjectItem{makeTrainItem(1, "One")}, "orphan")
@@ -5542,7 +5542,7 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 
 	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -5596,8 +5596,8 @@ func TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLandi
 
 	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
 
 	// Flag #1 for a pending review-finding eject — simulates settleQueuedReviewFindings
@@ -5658,7 +5658,7 @@ func TestLandGreenBatch_ExhaustionDissolves(t *testing.T) {
 
 	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -5707,7 +5707,7 @@ func TestReconstructTrainState_Fresh(t *testing.T) {
 	client := &mockGitHubClient{listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil }}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{assembling: true}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2)) {
 		t.Error("reconstructTrainState with no durable artifacts should return false (fresh)")
@@ -5732,7 +5732,7 @@ func TestReconstructTrainState_ResumeOpenPR(t *testing.T) {
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{openPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
 	if !handled {
@@ -5771,7 +5771,7 @@ func TestReconstructTrainState_CompleteDeferredLanding(t *testing.T) {
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{mergedPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
 	if !handled {
@@ -5815,7 +5815,7 @@ func TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
 	if !handled {
@@ -5864,7 +5864,7 @@ func TestReconstructTrainState_HistoricalMergedPR_ProceedsFresh(t *testing.T) {
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{historicalPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	// Today's fresh Queued batch — disjoint from the historical PR's members.
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
@@ -5904,7 +5904,7 @@ func TestReconstructTrainState_StaleOpenPR_ClosedAndProceedsFresh(t *testing.T) 
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{staleOpenPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
 	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
@@ -5958,7 +5958,7 @@ func TestReconstructTrainState_MarkerOnlyNonTrainBranchPR_NeverClosed(t *testing
 	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{unrelatedPR}, nil }
 
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
 	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
@@ -5995,7 +5995,7 @@ func TestReconstructTrainState_OrphanedBranchNoPR_ProceedsFresh(t *testing.T) {
 	}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
 
@@ -6110,8 +6110,10 @@ func TestDispatchMergeTrainWorker_SameRepoSuppressedDurably(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 
-	// Simulate an in-flight train (e.g. resumed after reconstruction).
-	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{assembling: true, trialName: "merge-train-main-1"})
+	// Simulate an in-flight train (e.g. resumed after reconstruction). Keyed on the
+	// (repo,base) trainKey (#1648) matching the "main" partitionBase dispatched below —
+	// a bare "owner/repo" key would silently fail to suppress the duplicate dispatch.
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), &mergeTrainWorkerState{assembling: true, trialName: "merge-train-main-1"})
 
 	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{makeTrainItem(1, "One")}, "", "main")
 
@@ -6238,7 +6240,7 @@ func TestRunawayGuard_Fires(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -6277,7 +6279,7 @@ func TestRunawayGuard_Fires(t *testing.T) {
 	}
 
 	// mergeTrainInFlight must be cleared after the guard fires.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("expected mergeTrainInFlight cleared after runaway guard fires")
 	}
 }
@@ -6296,7 +6298,7 @@ func TestRunawayGuard_NormalBisectionNotTripped(t *testing.T) {
 
 	batch := makeSeamBatch(5)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -6356,7 +6358,7 @@ func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -6703,7 +6705,7 @@ func TestMergeTrainRunawayGuard(t *testing.T) {
 
 	batch := makeSeamBatch(3)
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -6760,7 +6762,7 @@ func TestMergeTrainRunawayGuard(t *testing.T) {
 	}
 
 	// mergeTrainInFlight must be cleared.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("e2e: expected mergeTrainInFlight cleared after runaway guard fires")
 	}
 }

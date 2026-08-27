@@ -39,14 +39,21 @@ func (e *Engine) markRunawayAlertOutstanding(item gh.ProjectItem, owner, repo st
 // mergeTrainKeyForItem reconstructs the composite (repo,base) trainKey fireRunawayGuard
 // used when it originally alerted item (#1648). By the time this settle scan runs the
 // member is already paused, so unlike a live dispatch there is no partition context handed
-// down — the base must be re-resolved from the item itself, mirroring the wm-lookup pattern
-// the now-removed nonDefaultBaseExclusion (#1647) used before this issue superseded it.
-// Fails if the repo's WorktreeManager isn't registered (should be unreachable in practice:
-// fireRunawayGuard's own caller already resolved this item's base successfully to get here
-// in the first place) or if baseBranchForItem itself errors.
+// down — the base must be re-derived from the item itself, mirroring exactly
+// groupQueuedByRepoAndBase's own bucketing rule (poll.go) so the two can never disagree:
+// an item with no base: label reconstructs to the defaultPartitionBase sentinel without
+// ever touching the WorktreeManager (the zero-cost, common-case path), and only an item
+// carrying an explicit base: label resolves via baseBranchForItem, which does need the
+// WorktreeManager. Fails (for a labeled item only) if the repo's WorktreeManager isn't
+// registered (should be unreachable in practice: fireRunawayGuard's own caller already
+// resolved this item's base successfully to get here in the first place) or if
+// baseBranchForItem itself errors.
 func (e *Engine) mergeTrainKeyForItem(item gh.ProjectItem) (string, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoKey := owner + "/" + repo
+	if !itemHasBaseLabel(item) {
+		return mergeTrainKey(repoKey, defaultPartitionBase), nil
+	}
 	e.mu.Lock()
 	wm, ok := e.worktreeManagers[repoKey]
 	e.mu.Unlock()

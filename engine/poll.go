@@ -2016,43 +2016,48 @@ func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string
 // non-default base: label member is now batched into its own partition
 // instead of being excluded from batching entirely.
 //
-// Per-item cost is preserved exactly as before (R5): baseBranchForItem is
-// only called for items that actually carry a base: label. Items without one
-// are bucketed directly under the repo's own default branch, resolved once
-// per repo group (not once per item) via wm.DefaultBaseBranch() — the same
-// single call prepareTrainWorker already made once per dispatch pre-#1648,
-// simply made once per grouping pass instead so an explicit base: label whose
-// value happens to equal the current default correctly folds into the same
-// partition as the implicit-default members, rather than spawning a
-// redundant, identically-based second partition.
+// Per-item cost is preserved exactly as before (R5), and strengthened: an item
+// with no base: label (the overwhelming common case) is bucketed under the
+// defaultPartitionBase sentinel — the empty string — without ever touching the
+// repo's WorktreeManager or calling any git command. baseBranchForItem (which
+// does need the WorktreeManager) is called only for items that actually carry a
+// base: label. This matters beyond performance: unlike a per-item resolution
+// cost, requiring wm.DefaultBaseBranch() to succeed just to form the *default*
+// partition would make the entire repo's Queued batch fail closed on any
+// transient git hiccup — a strictly worse failure mode than what this function
+// replaces (nonDefaultBaseExclusion never touched wm for a no-label item
+// either). See trialParams's doc comment in merge_train.go for the full
+// partitionBase-vs-baseBranch split this sentinel is part of.
 //
-// A repo whose WorktreeManager isn't registered yet (a narrow same-poll
-// cold-start window, mirroring the fail-closed posture #1647's
-// nonDefaultBaseExclusion used) is skipped entirely this poll and retried
-// next poll — in practice unreachable once an item has passed through any
-// earlier pipeline stage, since every stage already requires a registered WM
-// for its own repo before this point.
+// One accepted, narrow consequence: an item with an explicit base: label whose
+// value happens to equal the repo's actual default branch is NOT folded into
+// the same partition as implicit-default members — it resolves to the real
+// branch name (via baseBranchForItem) and gets its own, separately-keyed
+// partition that happens to target the same branch. This is a batching
+// inefficiency (two smaller trains instead of one combined one), never a
+// correctness issue (AC2 cares about landing target, not partition count) —
+// accepted in exchange for the default partition never depending on git at
+// grouping time at all.
 func (e *Engine) groupQueuedByRepoAndBase(items []gh.ProjectItem, holdingStatus, defaultRepo string) []queuedRepoGroup {
 	var out []queuedRepoGroup
 	for _, rg := range groupQueuedByRepo(items, holdingStatus, defaultRepo) {
-		e.mu.Lock()
-		wm, ok := e.worktreeManagers[rg.repoKey]
-		e.mu.Unlock()
-		if !ok {
-			e.logf(0, "merge-train", "WorktreeManager not yet registered for %s — skipping base partitioning this poll, will retry\n", rg.repoKey)
-			continue
-		}
-		def, err := wm.DefaultBaseBranch()
-		if err != nil {
-			e.logf(0, "merge-train", "cannot resolve default branch for %s: %v — skipping base partitioning this poll\n", rg.repoKey, err)
-			continue
-		}
-
 		var baseOrder []string
 		byBase := make(map[string][]gh.ProjectItem)
 		for _, item := range rg.items {
-			base := def
+			base := defaultPartitionBase
 			if itemHasBaseLabel(item) {
+				e.mu.Lock()
+				wm, ok := e.worktreeManagers[rg.repoKey]
+				e.mu.Unlock()
+				if !ok {
+					// Narrow same-poll cold-start window (fail-closed, mirroring
+					// #1647's nonDefaultBaseExclusion posture) — in practice
+					// unreachable once this item has passed through any earlier
+					// pipeline stage, since every stage already requires a
+					// registered WM for its own repo before this point.
+					e.logf(item.Number, "merge-train", "WorktreeManager not yet registered for %s — excluding #%d from batching this poll, will retry\n", rg.repoKey, item.Number)
+					continue
+				}
 				resolved, berr := e.baseBranchForItem(item, wm)
 				if berr != nil {
 					e.logf(item.Number, "merge-train", "cannot resolve base branch for #%d: %v — excluding from batching this poll\n", item.Number, berr)

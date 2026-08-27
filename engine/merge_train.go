@@ -263,16 +263,29 @@ func sanitizeBranchName(s string) string {
 	return strings.ReplaceAll(s, "/", "-")
 }
 
+// defaultPartitionBase is the sentinel "base" value groupQueuedByRepoAndBase
+// assigns to a Queued member with no base: label (#1648) — the common-case
+// bucket, deliberately never resolved via wm.DefaultBaseBranch()/git at
+// grouping time (see that function's and trialParams's doc comments for why).
+// Every code path that reconstructs a trainKey for a no-label item (the
+// runaway-alert settle scan's mergeTrainKeyForItem, most notably) must use
+// this same sentinel, or its reconstructed key will silently disagree with
+// the one the item was actually dispatched/paused under.
+const defaultPartitionBase = ""
+
 // mergeTrainKey returns the composite key identifying one merge-train
 // partition: one independent train per (repo, resolved base branch), per
 // #1648. repoKey is the usual "owner/repo" string every call site already
-// computes. The delimiter is ':' — illegal in both a GitHub "owner/repo"
-// string and in any valid git ref name (git check-ref-format forbids a bare
-// ':'), so the two components can never collide by construction; no
-// sanitizeBranchName-style escaping of the key itself is needed. This key
-// replaces the bare "owner/repo" string as the guard key for
-// mergeTrainInFlight, the runaway guard's mergeTrainTrials/mergeTrainRunawayAlerted,
-// store.repoWorkers (EnterRepoWorker/ExitRepoWorker/RepoWorkerActive), and
+// computes. baseBranch is defaultPartitionBase ("") for the common default-base
+// partition, or the real resolved branch name otherwise — see trialParams's doc
+// comment in this file for the full partitionBase-vs-baseBranch distinction.
+// The delimiter is ':' — illegal in both a GitHub "owner/repo" string and in
+// any valid git ref name (git check-ref-format forbids a bare ':'), so the two
+// components can never collide by construction; no sanitizeBranchName-style
+// escaping of the key itself is needed. This key replaces the bare
+// "owner/repo" string as the guard key for mergeTrainInFlight, the runaway
+// guard's mergeTrainTrials/mergeTrainRunawayAlerted, store.repoWorkers
+// (EnterRepoWorker/ExitRepoWorker/RepoWorkerActive), and
 // mergeTrainBatchSnapshotSeen — every registry that must not let one base's
 // train block, cancel, alert on, or be mistaken for another base's train in
 // the same repo (R2). Registries that are deliberately NOT re-keyed
@@ -3455,7 +3468,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 
 		if !e.trialBehind(p.owner, p.repo, p.baseBranch, trialBranch) {
 			// Up to date: land via the unchanged terminal path (clears the map).
-			e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
+			e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, p.trainKey, survivors, p.wm)
 			return
 		}
 
@@ -3715,7 +3728,7 @@ func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainW
 	// defer once this whole call chain unwinds (this function is only reached via
 	// reconstructTrainState returning true, which prepareTrainWorker treats as
 	// ok=false) — see ADR-067.
-	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
+	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, p.trainKey, survivors, p.wm)
 }
 
 // resumeTrain re-establishes an in-flight batch from an open train PR after a
