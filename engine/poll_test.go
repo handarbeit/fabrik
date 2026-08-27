@@ -3436,7 +3436,7 @@ func TestGroupQueuedByRepoAndBase_TwoBasesProduceTwoPartitions(t *testing.T) {
 	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
 
 	items := []gh.ProjectItem{
-		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},                                    // implicit default
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},                                     // implicit default
 		{Number: 2, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:maint/1.x"}}, // explicit non-default
 		{Number: 3, Status: "BatchHold", Repo: "owner/repo"},                                     // implicit default
 	}
