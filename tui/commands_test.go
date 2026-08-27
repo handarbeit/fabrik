@@ -115,6 +115,22 @@ func TestUpdate_LKey_Returns_WatchCmd(t *testing.T) {
 	}
 }
 
+// TestUpdate_LKey_MergeTrainRow_NoOp verifies the l key is a no-op on the merge
+// train's row (IssueNumber==0, #1661) — there is no per-issue worktree to
+// watch, so opening one would shell out to `fabrik watch ... 0` for a
+// worktree that was never created. Before #1661 an active job could never
+// have IssueNumber==0, so this guard was never exercised.
+func TestUpdate_LKey_MergeTrainRow_NoOp(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.focusPane = paneActive
+	m.active.active[activeJobKey("owner/repo", 0)] = &activeJob{Repo: "owner/repo", StageName: "Merge Train", StartedAt: time.Now()}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if cmd != nil {
+		t.Error("expected nil cmd from l key on the merge-train row — nothing to watch")
+	}
+}
+
 // TestUpdate_AKey_NoAbtop_SetsStatusMsg verifies that pressing 'a' when abtop is not in
 // PATH sets an error status message and returns a nil cmd (no subprocess launched).
 func TestUpdate_AKey_NoAbtop_SetsStatusMsg(t *testing.T) {

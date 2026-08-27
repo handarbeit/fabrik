@@ -72,6 +72,38 @@ func TestSKey_ActivePane_WithSelectedJob(t *testing.T) {
 	}
 }
 
+// TestSKey_ActivePane_MergeTrainRow_NoOp verifies that s on the merge train's row
+// (IssueNumber==0, #1661) does not start a stop confirmation — there is no
+// per-issue worker to cancel and no issue to pause/label at #0. Before #1661,
+// SelectedJob() could never return an IssueNumber==0 job, so this guard was
+// never exercised; without it, confirming would build a StopRequest{IssueNumber:0}
+// that engine.handleStopRequest applies against a nonexistent issue.
+func TestSKey_ActivePane_MergeTrainRow_NoOp(t *testing.T) {
+	stopCh := make(chan StopRequest, 1)
+	m := New(30, ProjectInfo{}, "", nil, stopCh, 0, false)
+	m.focusPane = paneActive
+	addActiveJob(&m, 0, "owner/repo", "Merge Train")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from s on the merge-train row")
+	}
+	if nm.confirmStop {
+		t.Error("expected confirmStop=false for the merge-train row — nothing to stop")
+	}
+	if nm.pendingStopRequest != nil {
+		t.Error("expected pendingStopRequest=nil for the merge-train row")
+	}
+	select {
+	case req := <-stopCh:
+		t.Errorf("unexpected StopRequest sent for the merge-train row: %+v", req)
+	default:
+		// ok
+	}
+}
+
 // TestSKey_ThenY_SendsStopRequest verifies that s then y sends a StopRequest on stopCh.
 func TestSKey_ThenY_SendsStopRequest(t *testing.T) {
 	stopCh := make(chan StopRequest, 1)

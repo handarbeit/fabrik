@@ -433,6 +433,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			} else if m.focusPane == paneActive {
 				if job := m.active.SelectedJob(); job != nil {
+					if job.IssueNumber == 0 {
+						// The merge train's row (IssueNumber==0) isn't a per-issue
+						// stage invocation — there's no issue to pause/label, and
+						// no in-flight per-issue context to cancel. Before #1661
+						// SelectedJob() could never return an IssueNumber==0 job,
+						// so this guard was never needed.
+						m.header.SetStatusMsg("can't stop the merge train from here — see the Queued members' issues instead")
+						return m, nil
+					}
 					req := &StopRequest{
 						IssueNumber: job.IssueNumber,
 						Repo:        job.Repo,

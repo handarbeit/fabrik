@@ -147,7 +147,12 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		case "l":
 			keys := a.sortedActiveKeys()
 			if a.activeIdx < len(keys) {
-				if job, ok := a.active[keys[a.activeIdx]]; ok {
+				if job, ok := a.active[keys[a.activeIdx]]; ok && job.IssueNumber != 0 {
+					// job.IssueNumber==0 is the merge train's row (#1661) — there's
+					// no per-issue worktree to watch, so openWatchInlineCmd would
+					// shell out to `fabrik watch ... 0` for a worktree that was
+					// never created. Silently no-op, matching this switch's
+					// existing "not present" guards above.
 					return a, openWatchInlineCmd(job.IssueNumber, job.Repo)
 				}
 			}
