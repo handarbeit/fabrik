@@ -39,6 +39,13 @@ type DerivedInstallation struct {
 	// FetchInstallationRepositories call returned, before any filter or cap
 	// was applied.
 	RepoCount int
+	// RepoListError is non-empty when this installation's
+	// FetchInstallationRepositories call itself failed (e.g. a transient
+	// network error) — RepoCount is 0 in that case, but that 0 means
+	// "unknown this round," not "genuinely zero accessible repos." Callers
+	// (see logDerivedSet) must say so rather than implying the installation
+	// was actually confirmed to grant nothing.
+	RepoListError string
 }
 
 // DerivedRepoSet is the result of one Reconciler.Derive call: every repo the
@@ -210,8 +217,10 @@ func (r *Reconciler) Derive(ctx context.Context, filter []string, maxRepos int, 
 		}
 
 		repos, repoTruncated, err := gh.FetchInstallationRepositories(baseURL, client.Token())
+		repoListErr := ""
 		if err != nil {
 			logf("! listing accessible repositories for installation %d (account %q) failed: %v", inst.ID, inst.Account, err)
+			repoListErr = err.Error()
 		}
 		if repoTruncated {
 			truncated = true
@@ -224,6 +233,7 @@ func (r *Reconciler) Derive(ctx context.Context, filter []string, maxRepos int, 
 		instSummaries = append(instSummaries, DerivedInstallation{
 			Account: inst.Account, InstallationID: inst.ID,
 			RepositorySelection: inst.RepositorySelection, RepoCount: len(repos),
+			RepoListError: repoListErr,
 		})
 	}
 
@@ -290,6 +300,10 @@ func (r *Reconciler) Derive(ctx context.Context, filter []string, maxRepos int, 
 // once per Reconcile/Derive round (initial and every re-derivation trigger).
 func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 	for _, inst := range set.Installations {
+		if inst.RepoListError != "" {
+			logf("✓ installation %d (%s, repository_selection=%s): repo-access verification was skipped this round (listing failed — see error above); the installation is still authorized", inst.InstallationID, inst.Account, inst.RepositorySelection)
+			continue
+		}
 		logf("✓ installation %d (%s, repository_selection=%s): %d repo(s) accessible", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 	}
 	if len(set.Installations) == 0 {

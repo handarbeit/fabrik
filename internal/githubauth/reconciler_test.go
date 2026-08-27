@@ -244,7 +244,18 @@ func TestReconcile_PinnedInstallation_CacheWriteFailureIsNonFatal(t *testing.T) 
 	}
 }
 
-func TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger(t *testing.T) {
+// TestReconcile_MultiOwner_WatchedReposNarrowsButEveryInstalledOwnerGetsAClient
+// replaces the pre-#1641 TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger,
+// which asserted the *opposite* of what this issue intentionally inverts:
+// under the old (ADR-1233) model, watched_repos was the containment
+// boundary, so an installed-but-unwatched owner ("stranger" below) was never
+// even contacted. Post-#1253/#1641, containment comes from the operator's
+// own dedicated App identity, not from watched_repos membership — every
+// installation of *this* App is now derived and minted regardless of
+// whether watched_repos names it, and watched_repos (R3) only narrows which
+// of those repos are *reviewed*, never which owners get a client. See the
+// issue body's own "safety property that makes this hard" section.
+func TestReconcile_MultiOwner_WatchedReposNarrowsButEveryInstalledOwnerGetsAClient(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
 	defer func() { runManifestFlow = oldFlow }()
@@ -254,8 +265,13 @@ func TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger(t *testing.T) {
 	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "verveguy"},
-		{ID: 333, Account: "stranger"}, // installed on the App, never watched
+		{ID: 333, Account: "stranger"}, // installed on this same App, but not named in watched_repos
 	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"},
+		222: {"verveguy/otherrepo"},
+		333: {"stranger/repo"},
+	}
 	defer srv.Close()
 
 	r, err := Reconcile(context.Background(), Options{
@@ -276,16 +292,31 @@ func TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger(t *testing.T) {
 	if handarbeitClient.Token() == verveguyClient.Token() {
 		t.Error("expected distinct tokens for distinct owners")
 	}
-	if _, err := r.ClientForRepo(context.Background(), "stranger", "repo"); err == nil {
-		t.Fatal("expected no client for the unwatched stranger installation")
+	// stranger's installation belongs to the SAME App this operator
+	// authenticated as — it is minted like any other, since R1 derives from
+	// installations, not from watched_repos.
+	if _, err := r.ClientForRepo(context.Background(), "stranger", "repo"); err != nil {
+		t.Errorf("expected a client for stranger's installation too (it's this same App's own installation): %v", err)
 	}
+	strangerHit := false
 	for _, instID := range fake.hitInstallations() {
 		if instID == 333 {
-			t.Fatal("expected installation 333 (stranger, unwatched) to never be minted a token")
+			strangerHit = true
 		}
 	}
-	if r.InstallationCount() != 2 {
-		t.Errorf("InstallationCount() = %d, want 2", r.InstallationCount())
+	if !strangerHit {
+		t.Error("expected installation 333 (stranger) to be minted a token — it's this App's own installation")
+	}
+	if r.InstallationCount() != 3 {
+		t.Errorf("InstallationCount() = %d, want 3 (every installation of this App, regardless of watched_repos)", r.InstallationCount())
+	}
+	// watched_repos still narrows the *derived, reviewed* set (R3): stranger's
+	// repo is minted/authorized but excluded from what's actually reviewed.
+	derived := r.LastDerived()
+	for _, dr := range derived.Repos {
+		if dr.Owner == "stranger" {
+			t.Errorf("expected stranger/repo to be excluded from the derived (reviewed) set by the watched_repos filter, found: %+v", dr)
+		}
 	}
 }
 
@@ -464,7 +495,7 @@ func TestReconcile_MintFailure_ClientForRepoDistinguishesFromMissingInstallation
 	}
 	found := false
 	for _, l := range lines() {
-		if strings.Contains(l, "minting token for owner") && strings.Contains(l, "flaky") {
+		if strings.Contains(l, "minting token for installation") && strings.Contains(l, "flaky") {
 			found = true
 		}
 	}
@@ -607,6 +638,11 @@ func TestReconcile_MultipleMissingOwnerInstallations_OpensBrowserOnlyOnce(t *tes
 	}
 }
 
+// TestReconcile_SelectedModeExclusion_SoftStatusNotHardError asserts AC4's
+// "reported, not silently included/excluded" requirement: a watched_repos
+// entry a "selected"-mode installation doesn't actually grant must be named
+// in the log (via DerivedRepoSet.FilteredOut), not merely dropped, while the
+// owner's other, actually-granted repo stays authorized.
 func TestReconcile_SelectedModeExclusion_SoftStatusNotHardError(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
@@ -633,12 +669,12 @@ func TestReconcile_SelectedModeExclusion_SoftStatusNotHardError(t *testing.T) {
 	}
 	found := false
 	for _, l := range lines() {
-		if strings.Contains(l, "someorg/repo-excluded") && strings.Contains(l, "settings/installations") {
+		if strings.Contains(l, "someorg/repo-excluded") && strings.Contains(l, "not covered") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected a soft-status log line naming the excluded repo and a grant URL, got: %v", lines())
+		t.Errorf("expected a soft-status log line naming the excluded repo, got: %v", lines())
 	}
 }
 
@@ -706,7 +742,8 @@ func TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage(t *t
 	for i := range installations {
 		installations[i] = gh.AppInstallation{ID: int64(i + 1), Account: fmt.Sprintf("someorg-%03d", i)}
 	}
-	srv, _ := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	srv, fake := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.neverShortPage = true // simulate a server that never signals the end of the list
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -729,8 +766,8 @@ func TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage(t *t
 	if found == "" {
 		t.Fatalf("expected a log line about missingowner, got: %v", lines())
 	}
-	if !strings.Contains(found, "100") || !strings.Contains(found, "pagination") {
-		t.Errorf("log line = %q, expected it to flag the 100-result truncation as a possible pagination gap", found)
+	if !strings.Contains(found, "pagination") {
+		t.Errorf("log line = %q, expected it to flag the truncation as a possible pagination gap", found)
 	}
 	if strings.Contains(found, "has no installation") {
 		t.Errorf("log line = %q, should not confidently claim no installation when the result set was truncated", found)
@@ -755,7 +792,8 @@ func TestMintOwnerAuth_TruncatedInstallationsListYieldsAmbiguousError(t *testing
 	for i := range installations {
 		installations[i] = gh.AppInstallation{ID: int64(i + 1), Account: fmt.Sprintf("someorg-%03d", i)}
 	}
-	srv, _ := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	srv, fake := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.neverShortPage = true // simulate a server that never signals the end of the list
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -801,7 +839,10 @@ func TestReconcile_PopulatesInstallationRepoCache(t *testing.T) {
 		{ID: 111, Account: "handarbeit", RepositorySelection: "all"},
 		{ID: 222, Account: "someorg", RepositorySelection: "selected"},
 	}, func() time.Time { return time.Now().Add(time.Hour) })
-	fake.selectedRepos = map[int64][]string{222: {"someorg/repo-one"}}
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"}, // "all"-mode installation: FetchInstallationRepositories is now called unconditionally too (#1641)
+		222: {"someorg/repo-one"},
+	}
 	defer srv.Close()
 
 	_, err := Reconcile(context.Background(), Options{
@@ -850,7 +891,10 @@ func TestReconcile_InstallationRepoCache_KeysAreLowerCased(t *testing.T) {
 		{ID: 111, Account: "handarbeit", RepositorySelection: "all"},
 		{ID: 222, Account: "someorg", RepositorySelection: "selected"},
 	}, func() time.Time { return time.Now().Add(time.Hour) })
-	fake.selectedRepos = map[int64][]string{222: {"SomeOrg/repo-one"}}
+	fake.selectedRepos = map[int64][]string{
+		111: {"HandArbeit/fabrik"}, // "all"-mode installation: FetchInstallationRepositories is now called unconditionally too (#1641)
+		222: {"SomeOrg/repo-one"},
+	}
 	defer srv.Close()
 
 	_, err := Reconcile(context.Background(), Options{
@@ -1023,9 +1067,10 @@ func TestReconcile_AppIDChange_ClearsStaleSecretsAndCache(t *testing.T) {
 	// Reconcile now runs against a *different* App ID (99), e.g. because the
 	// operator pointed github_app_id at a new App while reusing the same
 	// AppStatePath.
-	srv, _ := newFakeAppServer("new-app", []gh.AppInstallation{{ID: 222, Account: "someorg"}}, func() time.Time {
+	srv, fake := newFakeAppServer("new-app", []gh.AppInstallation{{ID: 222, Account: "someorg"}}, func() time.Time {
 		return time.Now().Add(time.Hour)
 	})
+	fake.selectedRepos = map[int64][]string{222: {"someorg/repo-one"}}
 	defer srv.Close()
 
 	if _, err := Reconcile(context.Background(), Options{
@@ -1895,7 +1940,11 @@ func TestReconcile_JustBootstrapped_PersistentIdentityFailure_WithPinnedInstalla
 	}
 }
 
-func TestReconcile_NoWatchedRepos_MintsNothing(t *testing.T) {
+// TestReconcile_NoWatchedRepos_DerivesFromInstallations is AC1's direct
+// regression test: with no watched_repos configured at all, Reconcile must
+// derive its repo set from the App's installations rather than minting
+// nothing (the pre-#1641 behavior, when watched_repos was the sole input).
+func TestReconcile_NoWatchedRepos_DerivesFromInstallations(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
 	defer func() { runManifestFlow = oldFlow }()
@@ -1905,6 +1954,7 @@ func TestReconcile_NoWatchedRepos_MintsNothing(t *testing.T) {
 	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{111: {"handarbeit/fabrik", "handarbeit/other"}}
 	defer srv.Close()
 
 	r, err := Reconcile(context.Background(), Options{
@@ -1914,11 +1964,18 @@ func TestReconcile_NoWatchedRepos_MintsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if r.InstallationCount() != 0 {
-		t.Errorf("InstallationCount() = %d, want 0 with no watched repos", r.InstallationCount())
+	if r.InstallationCount() != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 — an installed owner must be minted even with no watched_repos filter (AC1)", r.InstallationCount())
 	}
-	if fake.mintCount.Load() != 0 {
-		t.Errorf("mintCount = %d, want 0 (no installation calls with zero watched repos)", fake.mintCount.Load())
+	if fake.mintCount.Load() != 1 {
+		t.Errorf("mintCount = %d, want 1", fake.mintCount.Load())
+	}
+	if _, err := r.ClientForRepo(context.Background(), "handarbeit", "fabrik"); err != nil {
+		t.Errorf("expected a client for handarbeit's installed repo with no watched_repos filter: %v", err)
+	}
+	derived := r.LastDerived()
+	if len(derived.Repos) != 2 {
+		t.Errorf("LastDerived().Repos = %v, want both of handarbeit's accessible repos with no filter applied", derived.Repos)
 	}
 }
 

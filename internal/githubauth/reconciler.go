@@ -721,12 +721,23 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 	logDerivedSet(set, logf)
 	guideMissingInstallations(opts, slug, set, logf)
 
+	// repoCache only gets an entry for an installation Derive got a
+	// definitive answer for this round — one whose FetchInstallationRepositories
+	// call actually succeeded (RepoListError == ""). An installation whose
+	// listing failed this round (a transient error) contributes no entry at
+	// all, mirroring the pre-Derive discovery loop's repoVerifyFailed
+	// handling: saveInstallationRepoCache's per-owner merge then leaves that
+	// owner's last-known-good cache entry untouched instead of wiping it to
+	// empty over a transient hiccup.
 	repoCache := make(map[string][]string)
 	for _, dr := range set.Repos {
 		key := strings.ToLower(dr.Owner)
 		repoCache[key] = append(repoCache[key], dr.Repo)
 	}
 	for _, inst := range set.Installations {
+		if inst.RepoListError != "" {
+			continue
+		}
 		key := strings.ToLower(inst.Account)
 		if _, ok := repoCache[key]; !ok {
 			repoCache[key] = []string{}
