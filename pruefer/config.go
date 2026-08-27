@@ -27,7 +27,12 @@ const (
 	DefaultMaxDiffBytes   = 500_000 // 500 KB
 	DefaultConfigPath     = ".pruefer/config.yaml"
 	DefaultPrivateKeyPath = ".pruefer/app-private-key.pem"
-	DefaultLogPath        = ".pruefer/pruefer.log"
+	// DefaultAppStatePath is where the auth reconciler persists its own
+	// non-key metadata (App ID once manifest-created, slug, webhook secret,
+	// client ID/secret, installation cache) — see internal/githubauth.
+	// Never written into config.yaml itself.
+	DefaultAppStatePath = ".pruefer/app-state.json"
+	DefaultLogPath      = ".pruefer/pruefer.log"
 )
 
 // Defaults for the event-driven (Hookdeck) ingestion surface, justified in
@@ -49,18 +54,20 @@ const (
 // applying the flag > env > YAML file > default precedence chain in
 // LoadConfig.
 //
-// Every field carries a `reload:"live|restart|skip"` struct tag — the single
-// source of truth applyConfigReload uses both to decide which changed
-// fields it may write into a running Daemon on SIGHUP (see
-// pruefer/execute.go's handleReload) and to render the R6 diff summary.
-// TestConfig_AllFieldsClassified asserts every field has one, so adding a
-// field without a tag fails the build's tests rather than silently
-// defaulting to some behavior. See adrs/1640-pruefer-config-reload.md.
+// Every field carries a `reload:"live|restart|skip"` struct tag — the
+// single source of truth applyConfigReload uses both to decide which
+// changed fields it may write into a running Daemon on SIGHUP (see
+// execute.go's handleReload) and to render the reload diff summary. A field
+// tagged "live" is applied without a restart; "restart" is reported as
+// changed but deliberately left untouched (its value can only take effect
+// on the next process start); "skip" is neither reported nor applied
+// (VersionRequested only — never a real runtime value). See ADR-1640.
 type Config struct {
 	// WatchedRepos is tagged "live" but is never applied through the
 	// generic reflection loop in applyConfigReload — it's diffed and
-	// applied specially (diffRepos) so R6's summary can name individual
-	// repos added/removed rather than a single before/after slice dump.
+	// applied specially (diffRepos) so the reload summary can name
+	// individual repos added/removed rather than a single before/after
+	// slice dump.
 	WatchedRepos   []string      `reload:"live"` // "owner/repo"
 	PollInterval   time.Duration `reload:"live"`
 	Model          string        `reload:"live"`
@@ -112,10 +119,18 @@ type Config struct {
 	// watched repo, regardless of owner, through this one installation's
 	// token — preserving pre-multi-installation behavior exactly. Zero (the
 	// default) means resolve one installation per distinct owner present in
-	// WatchedRepos instead (see BootstrapMulti in pruefer/auth.go).
-	// Restart-only: it governs which App identity BootstrapMulti resolves at
-	// startup, not something a reload can safely re-derive.
+	// WatchedRepos instead (see internal/githubauth.Reconcile). Restart-only:
+	// it governs which App identity Reconcile resolves at startup, not
+	// something a reload can safely re-derive.
 	AppInstallationID int64 `reload:"restart"`
+	// AppStatePath is where the auth reconciler persists its own non-key
+	// metadata — see DefaultAppStatePath.
+	AppStatePath string `reload:"restart"`
+	// NoBrowser skips attempting to open a local browser during first-run
+	// GitHub App manifest setup — the setup URL is always printed
+	// regardless. Set this in headless/SSH/CI environments where no local
+	// browser exists to launch.
+	NoBrowser bool `reload:"restart"`
 
 	// AutoUpgrade enables self-upgrade checks at the poll boundary (see
 	// Daemon.checkAndUpgrade in pruefer/upgrade.go). Default false, mirroring
@@ -138,7 +153,7 @@ type Config struct {
 	// Reconciliation* fields below). See adrs/1254-*.md. Restart-only:
 	// switching modes means constructing (or tearing down) a whole
 	// events.EventSource, including its Hookdeck WebSocket session and
-	// dedupe ring (R3) — out of scope for a live reload.
+	// dedupe ring — out of scope for a live reload.
 	EventSource string `reload:"restart"`
 
 	// HookdeckAPIKeyEnv names the environment variable holding the
@@ -168,7 +183,8 @@ type Config struct {
 	// used as a safety net in event-driven mode — a separate field from
 	// PollInterval, which remains poll-only mode's interval, unaffected by
 	// this one. Only consulted when EventSource == EventSourceHookdeck.
-	// Live: runEventDriven calls ticker.Reset when it detects a change.
+	// Live: runEventDriven's ticker picks up the new value on its next
+	// reconciliationFallbackInterval() read.
 	ReconciliationFallbackInterval time.Duration `reload:"live"`
 }
 
@@ -190,6 +206,8 @@ type yamlConfig struct {
 	AppID                   *int64   `yaml:"github_app_id"`
 	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
 	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
+	AppStatePath            string   `yaml:"github_app_state_path"`
+	NoBrowser               *bool    `yaml:"no_browser"`
 	TUI                     *bool    `yaml:"tui"`
 	LogFile                 *string  `yaml:"log_file"`
 	AutoUpgrade             *bool    `yaml:"auto_upgrade"`
@@ -241,6 +259,8 @@ type flagValues struct {
 	appID                   int64
 	appPrivateKeyPath       string
 	appInstallationID       int64
+	appStatePath            string
+	noBrowser               bool
 	configPath              string
 	noTUI                   bool
 	logFile                 string
@@ -277,6 +297,8 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
 	fs.StringVar(&fv.appPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's PEM private key")
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
+	fs.StringVar(&fv.appStatePath, "github-app-state-path", "", "Path to the auth reconciler's app-state file")
+	fs.BoolVar(&fv.noBrowser, "no-browser", false, "Skip attempting to open a local browser during first-run GitHub App setup")
 	fs.StringVar(&fv.configPath, "config", DefaultConfigPath, "Path to Pruefer's YAML config file")
 	fs.BoolVar(&fv.noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
@@ -321,6 +343,7 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedPaths:     yc.ExcludedPaths,
 		ExcludedLabels:    yc.ExcludedLabels,
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
+		AppStatePath:      DefaultAppStatePath,
 		TUI:               true,
 		LogFile:           DefaultLogPath,
 		AutoUpgrade:       false,
@@ -366,6 +389,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AppInstallationID != nil {
 		cfg.AppInstallationID = *yc.AppInstallationID
+	}
+	if yc.AppStatePath != "" {
+		cfg.AppStatePath = yc.AppStatePath
+	}
+	if yc.NoBrowser != nil {
+		cfg.NoBrowser = *yc.NoBrowser
 	}
 	if yc.LogFile != nil {
 		cfg.LogFile = *yc.LogFile
@@ -437,6 +466,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["github-app-installation-id"] {
 		cfg.AppInstallationID = fv.appInstallationID
+	}
+	if explicit["github-app-state-path"] {
+		cfg.AppStatePath = fv.appStatePath
+	}
+	if explicit["no-browser"] {
+		cfg.NoBrowser = fv.noBrowser
 	}
 	if explicit["notui"] {
 		cfg.TUI = !fv.noTUI
@@ -541,6 +576,14 @@ func applyEnv(cfg *Config) {
 			cfg.AppInstallationID = n
 		}
 	}
+	if v := os.Getenv("PRUEFER_GITHUB_APP_STATE_PATH"); v != "" {
+		cfg.AppStatePath = v
+	}
+	if v := os.Getenv("PRUEFER_NO_BROWSER"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.NoBrowser = b
+		}
+	}
 	if v := os.Getenv("PRUEFER_TUI"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.TUI = b
@@ -609,18 +652,18 @@ const (
 )
 
 // FieldChange records one Config field's old and new value, formatted for
-// the R6 log summary.
+// the reload log summary.
 type FieldChange struct {
 	Field string
 	Old   string
 	New   string
 }
 
-// ReloadDiff summarizes what a reload attempt changed (R6). ReposAdded and
+// ReloadDiff summarizes what a reload attempt changed. ReposAdded and
 // ReposRemoved report WatchedRepos at repo granularity rather than as a
 // single before/after field dump; FieldsChanged covers every other changed
 // field that was actually applied; RestartOnlyChanged covers every changed
-// field that was reported but deliberately left untouched (R2/AC4).
+// field that was reported but deliberately left untouched.
 type ReloadDiff struct {
 	ReposAdded         []string
 	ReposRemoved       []string
@@ -666,11 +709,10 @@ func diffRepos(oldRepos, newRepos []string) (added, removed []string) {
 // "live" overwritten by cand's value — and a ReloadDiff describing what
 // changed. A field tagged "restart" (or carrying no recognized tag at all)
 // that changed value is reported in RestartOnlyChanged but merged keeps
-// old's value for it: AC4 ("reported clearly... never silently ignored")
-// is true of the log, and "not applied" (AC4) is literally true of merged,
-// not just of runtime behavior. cand is assumed already fully parsed and
-// validated by LoadConfig — this function performs no validation of its
-// own, only classification and merging.
+// old's value for it: it is reported clearly and never silently ignored in
+// the log, while merged genuinely does not apply it. cand is assumed
+// already fully parsed and validated by LoadConfig — this function performs
+// no validation of its own, only classification and merging.
 func applyConfigReload(old, cand Config) (Config, ReloadDiff) {
 	merged := old
 	var diff ReloadDiff
@@ -723,7 +765,7 @@ func applyConfigReload(old, cand Config) (Config, ReloadDiff) {
 	return merged, diff
 }
 
-// logReloadSummary emits R6's diff-style summary of one reload attempt to
+// logReloadSummary emits a diff-style summary of one reload attempt to
 // .pruefer/pruefer.log (via logf), naming every repo added/removed and
 // every other field that changed — including restart-only fields that were
 // reported but not applied.

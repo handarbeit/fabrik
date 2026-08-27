@@ -44,6 +44,12 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if cfg.AppPrivateKeyPath != DefaultPrivateKeyPath {
 		t.Errorf("AppPrivateKeyPath = %q, want %q", cfg.AppPrivateKeyPath, DefaultPrivateKeyPath)
 	}
+	if cfg.AppStatePath != DefaultAppStatePath {
+		t.Errorf("AppStatePath = %q, want %q", cfg.AppStatePath, DefaultAppStatePath)
+	}
+	if cfg.NoBrowser {
+		t.Errorf("NoBrowser = true, want false (default)")
+	}
 	if len(cfg.WatchedRepos) != 0 {
 		t.Errorf("WatchedRepos = %v, want empty", cfg.WatchedRepos)
 	}
@@ -625,13 +631,78 @@ func TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue(t *testing.T
 	}
 }
 
+func TestLoadConfig_AppStatePathAndNoBrowserPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+github_app_state_path: /yaml/app-state.json
+no_browser: true
+`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppStatePath != "/yaml/app-state.json" {
+		t.Errorf("AppStatePath = %q, want /yaml/app-state.json (from YAML)", cfg.AppStatePath)
+	}
+	if !cfg.NoBrowser {
+		t.Errorf("NoBrowser = false, want true (from YAML)")
+	}
+
+	t.Setenv("PRUEFER_GITHUB_APP_STATE_PATH", "/env/app-state.json")
+	t.Setenv("PRUEFER_NO_BROWSER", "false")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppStatePath != "/env/app-state.json" {
+		t.Errorf("AppStatePath = %q, want /env/app-state.json (env should override YAML)", cfg.AppStatePath)
+	}
+	if cfg.NoBrowser {
+		t.Errorf("NoBrowser = true, want false (env should override YAML)")
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-github-app-state-path", "/flag/app-state.json", "-no-browser"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppStatePath != "/flag/app-state.json" {
+		t.Errorf("AppStatePath = %q, want /flag/app-state.json (flag should override env)", cfg.AppStatePath)
+	}
+	if !cfg.NoBrowser {
+		t.Errorf("NoBrowser = false, want true (flag should override env)")
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"a", []string{"a"}},
+		{"a,b,c", []string{"a", "b", "c"}},
+		{" a , b ,c ", []string{"a", "b", "c"}},
+		{"a,,b", []string{"a", "b"}},
+	}
+	for _, tc := range cases {
+		got := splitCSV(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitCSV(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitCSV(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 // TestConfig_AllFieldsClassified asserts every field in Config carries a
-// recognized `reload` struct tag (#1640, R2) — a field added without one
+// recognized `reload` struct tag (ADR-1640) — a field added without one
 // fails this test rather than silently falling through applyConfigReload's
-// conservative "treat as restart-only" default. Non-vacuous: adding a field
-// with no tag, or a misspelled one, to a scratch copy of Config fails this
-// exact assertion (verified by hand while writing this test, against a
-// throwaway extra field).
+// conservative "treat as restart-only" default.
 func TestConfig_AllFieldsClassified(t *testing.T) {
 	typ := reflect.TypeOf(Config{})
 	for i := 0; i < typ.NumField(); i++ {
@@ -689,7 +760,6 @@ func TestApplyConfigReload_RestartOnlyFieldIsReportedNotApplied(t *testing.T) {
 
 	merged, diff := applyConfigReload(old, cand)
 
-	// AC4: reported...
 	if len(diff.RestartOnlyChanged) != 2 {
 		t.Fatalf("RestartOnlyChanged = %v, want 2 entries (AppID, LogFile)", diff.RestartOnlyChanged)
 	}
@@ -708,7 +778,6 @@ func TestApplyConfigReload_RestartOnlyFieldIsReportedNotApplied(t *testing.T) {
 			t.Errorf("RestartOnlyChanged = %v, missing %q", names, want)
 		}
 	}
-	// ...but never applied (AC4: "not applied", literally true of merged).
 	if merged.AppID != 1 {
 		t.Errorf("merged.AppID = %d, want 1 (unchanged — restart-only)", merged.AppID)
 	}
@@ -738,9 +807,6 @@ func TestApplyConfigReload_MixOfLiveAndRestartOnlyBothReported(t *testing.T) {
 
 	merged, diff := applyConfigReload(old, cand)
 
-	// The live field is applied even though a restart-only field also
-	// changed in the same reload (my reading of R2: a restart-only change
-	// is reported, not a reason to withhold an otherwise-safe field).
 	if merged.Model != "opus" {
 		t.Errorf("merged.Model = %q, want opus (a restart-only change elsewhere must not block a live field)", merged.Model)
 	}
@@ -756,30 +822,5 @@ func TestDiffRepos_OrderInsensitive(t *testing.T) {
 	added, removed := diffRepos([]string{"a/one", "a/two"}, []string{"a/two", "a/one"})
 	if len(added) != 0 || len(removed) != 0 {
 		t.Errorf("diffRepos with reordered-only input = added:%v removed:%v, want both empty", added, removed)
-	}
-}
-
-func TestSplitCSV(t *testing.T) {
-	cases := []struct {
-		in   string
-		want []string
-	}{
-		{"", nil},
-		{"a", []string{"a"}},
-		{"a,b,c", []string{"a", "b", "c"}},
-		{" a , b ,c ", []string{"a", "b", "c"}},
-		{"a,,b", []string{"a", "b"}},
-	}
-	for _, tc := range cases {
-		got := splitCSV(tc.in)
-		if len(got) != len(tc.want) {
-			t.Errorf("splitCSV(%q) = %v, want %v", tc.in, got, tc.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != tc.want[i] {
-				t.Errorf("splitCSV(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
-			}
-		}
 	}
 }

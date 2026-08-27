@@ -290,6 +290,14 @@ and should recognize.
   matches the default again (the `base:` label removed or changed) —
   `routeQueuedGroup` re-evaluates every Queued item every poll, so no
   settle scan is needed. See ADR-1647.
+- **`fabrik:nondefault-base-pr-noted`** — Set after a one-time comment names
+  an item's PR and explains that GitHub creates no Development-panel
+  issue↔PR link at all for a PR targeting a non-default base branch (only
+  relevant on a `base:<branch>` item). Purely informational — does not gate
+  dispatch, does not suppress anything, and (unlike `fabrik:awaiting-close`)
+  carries no retry/escalation: a failed comment post is not retried, since
+  there's no durable outstanding action to retry toward, only a missed
+  one-time notice.
 
 ## Notes for skill authors
 

@@ -23,9 +23,58 @@ Review state ("already reviewed at SHA X") is derived from GitHub itself (existi
 
 ## Setup
 
-### 1. Create a GitHub App
+Pruefer authenticates as a GitHub App so its reviews are attributed to a genuine bot identity (`<app-slug>[bot]`) — this is what makes "review identity distinct from PR author" structural rather than a setup mistake waiting to happen. An idempotent **auth reconciler** (`internal/githubauth`) drives this to a working state on every run: if usable local credentials already exist, it skips straight to verifying installations; if not, it walks you through creating your own dedicated App.
 
-Pruefer authenticates as a GitHub App so its reviews are attributed to a genuine bot identity (`<app-slug>[bot]`) — this is what makes "review identity distinct from PR author" structural rather than a setup mistake waiting to happen.
+### First run: automatic setup (recommended)
+
+There's no GitHub App to hand-register up front. Just configure your watched repos and run Pruefer:
+
+```yaml
+# .pruefer/config.yaml
+watched_repos:
+  - your-org/repo-one
+poll_interval_seconds: 120
+model: sonnet
+```
+
+```bash
+go build -o bin/pruefer ./cmd/pruefer
+./bin/pruefer
+```
+
+With no usable local App credentials, Pruefer walks you through GitHub's **App Manifest flow**:
+
+1. Pruefer starts a temporary local HTTP listener and opens your browser to a page that hands GitHub a pre-filled manifest — scoped to exactly the four permissions below, with webhook delivery disabled (Pruefer polls; see ADR-1113/ADR-032). If a browser can't be opened (e.g. an SSH/headless session), or you'd rather it never tried, Pruefer prints the URL to open manually instead — pass `-no-browser`, set `PRUEFER_NO_BROWSER=1`, or `no_browser: true` in config to always skip the browser-open attempt.
+
+   **Running Pruefer on a remote host (VPS, container, etc.) and completing setup from your laptop's browser?** The setup listener always binds to `127.0.0.1` *on the machine running Pruefer* — both the printed setup page and GitHub's subsequent redirect back with the App's credentials live at `http://127.0.0.1:<port>` on that machine, where `<port>` is chosen by the OS fresh on every run. A browser on a different machine can't reach that address at all; the printed setup URL will just fail to connect. Forward the port over SSH before opening the printed URL:
+
+   ```bash
+   ssh -L <port>:127.0.0.1:<port> user@remote-host
+   ```
+
+   Since `<port>` is only known once Pruefer prints the setup URL, start Pruefer first (with `-no-browser` so it doesn't try to open a browser on the remote host itself), copy the port out of the printed URL, open the SSH tunnel, then open that URL in your local browser.
+2. On GitHub, confirm (or rename) the App and click **Create GitHub App**. GitHub redirects back to Pruefer's local listener with the new App's credentials — the flow expires after about an hour if abandoned; just restart Pruefer to try again, your existing config is never disturbed by an abandoned or expired attempt.
+3. Pruefer saves the private key to `.pruefer/app-private-key.pem` and everything else (App ID, slug, webhook secret, client ID/secret) to `.pruefer/app-state.json` — both gitignored, neither ever committed or logged.
+4. Pruefer then checks every account named in `watched_repos` for an installation of the new App, printing guided-installation progress as it goes:
+
+   ```
+   ✓ your-org/repo-one authorized
+   ! another-org has no installation → opening https://github.com/apps/<your-app-slug>/installations/new …
+   ```
+
+   Follow the printed link, install the App on the account, and restart Pruefer — reconciliation re-runs automatically and picks up the new installation. (Adding a repo under a new owner later works the same way: add it to `watched_repos` and restart.)
+
+The App this flow creates is **yours** — owned by whichever GitHub account performs the manifest flow, installable only where you choose to install it. This is not a shared, publicly-installable App: each user who sets up their own Pruefer instance this way gets their own dedicated App, with no credential ever shared between instances.
+
+### Subsequent runs
+
+Once `.pruefer/app-private-key.pem` and `.pruefer/app-state.json` exist (or a manually-registered `github_app_id` + PEM — see below), every later run finds valid local credentials and skips the manifest flow entirely, going straight to installation/token verification — no prompts, no behavior change to *auth* from run to run.
+
+**One caveat**: `.pruefer/app-state.json` is now written (created if absent) on every run, in every mode — including manual/compat setup and even when `github_app_installation_id` is pinned, not only after the manifest flow. It holds a diagnostics-only cache of which watched repos each installation authorizes (`InstallationRepoCache`), refreshed on each reconciliation pass; it is never read to make an authorization decision — `.pruefer/app-private-key.pem` plus a live GitHub call is always authoritative — and it does not change which repos Pruefer polls. An existing single-App deployment that never had this file before this change will see it appear on the first run after upgrading; nothing else about that deployment's behavior changes.
+
+### Manual setup (compat mode)
+
+Registering the App yourself is still fully supported — this is also how Pruefer's original shared-App deployment (`handarbeit-pruefer`) keeps working unchanged (aside from the new `.pruefer/app-state.json` diagnostics file noted above).
 
 1. Go to your org or personal account's **Settings → Developer settings → GitHub Apps → New GitHub App**.
 2. Fill in:
@@ -36,17 +85,20 @@ Pruefer authenticates as a GitHub App so its reviews are attributed to a genuine
    - **Pull requests**: Read and write (review submission, reading PR metadata/diff)
    - **Contents**: Read (cloning the PR head commit)
    - **Metadata**: Read (mandatory baseline for every App)
-   - **Issues**: Read (reading `/pruefer review` comments and their reactions — GitHub's Issue Comments API also covers PR-conversation comments)
+   - **Issues**: Read and write (reading `/pruefer review` comments and leaving the eyes/rocket acknowledgment reaction on them — GitHub's Issue Comments API also covers PR-conversation comments, and creating a reaction requires write, not just read)
 4. **Where can this GitHub App be installed?**: your choice — "Only on this account" is simplest for a single org.
 5. Click **Create GitHub App**. Note the **App ID** shown on the app's settings page.
 6. Scroll to **Private keys** and click **Generate a private key**. This downloads a `.pem` file — save it somewhere outside version control (Pruefer's default config gitignores `.pruefer/*.pem`).
 7. Click **Install App** (left sidebar) and install it on every account whose repos you list in `watched_repos` — a single App installed on multiple orgs/accounts is exactly the multi-org setup this section leads into.
+8. Set `github_app_id` in `.pruefer/config.yaml` (or `PRUEFER_GITHUB_APP_ID` / `--github-app-id`) and place the downloaded key per "Place the private key" below.
 
-### 2. Place the private key
+Once `github_app_id` and the PEM are both in place, the reconciler recognizes them as valid local credentials on the very next run and never attempts the manifest flow.
 
-Put the downloaded `.pem` file at `.pruefer/app-private-key.pem` (the default `github_app_private_key_path`), or point `github_app_private_key_path` at a different location. **Never** put the key's contents directly in `.env` or the YAML config — Pruefer only ever takes a file path.
+### Place the private key
 
-### 3. Configure Pruefer
+Put the private key `.pem` file (however it was produced — manifest flow or manual registration) at `.pruefer/app-private-key.pem` (the default `github_app_private_key_path`), or point `github_app_private_key_path` at a different location. **Never** put the key's contents directly in `.env` or the YAML config — Pruefer only ever takes a file path.
+
+### Configure Pruefer
 
 Create `.pruefer/config.yaml` (or use flags/env vars — see Configuration below):
 
@@ -56,9 +108,11 @@ watched_repos:
   - your-org/repo-two
   - another-org/repo-three   # a different owner works too — see below
 
-github_app_id: 123456
+# github_app_id: 123456                        # only needed for manual/compat setup — see above
 # github_app_private_key_path: .pruefer/app-private-key.pem  # default shown
 # github_app_installation_id: 0  # 0 = derive installations from watched_repos (see below)
+# github_app_state_path: .pruefer/app-state.json  # default shown — reconciler-owned; never hand-edit this file
+# no_browser: false  # true = never attempt to open a local browser during first-run setup
 
 poll_interval_seconds: 120
 model: sonnet
@@ -76,21 +130,21 @@ max_diff_bytes: 500000
 
 `watched_repos` may list repos across any number of distinct owners. Pruefer groups the list by owner and, for each distinct owner, resolves that owner's App installation and mints it its own token — refreshed independently on its own schedule. A single daemon can therefore cover every org/account the App is installed on, driven entirely by `watched_repos`.
 
-**The set of installations Pruefer ever tokenizes equals exactly the set of owners appearing in `watched_repos` — nothing more.** Pruefer never enumerates "every installation of the App" and acts on all of them; it only ever mints a token for, or contacts, an owner an operator explicitly listed. This is what makes it safe to register the App as installable by anyone: a stranger who installs it on their own account is structurally untouched, because no `watched_repos` entry names them. There's no separate allowlist to maintain — "only act on my own accounts" falls directly out of what's in the config.
+**The set of installations Pruefer ever tokenizes equals exactly the set of owners appearing in `watched_repos` — nothing more.** Pruefer never enumerates "every installation of the App" and acts on all of them; it only ever mints a token for, or contacts, an owner an operator explicitly listed. This is what makes a per-user dedicated App (or, in compat mode, a public App) safe: a stranger who installs it on their own account is structurally untouched, because no `watched_repos` entry names them. There's no separate allowlist to maintain — "only act on my own accounts" falls directly out of what's in the config.
 
 Two consequences:
 
-- If an owner in `watched_repos` has **no** matching App installation, Pruefer fails fast at startup with an error naming that owner (and how to fix it — install the App there).
-- `github_app_installation_id` is now a **legacy pin/escape hatch**, not a requirement. Leave it at `0` (or unset) to let Pruefer resolve one installation per watched owner automatically — this works cleanly even with several installations, as long as every owner you watch has one. Set it explicitly only to force every watched repo through one specific installation's token regardless of owner (the old single-installation behavior, preserved byte-for-byte for existing single-org deployments).
+- If an owner in `watched_repos` has **no** matching App installation, Pruefer keeps running for every other, already-authorized owner and prints a guided installation link for the missing one (see "First run" above) rather than failing to start.
+- `github_app_installation_id` is a **legacy pin/escape hatch**, not a requirement. Leave it at `0` (or unset) to let Pruefer resolve one installation per watched owner automatically — this works cleanly even with several installations, as long as every owner you watch has one. Set it explicitly only to force every watched repo through one specific installation's token regardless of owner (the old single-installation behavior, preserved byte-for-byte for existing single-org deployments).
 
-### 4. Run it
+### Run it
 
 ```bash
-go build -o pruefer ./cmd/pruefer
-./pruefer
+go build -o bin/pruefer ./cmd/pruefer
+./bin/pruefer
 ```
 
-Pruefer loads `.env` (via the same `godotenv`-based loader Fabrik uses), reads `.pruefer/config.yaml`, bootstraps GitHub App auth, and polls until interrupted (SIGINT/SIGTERM). Pruefer also needs a working `claude` CLI installation with a valid Claude Code subscription on the host it runs on — a separate credential from the GitHub App.
+Pruefer loads `.env` (via the same `godotenv`-based loader Fabrik uses), reads `.pruefer/config.yaml`, reconciles GitHub App auth (running the manifest flow on first use, or verifying existing credentials on every later run — see Setup above), and polls until interrupted (SIGINT/SIGTERM). Pruefer also needs a working `claude` CLI installation with a valid Claude Code subscription on the host it runs on — a separate credential from the GitHub App.
 
 A lock file at `.pruefer/pruefer.lock` prevents two instances from polling the same working directory concurrently.
 
@@ -272,9 +326,11 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--excluded-labels` | `PRUEFER_EXCLUDED_LABELS` | `excluded_labels` | (none) | Skip if any label matches |
 | `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns, filtered **per file** and applied before `max_diff_bytes` is measured; a PR is skipped whole only if **every** touched path matches |
 | `--request-changes-threshold` | `PRUEFER_REQUEST_CHANGES_THRESHOLD` | `request_changes_threshold` | (none — disabled) | `low`, `medium`, `high`, or `critical`; submits `REQUEST_CHANGES` when a finding's severity meets or exceeds this tier. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes). |
-| `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none — required) | |
-| `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | |
+| `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none) | Only needed for manual/compat setup — omit it to let first-run manifest setup create and track its own App ID in `github_app_state_path` instead |
+| `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | Read from and written to by both manifest and manual setup |
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from `watched_repos`) | Legacy pin: set to force every watched repo through one specific installation, regardless of owner |
+| `--github-app-state-path` | `PRUEFER_GITHUB_APP_STATE_PATH` | `github_app_state_path` | `.pruefer/app-state.json` | Reconciler-owned (App ID once manifest-created, slug, webhook secret, client ID/secret); never hand-edit this file |
+| `--no-browser` | `PRUEFER_NO_BROWSER` | `no_browser` | `false` | Skip attempting to open a local browser during first-run manifest setup — the setup URL is always printed regardless |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
 | `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |

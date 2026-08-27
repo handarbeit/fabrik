@@ -3,6 +3,7 @@ package pruefer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,53 @@ func TestNewDaemon_EmptyLogFileDisablesFileLogging(t *testing.T) {
 
 	if Logf != nil {
 		t.Error("NewDaemon assigned pruefer.Logf despite an empty LogFile; want it left nil (file logging disabled)")
+	}
+}
+
+// TestWireLogf_IdempotentWhenLogfAlreadySet is the regression test for a
+// review finding: execute.go used to call wireLogf only via NewDaemon,
+// which runs after githubauth.Reconcile — so Reconcile's own first-run/
+// self-heal auth log lines always fell back to raw stderr regardless of
+// cfg.LogFile, since Logf wasn't wired yet at the time they were emitted.
+// execute.go now calls wireLogf itself, before Reconcile, and NewDaemon's
+// own subsequent call must become a no-op rather than re-opening the log
+// file a second time (which would leak the first handle) or discarding the
+// already-wired hook.
+func TestWireLogf_IdempotentWhenLogfAlreadySet(t *testing.T) {
+	resetLogf(t)
+	Logf = nil
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "pruefer.log")
+
+	firstClose := wireLogf(Config{LogFile: logPath}, false)
+	defer firstClose()
+	firstLogf := Logf
+	if firstLogf == nil {
+		t.Fatal("first wireLogf call left Logf nil")
+	}
+	Logf(0, "test", "before second wire\n")
+
+	secondClose := wireLogf(Config{LogFile: logPath}, false)
+	if secondClose == nil {
+		t.Fatal("second wireLogf call returned a nil close func")
+	}
+	if err := secondClose(); err != nil {
+		t.Errorf("second (no-op) closeLog returned an error: %v", err)
+	}
+	// The no-op second close must not have torn down the first wiring —
+	// Logf should be untouched and still usable.
+	if Logf == nil {
+		t.Fatal("second wireLogf's no-op closeLog cleared Logf; want the first wiring left intact")
+	}
+	Logf(0, "test", "after second wire\n")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	if !strings.Contains(string(data), "before second wire") || !strings.Contains(string(data), "after second wire") {
+		t.Errorf("log file content = %q, want both lines present (single file handle, not reopened)", data)
 	}
 }
 

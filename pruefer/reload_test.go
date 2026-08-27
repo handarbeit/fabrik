@@ -2,7 +2,12 @@ package pruefer
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -13,14 +18,63 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/githubauth"
 )
 
-// TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle covers AC1: a
-// repo added to watched_repos is polled on the very next poll cycle after
-// ApplyReload, with no restart — asserted against a test daemon (not
+// writeTestPrivateKey generates a small (test-only) RSA key, writes it as a
+// PEM file under dir, and returns the file path.
+func writeTestPrivateKey(t *testing.T, dir string) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generating test RSA key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	path := filepath.Join(dir, "app-private-key.pem")
+	if err := os.WriteFile(path, pemBytes, 0600); err != nil {
+		t.Fatalf("writing private key file: %v", err)
+	}
+	return path
+}
+
+// historyLister wraps *fakeLister to additionally record the order and
+// identity of every ListOpenPRs call, keyed "owner/repo" — a thin local
+// helper rather than a change to the shared fakeLister, since no other
+// test needs per-repo call ordering.
+type historyLister struct {
+	*fakeLister
+	mu      sync.Mutex
+	history []string
+}
+
+func newHistoryLister() *historyLister {
+	return &historyLister{fakeLister: newFakeLister()}
+}
+
+func (h *historyLister) ListOpenPRs(owner, repo string) ([]gh.PRDetails, error) {
+	h.mu.Lock()
+	h.history = append(h.history, owner+"/"+repo)
+	h.mu.Unlock()
+	return h.fakeLister.ListOpenPRs(owner, repo)
+}
+
+func (h *historyLister) historySnapshot() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.history))
+	copy(out, h.history)
+	return out
+}
+
+// TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle covers ADR-1640
+// AC1: a repo added to watched_repos is polled on the very next poll cycle
+// after ApplyReload, with no restart — asserted against a test daemon (not
 // manual observation, per the AC's own wording).
 func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
-	client := newFakeLister()
+	client := newHistoryLister()
 	client.prsByRepo["owner/repo1"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
 	client.prsByRepo["owner/repo2"] = []gh.PRDetails{{Number: 2, Author: "alice", HeadSHA: "sha2"}}
 
@@ -33,7 +87,7 @@ func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
 	}
 
 	d.poll(context.Background())
-	if hist := client.listOpenPRsHistorySnapshot(); len(hist) != 1 || hist[0] != "owner/repo1" {
+	if hist := client.historySnapshot(); len(hist) != 1 || hist[0] != "owner/repo1" {
 		t.Fatalf("first cycle history = %v, want [owner/repo1] only", hist)
 	}
 
@@ -41,7 +95,7 @@ func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
 	d.ApplyReload(merged, nil, nil) // same owner already has a client — nothing new to add
 
 	d.poll(context.Background())
-	hist := client.listOpenPRsHistorySnapshot()
+	hist := client.historySnapshot()
 	if len(hist) != 3 {
 		t.Fatalf("history after reload = %v, want 3 entries (repo1, then repo1+repo2)", hist)
 	}
@@ -55,7 +109,7 @@ func TestDaemon_ApplyReload_WatchedReposAddedPolledNextCycle(t *testing.T) {
 // next cycle, and a review already dispatched against it while the reload
 // lands completes rather than being cancelled (R3).
 func TestDaemon_ApplyReload_RemovedRepoStopsPollingButInFlightReviewCompletes(t *testing.T) {
-	client := newFakeLister()
+	client := newHistoryLister()
 	client.prsByRepo["owner/repoA"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
 	client.prsByRepo["owner/repoB"] = []gh.PRDetails{{Number: 2, Author: "alice", HeadSHA: "sha2"}}
 
@@ -75,9 +129,6 @@ func TestDaemon_ApplyReload_RemovedRepoStopsPollingButInFlightReviewCompletes(t 
 		close(done)
 	}()
 
-	// Wait until both reviews (repoA's and repoB's) have actually
-	// dispatched and are blocked on claude.release, so the reload below
-	// genuinely lands while repoA's review is in flight.
 	waitUntil(t, 2*time.Second, func() bool { return claude.currentCount() == 2 })
 
 	merged, _ := applyConfigReload(d.config(), Config{WatchedRepos: []string{"owner/repoB"}, ConcurrencyCap: 3})
@@ -94,10 +145,9 @@ func TestDaemon_ApplyReload_RemovedRepoStopsPollingButInFlightReviewCompletes(t 
 		t.Errorf("submitCallCount = %d, want 2 — repoA's review (removed mid-flight) must still complete, not be cancelled", got)
 	}
 
-	// The next cycle no longer polls repoA at all.
 	d.poll(context.Background())
-	hist := client.listOpenPRsHistorySnapshot()
-	for _, h := range hist[2:] { // first two entries are the initial cycle's repoA/repoB
+	hist := client.historySnapshot()
+	for _, h := range hist[2:] {
 		if h == "owner/repoA" {
 			t.Errorf("owner/repoA was polled again after being removed from watched_repos: history = %v", hist)
 		}
@@ -126,10 +176,10 @@ func TestDaemon_Semaphore_ConcurrencyCapLiveResize(t *testing.T) {
 }
 
 // TestDaemon_Semaphore_ResizeDoesNotDisturbInFlightHolder is the mechanism
-// this issue's ADR documents: a holder that acquired a slot on the
-// pre-resize channel keeps releasing into it, undisturbed by a concurrent
-// resize — never blocking, never panicking on a send/receive against a
-// channel nobody else references anymore.
+// ADR-1640 documents: a holder that acquired a slot on the pre-resize
+// channel keeps releasing into it, undisturbed by a concurrent resize —
+// never blocking, never panicking on a send/receive against a channel
+// nobody else references anymore.
 func TestDaemon_Semaphore_ResizeDoesNotDisturbInFlightHolder(t *testing.T) {
 	d := &Daemon{Config: Config{ConcurrencyCap: 1}}
 
@@ -153,13 +203,7 @@ func TestDaemon_Semaphore_ResizeDoesNotDisturbInFlightHolder(t *testing.T) {
 
 // TestDaemon_ConcurrentReloadDuringActivePoll exercises AC7 directly: a
 // reload (ApplyReload) landing concurrently with an active poll cycle, run
-// under -race. This is the surface #1640 introduces: Config and Clients
-// were read-only-after-construction before this issue, from many
-// goroutines with no synchronization; this test fails under `go test -race`
-// against the pre-#1640 code (Config/Clients as plain fields with no cfgMu)
-// specifically because both a reader (poll(), via d.config()/d.client())
-// and a writer (ApplyReload) touch the same fields concurrently here — see
-// #1640/AC7's own "must fail under -race against the pre-fix code" bar.
+// under -race.
 func TestDaemon_ConcurrentReloadDuringActivePoll(t *testing.T) {
 	client := newFakeLister()
 	for i := 1; i <= 20; i++ {
@@ -179,7 +223,6 @@ func TestDaemon_ConcurrentReloadDuringActivePoll(t *testing.T) {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
-	// One goroutine hammering poll() cycles...
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -193,15 +236,13 @@ func TestDaemon_ConcurrentReloadDuringActivePoll(t *testing.T) {
 		}
 	}()
 
-	// ...while another concurrently applies reloads that touch Config,
-	// Clients, and the semaphore all at once.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 20; i++ {
 			newCap := 2 + (i % 5)
 			d.ApplyReload(Config{WatchedRepos: []string{"owner/repo"}, ConcurrencyCap: newCap}, map[string]GitHubLister{
-				"owner": client, // re-affirm the same client, exercising the Clients write path too
+				"owner": client,
 			}, nil)
 		}
 	}()
@@ -219,18 +260,104 @@ func mustFakeClone(t *testing.T) CloneFunc {
 	return fn
 }
 
-// --- handleReload integration tests ---
+// TestDaemon_OwnerReviewsInFlight covers the prefix-matching primitive
+// drainThenStopAuth polls: present only while a prGate for one of owner's
+// repos is held, case-insensitively, and never confused by an unrelated
+// owner whose name happens to share a prefix (e.g. "acme" vs "acme2").
+func TestDaemon_OwnerReviewsInFlight(t *testing.T) {
+	d := &Daemon{}
 
-// setupReloadDaemon writes the given initial YAML, bootstraps auth and a
-// Daemon against it via the real LoadConfig/BootstrapMulti/NewDaemon
-// production path (not a hand-built Config literal — that would carry none
-// of LoadConfig's resolved defaults, making a later reload's diff against
-// it spuriously noisy), and returns the pieces handleReload needs. args is
-// the flag slice a later call to handleReload should reuse, mirroring
-// Execute()'s own single `args` capture.
-func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.AppInstallation) (args []string, authSet *AuthSet, daemon *Daemon, srv *httptest.Server, fake *fakeAppServer, closeLog func() error) {
+	if d.ownerReviewsInFlight("acme") {
+		t.Fatal("expected no reviews in flight for acme before any gate is acquired")
+	}
+
+	_, release := d.acquirePRGate("ACME", "widgets", 7)
+	if !d.ownerReviewsInFlight("acme") {
+		t.Error("expected ownerReviewsInFlight(\"acme\") to be true while a gate for ACME/widgets#7 is held — matching must be case-insensitive")
+	}
+	if d.ownerReviewsInFlight("acme2") {
+		t.Error("expected ownerReviewsInFlight(\"acme2\") to be false — \"acme\" must not prefix-match \"acme2\"'s repos")
+	}
+
+	release()
+	if d.ownerReviewsInFlight("acme") {
+		t.Error("expected no reviews in flight for acme once the gate was released")
+	}
+}
+
+// --- handleReload integration tests (a minimal fake GitHub App server, not
+// internal/githubauth's own unexported test helpers, since this test lives
+// in a different package). ---
+
+// fakeReloadAppServer is a minimal httptest server covering exactly the
+// three GitHub App endpoints Reconcile/MintOwnerAuth need: app identity
+// (/app), installation discovery (/app/installations), and token minting
+// (/app/installations/{id}/access_tokens). Unlike internal/githubauth's own
+// fakeAppServer, this never needs to serve the manifest-exchange endpoint —
+// every test here starts from an already-bootstrapped App (an explicit
+// AppID + on-disk PEM), never the first-run flow.
+type fakeReloadAppServer struct {
+	mu        sync.Mutex
+	mintCalls map[int64]int
+}
+
+func newFakeReloadAppServer(t *testing.T, slug string, installations []gh.AppInstallation) (*httptest.Server, *fakeReloadAppServer) {
 	t.Helper()
-	srv, fake = newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	fake := &fakeReloadAppServer{mintCalls: map[int64]int{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id": 42, "slug": %q}`, slug)
+	})
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("["))
+		for i, inst := range installations {
+			if i > 0 {
+				w.Write([]byte(","))
+			}
+			selection := inst.RepositorySelection
+			if selection == "" {
+				selection = "all"
+			}
+			fmt.Fprintf(w, `{"id": %d, "account": {"login": %q}, "repository_selection": %q}`, inst.ID, inst.Account, selection)
+		}
+		w.Write([]byte("]"))
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		trimmed := strings.TrimPrefix(r.URL.Path, "/app/installations/")
+		trimmed = strings.TrimSuffix(trimmed, "/access_tokens")
+		var instID int64
+		fmt.Sscanf(trimmed, "%d", &instID)
+		fake.mu.Lock()
+		fake.mintCalls[instID]++
+		fake.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"token": "tok-%d", "expires_at": %q}`, instID, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, fake
+}
+
+func (f *fakeReloadAppServer) mintCountFor(installationID int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mintCalls[installationID]
+}
+
+// setupReloadDaemon writes the given initial YAML, reconciles auth and
+// builds a Daemon against it via the real LoadConfig/githubauth.Reconcile/
+// NewDaemon production path, and returns the pieces handleReload needs.
+// args is the flag slice a later call to handleReload should reuse,
+// mirroring Execute()'s own single `args` capture.
+func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.AppInstallation) (args []string, reconciler *githubauth.Reconciler, daemon *Daemon, srv *httptest.Server, fake *fakeReloadAppServer, closeLog func() error) {
+	t.Helper()
+	srv, fake = newFakeReloadAppServer(t, "pruefer-bot", installations)
 
 	configPath := filepath.Join(dir, "config.yaml")
 	args = []string{"-config", configPath, "-github-app-id", "42", "-github-app-private-key-path", keyPath}
@@ -239,16 +366,28 @@ func setupReloadDaemon(t *testing.T, dir, keyPath string, installations []gh.App
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	authSet, err = BootstrapMulti(cfg, srv.URL)
+	reconciler, err = githubauth.Reconcile(context.Background(), githubauth.Options{
+		AppID:             cfg.AppID,
+		AppInstallationID: cfg.AppInstallationID,
+		AppPrivateKeyPath: cfg.AppPrivateKeyPath,
+		AppStatePath:      filepath.Join(dir, "app-state.json"),
+		WatchedRepos:      cfg.WatchedRepos,
+		BaseURL:           srv.URL,
+	})
 	if err != nil {
-		t.Fatalf("BootstrapMulti: %v", err)
+		t.Fatalf("Reconcile: %v", err)
 	}
+	cfg.AppStatePath = filepath.Join(dir, "app-state.json")
 	clients := map[string]GitHubLister{}
-	for owner, c := range authSet.Clients {
-		clients[owner] = c
+	for _, owner := range distinctOwners(cfg.WatchedRepos) {
+		c, err := reconciler.ClientForRepo(context.Background(), owner, "")
+		if err != nil {
+			continue
+		}
+		clients[strings.ToLower(owner)] = c
 	}
-	daemon, closeLog = NewDaemon(cfg, clients, &RealClaudeInvoker{}, nil, authSet.BotLogin)
-	return args, authSet, daemon, srv, fake, closeLog
+	daemon, closeLog = NewDaemon(cfg, clients, &RealClaudeInvoker{}, nil, reconciler.BotLogin())
+	return args, reconciler, daemon, srv, fake, closeLog
 }
 
 // captureLogf swaps in a capturing Logf for the duration of the test and
@@ -281,20 +420,17 @@ func TestHandleReload_MalformedConfigLeavesRunningConfigUntouched(t *testing.T) 
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
-	defer srv.Close()
+	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
 	defer closeLog()
 	snapshot := captureLogf(t)
 
 	before := daemon.config()
 
-	// Corrupt the file mid-write, as an operator saving a half-finished
-	// edit would.
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos: [unterminated"), 0600); err != nil {
 		t.Fatalf("writing malformed config: %v", err)
 	}
 
-	handleReload(context.Background(), args, authSet, daemon)
+	handleReload(context.Background(), args, reconciler, daemon)
 
 	if got := daemon.config(); !reflect.DeepEqual(got, before) {
 		t.Errorf("daemon.config() = %+v, want the original config untouched by the failed reload: %+v", got, before)
@@ -311,22 +447,21 @@ func TestHandleReload_MalformedConfigLeavesRunningConfigUntouched(t *testing.T) 
 	}
 }
 
-// TestHandleReload_NewOwnerMintsInstallationTokenAndPolledNextCycle covers
-// AC5's success path: adding a repo under a previously-unwatched owner
-// mints that owner's installation token as part of the reload, and the new
-// owner's repo is servable (has a client) immediately after.
-func TestHandleReload_NewOwnerMintsInstallationTokenAndPolledNextCycle(t *testing.T) {
+// TestHandleReload_NewOwnerMintsInstallationTokenAndServable covers the
+// success path: adding a repo under a previously-unwatched owner mints that
+// owner's installation token as part of the reload, and the new owner's
+// repo is servable (has a client) immediately after.
+func TestHandleReload_NewOwnerMintsInstallationTokenAndServable(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, authSet, daemon, srv, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+	args, reconciler, daemon, _, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "newowner"},
 	})
-	defer srv.Close()
 	defer closeLog()
 	captureLogf(t)
 
@@ -336,7 +471,7 @@ func TestHandleReload_NewOwnerMintsInstallationTokenAndPolledNextCycle(t *testin
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handleReload(ctx, args, authSet, daemon)
+	handleReload(ctx, args, reconciler, daemon)
 
 	if fake.mintCountFor(222) != 1 {
 		t.Errorf("mintCountFor(222 = newowner) = %d, want 1 — reload must mint a token for the newly-watched owner", fake.mintCountFor(222))
@@ -351,15 +486,10 @@ func TestHandleReload_NewOwnerMintsInstallationTokenAndPolledNextCycle(t *testin
 }
 
 // TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing
-// covers AC5's failure path and R5's all-or-nothing guarantee across a
+// covers the failure path and the all-or-nothing guarantee across a
 // multi-owner batch: when one of two newly-watched owners has no App
 // installation, neither new owner is registered and the running config is
-// untouched — not even the owner that *would* have succeeded. (A token can
-// still have been minted-then-abandoned for the earlier, successful owner
-// before the batch as a whole failed — an accepted, documented trade-off,
-// see adrs/1640-pruefer-config-reload.md — so this test asserts the
-// commit-time invariant that actually matters: nothing observable through
-// daemon/authSet reflects the failed owner's partial progress.)
+// untouched.
 func TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
@@ -368,39 +498,38 @@ func TestHandleReload_NewOwnerNoInstallation_FailsWholeReloadAllOrNothing(t *tes
 	}
 
 	// "goodowner" has an installation; "badowner" does not.
-	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "goodowner"},
 	})
-	defer srv.Close()
 	defer closeLog()
 	captureLogf(t)
 
 	before := daemon.config()
-	beforeInstallationCount := authSet.InstallationCount()
+	beforeInstallationCount := reconciler.InstallationCount()
 
 	newYAML := "watched_repos:\n  - handarbeit/fabrik\n  - goodowner/repo\n  - badowner/repo\n"
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(newYAML), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
 	}
 
-	handleReload(context.Background(), args, authSet, daemon)
+	handleReload(context.Background(), args, reconciler, daemon)
 
 	if got := daemon.config(); !reflect.DeepEqual(got, before) {
 		t.Errorf("daemon.config() changed despite a failed reload: got %+v, want unchanged %+v", got, before)
 	}
 	if _, ok := daemon.client("goodowner"); ok {
-		t.Error("goodowner must not be registered — the whole reload failed because badowner had no installation (R5 all-or-nothing)")
+		t.Error("goodowner must not be registered — the whole reload failed because badowner had no installation (all-or-nothing)")
 	}
-	if _, ok := authSet.Clients["goodowner"]; ok {
-		t.Error("authSet.Clients must not contain goodowner — CommitOwner must never run for a batch that ultimately fails")
+	if _, err := reconciler.ClientForRepo(context.Background(), "goodowner", ""); err == nil {
+		t.Error("reconciler must not have a client for goodowner — CommitOwnerAuth must never run for a batch that ultimately fails")
 	}
-	if authSet.InstallationCount() != beforeInstallationCount {
-		t.Errorf("InstallationCount() = %d, want unchanged %d — a minted-but-uncommitted Auth must never be appended to auths", authSet.InstallationCount(), beforeInstallationCount)
+	if reconciler.InstallationCount() != beforeInstallationCount {
+		t.Errorf("InstallationCount() = %d, want unchanged %d — a minted-but-uncommitted Auth must never be registered", reconciler.InstallationCount(), beforeInstallationCount)
 	}
 }
 
-// TestHandleReload_LogsDiffSummary covers R6/AC6: the reload summary names
+// TestHandleReload_LogsDiffSummary covers the reload summary: it names
 // every added/removed repo and every changed field.
 func TestHandleReload_LogsDiffSummary(t *testing.T) {
 	dir := t.TempDir()
@@ -409,15 +538,14 @@ func TestHandleReload_LogsDiffSummary(t *testing.T) {
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
-	defer srv.Close()
+	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{{ID: 111, Account: "handarbeit"}})
 	defer closeLog()
 	snapshot := captureLogf(t)
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos: []\nmodel: opus\n"), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
 	}
-	handleReload(context.Background(), args, authSet, daemon)
+	handleReload(context.Background(), args, reconciler, daemon)
 
 	joined := strings.Join(snapshot(), "\n")
 	if !strings.Contains(joined, "handarbeit/fabrik") {
@@ -428,44 +556,41 @@ func TestHandleReload_LogsDiffSummary(t *testing.T) {
 	}
 }
 
-// TestHandleReload_RemovedOwnerPrunesClientAndAuth is the handleReload-level
-// proof for the #1640 review finding: dropping an owner's last watched repo
-// via reload must leave that owner unresolvable through the daemon (not
-// just absent from watched_repos) and must drop its Auth from authSet —
-// otherwise its refresh goroutine keeps minting tokens for an owner Pruefer
-// no longer watches, indefinitely.
-func TestHandleReload_RemovedOwnerPrunesClientAndAuth(t *testing.T) {
+// TestHandleReload_RemovedOwnerPrunesClient is the handleReload-level proof
+// that dropping an owner's last watched repo via reload leaves that owner
+// unresolvable through the daemon (not just absent from watched_repos) and
+// drops its Auth from the reconciler.
+func TestHandleReload_RemovedOwnerPrunesClient(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - verveguy/otherrepo\n"), 0600); err != nil {
 		t.Fatalf("writing initial config: %v", err)
 	}
 
-	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+	args, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
 		{ID: 111, Account: "handarbeit"},
 		{ID: 222, Account: "verveguy"},
 	})
-	defer srv.Close()
 	defer closeLog()
 	captureLogf(t)
 
 	if _, ok := daemon.client("verveguy"); !ok {
 		t.Fatal("expected verveguy to be servable before the reload")
 	}
-	beforeInstallationCount := authSet.InstallationCount()
+	beforeInstallationCount := reconciler.InstallationCount()
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
 	}
-	handleReload(context.Background(), args, authSet, daemon)
+	handleReload(context.Background(), args, reconciler, daemon)
 
 	if _, ok := daemon.client("verveguy"); ok {
 		t.Error("expected verveguy to no longer be servable through the daemon after its last watched repo was removed")
 	}
-	if _, ok := authSet.Clients["verveguy"]; ok {
-		t.Error("expected authSet.Clients to no longer contain verveguy after the reload")
+	if _, err := reconciler.ClientForRepo(context.Background(), "verveguy", ""); err == nil {
+		t.Error("expected reconciler to no longer have a client for verveguy after the reload")
 	}
-	if got := authSet.InstallationCount(); got != beforeInstallationCount-1 {
+	if got := reconciler.InstallationCount(); got != beforeInstallationCount-1 {
 		t.Errorf("InstallationCount() = %d, want %d (verveguy's dedicated installation dropped)", got, beforeInstallationCount-1)
 	}
 	if _, ok := daemon.client("handarbeit"); !ok {
@@ -473,64 +598,49 @@ func TestHandleReload_RemovedOwnerPrunesClientAndAuth(t *testing.T) {
 	}
 }
 
-// --- deferred owner-removal auth cancellation (#1640 review finding) ---
-
-// TestDaemon_OwnerReviewsInFlight covers the prefix-matching primitive
-// drainThenStopAuth polls: present only while a prGate for one of owner's
-// repos is held, case-insensitively, and never confused by an unrelated
-// owner whose name happens to share a prefix (e.g. "acme" vs "acme2").
-func TestDaemon_OwnerReviewsInFlight(t *testing.T) {
-	d := &Daemon{}
-
-	if d.ownerReviewsInFlight("acme") {
-		t.Fatal("expected no reviews in flight for acme before any gate is acquired")
-	}
-
-	_, release := d.acquirePRGate("ACME", "widgets", 7)
-	if !d.ownerReviewsInFlight("acme") {
-		t.Error("expected ownerReviewsInFlight(\"acme\") to be true while a gate for ACME/widgets#7 is held — matching must be case-insensitive")
-	}
-	if d.ownerReviewsInFlight("acme2") {
-		t.Error("expected ownerReviewsInFlight(\"acme2\") to be false — \"acme\" must not prefix-match \"acme2\"'s repos")
-	}
-
-	release()
-	if d.ownerReviewsInFlight("acme") {
-		t.Error("expected no reviews in flight for acme once the gate was released")
-	}
-}
-
 // TestDaemon_DrainThenStopAuth_WaitsForInFlightReviewThenStops is the
-// non-vacuous core of the #1640 review finding's fix: drainThenStopAuth
+// non-vacuous core of the deferred owner-removal fix: drainThenStopAuth
 // must not call Auth.Stop() while a review is still in flight for the
 // owner being removed, and must call it promptly once that review
-// completes. Shrinks ownerDrainPollInterval so the test doesn't wait out
-// the production 2s poll.
+// completes. Uses a real *githubauth.Auth minted against a fake server
+// (rather than poking its unexported cancel field, which this package
+// cannot reach), started via Reconciler.CommitOwnerAuth exactly as
+// production does. Shrinks ownerDrainPollInterval so the test doesn't wait
+// out the production 2s poll.
 func TestDaemon_DrainThenStopAuth_WaitsForInFlightReviewThenStops(t *testing.T) {
 	orig := ownerDrainPollInterval
 	ownerDrainPollInterval = 20 * time.Millisecond
 	t.Cleanup(func() { ownerDrainPollInterval = orig })
 
-	d := &Daemon{}
-	_, release := d.acquirePRGate("acme", "widgets", 1)
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
+		t.Fatalf("writing initial config: %v", err)
+	}
+	_, reconciler, daemon, _, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "acme"},
+	})
+	defer closeLog()
+	captureLogf(t)
 
-	loopCtx, loopCancel := context.WithCancel(context.Background())
-	a := &Auth{cancel: loopCancel}
-	done := make(chan struct{})
-	go func() {
-		<-loopCtx.Done()
-		close(done)
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, fresh, err := reconciler.MintOwnerAuth("acme", []string{"acme/widgets"}, nil)
+	if err != nil {
+		t.Fatalf("MintOwnerAuth: %v", err)
+	}
+	reconciler.CommitOwnerAuth(ctx, "acme", a, fresh, nil)
+
+	_, release := daemon.acquirePRGate("acme", "widgets", 1)
 
 	drainDone := make(chan struct{})
 	go func() {
-		d.drainThenStopAuth(context.Background(), "acme", a)
+		daemon.drainThenStopAuth(ctx, "acme", a)
 		close(drainDone)
 	}()
 
 	select {
-	case <-done:
-		t.Fatal("drainThenStopAuth stopped the Auth while a review was still in flight for its owner")
 	case <-drainDone:
 		t.Fatal("drainThenStopAuth returned while a review was still in flight for its owner")
 	case <-time.After(100 * time.Millisecond):
@@ -540,95 +650,9 @@ func TestDaemon_DrainThenStopAuth_WaitsForInFlightReviewThenStops(t *testing.T) 
 	release()
 
 	select {
-	case <-done:
+	case <-drainDone:
 		// drainThenStopAuth observed the drain and called a.Stop().
 	case <-time.After(time.Second):
-		t.Fatal("drainThenStopAuth did not stop the Auth within 1s of the in-flight review completing")
-	}
-	select {
-	case <-drainDone:
-	case <-time.After(time.Second):
-		t.Fatal("drainThenStopAuth did not return within 1s of stopping the Auth")
-	}
-}
-
-// TestHandleReload_RemovedOwnerAuthNotStoppedUntilInFlightReviewCompletes
-// covers the full production path (not just the Daemon-level primitive
-// above): a SIGHUP that drops an owner mid-review must not cancel that
-// owner's token-refresh loop until the review genuinely finishes — the bug
-// the second #1640 review finding caught in the first fix (cd83be9f), which
-// cancelled unconditionally at reload time.
-func TestHandleReload_RemovedOwnerAuthNotStoppedUntilInFlightReviewCompletes(t *testing.T) {
-	orig := ownerDrainPollInterval
-	ownerDrainPollInterval = 20 * time.Millisecond
-	t.Cleanup(func() { ownerDrainPollInterval = orig })
-
-	dir := t.TempDir()
-	keyPath := writeTestPrivateKey(t, dir)
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - verveguy/otherrepo\n"), 0600); err != nil {
-		t.Fatalf("writing initial config: %v", err)
-	}
-
-	args, authSet, daemon, srv, _, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
-		{ID: 111, Account: "handarbeit"},
-		{ID: 222, Account: "verveguy"},
-	})
-	defer srv.Close()
-	defer closeLog()
-	captureLogf(t)
-
-	var verveguyAuth *Auth
-	for _, a := range authSet.auths {
-		if authSet.Clients["verveguy"] == a.client {
-			verveguyAuth = a
-		}
-	}
-	if verveguyAuth == nil {
-		t.Fatal("could not find verveguy's Auth in authSet.auths")
-	}
-
-	// Mirror startRefreshLoop so we have a completion channel to observe —
-	// same mechanism handleReload's own newly-watched-owner path uses, just
-	// not hidden behind it.
-	loopCtx, loopCancel := context.WithCancel(context.Background())
-	verveguyAuth.mu.Lock()
-	verveguyAuth.cancel = loopCancel
-	verveguyAuth.mu.Unlock()
-	refreshLoopDone := make(chan struct{})
-	go func() {
-		verveguyAuth.RunRefreshLoop(loopCtx, func(format string, args ...any) {})
-		close(refreshLoopDone)
-	}()
-
-	// Simulate a review already dispatched (before the reload) and still
-	// running against verveguy/otherrepo.
-	_, release := daemon.acquirePRGate("verveguy", "otherrepo", 1)
-
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
-		t.Fatalf("writing updated config: %v", err)
-	}
-	handleReload(context.Background(), args, authSet, daemon)
-
-	// The synchronous parts of the reload must have already taken effect:
-	// verveguy is no longer dispatchable...
-	if _, ok := daemon.client("verveguy"); ok {
-		t.Error("expected verveguy to no longer be servable through the daemon after its last watched repo was removed")
-	}
-	// ...but its in-flight review's token must still be refreshing.
-	select {
-	case <-refreshLoopDone:
-		t.Fatal("handleReload stopped verveguy's refresh loop while a review was still in flight for it")
-	case <-time.After(150 * time.Millisecond):
-		// still running, as expected — R3: the in-flight review must be
-		// allowed to finish with a valid token.
-	}
-
-	release()
-
-	select {
-	case <-refreshLoopDone:
-		// drainThenStopAuth observed the drain and stopped the loop.
-	case <-time.After(time.Second):
-		t.Fatal("verveguy's refresh loop was not stopped within 1s of its in-flight review completing")
+		t.Fatal("drainThenStopAuth did not return within 1s of the in-flight review completing")
 	}
 }

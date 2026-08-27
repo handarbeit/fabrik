@@ -150,6 +150,73 @@ func TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview(t *testing.T) {
 	}
 }
 
+// TestDaemonEventSink_CaseMismatchedOwnerInClientsMap_DispatchesReview is the
+// regression test for a review finding: ReviewFromEvent looked up
+// d.Clients[owner] using the webhook payload's raw-case owner, but d.Clients
+// is keyed by strings.ToLower(owner) everywhere it's built or read elsewhere
+// (poll(), rate-limit reporting). GitHub delivers each account's
+// canonical-case login in webhook payloads, which need not match the casing
+// an operator wrote in watched_repos/config — a mismatch silently dropped
+// every real-time event for that owner as "no client for owner."
+func TestDaemonEventSink_CaseMismatchedOwnerInClientsMap_DispatchesReview(t *testing.T) {
+	client := newFakeLister()
+	client.prsByRepo["MyOrg/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
+	claude := &mockClaudeInvoker{}
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+		return "/tmp", func() {}, nil
+	}
+	d := &Daemon{
+		// Keyed lower-case, matching how Reconciler/execute.go actually
+		// build this map — the event below uses GitHub's own canonical
+		// casing for the same account, which differs.
+		Clients:  map[string]GitHubLister{"myorg": client},
+		Claude:   claude,
+		Clone:    clone,
+		Config:   Config{WatchedRepos: []string{"MyOrg/repo"}, ConcurrencyCap: 3},
+		BotLogin: "pruefer-bot[bot]",
+	}
+	sink := &daemonEventSink{daemon: d}
+
+	sink.Handle(context.Background(), events.GitHubEvent{
+		EventType: "pull_request", Action: "opened", Owner: "MyOrg", Repo: "repo", ResourceID: "1",
+	})
+
+	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
+}
+
+// TestDaemonEventSink_CaseMismatchedWatchedRepoSpec_DispatchesReview is the
+// regression test for isWatchedRepo's sibling case-sensitivity bug: it
+// compared "owner/repo" against each watched_repos spec with exact-case
+// equality, unlike every other owner comparison in this file. An operator's
+// literal watched_repos casing can differ from the case GitHub delivers in
+// webhook payloads, which previously made isWatchedRepo report a
+// legitimately watched repo as unwatched.
+func TestDaemonEventSink_CaseMismatchedWatchedRepoSpec_DispatchesReview(t *testing.T) {
+	client := newFakeLister()
+	client.prsByRepo["myorg/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
+	claude := &mockClaudeInvoker{}
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+		return "/tmp", func() {}, nil
+	}
+	d := &Daemon{
+		Clients: map[string]GitHubLister{"myorg": client},
+		Claude:  claude,
+		Clone:   clone,
+		// The operator's literal config casing differs from what the event
+		// below delivers, isolating isWatchedRepo's own comparison (the
+		// Clients-map lookup above already matches, via strings.ToLower).
+		Config:   Config{WatchedRepos: []string{"MyOrg/Repo"}, ConcurrencyCap: 3},
+		BotLogin: "pruefer-bot[bot]",
+	}
+	sink := &daemonEventSink{daemon: d}
+
+	sink.Handle(context.Background(), events.GitHubEvent{
+		EventType: "pull_request", Action: "opened", Owner: "myorg", Repo: "repo", ResourceID: "1",
+	})
+
+	waitUntil(t, 2*time.Second, func() bool { return client.submitCallCount() == 1 })
+}
+
 func TestDaemonEventSink_FetchPRDetailsError_DropsWithoutPanic(t *testing.T) {
 	client := newFakeLister()
 	client.detailsErrByKey["owner/repo#1"] = errFetchPRDetailsBoom
