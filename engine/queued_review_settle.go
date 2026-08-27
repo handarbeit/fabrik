@@ -9,12 +9,12 @@ import (
 // merge-train member's linked PR while it sits out of reach of the ordinary
 // review-reinvoke path (#1208). Sourced directly from board.Items via
 // groupQueuedByRepoAndBase — the same holding-stage-column filter, closed/fabrik:paused
-// exclusion, and (since #1648) per-(repo,base) partitioning handleMergeTrainBatch's
-// routeQueuedGroup already applies — rather than
-// deepFetchCandidates: itemMayNeedWork unconditionally excludes HoldingStage items
-// from that path, so a Queued member's reviewThreads are never populated by the
-// normal poll pipeline at all. This scan calls FetchItemDetails itself, exactly as
-// settleAwaitingCIScan does for the analogous fabrik:awaiting-ci gap (ADR-1270).
+// exclusion, and (since #1648) per-(repo,base) partitioning that handleMergeTrainBatch's
+// routeQueuedGroup already applies — rather than deepFetchCandidates: itemMayNeedWork
+// unconditionally excludes HoldingStage items from that path, so a Queued member's
+// reviewThreads are never populated by the normal poll pipeline at all. This scan calls
+// FetchItemDetails itself, exactly as settleAwaitingCIScan does for the analogous
+// fabrik:awaiting-ci gap (ADR-1270).
 //
 // Detection uses currentHeadReviewThreadComments (not raw buildReviewThreadComments)
 // — the ADR-1207-canonical, current-head-scoped primitive — so a thread anchored to a

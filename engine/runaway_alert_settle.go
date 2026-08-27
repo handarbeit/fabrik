@@ -36,6 +36,30 @@ func (e *Engine) markRunawayAlertOutstanding(item gh.ProjectItem, owner, repo st
 	e.addLabel(item, runawayAlertMarkerLabel)
 }
 
+// mergeTrainKeyForItem reconstructs the composite (repo,base) trainKey fireRunawayGuard
+// used when it originally alerted item (#1648). By the time this settle scan runs the
+// member is already paused, so unlike a live dispatch there is no partition context handed
+// down — the base must be re-resolved from the item itself, mirroring the wm-lookup pattern
+// the now-removed nonDefaultBaseExclusion (#1647) used before this issue superseded it.
+// Fails if the repo's WorktreeManager isn't registered (should be unreachable in practice:
+// fireRunawayGuard's own caller already resolved this item's base successfully to get here
+// in the first place) or if baseBranchForItem itself errors.
+func (e *Engine) mergeTrainKeyForItem(item gh.ProjectItem) (string, error) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	repoKey := owner + "/" + repo
+	e.mu.Lock()
+	wm, ok := e.worktreeManagers[repoKey]
+	e.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("no WorktreeManager registered for %s", repoKey)
+	}
+	base, err := e.baseBranchForItem(item, wm)
+	if err != nil {
+		return "", fmt.Errorf("resolving base branch for #%d: %w", item.Number, err)
+	}
+	return mergeTrainKey(repoKey, base), nil
+}
+
 // settleRunawayGuardAlertScan is the per-poll settle scan for the runaway-guard alert retry
 // (ADR-1533, R1). It runs unconditionally every poll, sourced from the raw board snapshot
 // (not deepFetchCandidates or groupQueuedByRepo): a member carrying this marker also
@@ -63,7 +87,7 @@ func (e *Engine) settleRunawayGuardAlertScan(board *gh.ProjectBoard) {
 // is ... a single critical section ... two concurrent calls can never interleave" — that
 // invariant only holds if every caller that can post this exact comment for the same member
 // participates in the same critical section. A member carrying runawayAlertMarkerLabel is
-// excluded from Hook 2's groupQueuedByRepo (it already has fabrik:paused), but Hook 1's
+// excluded from Hook 2's groupQueuedByRepoAndBase (it already has fabrik:paused), but Hook 1's
 // current/survivors is the worker's own in-flight member list, not a fresh board read — it
 // can still include this member if the worker hasn't ejected it, so a stale Hook 1 call can
 // legitimately reprocess a member that already picked up the marker earlier in the same
@@ -72,13 +96,18 @@ func (e *Engine) settleRunawayGuardAlertScan(board *gh.ProjectBoard) {
 // the alert concurrently — a duplicate alert, violating R2/A3.
 func (e *Engine) settleRunawayGuardAlert(item gh.ProjectItem) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	repoKey := owner + "/" + repo
-	alertKey := repoKey + "#" + strconv.Itoa(item.Number)
+	trainKey, kerr := e.mergeTrainKeyForItem(item)
+	if kerr != nil {
+		e.logf(item.Number, "merge-train", "retry: could not resolve base branch to reconstruct runaway alert key: %v — will retry next poll\n", kerr)
+		e.recordRunawayAlertRetry(item)
+		return
+	}
+	alertKey := trainKey + "#" + strconv.Itoa(item.Number)
 
 	e.mergeTrainRunawayMu.Lock()
 	defer e.mergeTrainRunawayMu.Unlock()
 
-	count, _ := e.isRunawayTripped(repoKey)
+	count, _ := e.isRunawayTripped(trainKey)
 	_, window := e.effectiveTrialWindow()
 
 	if recordedCount, ok := e.mergeTrainRunawayAlerted[alertKey]; ok && count <= recordedCount {
@@ -91,7 +120,7 @@ func (e *Engine) settleRunawayGuardAlert(item gh.ProjectItem) {
 		return
 	}
 
-	if _, err := e.postComment(item, runawayGuardAlertMessage(count, repoKey, window), false, true); err != nil {
+	if _, err := e.postComment(item, runawayGuardAlertMessage(count, trainKey, window), false, true); err != nil {
 		e.logf(item.Number, "merge-train", "retry: could not post runaway guard alert: %v\n", err)
 		e.recordRunawayAlertRetry(item)
 		return
@@ -137,9 +166,13 @@ func (e *Engine) recordRunawayAlertRetry(item gh.ProjectItem) {
 // recordRunawayAlertRetry, reached while that function still holds mergeTrainRunawayMu.
 func (e *Engine) escalateRunawayAlertFailure(item gh.ProjectItem) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	repoKey := owner + "/" + repo
-	alertKey := repoKey + "#" + strconv.Itoa(item.Number)
-	count, _ := e.isRunawayTripped(repoKey)
+	trainKey, kerr := e.mergeTrainKeyForItem(item)
+	if kerr != nil {
+		e.logf(item.Number, "escalate", "runaway guard fallback comment: could not resolve base branch to reconstruct alert key: %v — marker stays, will keep retrying\n", kerr)
+		return
+	}
+	alertKey := trainKey + "#" + strconv.Itoa(item.Number)
+	count, _ := e.isRunawayTripped(trainKey)
 	_, window := e.effectiveTrialWindow()
 
 	// fabrik:paused is unconditional and idempotent, mirroring fireRunawayGuard's own
@@ -152,7 +185,7 @@ func (e *Engine) escalateRunawayAlertFailure(item gh.ProjectItem) {
 			"not post the explanatory alert comment after %d attempt(s). Posting this "+
 			"fallback notice instead so the pause is not left unexplained.\n\n"+
 			"%s",
-		e.cfg.MaxRetries, runawayGuardAlertMessage(count, repoKey, window),
+		e.cfg.MaxRetries, runawayGuardAlertMessage(count, trainKey, window),
 	)
 
 	if _, err := e.postComment(item, comment, false, true); err != nil {

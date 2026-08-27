@@ -8,13 +8,44 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
+// setupRunawayAlertTestEngine builds an Engine registered with a real,
+// git-backed WorktreeManager (default branch "main") at "owner/repo" — unlike
+// plain testEngine's non-git placeholder WorktreeManager, this is required
+// since #1648: settleRunawayGuardAlert/escalateRunawayAlertFailure now
+// reconstruct the composite (repo,base) trainKey via mergeTrainKeyForItem,
+// which calls baseBranchForItem/wm.DefaultBaseBranch() and therefore needs a
+// real git repo to resolve against. Mirrors setupCloseTestRepo's identical
+// need in close_nondefault_base_test.go for the same underlying reason.
+func setupRunawayAlertTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
+	skipIfNoGit(t)
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+	return eng
+}
+
 // TestSettleRunawayGuardAlert_RetrySucceeds verifies the retry path: the alert comment
 // succeeds on this pass, the marker is cleared, and the member is recorded as alerted so a
 // subsequent fireRunawayGuard call for the same member (still within the same episode) skips
 // it rather than double-posting.
 func TestSettleRunawayGuardAlert_RetrySucceeds(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng := setupRunawayAlertTestEngine(t, client)
 
 	item := gh.ProjectItem{
 		Number: 10, Repo: "owner/repo",
@@ -45,7 +76,7 @@ func TestSettleRunawayGuardAlert_RetrySucceeds(t *testing.T) {
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#10"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:main#10"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if !alerted {
 		t.Error("expected the member recorded as alerted after a successful retry")
@@ -61,7 +92,7 @@ func TestSettleRunawayGuardAlert_RetryFails_MarkerStays(t *testing.T) {
 			return 0, fmt.Errorf("rate limited")
 		},
 	}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng := setupRunawayAlertTestEngine(t, client)
 	eng.cfg.MaxRetries = 5
 
 	item := gh.ProjectItem{
@@ -80,7 +111,7 @@ func TestSettleRunawayGuardAlert_RetryFails_MarkerStays(t *testing.T) {
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#11"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:main#11"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if alerted {
 		t.Error("did not expect the member recorded as alerted after a failed retry")
@@ -91,7 +122,7 @@ func TestSettleRunawayGuardAlert_RetryFails_MarkerStays(t *testing.T) {
 // items carrying the durable marker.
 func TestSettleRunawayGuardAlertScan_SkipsItemsWithoutMarker(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng := setupRunawayAlertTestEngine(t, client)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -117,7 +148,7 @@ func TestSettleRunawayGuardAlertScan_SkipsItemsWithoutMarker(t *testing.T) {
 // the only correct retry-eligibility signal.
 func TestSettleRunawayGuardAlertScan_DoesNotSkipPausedItems(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng := setupRunawayAlertTestEngine(t, client)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -160,7 +191,7 @@ func TestEscalateRunawayAlertFailure_FallbackSucceeds_MarkerRemovedAndAlerted(t 
 			return 0, fmt.Errorf("rate limited") // the primary retry keeps failing
 		},
 	}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng := setupRunawayAlertTestEngine(t, client)
 	eng.cfg.MaxRetries = 2
 
 	item := gh.ProjectItem{
@@ -195,7 +226,7 @@ func TestEscalateRunawayAlertFailure_FallbackSucceeds_MarkerRemovedAndAlerted(t 
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#15"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:main#15"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if !alerted {
 		t.Error("expected the member recorded as alerted once the fallback comment succeeds")
@@ -217,7 +248,7 @@ func TestEscalateRunawayAlertFailure_FallbackAlsoFails_MarkerStaysAndNotAlerted(
 			return 0, fmt.Errorf("rate limited")
 		},
 	}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng := setupRunawayAlertTestEngine(t, client)
 	eng.cfg.MaxRetries = 2
 
 	item := gh.ProjectItem{
@@ -248,9 +279,40 @@ func TestEscalateRunawayAlertFailure_FallbackAlsoFails_MarkerStaysAndNotAlerted(
 	}
 
 	eng.mergeTrainRunawayMu.Lock()
-	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo#14"]
+	_, alerted := eng.mergeTrainRunawayAlerted["owner/repo:main#14"]
 	eng.mergeTrainRunawayMu.Unlock()
 	if alerted {
 		t.Error("did not expect the member recorded as alerted while the fallback comment is also failing")
+	}
+}
+
+// TestSettleRunawayGuardAlert_UnresolvableBase_RetriesWithoutPosting verifies #1648's new
+// failure mode: when the item's repo has no registered WorktreeManager (mergeTrainKeyForItem
+// cannot reconstruct the trainKey), the settle scan must retry via the normal counter rather
+// than crash, post no alert, and leave the marker untouched for a later poll once the
+// WorktreeManager becomes available.
+func TestSettleRunawayGuardAlert_UnresolvableBase_RetriesWithoutPosting(t *testing.T) {
+	client := &mockGitHubClient{}
+	// Plain testEngine (no WorktreeManager registered — Config.Repo/Owner is
+	// empty here so NewWithDeps registers nothing) so mergeTrainKeyForItem
+	// cannot find a repo entry at all.
+	eng := NewWithDeps(Config{ProjectNum: 1, User: "testuser", Token: "token", MaxConcurrent: 5, Stages: testStages()}, client, &mockClaudeInvoker{}, nil)
+
+	item := gh.ProjectItem{
+		Number: 20, Repo: "owner/repo",
+		Labels: []string{runawayAlertMarkerLabel, "fabrik:paused"},
+	}
+
+	eng.settleRunawayGuardAlert(item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected no alert comment when the base branch can't be resolved, got %v", client.addCommentCalls)
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == runawayAlertMarkerLabel {
+			t.Error("did not expect the marker removed when the base branch can't be resolved")
+		}
 	}
 }

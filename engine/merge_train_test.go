@@ -1254,7 +1254,7 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	eng.webhookMgr = wm
 
 	member := makeTrainItem(7, "Runaway Issue")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 20)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 20)
 
 	labels, err := cache.FetchLabels("owner", "repo", 7)
 	if err != nil {
@@ -1740,7 +1740,7 @@ func TestDispatchMergeTrainWorker_SkipsWhenAlreadyAssembling(t *testing.T) {
 	eng.mergeTrainInFlight.Store("owner/repo", existingState)
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
-	eng.dispatchMergeTrainWorker(context.Background(), batch, "")
+	eng.dispatchMergeTrainWorker(context.Background(), batch, "", "main")
 
 	// No goroutine should have been launched (wg count stays 0).
 	done := make(chan struct{})
@@ -1767,7 +1767,7 @@ func TestDispatchMergeTrainWorker_LogsGreenState(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	// Just verify it doesn't panic or launch a worker.
-	eng.dispatchMergeTrainWorker(context.Background(), batch, "")
+	eng.dispatchMergeTrainWorker(context.Background(), batch, "", "main")
 }
 
 func TestDispatchMergeTrainWorker_EmptyBatch_NoOp(t *testing.T) {
@@ -1775,8 +1775,8 @@ func TestDispatchMergeTrainWorker_EmptyBatch_NoOp(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
-	eng.dispatchMergeTrainWorker(context.Background(), nil, "")
-	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{}, "")
+	eng.dispatchMergeTrainWorker(context.Background(), nil, "", "main")
+	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{}, "", "main")
 	// Should not panic or store anything.
 }
 
@@ -1972,7 +1972,7 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	n := len(createdPRs)
@@ -2057,7 +2057,7 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// #1 must have been rerouted off Queued (the ejection), not landed.
 	if len(client.updateStatusCalls) == 0 {
@@ -2173,7 +2173,7 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	prs := createdPRs
@@ -2255,7 +2255,7 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	prs := createdPRs
@@ -2325,7 +2325,7 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	prs := createdPRs
@@ -2419,7 +2419,7 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	mu.Lock()
 	n := len(createdPRs)
@@ -2464,7 +2464,7 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 	eng.store.EnterRepoWorker("owner/repo")
 
-	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", batch)
+	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", "main", batch)
 	if ok {
 		t.Fatal("expected prepareTrainWorker to fail with no holding stage configured")
 	}
@@ -3669,7 +3669,7 @@ func TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPat
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -3739,7 +3739,7 @@ func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *test
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -4287,7 +4287,7 @@ func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	if got := rv.count(); got != 1 {
 		t.Errorf("green common path must cost exactly 1 combined validation (zero bisection), got %d", got)
@@ -4322,7 +4322,7 @@ func TestMergeTrainBisect_SinglePoisoner(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// #3 ejected exactly once.
 	if c := ejectionCommentCount(client, 3); c != 1 {
@@ -4372,7 +4372,7 @@ func TestMergeTrainBisect_RepeatedEjectionPauses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	paused, awaiting := false, false
@@ -4411,7 +4411,7 @@ func TestMergeTrainBisect_FirstEjectionCommentCarriesDiagnostic(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	comments := ejectionCommentBodies(client, 3)
 	if len(comments) != 1 {
@@ -4485,7 +4485,7 @@ func TestMergeTrainBisect_EjectionCarriesInnermostRunDiagnostic(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	comments := ejectionCommentBodies(client, 3)
 	if len(comments) != 1 {
@@ -4518,7 +4518,7 @@ func TestMergeTrainBisect_EjectionCommentNamesOtherBatchMembers(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	comments := ejectionCommentBodies(client, 3)
 	if len(comments) != 1 {
@@ -4558,7 +4558,7 @@ func TestMergeTrainBisect_SingleMemberTrain_NoOtherMembers(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// AC1: handleRedBatch (multi-member bisection machinery) must never be reached.
 	if redBatchHookCalls != 0 {
@@ -4640,7 +4640,7 @@ func TestMergeTrainRedSingleton_NoRetrialOnNextPoll(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	if got := rv.count(); got != 1 {
 		t.Fatalf("expected exactly 1 validation trial after the first episode, got %d", got)
@@ -4998,7 +4998,7 @@ func TestMergeTrainBisect_PauseCommentNamesCause(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	var pauseBody string
@@ -5036,7 +5036,7 @@ func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	if !strings.Contains(out, "cost cap") {
@@ -5081,7 +5081,7 @@ func TestMergeTrainOneAtATime_RedSingletonUsesSameDisposition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	if !strings.Contains(out, "one-at-a-time") {
@@ -5144,7 +5144,7 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	// Fell back to one-at-a-time (not a bespoke isolation path).
@@ -5208,7 +5208,7 @@ func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	if !strings.Contains(out, "one-at-a-time") {
@@ -6084,8 +6084,8 @@ func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemA}, "")
-	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemB}, "")
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemA}, "", "main")
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemB}, "", "main")
 
 	done := make(chan struct{})
 	go func() { eng.wg.Wait(); close(done) }()
@@ -6113,7 +6113,7 @@ func TestDispatchMergeTrainWorker_SameRepoSuppressedDurably(t *testing.T) {
 	// Simulate an in-flight train (e.g. resumed after reconstruction).
 	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{assembling: true, trialName: "merge-train-main-1"})
 
-	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{makeTrainItem(1, "One")}, "")
+	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{makeTrainItem(1, "One")}, "", "main")
 
 	done := make(chan struct{})
 	go func() { eng.wg.Wait(); close(done) }()
@@ -6242,7 +6242,7 @@ func TestRunawayGuard_Fires(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6300,7 +6300,7 @@ func TestRunawayGuard_NormalBisectionNotTripped(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6360,7 +6360,7 @@ func TestRunawayGuard_BisectionExceedsThresholdWithoutTripping(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 
 	// Non-vacuity: the raw trial count must actually exceed the threshold — this is what
 	// makes the test meaningful (fixed code completes all 6 raw trials since bisection is
@@ -6420,8 +6420,8 @@ func TestFireRunawayGuard_IdempotentAcrossTwoFirings(t *testing.T) {
 	memberA := makeTrainItem(1, "Member One") // present in both firings
 	memberB := makeTrainItem(2, "Member Two") // only in the second firing
 
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA}, 6)
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{memberA, memberB}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{memberA}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{memberA, memberB}, 6)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6460,11 +6460,11 @@ func TestFireRunawayGuard_ReAlertsAfterOperatorResumeRaisesCount(t *testing.T) {
 	member := makeTrainItem(3, "Resumed Member")
 
 	// First trip: fires at count 6, alerts and pauses the member.
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 	// A second, genuinely new trip: count is now 8, not 6 — only possible if new trials ran
 	// after an operator resumed the member (no resetTrialCounter call in between here, exactly
 	// mirroring the recovery path's own behavior).
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 8)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 8)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6492,7 +6492,7 @@ func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(9, "Flaky Member")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 
 	client.mu.Lock()
 	paused, marker, commentAttempts := false, false, 0
@@ -6538,7 +6538,7 @@ func TestFireRunawayGuard_CommentFailureLeavesMarkerAndRetriable(t *testing.T) {
 	// Not marked alerted: a second firing for the same member within the same episode
 	// must retry the comment, not skip it as already-delivered.
 	client.addCommentFn = nil // succeeds this time
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6562,9 +6562,9 @@ func TestResetTrialCounter_ClearsRunawayAlertedIdempotency(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(4, "Repeat Offender")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 	eng.resetTrialCounter("owner/repo")
-	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 6)
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 6)
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6591,14 +6591,15 @@ func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
 	eng.cfg.TrainTrialWindowDuration = time.Hour
 
 	repoKey := "owner/repo"
-	eng.recordTrial(repoKey) // trips the counter (threshold 1)
+	trainKey := mergeTrainKey(repoKey, "main")
+	eng.recordTrial(trainKey) // trips the counter (threshold 1)
 
 	items := []gh.ProjectItem{
 		makeTrainItem(1, "Member One"),
 		makeTrainItem(2, "Member Two"),
 	}
 
-	eng.routeQueuedGroup(context.Background(), repoKey, items, "PVT_test")
+	eng.routeQueuedGroup(context.Background(), queuedRepoGroup{repoKey: repoKey, base: "main", trainKey: trainKey, items: items}, "PVT_test")
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -6624,7 +6625,7 @@ func TestRouteQueuedGroup_RunawayGuardHook2AlertsEveryMember(t *testing.T) {
 	}
 
 	// routeQueuedGroup must return immediately after firing the guard — no worker dispatched.
-	if _, ok := eng.mergeTrainInFlight.Load(repoKey); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(trainKey); ok {
 		t.Error("expected no worker dispatched when the runaway guard is already tripped")
 	}
 }
@@ -6674,7 +6675,7 @@ func TestFireRunawayGuard_RacesSettleRunawayGuardAlert_NoDuplicateAlert(t *testi
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, count)
+		eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, count)
 	}()
 	go func() {
 		defer wg.Done()
@@ -6707,7 +6708,7 @@ func TestMergeTrainRunawayGuard(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out := captureStdout(func() {
-		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	})
 
 	// Guard must fire within the configured trial bound.

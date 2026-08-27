@@ -48,8 +48,12 @@ type Store struct {
 	// repoWorkers tracks repo-scoped (as opposed to per-(Repo,Number)) worker
 	// liveness — currently just merge-train workers, which operate on a batch
 	// spanning multiple issue numbers and have no single natural item home.
-	// Keyed by "owner/repo". Presence means a worker is in flight for that repo.
-	// Mutated via EnterRepoWorker/ExitRepoWorker; read via RepoWorkerActive and
+	// Keyed by a trainKey ("owner/repo:baseBranch", engine's mergeTrainKey —
+	// since #1648, one entry per independently-dispatched (repo,base) partition;
+	// was bare "owner/repo" before). Presence means a worker is in flight for
+	// that partition. Mutated via EnterRepoWorker/ExitRepoWorker; read via
+	// RepoWorkerActive (exact key), RepoWorkerActiveForAnyBase (repo-wide prefix
+	// scan, for a caller that only knows the repo, not the base), and
 	// HasInFlightWorker. Guarded by mu, same as items.
 	repoWorkers map[string]struct{}
 
