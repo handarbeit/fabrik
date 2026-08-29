@@ -137,6 +137,38 @@ rm -f "$DIRTY_TREE_FILE"
 assert_eq "matching SHA + dirty tree exits 0 (full pre-gate ran and passed)" "0" "$rc"
 assert_eq "matching SHA + dirty tree runs the full pre-gate (2 go calls), not a skip" "2" "$(marker_count)"
 
+# --- Case 7 (REQ7, #1677): a matching FABRIK_PREGATE_VERIFIED_SHA DOES skip
+# the pre-gate when the only dirty file matches a caller-declared
+# FABRIK_PREGATE_ALLOWED_DIRTY_REGEX — this is the mechanism that makes
+# cut-release.sh's own step 4 self-write (plugin/known_embedded_versions.go)
+# stop defeating the dedup guard on every real release. Zero go calls, exit
+# 0, same as Case 4's clean-tree skip. ---
+reset_marker
+: > "$DIRTY_TREE_FILE"
+CURRENT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+ALLOWED_REGEX='^\?\? \.pregate_test_dirty_tree_scratch$'
+( FAKE_GO_EXIT=1 FABRIK_PREGATE_VERIFIED_SHA="$CURRENT_SHA" FABRIK_PREGATE_ALLOWED_DIRTY_REGEX="$ALLOWED_REGEX" run_pregate ) >/dev/null 2>&1
+rc=$?
+rm -f "$DIRTY_TREE_FILE"
+assert_eq "matching SHA + only-allowlisted dirt exits 0 (skipped)" "0" "$rc"
+assert_eq "matching SHA + only-allowlisted dirt makes no go call" "0" "$(marker_count)"
+
+# --- Case 8 (REQ7, #1677 — preserves the TOCTOU protection): a matching
+# FABRIK_PREGATE_VERIFIED_SHA does NOT skip when a dirty file does NOT match
+# the declared allowlist, even though the same allowlist var is set — an
+# unvetted change must still fall through to the full pre-gate exactly like
+# Case 6's unscoped-dirty-tree case. This is what proves the allowlist
+# narrows rather than replaces the dirty-tree check. ---
+reset_marker
+: > "$DIRTY_TREE_FILE"
+CURRENT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+UNRELATED_REGEX='^\?\? some/other/file\.go$'
+( FAKE_GO_EXIT=0 FABRIK_PREGATE_VERIFIED_SHA="$CURRENT_SHA" FABRIK_PREGATE_ALLOWED_DIRTY_REGEX="$UNRELATED_REGEX" run_pregate ) >/dev/null 2>&1
+rc=$?
+rm -f "$DIRTY_TREE_FILE"
+assert_eq "matching SHA + non-allowlisted dirt exits 0 (full pre-gate ran and passed)" "0" "$rc"
+assert_eq "matching SHA + non-allowlisted dirt runs the full pre-gate (2 go calls), not a skip" "2" "$(marker_count)"
+
 # --- Structural check: run_pregate must precede prepare_bed_and_reset inside
 # the dispatch guard, textually — this is what makes "no live call is made"
 # true by construction rather than by accident of today's implementation.
