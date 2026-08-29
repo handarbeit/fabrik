@@ -21,10 +21,17 @@ released — every one was the release harness itself. Four distinct, independen
    ./...` run the exact same git-forking `tests/sim` package as part of `./...`, uncapped —
    reproducing the identical crash via a different entry point.
 3. **The viable parallelism band was narrower than #1624 assumed.** Measured on the 28-core
-   host that produced both #1624 and #1677: `-parallel 8` (#1624's own default) still
-   SIGSEGVs roughly 1 run in 5 — not reliable for a release gate. `-parallel 4` showed zero
-   SIGSEGVs across multiple consecutive runs, but took ~661s — over `go test`'s undocumented
-   10-minute default `-timeout`, which nobody had ever made explicit.
+   host that produced both #1624 and #1677:
+
+   | `-parallel` | outcome |
+   |---|---|
+   | 28 (default, uncapped) | TSan fork/exec SIGSEGV, frequent |
+   | 8 (#1624's own default) | ~130s, SIGSEGV roughly **1 run in 5** — not reliable for a release gate |
+   | 4 | ~661s, zero SIGSEGVs across multiple consecutive runs — but over `go test`'s undocumented 10-minute default `-timeout`, which nobody had ever made explicit |
+
+   This data cost a full release cycle (ten attempts) to obtain, which is why it's recorded
+   here in full rather than summarized — re-deriving it requires the same multi-run,
+   high-core-count validation methodology described in Consequences below.
 4. **The pre-gate SHA dedup guard (#1624's R5) never actually engaged.** `run_pregate`'s
    `FABRIK_PREGATE_VERIFIED_SHA` check requires both a HEAD match and a clean working tree.
    `cut-release.sh` step 4's "Record embedded plugin hash" step writes
