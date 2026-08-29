@@ -293,11 +293,12 @@ fi
 # since the handler itself calls `exit`. The function reads these as
 # ordinary variables (this test sets them as globals rather than switch_and_
 # run's own locals) — equivalent from the function's own point of view,
-# since bash trap/function execution doesn't distinguish the two.
+# since bash trap/function execution doesn't distinguish the two. $mode and
+# $suite_exit_epoch are only read by the function's OTHER branch (the
+# watchdog's own "fired" diagnostic, not exercised by this fallback-focused
+# case), so they're deliberately not set here.
 watchdog_dir="$(mktemp -d)"
 fifo_dir="$(mktemp -d)"
-mode="test"
-suite_exit_epoch=$(date +%s)
 ( sleep 30 ) &
 suite_pid=$!
 ( sleep 30 ) &
