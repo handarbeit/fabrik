@@ -200,6 +200,10 @@ func (r RepoPaneComponent) provenanceNotes() []string {
 }
 
 func (r RepoPaneComponent) Height() int {
+	// See HistoryPaneComponent.Height: a granted budget is padded to in View.
+	if r.maxRows > 0 {
+		return r.rowBudget() + 3
+	}
 	n := len(r.order) + len(r.provenanceNotes())
 	if n == 0 {
 		n = 1

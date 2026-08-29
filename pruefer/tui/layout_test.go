@@ -186,3 +186,62 @@ func TestElideMiddle_PreservesPRNumber(t *testing.T) {
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
+
+// TestHistoryPane_SelectionTracksVisibleRows is the regression test for the
+// review finding on #1675: h.idx is a position within the rendered (visible)
+// list, so navigation bounds and Selected() must resolve against
+// visibleEntries(). Before the fix they used h.entries, so the highlighted row
+// and the detail panel disagreed as soon as one skip was filtered out.
+func TestHistoryPane_SelectionTracksVisibleRows(t *testing.T) {
+	var h HistoryPaneComponent
+	// Oldest first: real1, skip1, real2 — exactly the reviewer's repro.
+	for _, ev := range []ReviewCompletedEvent{
+		{Repo: "o/r", PRNumber: 1, Reviewed: true, CompletedAt: time.Now()},
+		{Repo: "o/r", PRNumber: 2, Skipped: true, Reason: "draft", CompletedAt: time.Now()},
+		{Repo: "o/r", PRNumber: 3, Reviewed: true, CompletedAt: time.Now()},
+	} {
+		comp, _ := h.Update(ev)
+		h = comp.(HistoryPaneComponent)
+	}
+	h.SetFocused(true)
+
+	// idx=0 is the newest visible entry: PR 3.
+	if got := h.Selected(); got == nil || got.PRNumber != 3 {
+		t.Fatalf("idx=0 selected %v, want PR 3", got)
+	}
+	// One step down is the next visible entry: PR 1, not the filtered skip.
+	comp, _ := h.Update(tea.KeyMsg{Type: tea.KeyDown})
+	h = comp.(HistoryPaneComponent)
+	if got := h.Selected(); got == nil || got.PRNumber != 1 {
+		t.Fatalf("after one 'down', selected %v, want PR 1 (the skip must be stepped over)", got)
+	}
+	// Navigation must stop at the last *visible* row, not run on through the
+	// filtered entries.
+	for i := 0; i < 5; i++ {
+		comp, _ := h.Update(tea.KeyMsg{Type: tea.KeyDown})
+		h = comp.(HistoryPaneComponent)
+	}
+	if got := h.Selected(); got == nil || got.PRNumber != 1 {
+		t.Fatalf("selection ran past the last visible row: %v", got)
+	}
+}
+
+// TestPaneHeightMatchesRender pins the second review finding: with a granted
+// budget both flexible panes pad to it, so Height() must report the padded
+// height rather than the entry count.
+func TestPaneHeightMatchesRender(t *testing.T) {
+	var h HistoryPaneComponent
+	comp, _ := h.Update(ReviewCompletedEvent{Repo: "o/r", PRNumber: 1, Reviewed: true, CompletedAt: time.Now()})
+	h = comp.(HistoryPaneComponent)
+	h.SetMaxRows(20)
+	if got, want := h.Height(), lineCount(h.View(120)); got != want {
+		t.Errorf("history Height() = %d, but View() renders %d rows", got, want)
+	}
+
+	var r RepoPaneComponent
+	r.SetWatchedRepos([]string{"o/a", "o/b"})
+	r.SetMaxRows(15)
+	if got, want := r.Height(), lineCount(r.View(120)); got != want {
+		t.Errorf("repos Height() = %d, but View() renders %d rows", got, want)
+	}
+}
