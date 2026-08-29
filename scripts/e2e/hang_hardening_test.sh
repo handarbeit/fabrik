@@ -161,14 +161,17 @@ rm -rf "$child_marker"
 # ---------------------------------------------------------------------------
 # Deadline-watcher-plus-marker-file pattern (R2) — supports AC2
 #
-# R2's post-suite watchdog is inline in switch_and_run (armed directly in
-# the caller's own function body, not through a shared "arm" function — see
-# run.sh's own comment on why command substitution's subshell semantics rule
-# that out), so it isn't itself an extractable, independently-callable
-# function. What IS shared and directly testable is disarm_deadline_signal
-# (the teardown half) and the marker-file-on-timeout pattern both
-# with_timeout and the watchdog use — exercised here standalone, without
-# needing a live bed or an actual switch_and_run invocation.
+# R2's post-suite watchdog TIMER is armed inline in switch_and_run (directly
+# in the caller's own function body, not through a shared "arm" function —
+# see run.sh's own comment on why command substitution's subshell semantics
+# rule that out), so arming it isn't itself an extractable, independently-
+# callable step. What IS shared and directly testable: disarm_deadline_signal
+# (the teardown half), the marker-file-on-timeout pattern both with_timeout
+# and the watchdog use, and — since Review, #1676 — the watchdog's own
+# TERM/INT signal handler, extracted into _post_suite_watchdog_signal
+# specifically so it's independently testable (see Case 13 below). All
+# exercised here standalone, without needing a live bed or an actual
+# switch_and_run invocation.
 # ---------------------------------------------------------------------------
 
 # Case 6: the pattern fires (marker written, main process signaled) when the
@@ -313,6 +316,83 @@ else
   fail "_post_suite_watchdog_signal left a job running (watchdog=$(kill -0 "$watchdog_pid" 2>/dev/null && echo alive || echo gone), suite=$(kill -0 "$suite_pid" 2>/dev/null && echo alive || echo gone), consumer=$(kill -0 "$consumer_pid" 2>/dev/null && echo alive || echo gone)) — orphan leak"
 fi
 rm -rf "$watchdog_dir" "$fifo_dir" 2>/dev/null
+
+# Case 13 (found during external review, #1676): the FIRED branch (the
+# watchdog's own "actually stuck" case — the $watchdog_dir/fired marker
+# present) must ALSO group-kill suite_pid/consumer_pid before exiting, not
+# just print its diagnostic. An earlier revision skipped this specifically
+# in the fired branch, which is backwards: the fired branch is the
+# realistic case this watchdog exists to catch (a wedged tee/jq consumer
+# drain — every other step in the tail is either with_timeout-bounded or a
+# fast local jq/grep call), so consumer_pid is exactly the process most
+# likely to still be alive and wedged at the moment this branch runs, and
+# skipping its group-kill orphaned it. Mirrors Case 12's structure but
+# creates the $watchdog_dir/fired marker first so the OTHER branch runs;
+# $mode/$suite_exit_epoch ARE needed here since the fired branch's own
+# diagnostic reads them.
+watchdog_dir="$(mktemp -d)"
+fifo_dir="$(mktemp -d)"
+# shellcheck disable=SC2034 # read by _post_suite_watchdog_signal's fired
+# branch (defined in the sourced run.sh), invisible to shellcheck's static
+# analysis — same false positive run.sh's own suite_exit_epoch assignment
+# disables.
+mode="test"
+# shellcheck disable=SC2034
+suite_exit_epoch=$(date +%s)
+: > "$watchdog_dir/fired"
+( sleep 30 ) &
+suite_pid=$!
+( sleep 30 ) &
+consumer_pid=$!
+( sleep 30 ) &
+watchdog_pid=$!
+( _post_suite_watchdog_signal 143 ) >/dev/null 2>&1
+watchdog_signal_rc=$?
+sleep 1
+if [ "$watchdog_signal_rc" -eq "$POST_SUITE_WATCHDOG_EXIT" ] \
+  && ! kill -0 "$suite_pid" 2>/dev/null && ! kill -0 "$consumer_pid" 2>/dev/null && ! kill -0 "$watchdog_pid" 2>/dev/null; then
+  pass "_post_suite_watchdog_signal's FIRED branch group-kills suite_pid/consumer_pid (not just watchdog_pid) before exiting \$POST_SUITE_WATCHDOG_EXIT — no orphaned tee/jq consumer left running"
+else
+  fail "_post_suite_watchdog_signal's fired branch left a job running or returned the wrong code (rc=$watchdog_signal_rc, expected $POST_SUITE_WATCHDOG_EXIT; suite=$(kill -0 "$suite_pid" 2>/dev/null && echo alive || echo gone), consumer=$(kill -0 "$consumer_pid" 2>/dev/null && echo alive || echo gone), watchdog=$(kill -0 "$watchdog_pid" 2>/dev/null && echo alive || echo gone)) — orphan leak in the realistic 'actually stuck' case"
+fi
+rm -rf "$watchdog_dir" "$fifo_dir" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# _report_gh_probe_failure (found during external review, #1676)
+# ---------------------------------------------------------------------------
+
+# Case 14: with_timeout's own "command exceeded Ns, killed: ..." diagnostic
+# must survive to an operator's view when a real call site captures stderr
+# to a file (the pattern budget_before/budget_after now use) rather than
+# discarding it via `2>/dev/null` — the old pattern silently swallowed that
+# diagnostic too, since a redirect on a function-call command applies to
+# everything the function's body does, not just the wrapped subprocess.
+# Exercises the real call-site pattern end to end: with_timeout against a
+# genuinely hanging command, stderr captured to a file, then relayed via
+# _report_gh_probe_failure, and asserts the ORIGINAL with_timeout diagnostic
+# text is present in what gets printed — not just that something was
+# printed.
+probe_err="$(mktemp)"
+with_timeout 2 sleep 30 > /dev/null 2>"$probe_err"
+relayed="$(_report_gh_probe_failure "$probe_err" "test probe" 2>&1)"
+if printf '%s' "$relayed" | grep -q "with_timeout: command exceeded 2s, killed: sleep 30"; then
+  pass "_report_gh_probe_failure relays with_timeout's own timeout diagnostic (previously swallowed by the call site's 2>/dev/null) — output: $relayed"
+else
+  fail "_report_gh_probe_failure did not relay with_timeout's diagnostic (got: '$relayed') — the exact signal an operator needs to tell a caught hang apart from an ordinary gh failure is being lost again"
+fi
+rm -f "$probe_err"
+
+# Case 15: the normal (empty stderr) case emits nothing — this warning
+# relay must not add noise to a probe that simply succeeds.
+probe_err="$(mktemp)"
+: > "$probe_err"
+relayed="$(_report_gh_probe_failure "$probe_err" "test probe" 2>&1)"
+if [ -z "$relayed" ]; then
+  pass "_report_gh_probe_failure emits nothing for an empty (no-error) stderr capture — no spurious noise on a healthy probe"
+else
+  fail "_report_gh_probe_failure emitted unexpected output for an empty stderr file: '$relayed'"
+fi
+rm -f "$probe_err"
 
 if [ "$FAILED" -ne 0 ]; then
   echo "=== hang_hardening_test.sh: FAILED ==="

@@ -494,6 +494,40 @@ with_timeout() {
   return "$rc"
 }
 
+# _report_gh_probe_failure <stderr_file> <label> (#1676, found during
+# Review, external feedback): relay a failed gh-api-rate_limit probe's
+# captured stderr as a warning, one line at a time — including
+# with_timeout's own "command exceeded Ns, killed: ..." diagnostic when the
+# failure was an enforced R1 timeout rather than an ordinary gh error.
+#
+# Exists because both real call sites below route with_timeout's entire
+# invocation through a caller-side stderr redirect (previously `2>/dev/null`,
+# now a captured temp file passed in as $1 here): a redirect on a
+# function-call command applies to everything the function's body does, not
+# just the wrapped subprocess it backgrounds — confirmed empirically:
+# `f() { echo diag >&2; return 1; }; f 2>/dev/null` produces no stderr
+# output at all. So the old `2>/dev/null` didn't just suppress a failing
+# `gh`'s own error text (the original, intended behavior, unchanged since
+# before this issue) — it also silently discarded with_timeout's OWN
+# diagnostic on an actual timeout, degrading the one case this whole PR
+# exists to make loud (a `gh api rate_limit` call that genuinely hung and
+# got killed by the deadline watcher) into the exact same generic "could not
+# read GraphQL rate_limit" message as an ordinary API failure, with nothing
+# in the log distinguishing a caught hang from a normal error — defeating
+# this mechanism's diagnosability goal at the only two call sites that exist
+# today.
+#
+# Never touches $rc — this is visibility only (R4, #1676: these probes
+# remain purely a report, never a gate, whether they fail via an ordinary
+# error or a with_timeout-enforced kill).
+_report_gh_probe_failure() {
+  local errfile="$1"
+  local label="$2"
+  if [ -s "$errfile" ]; then
+    sed "s/^/warning: ${label} probe: /" "$errfile" >&2
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Pre-gate (R1, #1454): refuse to spend live budget until the free, fast
 # layers pass.
@@ -1064,24 +1098,46 @@ stop_post_suite_watchdog() {
 #
 # Distinguishes "this is our own watchdog firing" (the $watchdog_dir/fired
 # marker is present) from "some other signal landed in this window" (marker
-# absent — a real Ctrl-C, or an external `kill` of the whole script) and
-# reacts accordingly. Both branches disarm $watchdog_pid (found during
-# Review, #1676): an earlier revision's TERM-only trap left the still-
-# sleeping watchdog timer running whenever its "external signal" branch
-# fired (its own kill target is this script's now-exiting PID, so the leaked
-# job would eventually no-op after its own sleep rather than misfire, but it
-# was still an unreaped background job for up to $POST_SUITE_WATCHDOG
-# seconds) — and was never wired to INT at all, so a Ctrl-C landing in this
-# exact window fell through to switch_and_run's EARLIER INT trap (installed
-# before the consumer wait, for the suite/consumer-drain phase), which has no
-# idea $watchdog_pid or $watchdog_dir exist and left both behind. Installed
-# for both signals below so INT and TERM behave identically here, matching
-# this whole mechanism's own "process-group discipline should extend to any
-# new backgrounded watcher job" design constraint (see with_timeout's and
-# disarm_deadline_signal's own comments).
+# absent — a real Ctrl-C, or an external `kill` of the whole script), but
+# BOTH branches now tear down the same set of resources before exiting
+# (found during Review, #1676 — two rounds of external review feedback, see
+# below): $suite_pid/$consumer_pid are group-killed, $watchdog_pid is
+# disarmed, and $fifo_dir/$watchdog_dir are removed, regardless of which
+# branch is taken. Earlier revisions diverged on this:
+#
+#   - The FIRED branch alone used to skip the suite/consumer group-kill
+#     entirely, just printing the diagnostic and exiting. That is backwards:
+#     the fired branch is the realistic "actually stuck" case this watchdog
+#     exists to catch — the checkpoint file's own text ("waiting for tee/jq
+#     consumer to drain") shows the most likely stuck step is the tee/jq
+#     consumer drain itself, and every OTHER step in this tail is either
+#     already timeout-bounded via with_timeout or a fast local jq/grep call —
+#     so $consumer_pid is exactly the process most likely to still be alive
+#     and wedged at the moment this branch runs, and leaving it running
+#     headless after the script exits is precisely the orphan class
+#     run_reaped's own R3 (#1624) discipline exists to avoid.
+#   - Neither branch used to disarm $watchdog_pid itself: an earlier
+#     revision's TERM-only trap left the still-sleeping watchdog timer
+#     running whenever its "external signal" branch fired (its own kill
+#     target is this script's now-exiting PID, so the leaked job would
+#     eventually no-op after its own sleep rather than misfire, but it was
+#     still an unreaped background job for up to $POST_SUITE_WATCHDOG
+#     seconds) — and was never wired to INT at all, so a Ctrl-C landing in
+#     this exact window fell through to switch_and_run's EARLIER INT trap
+#     (installed before the consumer wait, for the suite/consumer-drain
+#     phase), which has no idea $watchdog_pid or $watchdog_dir exist and left
+#     both behind.
+#
+# Installed for both signals below so INT and TERM behave identically here,
+# matching this whole mechanism's own "process-group discipline should
+# extend to any new backgrounded watcher job" design constraint (see
+# with_timeout's and disarm_deadline_signal's own comments).
 _post_suite_watchdog_signal() {
   local external_exit="$1"
-  if [ -f "$watchdog_dir/fired" ]; then
+  local fired=0
+  [ -f "$watchdog_dir/fired" ] && fired=1
+
+  if [ "$fired" -eq 1 ]; then
     {
       echo ""
       echo "############################################################"
@@ -1092,14 +1148,17 @@ _post_suite_watchdog_signal() {
       echo "## Last engine log line: $(tail -n1 "$ENGINE_LOG" 2>/dev/null || echo "(unavailable)")"
       echo "############################################################"
     } >&2
-    rm -rf "$watchdog_dir" 2>/dev/null || true
-    exit "$POST_SUITE_WATCHDOG_EXIT"
   fi
+
   kill -TERM -"$suite_pid" 2>/dev/null || true
   kill -TERM -"$consumer_pid" 2>/dev/null || true
   disarm_deadline_signal "$watchdog_pid"
   rm -rf "$fifo_dir" 2>/dev/null || true
   rm -rf "$watchdog_dir" 2>/dev/null || true
+
+  if [ "$fired" -eq 1 ]; then
+    exit "$POST_SUITE_WATCHDOG_EXIT"
+  fi
   exit "$external_exit"
 }
 
@@ -1140,17 +1199,24 @@ switch_and_run() {
   # silently defeat its group-kill entirely. A failed `with_timeout` (gh
   # error OR an enforced kill) both degrade to a skipped report rather than
   # aborting the script under `set -e` (R4, #1676: this probe is a report,
-  # never a gate).
+  # never a gate) — but, unlike stdout, stderr is captured to a temp file
+  # rather than discarded (`2>/dev/null` would also silently swallow
+  # with_timeout's own timeout diagnostic — see _report_gh_probe_failure's
+  # own comment, found during Review, #1676) and relayed as a warning on
+  # failure.
   local budget_before budget_after
   budget_before=""
   if [ -n "$BED_TOKEN" ]; then
-    local budget_before_tmp
+    local budget_before_tmp budget_before_err
     budget_before_tmp="$(mktemp)"
+    budget_before_err="$(mktemp)"
     if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
-        > "$budget_before_tmp" 2>/dev/null; then
+        > "$budget_before_tmp" 2>"$budget_before_err"; then
       budget_before="$(cat "$budget_before_tmp" 2>/dev/null || echo "")"
+    else
+      _report_gh_probe_failure "$budget_before_err" "budget_before (leg: ${mode})"
     fi
-    rm -f "$budget_before_tmp"
+    rm -f "$budget_before_tmp" "$budget_before_err"
   fi
 
   # The consumer (tee | jq) is fed via a named pipe and backgrounded as its
@@ -1276,22 +1342,32 @@ switch_and_run() {
   # there's nothing group-shaped to kill here, just this function's own trap
   # to invoke. The TERM and INT traps installed for this window (both routed
   # through the shared _post_suite_watchdog_signal, defined above) check
-  # `fired` at fire time: if present, this was our own watchdog, and it
-  # prints a diagnostic naming the elapsed time and the last checkpoint
-  # reached, then exits $POST_SUITE_WATCHDOG_EXIT. If absent, this was some
-  # other TERM/INT (e.g. an external kill, or Ctrl-C) landing in this same
-  # window, and it falls through to the same suite/consumer-group-kill
-  # behavior this function already had here before this watchdog existed —
-  # also now disarming $watchdog_pid itself in that fallback branch (found
-  # during Review, #1676: neither the original TERM-only trap's fallback
-  # branch nor, for INT specifically, any trap in this window at all used to
-  # do this, leaking the watchdog's background timer job) — an external
-  # signal during this window behaves exactly as it did before, it just also
-  # gets diagnosed correctly against a genuine watchdog firing, and no longer
-  # leaks the watchdog job doing so. These traps stay installed for the whole
-  # remaining tail (unlike the old suite/consumer traps they replace, which
-  # were cleared right after the consumer wait) — by design, since the
-  # watched window is the whole tail, not just the consumer drain.
+  # `fired` at fire time: if present, this was our own watchdog — it prints
+  # a diagnostic naming the elapsed time and the last checkpoint reached,
+  # THEN (found during Review, #1676, second round of external feedback)
+  # group-kills $suite_pid/$consumer_pid exactly like the non-watchdog branch
+  # below, before exiting $POST_SUITE_WATCHDOG_EXIT: an earlier revision
+  # skipped that teardown specifically in the fired branch, which is
+  # backwards — the checkpoint text ("waiting for tee/jq consumer to drain")
+  # and every other step in this tail being either with_timeout-bounded or a
+  # fast local jq/grep call means $consumer_pid is exactly the process most
+  # likely to still be alive and wedged at the moment this branch actually
+  # runs, so skipping its group-kill left the one realistic "stuck" case
+  # orphaning the very pipeline the watchdog was built to catch. If `fired`
+  # is absent, this was some other TERM/INT (e.g. an external kill, or
+  # Ctrl-C) landing in this same window, and it runs the identical
+  # suite/consumer-group-kill teardown this function already had here before
+  # this watchdog existed — both branches now also disarm $watchdog_pid
+  # itself (found during Review, #1676, first round: neither the original
+  # TERM-only trap's fallback branch nor, for INT specifically, any trap in
+  # this window at all used to do this, leaking the watchdog's background
+  # timer job). An external signal during this window behaves exactly as it
+  # did before, it just also gets diagnosed correctly against a genuine
+  # watchdog firing, and neither branch leaks a background job doing so.
+  # These traps stay installed for the whole remaining tail (unlike the old
+  # suite/consumer traps they replace, which were cleared right after the
+  # consumer wait) — by design, since the watched window is the whole tail,
+  # not just the consumer drain.
   local watchdog_dir
   watchdog_dir="$(mktemp -d)"
   echo "waiting for tee/jq consumer to drain" > "$watchdog_dir/checkpoint"
@@ -1334,14 +1410,19 @@ switch_and_run() {
   budget_after=""
   if [ -n "$BED_TOKEN" ]; then
     # Captured via a temp file, NOT `$(with_timeout ...)` — same rationale
-    # as budget_before above; see with_timeout's own comment.
-    local budget_after_tmp
+    # as budget_before above; see with_timeout's own comment. stderr is also
+    # captured (not discarded) and relayed on failure — same rationale as
+    # budget_before above; see _report_gh_probe_failure's own comment.
+    local budget_after_tmp budget_after_err
     budget_after_tmp="$(mktemp)"
+    budget_after_err="$(mktemp)"
     if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
-        > "$budget_after_tmp" 2>/dev/null; then
+        > "$budget_after_tmp" 2>"$budget_after_err"; then
       budget_after="$(cat "$budget_after_tmp" 2>/dev/null || echo "")"
+    else
+      _report_gh_probe_failure "$budget_after_err" "budget_after (leg: ${mode})"
     fi
-    rm -f "$budget_after_tmp"
+    rm -f "$budget_after_tmp" "$budget_after_err"
   fi
   if [ -n "$budget_before" ] && [ -n "$budget_after" ]; then
     if [ "$budget_after" -le "$budget_before" ]; then
