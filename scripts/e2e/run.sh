@@ -1053,6 +1053,56 @@ stop_post_suite_watchdog() {
   rm -rf "$wdir" 2>/dev/null || true
 }
 
+# _post_suite_watchdog_signal <exit_code_if_external> (#1676): shared TERM/INT
+# handler for R2's post-suite watchdog window, installed by switch_and_run
+# below for the duration of its own post-suite tail. Relies on bash's dynamic
+# scoping of `local` variables — $mode/$suite_pid/$consumer_pid/$fifo_dir/
+# $watchdog_dir/$watchdog_pid/$suite_exit_epoch are all still in scope from
+# the still-executing switch_and_run call this trap fires inside of, exactly
+# as the inline trap body it replaces already relied on for the same
+# variables.
+#
+# Distinguishes "this is our own watchdog firing" (the $watchdog_dir/fired
+# marker is present) from "some other signal landed in this window" (marker
+# absent — a real Ctrl-C, or an external `kill` of the whole script) and
+# reacts accordingly. Both branches disarm $watchdog_pid (found during
+# Review, #1676): an earlier revision's TERM-only trap left the still-
+# sleeping watchdog timer running whenever its "external signal" branch
+# fired (its own kill target is this script's now-exiting PID, so the leaked
+# job would eventually no-op after its own sleep rather than misfire, but it
+# was still an unreaped background job for up to $POST_SUITE_WATCHDOG
+# seconds) — and was never wired to INT at all, so a Ctrl-C landing in this
+# exact window fell through to switch_and_run's EARLIER INT trap (installed
+# before the consumer wait, for the suite/consumer-drain phase), which has no
+# idea $watchdog_pid or $watchdog_dir exist and left both behind. Installed
+# for both signals below so INT and TERM behave identically here, matching
+# this whole mechanism's own "process-group discipline should extend to any
+# new backgrounded watcher job" design constraint (see with_timeout's and
+# disarm_deadline_signal's own comments).
+_post_suite_watchdog_signal() {
+  local external_exit="$1"
+  if [ -f "$watchdog_dir/fired" ]; then
+    {
+      echo ""
+      echo "############################################################"
+      echo "## POST-SUITE WATCHDOG (leg: ${mode}): go test exited $(( $(date +%s) - suite_exit_epoch ))s ago,"
+      echo "## but the script has not progressed past its post-suite steps"
+      echo "## within ${POST_SUITE_WATCHDOG}s (E2E_POST_SUITE_WATCHDOG)."
+      echo "## Stuck in: $(cat "$watchdog_dir/checkpoint" 2>/dev/null || echo "(unknown step)")"
+      echo "## Last engine log line: $(tail -n1 "$ENGINE_LOG" 2>/dev/null || echo "(unavailable)")"
+      echo "############################################################"
+    } >&2
+    rm -rf "$watchdog_dir" 2>/dev/null || true
+    exit "$POST_SUITE_WATCHDOG_EXIT"
+  fi
+  kill -TERM -"$suite_pid" 2>/dev/null || true
+  kill -TERM -"$consumer_pid" 2>/dev/null || true
+  disarm_deadline_signal "$watchdog_pid"
+  rm -rf "$fifo_dir" 2>/dev/null || true
+  rm -rf "$watchdog_dir" 2>/dev/null || true
+  exit "$external_exit"
+}
+
 switch_and_run() {
   local mode="$1"
   local parallel="$2"
@@ -1224,19 +1274,24 @@ switch_and_run() {
   # account of this, found empirically during Implement). The watcher
   # signals the whole running script's PID ($$), not a process group —
   # there's nothing group-shaped to kill here, just this function's own trap
-  # to invoke. The TERM trap installed for this window checks `fired` at
-  # fire time: if present, this was our own watchdog, and it prints a
-  # diagnostic naming the elapsed time and the last checkpoint reached, then
-  # exits $POST_SUITE_WATCHDOG_EXIT. If absent, this was some other TERM
-  # (e.g. an external kill) landing in this same window, and it falls
-  # through to the same suite/consumer-group-kill-then-exit-143 behavior
-  # this function already had here before this watchdog existed — an
-  # external signal during this window behaves exactly as it did before, it
-  # just also gets diagnosed correctly against a genuine watchdog firing.
-  # This trap stays installed for the whole remaining tail (unlike the old
-  # suite/consumer trap it replaces, which was cleared right after the
-  # consumer wait) — by design, since the watched window is the whole tail,
-  # not just the consumer drain.
+  # to invoke. The TERM and INT traps installed for this window (both routed
+  # through the shared _post_suite_watchdog_signal, defined above) check
+  # `fired` at fire time: if present, this was our own watchdog, and it
+  # prints a diagnostic naming the elapsed time and the last checkpoint
+  # reached, then exits $POST_SUITE_WATCHDOG_EXIT. If absent, this was some
+  # other TERM/INT (e.g. an external kill, or Ctrl-C) landing in this same
+  # window, and it falls through to the same suite/consumer-group-kill
+  # behavior this function already had here before this watchdog existed —
+  # also now disarming $watchdog_pid itself in that fallback branch (found
+  # during Review, #1676: neither the original TERM-only trap's fallback
+  # branch nor, for INT specifically, any trap in this window at all used to
+  # do this, leaking the watchdog's background timer job) — an external
+  # signal during this window behaves exactly as it did before, it just also
+  # gets diagnosed correctly against a genuine watchdog firing, and no longer
+  # leaks the watchdog job doing so. These traps stay installed for the whole
+  # remaining tail (unlike the old suite/consumer traps they replace, which
+  # were cleared right after the consumer wait) — by design, since the
+  # watched window is the whole tail, not just the consumer drain.
   local watchdog_dir
   watchdog_dir="$(mktemp -d)"
   echo "waiting for tee/jq consumer to drain" > "$watchdog_dir/checkpoint"
@@ -1261,27 +1316,13 @@ switch_and_run() {
     fi
   ) >/dev/null 2>&1 &
   local watchdog_pid=$!
-  trap '
-    if [ -f "$watchdog_dir/fired" ]; then
-      {
-        echo ""
-        echo "############################################################"
-        echo "## POST-SUITE WATCHDOG (leg: ${mode}): go test exited $(( $(date +%s) - suite_exit_epoch ))s ago,"
-        echo "## but the script has not progressed past its post-suite steps"
-        echo "## within ${POST_SUITE_WATCHDOG}s (E2E_POST_SUITE_WATCHDOG)."
-        echo "## Stuck in: $(cat "$watchdog_dir/checkpoint" 2>/dev/null || echo "(unknown step)")"
-        echo "## Last engine log line: $(tail -n1 "$ENGINE_LOG" 2>/dev/null || echo "(unavailable)")"
-        echo "############################################################"
-      } >&2
-      rm -rf "$watchdog_dir" 2>/dev/null || true
-      exit "$POST_SUITE_WATCHDOG_EXIT"
-    fi
-    kill -TERM -"$suite_pid" 2>/dev/null || true
-    kill -TERM -"$consumer_pid" 2>/dev/null || true
-    rm -rf "$fifo_dir" 2>/dev/null || true
-    rm -rf "$watchdog_dir" 2>/dev/null || true
-    exit 143
-  ' TERM
+  # Installed for BOTH signals (found during Review, #1676 — see
+  # _post_suite_watchdog_signal's own comment above): an INT (Ctrl-C) landing
+  # in this exact window must be handled identically to a TERM, not silently
+  # fall through to the earlier suite/consumer-drain-phase INT trap installed
+  # above, which knows nothing about $watchdog_pid/$watchdog_dir.
+  trap '_post_suite_watchdog_signal 143' TERM
+  trap '_post_suite_watchdog_signal 130' INT
 
   # Wait for the consumer to drain and finish writing $jsonlog before any of
   # it is read below — see the comment above. Still under a TERM trap (the

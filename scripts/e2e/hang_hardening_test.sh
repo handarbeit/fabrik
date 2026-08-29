@@ -278,6 +278,41 @@ else
   fail "last_completed_test_name reported '$name', expected 'TestBeta' (skip should count as the most recent completion)"
 fi
 
+# ---------------------------------------------------------------------------
+# _post_suite_watchdog_signal (R2 fix, found during Review, #1676)
+# ---------------------------------------------------------------------------
+
+# Case 12: the "external signal" fallback branch (the $watchdog_dir/fired
+# marker absent — i.e. this signal was NOT the watchdog itself firing) must
+# disarm the watchdog's own background timer job too, not just the
+# suite/consumer jobs — an earlier revision's TERM-only trap left the
+# watchdog job running in exactly this branch, and never wired INT to any
+# watchdog-aware handler at all (see the function's own comment in run.sh
+# for the full account). This exercises the shared handler directly against
+# stand-in jobs for suite_pid/consumer_pid/watchdog_pid, run in a subshell
+# since the handler itself calls `exit`. The function reads these as
+# ordinary variables (this test sets them as globals rather than switch_and_
+# run's own locals) — equivalent from the function's own point of view,
+# since bash trap/function execution doesn't distinguish the two.
+watchdog_dir="$(mktemp -d)"
+fifo_dir="$(mktemp -d)"
+mode="test"
+suite_exit_epoch=$(date +%s)
+( sleep 30 ) &
+suite_pid=$!
+( sleep 30 ) &
+consumer_pid=$!
+( sleep 30 ) &
+watchdog_pid=$!
+( _post_suite_watchdog_signal 143 ) >/dev/null 2>&1
+sleep 1
+if ! kill -0 "$watchdog_pid" 2>/dev/null && ! kill -0 "$suite_pid" 2>/dev/null && ! kill -0 "$consumer_pid" 2>/dev/null; then
+  pass "_post_suite_watchdog_signal's external-signal fallback disarms the watchdog job (not just suite/consumer) — no orphaned timer left running"
+else
+  fail "_post_suite_watchdog_signal left a job running (watchdog=$(kill -0 "$watchdog_pid" 2>/dev/null && echo alive || echo gone), suite=$(kill -0 "$suite_pid" 2>/dev/null && echo alive || echo gone), consumer=$(kill -0 "$consumer_pid" 2>/dev/null && echo alive || echo gone)) — orphan leak"
+fi
+rm -rf "$watchdog_dir" "$fifo_dir" 2>/dev/null
+
 if [ "$FAILED" -ne 0 ]; then
   echo "=== hang_hardening_test.sh: FAILED ==="
   exit 1
