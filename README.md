@@ -126,10 +126,10 @@ Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead o
 
 On a repo with `strict` branch protection, landing several ready PRs serially produces an O(N²) rebase-and-retest cascade — each merge invalidates every other ready PR's "up-to-date + green" status, forcing a rebase and a full required-check re-run before the next one can land. Fabrik solves this by batching ready PRs and validating the combined result once instead of retesting each one against every prior merge.
 
-Two landing engines share one `Queued` board column, and Fabrik picks per repo:
+Two landing engines share one `Queued` board column, and Fabrik picks the engine per repo:
 
 - **GitHub's native merge queue** (ADR-058) — used automatically when the repo has one enabled (Enterprise Cloud or org-owned public repos). Kill-switch: `--merge-queue off`.
-- **Fabrik's internal merge train** (ADR-059) — the plan- and host-agnostic fallback for private Team and personal-account repos where GitHub's native queue isn't available. It stages a trial branch per repo, runs one combined Validate, and lands the batch atomically; a red batch is isolated via halving bisection so a single poisoner doesn't block the rest. It is opt-in via `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml`.
+- **Fabrik's internal merge train** (ADR-059) — the plan- and host-agnostic fallback for private Team and personal-account repos where GitHub's native queue isn't available. It stages a trial branch per `(repo, base)` partition — a single repo can run multiple concurrent trains when `base:<branch>` items target different branches — runs one combined Validate per partition, and lands the batch atomically; a red batch is isolated via halving bisection so a single poisoner doesn't block the rest. When exactly one item is queued for a partition, Fabrik skips the trial and lands that item's own PR directly once it's a fast-forward of its base, mergeable, and CI is green. It is opt-in via `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml`.
 
 Native queue routing defaults to `auto` (it only engages on repos where GitHub's native queue is already enabled); the merge train defaults to `off`. Both leave the existing serial auto-merge path untouched unless explicitly turned on. See [Merge Queue](docs/USER_GUIDE.md#merge-queue) and [Merge Train / Queued](docs/USER_GUIDE.md#merge-train--queued) in the User Guide for setup (including the required `Queued` board column) and tuning knobs.
 
