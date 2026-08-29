@@ -54,6 +54,28 @@
 #                           full price, exactly as before this existed. See
 #                           export_pregate_verified_sha in cut-release.sh.
 #
+#   FABRIK_PREGATE_ALLOWED_DIRTY_REGEX=<grep -E pattern>   caller-declared
+#                           dirty-tree allowlist (REQ7, #1677): only
+#                           meaningful alongside FABRIK_PREGATE_VERIFIED_SHA
+#                           above. On a real cut-release.sh run, its own
+#                           step 4 rewrites plugin/known_embedded_versions.go
+#                           on disk between the SHA being captured and this
+#                           check, which made the clean-tree requirement
+#                           above fail on essentially every release and the
+#                           dedup guard never actually engage. This var lets
+#                           the caller declare, up front, the specific
+#                           self-writes it knows are benign — anything NOT
+#                           matching still counts as dirty. cut-release.sh
+#                           exports this to the exact same allowlist its own
+#                           step-1 preflight already trusts (see that
+#                           script's allowed_dirty_regex), so this does not
+#                           reopen the TOCTOU gap the clean-tree check exists
+#                           to close — it only recognizes already-known,
+#                           already-declared writes. A standalone
+#                           `scripts/e2e/run.sh` invocation never sets this,
+#                           so its dirty-tree check stays exactly as strict
+#                           as before this existed.
+#
 # Bed preflight (on by default — see preflight_bed below for the full rationale):
 #   Before anything runs, the bed checkout is fast-forwarded to the ref under
 #   test, its binary is rebuilt IN PLACE, stage-config drift is reported, and the
@@ -361,10 +383,30 @@ run_pregate() {
   # also requires a clean working tree (`git status --porcelain` empty) —
   # any uncommitted change, tracked or untracked, falls through to the full
   # pre-gate exactly like a SHA mismatch does.
+  #
+  # REQ7 (#1677): on a real cut-release.sh run, step 4's plugin-hash write
+  # lands here on essentially every release, so an unconditionally-strict
+  # "empty means clean" check meant this guard never actually engaged in
+  # practice — it always saw a dirty tree and fell through. Rather than
+  # loosening the check to accept ANY dirty tree (which would reopen the
+  # exact TOCTOU gap this check exists to close — an unvetted change between
+  # the SHA being captured and this check could then slip through unnoticed),
+  # FABRIK_PREGATE_ALLOWED_DIRTY_REGEX lets the caller declare, up front,
+  # the specific self-writes it knows are benign (cut-release.sh sets this
+  # to the same allowlist its own step-1 preflight already trusts — see
+  # allowed_dirty_regex there). Anything NOT matching that declared
+  # allowlist still counts as dirty and still falls through to the full
+  # pre-gate below, exactly as before. A standalone `scripts/e2e/run.sh`
+  # invocation never sets this var, so `dirty` there is the full,
+  # unfiltered porcelain output — unchanged, still as strict as ever.
   if [ -n "${FABRIK_PREGATE_VERIFIED_SHA:-}" ]; then
     local current_sha dirty
     current_sha="$(git rev-parse HEAD)"
-    dirty="$(git status --porcelain)"
+    if [ -n "${FABRIK_PREGATE_ALLOWED_DIRTY_REGEX:-}" ]; then
+      dirty="$(git status --porcelain | grep -Ev "$FABRIK_PREGATE_ALLOWED_DIRTY_REGEX" || true)"
+    else
+      dirty="$(git status --porcelain)"
+    fi
     if [ "$FABRIK_PREGATE_VERIFIED_SHA" = "$current_sha" ] && [ -z "$dirty" ]; then
       echo "== pre-gate skipped (already verified for $current_sha in this invocation, R5 #1624) =="
       return 0
@@ -372,7 +414,7 @@ run_pregate() {
     if [ "$FABRIK_PREGATE_VERIFIED_SHA" != "$current_sha" ]; then
       echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA ($FABRIK_PREGATE_VERIFIED_SHA) does not match HEAD ($current_sha) — running the full pre-gate =="
     else
-      echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA matches HEAD ($current_sha) but the working tree has uncommitted changes since it was verified — running the full pre-gate =="
+      echo "== pre-gate: FABRIK_PREGATE_VERIFIED_SHA matches HEAD ($current_sha) but the working tree has uncommitted changes (beyond any declared allowlist) since it was verified — running the full pre-gate =="
     fi
   fi
 
