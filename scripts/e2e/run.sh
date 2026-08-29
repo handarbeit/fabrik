@@ -222,6 +222,56 @@
 # concretely, a compiled `*.test` binary) running headless. See run_reaped's
 # own doc comment for the mechanism and why it traps INT/TERM only, never
 # EXIT.
+#
+# Hang hardening (R1-R3, #1676): the v0.0.81 cut hung for 17h19m AFTER `go
+# test` had already exited — the two `gh api rate_limit` budget-probe calls
+# in switch_and_run had no timeout at all (`|| echo ""` only guards a
+# *failing* call, not a *hanging* one). Three independent layers now guard
+# against this:
+#
+#   E2E_GH_API_TIMEOUT=<secs>     (R1, default 30) — every ancillary network
+#                          call (currently: the two `gh api rate_limit`
+#                          budget-probe calls) is wrapped in the with_timeout
+#                          helper (defined below, near run_reaped) and killed
+#                          — whole process group — if it exceeds this. THIS IS
+#                          THE REQUIRED ROUTING POINT for any future network
+#                          call added to this script or one it sources; see
+#                          with_timeout's own comment.
+#
+#   E2E_POST_SUITE_WATCHDOG=<secs> (R2, default 300) — a background watchdog,
+#                          armed the instant `go test` exits, aborts the
+#                          script loudly (exit $POST_SUITE_WATCHDOG_EXIT, see
+#                          below) with a diagnostic naming the stuck step
+#                          (budget probe / timing report / outcome
+#                          classification / backoff scan) if switch_and_run's
+#                          own post-suite bookkeeping tail — normally seconds,
+#                          not minutes — hasn't finished within this window.
+#                          This is the exact failure mode from the v0.0.81
+#                          incident: go test long gone, no watchdog to say so.
+#                          A backstop against a future regression, not the
+#                          expected path — R1 already removes the only two
+#                          calls known to cause it.
+#
+#   E2E_STALL_WARN_MINUTES=<mins> (R3, default 15) — independently of R2,
+#                          warns (never aborts) if the suite's own combined
+#                          output has gone quiet for this long WHILE go test
+#                          is still running, naming the last completed
+#                          scenario. Purely advisory: a real scenario can
+#                          legitimately wait on Claude for extended periods
+#                          (see the TIMEOUT derivation above), so silence
+#                          alone is never treated as a hang — only surfaced,
+#                          so it's never mistaken for progress either. The
+#                          isolated TestMergeTrainRunawayGuardPausesBatch leg
+#                          (run alone, deliberately idle for long stretches)
+#                          is expected to trigger this on every healthy run —
+#                          see tests/e2e/README.md.
+#
+# R4 (non-gating): the budget probe is a report, never a gate — a timeout
+# under R1 degrades exactly like the pre-existing "call failed" case (the
+# `budget_before=""`/`budget_after=""` fallback), never affecting the suite's
+# own exit code. R3's stall warning is likewise purely advisory and never
+# touches $rc. See switch_and_run's own comments for the full mechanism, and
+# tests/e2e/README.md for the defaults' derivation.
 
 set -euo pipefail
 set -m
@@ -337,17 +387,22 @@ run_reaped() {
 #
 # NOTE: the watcher itself is armed inline at each call site (`( sleep ...;
 # if ...; then ...; fi ) &`), NOT via a shared "arm" function that returns
-# the watcher's PID through `$(...)`: command substitution always runs in a
-# subshell, and — confirmed empirically during Implement — a subshell
-# created for command substitution does not let a job it backgrounds run
-# concurrently with the substitution's own completion; the whole `(...) &`
-# body (sleep included) executes to completion INSIDE the substitution
-# before it returns, which would make with_timeout block for the full
-# timeout on every call, defeating it entirely. Backgrounding directly in
-# the caller's own function body (as both call sites below do) doesn't have
-# this problem — only the teardown half (an already-known PID, no
-# substitution needed to obtain it) is safely shareable, hence this
-# function exists but its counterpart does not.
+# the watcher's PID through `$(...)`: command substitution ALWAYS runs its
+# command list in a subshell, and — confirmed empirically during Implement —
+# `set -m` job control's one-process-group-per-background-job behavior does
+# NOT apply inside that subshell, regardless of `set -m` being active in the
+# calling shell. A job backgrounded there keeps the SUBSHELL's own process
+# group instead of getting one of its own, so a later `kill -TERM -"$pid"`
+# (a negative PGID) targets a process group that was never actually created
+# and silently fails (`kill` exits 1, "No such process") — the guarded
+# command is never killed and just runs to completion (or hangs forever)
+# on its own, defeating the timeout entirely without any visible error. This
+# is *why* with_timeout's own call sites below capture output via a temp
+# file instead of `$(with_timeout ...)` — see with_timeout's own comment.
+# Backgrounding directly in the caller's own (non-substituted) function body,
+# as both call sites below do, doesn't have this problem — only the teardown
+# half (an already-known PID, no substitution needed to obtain it) is safely
+# shareable, hence this function exists but its counterpart does not.
 disarm_deadline_signal() {
   local watcher_pid="$1"
   kill -TERM -"$watcher_pid" 2>/dev/null || true
@@ -367,6 +422,23 @@ disarm_deadline_signal() {
 # echo ""` only guards a *failing* call, not a *hanging* one. A bare `gh
 # api`/`curl`/`wget` call added later without this wrapper can reproduce that
 # exact incident. See the header comment's "Hang hardening" section.
+#
+# CALLERS MUST NOT INVOKE THIS VIA `$(with_timeout ...)` (command
+# substitution). Confirmed empirically during Implement: command
+# substitution always runs its command list in a subshell, and `set -m`
+# job control's one-process-group-per-background-job behavior does not
+# apply inside that subshell — the guarded command backgrounded below keeps
+# the SUBSHELL's own process group rather than getting one of its own, so
+# the deadline watcher's group-kill (`kill -TERM -"$pid"`, a negative PGID)
+# silently fails against a process group that was never created (`kill`
+# exits 1), and the guarded command just runs to completion — or hangs
+# forever — on its own, defeating the timeout entirely with no visible
+# error. Capture output via a temp file instead (see the budget-probe call
+# sites below for the pattern) — invoked as a plain foreground statement,
+# not inside `$(...)`, with_timeout runs in the caller's own shell, where
+# `set -m` correctly assigns each backgrounded job its own process group.
+# See disarm_deadline_signal's own comment above for the full account of
+# this finding.
 #
 # Implemented as portable bash job control (background the command under
 # `set -m`, which gives it its own process group; a second backgrounded
@@ -398,20 +470,10 @@ with_timeout() {
   marker_dir="$(mktemp -d)"
   "$@" &
   local pid=$!
-  # The watcher's own stdout is explicitly redirected away (>/dev/null),
-  # NOT left to inherit with_timeout's — with_timeout's real call sites
-  # capture its output via command substitution (e.g. `budget_before=$(
-  # with_timeout ... gh api ...)`), and command substitution only resolves
-  # once EVERY process holding its pipe's write end open has closed it.
-  # Without this redirect, the watcher (which inherits that same fd) would
-  # keep the pipe open for its own full `sleep timeout_secs` regardless of
-  # how fast the guarded command itself finishes — silently forcing every
-  # with_timeout call to take the FULL timeout even on the fast path.
-  # Confirmed empirically during Implement: omitting this made
-  # `with_timeout 30 echo hello` (captured via `$(...)`) take a full 30s
-  # instead of returning instantly. The watcher never produces real output
-  # of its own anyway (its `kill` is already `2>/dev/null`), so nothing is
-  # lost by closing this fd.
+  # The watcher's own stdout/stderr are redirected away — it never produces
+  # useful output of its own (its `kill` is already `2>/dev/null`), so
+  # nothing is lost by closing these fds, and it keeps the watcher from
+  # holding open anything the caller might itself have redirected.
   (
     sleep "$timeout_secs"
     if kill -0 "$pid" 2>/dev/null; then
@@ -1023,14 +1085,22 @@ switch_and_run() {
   # deliberately covers the restart too — see its own comment for why the two
   # have different windows). Wrapped in with_timeout (R1, #1676) so a hung
   # `gh api` call can never block the script — see with_timeout's own
-  # comment above. Guarded with `|| echo ...` so a transient `gh` failure OR
-  # a with_timeout-enforced kill both degrade to a skipped report rather
-  # than aborting the script under `set -e` (R4, #1676: this probe is a
-  # report, never a gate).
+  # comment above. Captured via a temp file, NOT `$(with_timeout ...)` —
+  # with_timeout's own comment explains why command substitution would
+  # silently defeat its group-kill entirely. A failed `with_timeout` (gh
+  # error OR an enforced kill) both degrade to a skipped report rather than
+  # aborting the script under `set -e` (R4, #1676: this probe is a report,
+  # never a gate).
   local budget_before budget_after
   budget_before=""
   if [ -n "$BED_TOKEN" ]; then
-    budget_before=$(with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+    local budget_before_tmp
+    budget_before_tmp="$(mktemp)"
+    if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
+        > "$budget_before_tmp" 2>/dev/null; then
+      budget_before="$(cat "$budget_before_tmp" 2>/dev/null || echo "")"
+    fi
+    rm -f "$budget_before_tmp"
   fi
 
   # The consumer (tee | jq) is fed via a named pipe and backgrounded as its
@@ -1222,7 +1292,15 @@ switch_and_run() {
   echo "gh api rate_limit budget_after probe" > "$watchdog_dir/checkpoint"
   budget_after=""
   if [ -n "$BED_TOKEN" ]; then
-    budget_after=$(with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+    # Captured via a temp file, NOT `$(with_timeout ...)` — same rationale
+    # as budget_before above; see with_timeout's own comment.
+    local budget_after_tmp
+    budget_after_tmp="$(mktemp)"
+    if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
+        > "$budget_after_tmp" 2>/dev/null; then
+      budget_after="$(cat "$budget_after_tmp" 2>/dev/null || echo "")"
+    fi
+    rm -f "$budget_after_tmp"
   fi
   if [ -n "$budget_before" ] && [ -n "$budget_after" ]; then
     if [ "$budget_after" -le "$budget_before" ]; then
