@@ -446,7 +446,7 @@ and why `mergeTrainSlots` caps concurrent merge-train git activity
 independently of `-parallel`. See `adrs/1452-mergetrain-sim-harness-seams.md`
 and `adrs/1624-sim-suite-concurrency-and-pregate-dedup.md`.
 
-### Parallelism cap (R1, #1624)
+### Parallelism cap (R1, #1624; ceiling lowered and extended repo-wide, #1677)
 
 `go test`'s default `-parallel` is `GOMAXPROCS` — every core the host has.
 On the 28-core machine that produced #1624, that meant dozens of concurrent
@@ -462,18 +462,38 @@ suite *less* reliable, backwards from the intended relationship.
 
 `scripts/sim/run.sh` (the sole entry point both manual runs and
 `scripts/e2e/run.sh`'s pre-gate go through — see that script's own header
-comment) now passes an explicit `-parallel "$SIM_PARALLEL"` (default
-**`min(8, host cores)`**, overridable via the environment — not a flat 8:
-review caught that a flat 8 would *increase* concurrent git-spawning on any
-host with fewer than 8 cores, versus the previous `GOMAXPROCS`-derived
-default, so a low-core host is never worse off than before this change,
-while every host still caps at 8 regardless of how many cores it has above
-that) instead of leaving `go test` to inherit `GOMAXPROCS` uncapped. This
-does not apply to a bare `go test -race ./...` invoked directly (CI's own
-gate, or a developer running the whole tree by hand) — only to invocations
-that go through `scripts/sim/run.sh`. CI's own runners are 2–4 cores, well
-below where this class of contention appears, which is part of why the
-flake was essentially unreproducible there.
+comment) passes an explicit `-parallel "$SIM_PARALLEL"`, defaulting to
+`scripts/lib/parallel.sh`'s `default_race_parallel` — **`min(4, host
+cores)`**, overridable via the environment — not a flat number: a flat cap
+would *increase* concurrent git-spawning on any host with fewer cores than
+the cap, versus the previous `GOMAXPROCS`-derived default, so a low-core
+host is never worse off than before this change, while every host still
+caps at the ceiling regardless of how many cores it has above that.
+
+The ceiling was **lowered from 8 to 4 by #1677**, after #1624's original
+`min(8, host cores)` default turned out to still reproduce the TSan
+fork/exec SIGSEGV roughly **1 run in 5** on the 28-core host — not reliable
+enough for a release gate. `-parallel 4` showed zero SIGSEGVs across
+multiple consecutive runs on that same host, at the cost of a longer run
+(~661s, over `go test`'s undocumented 10-minute default `-timeout`) — which
+is why `scripts/sim/run.sh` now also passes an explicit `-timeout
+"$SIM_TIMEOUT"` (default `20m`), so the lower, reliable parallelism value
+has room to actually finish instead of looking nonviable against a hidden
+default.
+
+**This now also applies to a bare `go test -race ./...`** (both
+`scripts/cut-release.sh` step 4 and CI's own `go test` step, REQ3/REQ4,
+#1677) — the previous version of this section stated the cap did *not*
+apply there, reasoning that CI's 2–4-core runners never hit this class of
+contention. That reasoning still holds for CI (the cap is a no-op there in
+practice), but not for a bare `go test -race ./...` run by hand on a
+high-core-count release-cutting workstation, which exercises the exact same
+`tests/sim` package as `scripts/sim/run.sh` and is just as capable of
+reproducing the SIGSEGV — confirmed during the same v0.0.81 release cut
+that motivated #1677. Both invocations now source
+`scripts/lib/parallel.sh` and pass `default_race_parallel`'s value
+explicitly, so there is one shared cap, not three drifting ones, across
+`scripts/sim/run.sh`, `cut-release.sh`, and CI.
 
 Measured before/after on the 28-core machine that produced #1624
 (`scripts/sim/run.sh --all`, `-race`): capping `-parallel` at 8 (from an

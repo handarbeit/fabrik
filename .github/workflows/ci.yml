@@ -56,7 +56,19 @@ jobs:
       - name: go test
         # TestExecute_ConfigYAMLApplied is a timing-sensitive SIGINT integration
         # test that fails intermittently on CI; it is tracked separately.
-        run: go test -race -timeout 5m -skip TestExecute_ConfigYAMLApplied ./...
+        #
+        # -parallel capped via scripts/lib/parallel.sh's default_race_parallel
+        # (REQ4, #1677): this invocation includes the same git-forking
+        # tests/sim package that scripts/sim/run.sh's own SIM_PARALLEL caps
+        # locally — capping it here too keeps both entry points coherent
+        # rather than one being a no-op protection. CI's runners are 2-4
+        # cores (well below the min(4, cores) ceiling), so this is a no-op
+        # in practice today and exists for future-proofing / consistency,
+        # not because CI has ever reproduced the fork/exec SIGSEGV this cap
+        # guards against — see scripts/lib/parallel.sh's own header comment.
+        run: |
+          source scripts/lib/parallel.sh
+          go test -race -timeout 5m -parallel "$(default_race_parallel)" -skip TestExecute_ConfigYAMLApplied ./...
 
       # Compile the e2e suite without running it. The scenarios are behind the
       # `e2e` build tag and drive a real Fabrik bed against real repos, so they
