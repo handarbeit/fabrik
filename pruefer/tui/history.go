@@ -138,7 +138,11 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 				h.idx--
 			}
 		case "down", "j":
-			if h.idx < len(h.entries)-1 {
+			// Bound against the visible list, not h.entries: skips are
+			// filtered out of the pane (#1674 R2), so h.idx is a position
+			// within what View actually renders. Bounding on h.entries would
+			// let the selection run past the last visible row.
+			if h.idx < len(h.visibleEntries())-1 {
 				h.idx++
 			}
 		}
@@ -276,6 +280,13 @@ const defaultHistoryRows = 10
 const maxKeyColumn = 34
 
 func (h HistoryPaneComponent) Height() int {
+	// With a granted budget, View pads to exactly that many rows, so the
+	// height is the budget regardless of how many entries exist. Reporting
+	// min(entries, budget) here would under-report the rendered height — e.g.
+	// budget 20 with 3 visible entries renders 23 rows, not 6.
+	if h.maxRows > 0 {
+		return h.rowBudget() + 3
+	}
 	n := len(h.visibleEntries())
 	if n == 0 {
 		n = 1
@@ -293,13 +304,19 @@ func (h *HistoryPaneComponent) SetFocused(f bool) {
 
 // Selected returns the currently selected history entry, or nil if none.
 // Index 0 is the most recently completed review.
+// Selected returns the entry the pane is highlighting, indexed within the
+// *visible* entries. h.idx is a display position: View renders visibleEntries()
+// newest-first and highlights the row at h.idx, so Selected must resolve
+// against that same list or the highlighted row and the detail panel disagree
+// as soon as a single skip is filtered out.
 func (h HistoryPaneComponent) Selected() *HistoryEntry {
-	if len(h.entries) == 0 {
+	visible := h.visibleEntries()
+	if len(visible) == 0 {
 		return nil
 	}
-	realIdx := len(h.entries) - 1 - h.idx
-	if realIdx >= 0 && realIdx < len(h.entries) {
-		return &h.entries[realIdx]
+	realIdx := len(visible) - 1 - h.idx
+	if realIdx >= 0 && realIdx < len(visible) {
+		return &visible[realIdx]
 	}
 	return nil
 }
